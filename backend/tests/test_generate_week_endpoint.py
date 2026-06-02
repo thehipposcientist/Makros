@@ -21,6 +21,8 @@ The tests use FastAPI TestClient + an in-memory SQLite DB + a mocked
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 
 def _ok(label: str) -> None:
     print(f"  ✓ {label}")
@@ -36,7 +38,7 @@ def _make_mem_engine():
         WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet,
         UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState,
         DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob,
-        UserState, WorkoutPlan,
+        UserState, WorkoutPlan, PlanWeek, PlanDay,
     )
     from sqlalchemy.pool import StaticPool
     engine = create_engine(
@@ -130,7 +132,9 @@ def _bro_5d_days() -> list[dict]:
 
 def _post_pin(client, *, current_days: list[dict], pin_day_index: int,
               pin_focus: str, days_per_week: int, preferred_split: str,
-              goal: str = "muscle_gain"):
+              goal: str = "muscle_gain",
+              change_mode: str | None = None,
+              day_statuses: list[str] | None = None):
     body = {
         "goal": goal,
         "days_per_week": days_per_week,
@@ -145,11 +149,34 @@ def _post_pin(client, *, current_days: list[dict], pin_day_index: int,
         "pin_focus": pin_focus,
         "current_days": current_days,
     }
+    if change_mode is not None:
+        body["change_mode"] = change_mode
+    if day_statuses is not None:
+        body["day_statuses"] = day_statuses
     return client.post("/workouts/generate-week", json=body)
 
 
 def _focuses(days: list[dict]) -> list[str]:
     return [d.get("focus") for d in days]
+
+
+def _has_non_warmup_cardio(day: dict) -> bool:
+    for ex in day.get("exercises") or []:
+        role = str(ex.get("slot_role") or ex.get("_role") or "").lower()
+        if role == "warmup":
+            continue
+        exercise_type = str(ex.get("exercise_type") or "").lower()
+        primary = str(ex.get("primary_muscle") or ex.get("_primary_muscle") or "").lower()
+        movement = str(ex.get("movement_pattern") or "").lower()
+        muscles = [str(m).lower() for m in (ex.get("muscles_targeted") or [])]
+        if (
+            exercise_type == "cardio"
+            or primary == "cardio"
+            or movement == "cardio"
+            or "cardio" in muscles
+        ):
+            return True
+    return False
 
 
 def _changed_positions(before: list[dict], after: list[dict]) -> list[int]:
@@ -471,6 +498,142 @@ def test_pin_recovery_day_to_legs_swaps_with_closest_legs() -> None:
     )
     assert rest_count == 1, \
         f"recovery count changed: {out_focuses}"
+
+
+# ── Change Focus + Cardio route regression ─────────────────────────
+
+def test_change_mode_plus_cardio_appends_actual_cardio_finisher() -> None:
+    """Change Focus uses the newer change_day_type route path. A
+    '+ Cardio' request must not return a plain lift day with only core
+    slots at the end."""
+    print("\n[test] change_mode single Push + Cardio appends finisher")
+    from sqlmodel import Session
+    from fastapi.testclient import TestClient
+
+    engine = _make_mem_engine()
+    with Session(engine) as s:
+        user = _insert_user(s)
+        user_id = user.id
+    app = _make_test_app(engine, user_id)
+    client = TestClient(app)
+
+    base_days = [
+        {
+            "focus": "Push",
+            "exercises": [
+                {"name": "Bench Press", "slot_role": "primary", "primary_muscle": "chest"},
+            ],
+        },
+        {
+            "focus": "Pull",
+            "exercises": [
+                {"name": "Barbell Row", "slot_role": "primary", "primary_muscle": "back"},
+            ],
+        },
+        {
+            "focus": "Legs",
+            "exercises": [
+                {"name": "Back Squat", "slot_role": "primary", "primary_muscle": "quads"},
+            ],
+        },
+    ]
+    resp = _post_pin(
+        client,
+        current_days=base_days,
+        pin_day_index=1,
+        pin_focus="Push + Cardio",
+        days_per_week=3,
+        preferred_split="ppl",
+        change_mode="single",
+        day_statuses=["pending", "pending", "pending"],
+    )
+    assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    out = resp.json().get("days", [])
+    assert "push + cardio" == (out[1].get("focus") or "").lower(), \
+        f"target focus lost: {_focuses(out)}"
+    assert _has_non_warmup_cardio(out[1]), \
+        f"Push + Cardio target has no cardio exercise: {out[1].get('exercises')}"
+
+
+def test_change_mode_patches_locked_target_on_second_to_last_day() -> None:
+    """A previously edited PlanDay is locked to protect it from automatic
+    week rewrites, but tapping Change Focus on that same day must still
+    be allowed. This covers the day-6-of-7 no-op reported in the app.
+    """
+    print("\n[test] change_mode patches locked target near week end")
+    from sqlmodel import Session, select
+    from fastapi.testclient import TestClient
+    from app.models import PlanDay, PlanWeek
+
+    engine = _make_mem_engine()
+    today = date.today()
+    week_start = today - timedelta(days=5)
+    base_days = _ppl_6d_days() + [{"focus": "Rest", "exercises": []}]
+
+    with Session(engine) as s:
+        user = _insert_user(s)
+        user_id = user.id
+        week = PlanWeek(
+            user_id=user_id,
+            start_date=week_start,
+            end_date=week_start + timedelta(days=6),
+            planner_version="test",
+            goal="muscle_gain",
+            days_per_week=6,
+            preferred_split="ppl",
+            status="active",
+        )
+        s.add(week)
+        s.commit()
+        s.refresh(week)
+        for idx, workout in enumerate(base_days):
+            s.add(PlanDay(
+                plan_week_id=week.id,
+                user_id=user_id,
+                day_date=week_start + timedelta(days=idx),
+                day_index=idx,
+                status="edited" if idx == 5 else "planned",
+                is_rest=idx == 6,
+                workout_json=workout,
+                locked=idx == 5,
+                lock_reason="change_focus" if idx == 5 else None,
+                generation_source="change_focus" if idx == 5 else "initial",
+            ))
+        s.commit()
+
+    app = _make_test_app(engine, user_id)
+    client = TestClient(app)
+    resp = _post_pin(
+        client,
+        current_days=base_days,
+        pin_day_index=5,
+        pin_focus="Pull",
+        days_per_week=6,
+        preferred_split="ppl",
+        change_mode="single",
+        day_statuses=[
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "pending",
+            "pending",
+        ],
+    )
+    assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+    with Session(engine) as s:
+        changed = s.exec(
+            select(PlanDay)
+            .where(PlanDay.user_id == user_id)
+            .where(PlanDay.day_index == 5)
+        ).first()
+        assert changed is not None
+        assert (changed.workout_json or {}).get("focus") == "Pull"
+        assert changed.status == "edited"
+        assert changed.locked is True
+        assert changed.lock_reason == "manual_edit"
 
 
 # ── Determinism: same inputs → same response ──────────────────────

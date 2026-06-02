@@ -1,11 +1,32 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking, TextInput, InteractionManager } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Linking, TextInput, InteractionManager } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as KeepAwake from 'expo-keep-awake';
-import { FREE_WORKOUT_TEMPLATE_LIMIT, isBetaFullAccessEnabled, tierOf } from '../src/utils/subscription';
+import {
+  FREE_TIER_CAPABILITIES,
+  FREE_TIER_SUMMARY,
+  PRO_TIER_CAPABILITIES,
+  PRO_TIER_SUMMARY,
+  SIGNUP_TRIAL_DAYS,
+  isBetaFullAccessEnabled,
+  isTrialing,
+  subscriptionStatusLabel,
+  tierOf,
+  trialDaysRemaining,
+} from '../src/utils/subscription';
+import { isFeatureEnabled } from '../src/utils/featureFlags';
 import { clearAuthToken, loadAuthToken, saveAuthToken } from '../src/utils/authTokenStorage';
+import { primeMealHistoryCache, resetMealHistoryCache } from '../src/services/mealHistoryWarmCache';
+import { completeWorkoutWithOfflineQueue, flushPendingWorkoutCompletions, loadPendingWorkoutCompletions, PENDING_WORKOUT_COMPLETIONS_KEY } from '../src/utils/workoutCompletionQueue';
+import { SUN_EXPOSURE_SYNC_INTERVAL_MS, syncSunExposureForToday } from '../src/services/sunExposureSync';
+import { STORAGE_KEYS, USER_STATE_SYNC_KEYS, isDbCanonicalUserStateKey } from '../src/utils/storageKeys.ts';
+import {
+  cachedProfileOwnerId,
+  normalizeAuthUserId,
+  shouldResetUserScopedCacheForLogin,
+  stampCachedProfileOwner,
+} from '../src/utils/authCacheIsolation';
 
 /** Keep the device awake while plan generation is in flight. iOS suspends
  *  JS execution ~30s after the app backgrounds or the screen locks, which
@@ -23,7 +44,7 @@ function releasePlanGenAwake(): void {
  *  backgrounds the app mid-gen iOS suspends the `fetch` promise, and on the
  *  next foreground event we look for a leftover marker and re-kick the same
  *  generation. Cleared on success OR explicit failure. */
-const PLAN_GEN_MARKER_KEY = 'plan_gen_pending';
+const PLAN_GEN_MARKER_KEY = STORAGE_KEYS.plan.pendingGeneration;
 type PlanGenMarker = {
   kind: 'full' | 'workout' | 'nutrition' | 'nutrition_remaining';
   startedAt: number;  // epoch ms — used to skip stale markers
@@ -41,7 +62,7 @@ async function setPlanGenMarker(kind: PlanGenMarker['kind']): Promise<void> {
 }
 async function clearPlanGenMarker(): Promise<void> {
   try { await AsyncStorage.removeItem(PLAN_GEN_MARKER_KEY); } catch {}
-  try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
+  try { await AsyncStorage.removeItem(STORAGE_KEYS.plan.pendingJob); } catch {}
 }
 async function readPlanGenMarker(): Promise<PlanGenMarker | null> {
   try {
@@ -59,12 +80,13 @@ const PLAN_GEN_MAX_ATTEMPTS = 3;
 /** Ignore markers older than this — probably orphaned from a much earlier
  *  session or a version the user has since abandoned. */
 const PLAN_GEN_MARKER_STALE_MS = 15 * 60 * 1000;
+const RETURN_HOME_AFTER_AWAY_MS = 60 * 60 * 1000;
 
 // Sentinel that lives in AsyncStorage. AsyncStorage is wiped on app delete,
 // but iOS Keychain (used by SecureStore inside authTokenStorage) is NOT — so a stale JWT can
 // auto-log the user in with an empty local profile after reinstall. This
 // marker lets us detect a fresh install and purge the Keychain token.
-const INSTALL_MARKER_KEY = 'install_marker_v1';
+const INSTALL_MARKER_KEY = STORAGE_KEYS.app.installMarker;
 async function ensureFreshInstall(): Promise<void> {
   try {
     const marker = await AsyncStorage.getItem(INSTALL_MARKER_KEY);
@@ -85,6 +107,7 @@ function isAuthFailureError(err: any): boolean {
   const msg = (err?.message ?? '').toLowerCase();
   return (
     msg.includes('401') ||
+    msg.includes('session_expired') ||
     msg.includes('unauthorized') ||
     msg.includes('invalid or expired') ||
     msg.includes('invalid token') ||
@@ -108,8 +131,9 @@ async function hardResetSession(): Promise<void> {
  *  same device. On a switch we wipe the previous user's cached data so the
  *  new user doesn't inherit it; on the same user returning we leave cache
  *  alone so sign-out → sign-in is non-destructive. */
-const LAST_USER_ID_KEY = 'last_user_id';
-const TUTORIAL_COMPLETED_KEY = 'tutorial_v1_completed';
+const LAST_USER_ID_KEY = STORAGE_KEYS.app.lastUserId;
+const TUTORIAL_COMPLETED_KEY = STORAGE_KEYS.app.tutorialCompleted;
+const LIVE_TUTORIAL_COMPLETED_KEY = STORAGE_KEYS.app.liveTutorialCompleted;
 /** Local cache of the last legal version this device accepted. Set on
  *  any successful `acceptLegal` (or signup / OAuth login that bundled
  *  legal acceptance). Preserved across sign-out so a same-user
@@ -117,7 +141,7 @@ const TUTORIAL_COMPLETED_KEY = 'tutorial_v1_completed';
  *  changed — even if the backend `/me` returns a stale version due to
  *  caching or a race. The legal-gate check uses this as a short-circuit
  *  before falling back to the backend versions. */
-const LEGAL_LOCAL_ACCEPTED_KEY = 'legal_locally_accepted_version';
+const LEGAL_LOCAL_ACCEPTED_KEY = STORAGE_KEYS.app.legalLocalAcceptedVersion;
 /** Every AsyncStorage key that holds user-scoped state. When a different
  *  user signs in we remove all of these in one shot. This list also doubles
  *  as the base set considered for backend sync. Transient, device-only, and
@@ -128,7 +152,7 @@ const USER_SCOPED_KEYS = [
   'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1', 'metaData_v4',
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
-  'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
+  'mealRoutines', 'workoutTemplates', 'workoutTemplateDeletedIds', 'planChangeHistory', 'goalHistory',
   'user_username',
   // ── Per-user keys previously missing from sign-out wipe ─────────────
   // Without these, signing out + signing into a different account on
@@ -150,18 +174,26 @@ const USER_SCOPED_KEYS = [
   // the new account never briefly sees the prior user's email/username.
   'accountModal.meCache.v1',
   'weightHistory',
+  'legacyWeightHistoryQuarantine_v1',
   'bodyScanHistory',
+  'legacyBodyScanHistoryQuarantine_v1',
   'healthDataSummary_v2',
   'sleepHistory_v1',
   'activeWorkoutSets',
   'activeWorkoutRest',
   'activeWorkoutStartTime',
+  'activeWorkoutTimers',
+  'activeWorkoutPausedAtMs',
+  'activeWorkoutPausedAccumMs',
   'activeWatchSessionId',
   'activeWorkoutSession',
+  PENDING_WORKOUT_COMPLETIONS_KEY,
   'groceryChecked_v2',
   'groceryRemoved_v2',
   'mealCheckTimestamps',
   'periodSymptomLogs_v1',
+  'periodSymptomLogsCache_v1',
+  'periodSymptomLogsQuarantine_v1',
   'hydrationByDate_v1',
   'injury_checkins_v1',
   'plateauDismissedAt',
@@ -173,6 +205,7 @@ const USER_SCOPED_KEYS = [
   'onboardingDraft_v1',
   'manualWorkoutOverrides',
   TUTORIAL_COMPLETED_KEY,
+  LIVE_TUTORIAL_COMPLETED_KEY,
   // Legal-acceptance cache is user-scoped so a user-switch on the same
   // device wipes it (the new user's acceptance state must come from
   // their own /auth/me, not inherited from the previous user). On a
@@ -182,10 +215,25 @@ const USER_SCOPED_KEYS = [
   'meal_reminder_settings',
   'meal_reminder_notification_id',
   'meal_reminder_ids',
+  'hydration_reminder_settings',
+  'hydration_reminder_ids',
   'workout_reminder_settings',
   'workout_reminder_ids',
   'notification_quiet_hours',
   'weekly_checkin_notification_sent_ids',
+  STORAGE_KEYS.reminders.sleepScoreSettings,
+  STORAGE_KEYS.reminders.sleepScoreSentNights,
+  STORAGE_KEYS.reminders.readinessSettings,
+  STORAGE_KEYS.reminders.readinessSentDates,
+  STORAGE_KEYS.reminders.coachingSettings,
+  STORAGE_KEYS.reminders.coachingPlanIds,
+  STORAGE_KEYS.reminders.postWorkoutMealId,
+  STORAGE_KEYS.reminders.newPlanWeekSentIds,
+  // Index for the SWR read-cache layer (see src/services/api.ts).
+  // The actual cache entries match the current `read_cache_v2::` prefix
+  // below; this is the registry that lets us enumerate them for wipe.
+  STORAGE_KEYS.cache.legacyReadCacheIndex,
+  STORAGE_KEYS.cache.readCacheIndex,
 ];
 
 const USER_SCOPED_KEY_PREFIXES = [
@@ -197,10 +245,18 @@ const USER_SCOPED_KEY_PREFIXES = [
   'workoutStartTime_',
   'routineOverlayShown_',
   'unloggedMealsPromptShown_',
+  'mealReviewPromptShown_',
   'birthday_dismissed_',
   'lastDigestDismissedWeek_',
   'weeklyReviewDismissed_v1_',
   'incompleteDayDismissed_',
+  // Persistent SWR read-cache layer in src/services/api.ts. The cache
+  // is keyed by `${hash(authToken)}::${path}` so multi-user scenarios stay
+  // scoped, but on sign-out / user-switch we still wipe the whole
+  // cache so the new user's first paint never sees the prior user's
+  // responses. The companion index key is wiped explicitly below.
+  STORAGE_KEYS.cache.legacyReadCachePrefix,
+  STORAGE_KEYS.cache.readCachePrefix,
 ];
 
 const USER_SCOPED_KEY_SET = new Set(USER_SCOPED_KEYS);
@@ -222,6 +278,44 @@ async function clearUserScopedStorage(options: { preserveKeys?: string[] } = {})
   } catch {
     try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS.filter(key => !preserveKeys.has(key))); } catch {}
   }
+  try { await clearAllPersistentReadCache(); } catch {}
+}
+
+async function hasUserScopedStorage(): Promise<boolean> {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    return keys.some(key => isUserScopedStorageKey(key));
+  } catch {
+    return false;
+  }
+}
+
+async function getCachedProfileOwnerId(): Promise<string | null> {
+  try {
+    const raw = await AsyncStorage.getItem('userProfile');
+    return raw ? cachedProfileOwnerId(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearCacheIfAccountChanged(incomingUserId: unknown): Promise<boolean> {
+  const normalizedIncomingUserId = normalizeAuthUserId(incomingUserId);
+  if (!normalizedIncomingUserId) return false;
+
+  const [previousUserId, profileOwnerId, hasScopedCache] = await Promise.all([
+    AsyncStorage.getItem(LAST_USER_ID_KEY).catch(() => null),
+    getCachedProfileOwnerId(),
+    hasUserScopedStorage(),
+  ]);
+  const shouldReset = shouldResetUserScopedCacheForLogin({
+    incomingUserId: normalizedIncomingUserId,
+    previousUserId,
+    cachedProfileOwnerId: profileOwnerId,
+    hasUserScopedCache: hasScopedCache,
+  });
+  if (shouldReset) await clearUserScopedStorage();
+  return shouldReset;
 }
 
 /** Keys that get pushed to the backend for cross-device sync. Subset of
@@ -229,22 +323,18 @@ async function clearUserScopedStorage(options: { preserveKeys?: string[] } = {})
  *  health caches. Health and hydration restore through server-authoritative
  *  endpoints instead of the opaque state blob. */
 const SYNCED_STATE_KEYS = [
-  'userProfile',
-  // aiWorkoutPlan included — without this, sign-out → sign-in (or cross-device)
-  // loses the user's generated plan, and loadPlans silently falls back to a
-  // local client-side generator that produces a totally different split.
-  'aiWorkoutPlan',
-  'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
-  'trainerNote', 'nutritionistNote', 'supplementStack',
-  'weekStartDate', 'mealEdits', 'mealChecks',
-  // workoutHistory synced — individual completions reach the backend via
-  // logWorkoutDone, but without the local blob a wipe loses per-set detail.
-  'workoutHistory',
-  'userLog', 'skippedWorkouts',
-  'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
-  // workoutSummaries excluded — local-only derivative of workoutHistory
-  'preservedCompletedWorkouts', 'preservedCheckedMeals',
+  ...USER_STATE_SYNC_KEYS,
 ];
+
+const DB_SOURCE_OF_TRUTH_STATE = {
+  _storage_policy: STORAGE_KEYS.userState.dbSourceOfTruthMarker,
+};
+
+function legacyCanonicalEntries(state: Record<string, any>): Record<string, any> {
+  return Object.fromEntries(
+    Object.entries(state).filter(([key]) => isDbCanonicalUserStateKey(key)),
+  );
+}
 
 function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
   const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
@@ -252,20 +342,54 @@ function workoutCompletionKey(dateISO?: string | null, focus?: string | null): s
   return date && focusKey ? `${date}|${focusKey}` : null;
 }
 
-/** Push the local AsyncStorage state blob to the backend. Best-effort —
- *  swallows errors so a failed sync never blocks sign-out / app backgrounding. */
+/** Push only the storage-policy marker to the legacy `/profile/state` row.
+ *  Real user data now syncs through typed backend tables/endpoints; this
+ *  write clears older opaque blobs so they cannot rehydrate stale meals,
+ *  workouts, routines, profiles, or goals on another device. */
 async function pushUserStateToBackend(token: string): Promise<void> {
   try {
-    const pairs = await AsyncStorage.multiGet(SYNCED_STATE_KEYS);
-    const state: Record<string, any> = {};
-    for (const [k, v] of pairs) {
-      if (v == null) continue;
-      try { state[k] = JSON.parse(v); } catch { state[k] = v; }
-    }
-    await putUserState(token, state);
-    console.log(`[user-state] pushed ${Object.keys(state).length} keys`);
+    await putUserState(token, DB_SOURCE_OF_TRUTH_STATE);
+    console.log('[user-state] cleared legacy canonical blob');
   } catch (e: any) {
     console.warn('[user-state] push failed:', e?.message ?? e);
+  }
+}
+
+async function quarantineLegacyCanonicalState(state: Record<string, any>): Promise<number> {
+  const entries = legacyCanonicalEntries(state);
+  const keys = Object.keys(entries);
+  if (keys.length === 0) return 0;
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEYS.userState.legacyCanonicalQuarantine);
+    const previous = raw ? safeJsonParse<Record<string, any>>(raw, {}) : {};
+    await AsyncStorage.setItem(
+      STORAGE_KEYS.userState.legacyCanonicalQuarantine,
+      JSON.stringify({
+        ...previous,
+        remoteUserState: {
+          quarantinedAt: new Date().toISOString(),
+          reason: 'Legacy /profile/state canonical data is no longer hydrated as saved data.',
+          entries,
+        },
+      }),
+    );
+  } catch {}
+  return keys.length;
+}
+
+async function pushCustomExercisesToBackend(token: string, profile: UserProfile): Promise<UserProfile> {
+  const local = profile.customExercises ?? [];
+  if (local.length === 0) return profile;
+  try {
+    const synced = await syncCustomExercises(token, local);
+    if (synced.length === 0) return profile;
+    return {
+      ...profile,
+      customExercises: mergeCustomExercises(synced, local),
+    };
+  } catch (e: any) {
+    console.warn('[custom-exercises] sync failed:', e?.message ?? e);
+    return profile;
   }
 }
 
@@ -285,26 +409,35 @@ async function hydrateTodayHydrationFromBackend(token: string): Promise<void> {
   }
 }
 
-/** Pull the backend state blob and write it into AsyncStorage. Called on
- *  sign-in (especially on a new device) so the user's data comes back. */
+/** Pull legacy `/profile/state` only to quarantine obsolete canonical data.
+ *  The app then restores real rows from typed DB endpoints below. */
 async function pullUserStateFromBackend(token: string): Promise<void> {
+  let hadPendingWorkoutCompletions = false;
+  try {
+    const pending = await loadPendingWorkoutCompletions();
+    hadPendingWorkoutCompletions = pending.length > 0;
+    if (pending.length > 0) {
+      const result = await flushPendingWorkoutCompletions(token);
+      if (result.synced > 0) {
+        console.log(`[workout-queue] flushed ${result.synced} pending completion${result.synced === 1 ? '' : 's'}`);
+      }
+    }
+  } catch (e: any) {
+    console.warn('[workout-queue] flush before state pull failed:', e?.message ?? e);
+  }
+
   try {
     const { state } = await getUserState(token);
     if (!state || Object.keys(state).length === 0) {
       console.log('[user-state] pull: empty remote state');
     } else {
-      const pairs: [string, string][] = [];
-      for (const [k, v] of Object.entries(state)) {
-        if (v == null) continue;
-        if (k === 'userProfile') {
-          const currentRaw = await AsyncStorage.getItem('userProfile').catch(() => null);
-          pairs.push([k, encodePulledStateValueForStorage(k, v, currentRaw)]);
-          continue;
-        }
-        pairs.push([k, encodePulledStateValueForStorage(k, v)]);
+      const quarantined = await quarantineLegacyCanonicalState(state);
+      if (quarantined > 0) {
+        await putUserState(token, DB_SOURCE_OF_TRUTH_STATE).catch(() => undefined);
+        console.log(`[user-state] quarantined ${quarantined} legacy canonical key${quarantined === 1 ? '' : 's'}; remote blob cleared`);
+      } else {
+        console.log('[user-state] pull: no legacy canonical keys to hydrate');
       }
-      if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
-      console.log(`[user-state] pulled ${pairs.length} keys`);
     }
   } catch (e: any) {
     console.warn('[user-state] pull failed:', e?.message ?? e);
@@ -314,6 +447,16 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   // directly so sign-out cache wipes cannot hide water logged in UserDayState
   // when the opaque synced-state blob is stale, missing, or too large to save.
   await hydrateTodayHydrationFromBackend(token);
+
+  // Workout templates: pull authoritative server rows + push any local-only
+  // rows that haven't reached the server yet (one-time migration after the
+  // table-backed rewrite). See workoutHistory.syncWorkoutTemplatesFromBackend.
+  try {
+    const { syncWorkoutTemplatesFromBackend } = await import('../src/utils/workoutHistory');
+    await syncWorkoutTemplatesFromBackend(token);
+  } catch (e: any) {
+    console.warn('[user-state] workout-templates sync failed:', e?.message ?? e);
+  }
 
   // Workout-history fallback: if local is empty (wipe / fresh install on a
   // user whose pre-sync state blob didn't include workoutHistory), rebuild
@@ -328,12 +471,25 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
     // or non-server ids) we preserve.
     const realLocal = localArr.filter(s => typeof s?.id === 'string' && !s.id.startsWith('server-'));
     const completions = await listWorkoutCompletions(token, 100);
+    const pending = await loadPendingWorkoutCompletions();
+    for (const item of pending) {
+      if (!item.session) continue;
+      const pendingKey = workoutCompletionKey(item.session.date, item.session.focus);
+      const alreadyLocal = pendingKey && realLocal.some(s => workoutCompletionKey(s?.date, s?.focus) === pendingKey);
+      if (!alreadyLocal) realLocal.push(item.session);
+    }
     const completionKeys = new Set(
       completions
         .map(c => workoutCompletionKey(c.workout_date, c.focus_label))
         .filter((k): k is string => !!k),
     );
-    if (completionKeys.size === 0) {
+    const pendingKeys = new Set(
+      pending
+        .map(item => workoutCompletionKey(item.request.workout_date, item.request.focus_label))
+        .filter((k): k is string => !!k),
+    );
+    const activeKeys = new Set([...completionKeys, ...pendingKeys]);
+    if (activeKeys.size === 0) {
       await AsyncStorage.multiRemove(['workoutHistory', 'workoutSummaries']);
       console.log('[user-state] backend has 0 completions; cleared local workout history/summaries');
       return;
@@ -344,7 +500,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
       if (Array.isArray(summaries)) {
         const scoped = summaries.filter((s: any) => {
           const key = workoutCompletionKey(s?.date, s?.focus);
-          return !!key && completionKeys.has(key);
+          return !!key && activeKeys.has(key);
         });
         if (scoped.length !== summaries.length) {
           await AsyncStorage.setItem('workoutSummaries', JSON.stringify(scoped));
@@ -380,7 +536,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
       // which days count as active.
       const merged = realLocal.filter((s) => {
         const key = workoutCompletionKey(s?.date, s?.focus);
-        return !!key && completionKeys.has(key);
+        return !!key && activeKeys.has(key);
       });
       for (const sk of skeleton) {
         const skDate = sk.date.slice(0, 10);
@@ -390,19 +546,24 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
       // Sort newest-first by date
       merged.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
       await AsyncStorage.setItem('workoutHistory', JSON.stringify(merged));
-      console.log(`[user-state] hydrated ${skeleton.length} from backend; ${realLocal.length} real local kept; total=${merged.length}`);
+      console.log(`[user-state] hydrated ${skeleton.length} from backend; ${realLocal.length} real local kept; pending=${pendingKeys.size}; total=${merged.length}`);
     }
   } catch (e: any) {
     console.warn('[user-state] completion hydration failed:', e?.message ?? e);
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, updateUsername, saveWeightEntryAPI, getHydration } from '../src/services/api';
+import { billingEntitlementToProfilePatch, getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekEquipmentConflicts, repairPlanWeekInjuryConflicts, updatePlanWeekSessionDuration, upsertDayState, parseRecentWorkouts, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, updateUsername, getHydration, setUnauthorizedHandler, syncCustomExercises, syncRevenueCatEntitlement, cancelSignupTrial, clearAllPersistentReadCache } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import { loadCachedHydration, saveCachedHydration } from '../src/utils/hydrationCache';
 import { encodePulledStateValueForStorage, mergePulledUserProfileWithCurrentStats, preserveLocalPreferredSplitWhenRemoteMissing } from '../src/utils/profileCache';
+import { mergeCustomExercises } from '../src/utils/customExercises';
 import AuthScreen from '../src/screens/AuthScreen';
+import { useRouter } from 'expo-router';
+import AboutPage from './about';
+import LandingScreen from '../src/screens/LandingScreen';
+import WhyThalloScreen from '../src/screens/WhyThalloScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
@@ -413,21 +574,36 @@ import SettingsScreen from '../src/screens/SettingsScreen';
 function serverTierOf(profile: UserProfile | null | undefined): 'free' | 'pro' {
   return profile?.subscriptionTier === 'pro' ? 'pro' : 'free';
 }
+function withDefaultTheme(profile: UserProfile): UserProfile {
+  return profile.themePreference ? profile : { ...profile, themePreference: DEFAULT_THEME_NAME };
+}
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
 import TutorialOverlay from '../src/components/TutorialOverlay';
+import DummyPaymentModal from '../src/components/DummyPaymentModal';
+import LiveTutorialOverlay from '../src/components/LiveTutorialOverlay';
 import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
-import { colors, getTheme, radius } from '../src/constants/theme';
+import { SplashLoadingScreen } from '../src/components/SplashLoadingScreen';
+import BottomSheetDismissHandle from '../src/components/BottomSheetDismissHandle';
+import { DEFAULT_THEME_NAME, colors, getContrastingTextColor, getTheme, radius } from '../src/constants/theme';
 import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, savePlanChange, todayKey } from '../src/utils/workoutHistory';
 import { nextPlanWeekStart, formatPlanStartDateShort } from '../src/utils/planEffectiveDate';
+import {
+  dateKey as planDateKey,
+  planScopeIsUnchanged,
+  planScopeSnapshot,
+  summarizeScopeDiff,
+} from '../src/utils/pendingPlanChange';
 import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
+import type { HomeTabKey } from '../src/utils/hiddenSurfaces';
 
 const START_WORKOUT_POST_COUNTDOWN_DELAY_MS = START_COUNTDOWN_TOTAL_MS + 350;
-import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
+import { APPLE_HEALTH_PERMISSION_COPY, getLastHealthKitError, isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
+import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRO_COPY, HEALTH_PLATFORM_STATUS_COPY } from '../src/constants/platformHealth';
 import { effectiveAge } from '../src/utils/age';
-import { setActiveWatchSessionId } from '../src/utils/activeWatchSession';
+import { getActiveWatchSessionId, setActiveWatchSessionId } from '../src/utils/activeWatchSession';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -482,10 +658,10 @@ function planChangeProfileSnapshot(
     prepTimeMinutes: profile.prepTimeMinutes,
     dietaryPreference: profile.dietaryPreference,
     mealVariety: profile.mealVariety,
-    mealsPerDay: profile.mealsPerDay,
     savedMeals: profile.savedMeals,
     mealRoutine: profile.mealRoutine,
     customMacros: profile.customMacros,
+    glp1Support: profile.glp1Support,
     allergies: profile.allergies,
   };
 }
@@ -523,6 +699,63 @@ function activeInjuriesChanged(
   return activeInjurySignature(before) !== activeInjurySignature(after);
 }
 
+function normalizedEquipmentItems(profile: UserProfile | null | undefined): string[] {
+  return (profile?.equipment ?? [])
+    .map(item => String(item ?? '').trim().toLowerCase())
+    .filter(Boolean)
+    .sort();
+}
+
+function equipmentWasRemoved(
+  before: UserProfile | null | undefined,
+  after: UserProfile | null | undefined,
+): boolean {
+  const beforeItems = new Set(normalizedEquipmentItems(before));
+  const afterItems = new Set(normalizedEquipmentItems(after));
+  for (const item of beforeItems) {
+    if (!afterItems.has(item)) return true;
+  }
+  return false;
+}
+
+function equipmentWasAdded(
+  before: UserProfile | null | undefined,
+  after: UserProfile | null | undefined,
+): boolean {
+  const beforeItems = new Set(normalizedEquipmentItems(before));
+  const afterItems = new Set(normalizedEquipmentItems(after));
+  for (const item of afterItems) {
+    if (!beforeItems.has(item)) return true;
+  }
+  return false;
+}
+
+function workoutDurationChanged(
+  before: UserProfile | null | undefined,
+  after: UserProfile | null | undefined,
+): boolean {
+  const beforeMinutes = Number(before?.workoutDurationMinutes ?? 60);
+  const afterMinutes = Number(after?.workoutDurationMinutes ?? 60);
+  return Number.isFinite(beforeMinutes)
+    && Number.isFinite(afterMinutes)
+    && beforeMinutes !== afterMinutes;
+}
+
+function workoutSettingsUnchangedExcept(
+  before: UserProfile | null | undefined,
+  after: UserProfile | null | undefined,
+  coveredKeys: string[],
+): boolean {
+  if (!before || !after) return false;
+  const beforeSnap = { ...planScopeSnapshot(before, 'workout') } as Record<string, unknown>;
+  const afterSnap = { ...planScopeSnapshot(after, 'workout') } as Record<string, unknown>;
+  for (const key of coveredKeys) {
+    delete beforeSnap[key];
+    delete afterSnap[key];
+  }
+  return JSON.stringify(beforeSnap) === JSON.stringify(afterSnap);
+}
+
 /** Guarded JSON.parse for AsyncStorage reads — returns fallback on any
  *  malformed payload. Used by the user-log and profile hydration paths
  *  so a single corrupted row never cascades into "can't sign in". */
@@ -546,14 +779,267 @@ async function appendUserLog(entry: Omit<UserLogEntry, 'id' | 'date'>) {
   } catch {}
 }
 
-export default function Index() {
+function countPersistedWorkoutSets(rawSets: string | null | undefined): number {
+  if (!rawSets) return 0;
+  try {
+    const parsed = JSON.parse(rawSets);
+    if (!Array.isArray(parsed)) return 0;
+    return parsed.reduce((total: number, entry: any) => {
+      const sets = Array.isArray(entry?.sets) ? entry.sets.length : 0;
+      const warmupSets = Array.isArray(entry?.warmupSets) ? entry.warmupSets.length : 0;
+      return total + sets + warmupSets;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
+function hasPersistedWorkoutTimers(rawTimers: string | null | undefined): boolean {
+  if (!rawTimers) return false;
+  try {
+    const parsed = JSON.parse(rawTimers);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    return Object.values(parsed).some((timer: any) => timer?.running === true || Number(timer?.baseElapsed) > 0);
+  } catch {
+    return false;
+  }
+}
+
+async function hasRecentWorkoutActivity(): Promise<boolean> {
+  try {
+    const pairs = await AsyncStorage.multiGet([
+      'activeWorkoutStartTime',
+      'activeWorkoutSession',
+      'activeWorkoutSets',
+      'activeWorkoutTimers',
+      'activeWatchSessionId',
+    ]);
+    const values = Object.fromEntries(pairs);
+    const startedAt = Number.parseInt(values.activeWorkoutStartTime ?? '', 10);
+    if (!Number.isFinite(startedAt) || startedAt <= 0) return false;
+    const ageMs = Date.now() - startedAt;
+    if (ageMs > 24 * 60 * 60 * 1000) return false;
+    if (
+      !!values.activeWorkoutSession?.trim()
+      || countPersistedWorkoutSets(values.activeWorkoutSets) > 0
+      || hasPersistedWorkoutTimers(values.activeWorkoutTimers)
+    ) {
+      return true;
+    }
+    return !!values.activeWatchSessionId?.trim() && ageMs <= 4 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
+type WebProgressShellProps = {
+  authToken: string;
+  userProfile: UserProfile;
+  onSignOut: () => void | Promise<void>;
+  onUpdateWeight: (weightLbs: number) => void | Promise<void>;
+  onCancelScheduledPlanChange: (restoredProfile: UserProfile) => void | Promise<void>;
+};
+
+function labelizeToken(value: string | null | undefined): string {
+  const cleaned = String(value ?? '').trim();
+  if (!cleaned) return 'Progress';
+  return cleaned
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function WebProgressShell({
+  authToken,
+  userProfile,
+  onSignOut,
+  onUpdateWeight,
+  onCancelScheduledPlanChange,
+}: WebProgressShellProps) {
+  const themeName = userProfile.themePreference;
+  const tc = getTheme(themeName).colors;
+  const styles = useMemo(() => createWebProgressStyles(tc), [themeName]);
+  const displayName = [userProfile.firstName, userProfile.lastName].filter(Boolean).join(' ').trim() || 'Thallo';
+  const goalLabel = labelizeToken(userProfile.goalSelection?.primaryGoal ?? userProfile.goal);
+  const tierLabel = tierOf(userProfile) === 'pro' ? 'Pro' : 'Free';
+  const statusLabel = subscriptionStatusLabel(userProfile);
+
+  return (
+    <View style={styles.root}>
+      <View style={styles.topbar}>
+        <View style={styles.brandCluster}>
+          <View style={styles.brandMark}>
+            <Text style={styles.brandMarkText}>T</Text>
+          </View>
+          <View style={styles.brandTextBlock}>
+            <Text style={styles.brandTitle}>Thallo</Text>
+            <Text style={styles.brandSubtitle} numberOfLines={1}>{displayName}</Text>
+          </View>
+        </View>
+        <View style={styles.accountCluster}>
+          <View style={styles.accountPill}>
+            <Text style={styles.accountPillLabel} numberOfLines={1}>{goalLabel}</Text>
+          </View>
+          <View style={styles.accountPill}>
+            <Text style={styles.accountPillLabel}>{tierLabel}</Text>
+            <Text style={styles.accountPillMeta} numberOfLines={1}>{statusLabel}</Text>
+          </View>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Sign out"
+            activeOpacity={0.82}
+            onPress={() => { void onSignOut(); }}
+            style={styles.signOutButton}>
+            <Ionicons name="log-out-outline" size={16} color={tc.textPrimary} />
+            <Text style={styles.signOutText}>Sign out</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+      <View style={styles.progressHost}>
+        <ProgressScreen
+          authToken={authToken}
+          userProfile={userProfile}
+          themeName={themeName}
+          noHeader
+          webMode
+          onBack={() => undefined}
+          onUpdateWeight={onUpdateWeight}
+          onCancelScheduledPlanChange={onCancelScheduledPlanChange}
+        />
+      </View>
+    </View>
+  );
+}
+
+function createWebProgressStyles(c: ReturnType<typeof getTheme>['colors']) {
+  return StyleSheet.create({
+    root: {
+      flex: 1,
+      backgroundColor: c.background,
+    },
+    topbar: {
+      width: '100%',
+      maxWidth: 980,
+      alignSelf: 'center',
+      minHeight: 62,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+      backgroundColor: c.background,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 18,
+    },
+    brandCluster: {
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+    },
+    brandMark: {
+      width: 34,
+      height: 34,
+      borderRadius: 8,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.primary,
+    },
+    brandMarkText: {
+      color: getContrastingTextColor(c.primary),
+      fontSize: 16,
+      fontWeight: '900',
+    },
+    brandTextBlock: {
+      minWidth: 0,
+    },
+    brandTitle: {
+      color: c.textPrimary,
+      fontSize: 16,
+      fontWeight: '900',
+      letterSpacing: 0,
+    },
+    brandSubtitle: {
+      color: c.textMuted,
+      fontSize: 11,
+      fontWeight: '700',
+      marginTop: 2,
+    },
+    accountCluster: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+      gap: 10,
+      flexWrap: 'wrap',
+    },
+    accountPill: {
+      minHeight: 32,
+      maxWidth: 180,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+      justifyContent: 'center',
+    },
+    accountPillLabel: {
+      color: c.textPrimary,
+      fontSize: 11,
+      fontWeight: '900',
+      letterSpacing: 0,
+    },
+    accountPillMeta: {
+      color: c.textMuted,
+      fontSize: 10,
+      fontWeight: '700',
+      marginTop: 1,
+    },
+    signOutButton: {
+      minHeight: 32,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      paddingHorizontal: 13,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceRaised,
+    },
+    signOutText: {
+      color: c.textPrimary,
+      fontSize: 12,
+      fontWeight: '900',
+      letterSpacing: 0,
+    },
+    progressHost: {
+      flex: 1,
+      minHeight: 0,
+      width: '100%',
+    },
+  });
+}
+
+export function NativeIndex() {
+  const router = useRouter();
   const [isLoading, setIsLoading]         = useState(true);
   const [authToken, setAuthToken]         = useState<string | null>(null);
+  const [authEntryMode, setAuthEntryMode] = useState<'landing' | 'why-thallo' | 'login' | 'signup'>(Platform.OS === 'web' ? 'login' : 'landing');
   const authTokenRef = useRef<string | null>(null);
+  const authRestoreRetryNeededRef = useRef(false);
+  const authRestoreInFlightRef = useRef(false);
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme' | 'body'>('goal');
-  const [pendingSave, setPendingSave]     = useState<{ profile: UserProfile; mode: string; repairInjuryConflicts?: boolean } | null>(null);
+  const [pendingSave, setPendingSave]     = useState<{
+    profile: UserProfile;
+    mode: string;
+    repairInjuryConflicts?: boolean;
+    repairEquipmentConflicts?: boolean;
+    updateSessionDuration?: boolean;
+  } | null>(null);
   // Optional sub-tab to pre-select when opening the EditProfileScreen in
   // 'mealplan' mode. Lets HomeScreen jump straight into Foods/Supplements/Macros.
   const [editInitialMealTab, setEditInitialMealTab] = useState<'foods' | 'supplements' | 'macros' | undefined>(undefined);
@@ -569,6 +1055,7 @@ export default function Index() {
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
+  const [settingsOpenImportOnShow, setSettingsOpenImportOnShow] = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
   const [usernameRefreshKey, setUsernameRefreshKey] = useState(0);
   // Re-acceptance gate: when the server-side legal versions a user has
@@ -582,10 +1069,30 @@ export default function Index() {
   // navigating back to a "home tab" that doesn't really exist as
   // its own destination, so the replay flow felt broken.
   const [showTutorial, setShowTutorial] = useState(false);
+  const [showLiveTutorial, setShowLiveTutorial] = useState(false);
+  const [liveTutorialNavigation, setLiveTutorialNavigation] = useState<{ tab: HomeTabKey; requestId: number } | null>(null);
+  const [homeResetKey, setHomeResetKey] = useState(0);
+  const awayStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     authTokenRef.current = authToken;
   }, [authToken]);
+
+  const resetOrdinaryAppNavigation = useCallback(() => {
+    setIsEditing(false);
+    setPendingSave(null);
+    setEditInitialMealTab(undefined);
+    setShowProgress(false);
+    setShowAccount(false);
+    setShowSettings(false);
+    setSettingsOpenImportOnShow(false);
+    setShowSupplements(false);
+    setShowTutorial(false);
+    setShowLiveTutorial(false);
+    setLiveTutorialNavigation(null);
+    setHomeResetKey(k => k + 1);
+    AsyncStorage.setItem('lastActiveTab', 'today').catch(() => {});
+  }, []);
 
   useEffect(() => {
     const errorUtils = (globalThis as any).ErrorUtils;
@@ -627,12 +1134,95 @@ export default function Index() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!userProfile]);
 
+  const liveTutorialTabs = useMemo<HomeTabKey[]>(() => {
+    const tabs: HomeTabKey[] = ['friends'];
+    if (userProfile?.hiddenSurfaces?.workouts !== true) tabs.push('workout');
+    tabs.push('today');
+    if (userProfile?.hiddenSurfaces?.meals !== true) tabs.push('meals');
+    tabs.push('progress');
+    return tabs;
+  }, [userProfile?.hiddenSurfaces?.meals, userProfile?.hiddenSurfaces?.workouts]);
+
+  const startLiveTutorial = useCallback(() => {
+    setShowTutorial(false);
+    setShowAccount(false);
+    setShowSettings(false);
+    setShowProgress(false);
+    setTimeout(() => setShowLiveTutorial(true), 180);
+  }, []);
+
+  const handleTutorialHealthSetup = useCallback(async () => {
+    if (!userProfile) return;
+    const tier = tierOf(userProfile);
+    if (tier === 'free') {
+      Alert.alert(
+        `${HEALTH_PLATFORM_LABEL} is Pro`,
+        `${HEALTH_PLATFORM_PRO_COPY}\n\nFree still supports manual workouts, meal logging, weight updates, and progress history.`,
+      );
+      return;
+    }
+    if (Platform.OS === 'android') {
+      Alert.alert(HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_STATUS_COPY);
+      return;
+    }
+    if (!isHealthKitAvailable()) {
+      Alert.alert(
+        `${HEALTH_PLATFORM_LABEL} unavailable`,
+        'Apple Health is iPhone-only and requires HealthKit support. Manual logs and in-app workout tracking still work normally.',
+      );
+      return;
+    }
+    Alert.alert(
+      APPLE_HEALTH_PERMISSION_COPY.title,
+      APPLE_HEALTH_PERMISSION_COPY.body,
+      [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: 'Continue',
+          onPress: async () => {
+            try {
+              const granted = await requestHealthPermissions();
+              if (granted) {
+                const age = effectiveAge({
+                  birthdate: userProfile.physicalStats?.birthdate ?? null,
+                  age: userProfile.physicalStats?.age ?? null,
+                });
+                import('../src/services/healthDataSummary')
+                  .then(({ backfillSnapshotsToBackend, refreshHealthDataSummary }) => {
+                    refreshHealthDataSummary({ age }).catch(() => null);
+                    backfillSnapshotsToBackend(180).catch(() => null);
+                  })
+                  .catch(() => null);
+                Alert.alert('Apple Health connected', 'Thallo will use shared health summaries for readiness, recovery, progress, and weekly check-ins when Apple Health has samples for those categories.');
+              } else {
+                const err = getLastHealthKitError();
+                Alert.alert('Apple Health not connected', `${APPLE_HEALTH_PERMISSION_COPY.denied}\n\n${err ?? ''}`.trim());
+              }
+            } catch (e: any) {
+              Alert.alert('Apple Health error', String(e?.message ?? e));
+            }
+          },
+        },
+      ],
+    );
+  }, [userProfile]);
+
+  const handleLiveTutorialNavigate = useCallback((tab: HomeTabKey) => {
+    setShowAccount(false);
+    setShowSettings(false);
+    setShowProgress(false);
+    setLiveTutorialNavigation({ tab, requestId: Date.now() });
+  }, []);
+
   const [activeWorkout, setActiveWorkoutRaw] = useState<WorkoutDay | null>(null);
   const [playStartCountdown, setPlayStartCountdown] = useState(false);
-  const [resumeWorkoutData, setResumeWorkoutData] = useState<{ workout: any; loggedCount: number } | null>(null);
   const startWorkoutInitialUrlHandledRef = useRef(false);
   const activeWorkoutPersistTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeWorkoutRef = useRef<WorkoutDay | null>(null);
   const startWorkoutSequenceRef = useRef(0);
+  useEffect(() => {
+    activeWorkoutRef.current = activeWorkout;
+  }, [activeWorkout]);
   const setActiveWorkout = useCallback((w: WorkoutDay | null, options?: { persistDelayMs?: number }) => {
     if (activeWorkoutPersistTimeoutRef.current) {
       clearTimeout(activeWorkoutPersistTimeoutRef.current);
@@ -666,12 +1256,18 @@ export default function Index() {
     startWorkoutSequenceRef.current = sequence;
     setPlayStartCountdown(shouldPlayCountdown);
     const watchSyncDelayMs = shouldPlayCountdown ? START_WORKOUT_POST_COUNTDOWN_DELAY_MS : 0;
-    if (shouldPlayCountdown) {
-      const startedAtMs = Date.now();
-      const sessionId = `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
+    const existingSessionId = getActiveWatchSessionId();
+    const existingWatchStartedSession = !shouldPlayCountdown && existingSessionId?.startsWith('watch-') === true;
+    const startedAtMs = Date.now();
+    const sessionId = shouldPlayCountdown || !existingSessionId
+      ? `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`
+      : existingSessionId;
+    if (shouldPlayCountdown || !existingSessionId) {
       setActiveWatchSessionId(sessionId);
       AsyncStorage.setItem('activeWatchSessionId', sessionId).catch(() => {});
       AsyncStorage.setItem('activeWorkoutStartTime', String(startedAtMs)).catch(() => {});
+    }
+    if (!existingWatchStartedSession) {
       const startWatchAfterCountdown = () => {
         if (startWorkoutSequenceRef.current !== sequence) return;
         import('../src/utils/watchSync')
@@ -790,6 +1386,46 @@ export default function Index() {
 
   useEffect(() => { initApp(); }, []);
 
+  // Global 401 handler. Any authenticated API call that returns 401
+  // (token expired / revoked / token_version bumped) routes here once
+  // per session. We can't call the normal sign-out — its server-side
+  // /auth/logout call would just 401 again, and wiping user-scoped
+  // storage is overkill when the user is going to sign right back into
+  // the same account. Just drop the local token and let React re-render
+  // onto AuthScreen.
+  useEffect(() => {
+    setUnauthorizedHandler(async (path: string) => {
+      console.log(`[auth] 401 on ${path} — dropping local session`);
+      try { await clearAuthToken(); } catch {}
+      setAuthEntryMode('login');
+      setAuthToken(null);
+      Alert.alert(
+        'Session expired',
+        'Please sign in again to continue.',
+      );
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // Meal-history warm prime. The moment `authToken` is restored from
+  // storage (or set on fresh sign-in), kick the /meals/history GET so
+  // the response races HomeScreen's mount. HomeScreen's auth-restore
+  // effect then `consumeMealHistoryCache` instead of firing its own
+  // GET, eliminating the "loading shimmer → swap to data" flash. On
+  // sign-out / 401 we drop the cache so a different user can never
+  // read the prior session's rows.
+  useEffect(() => {
+    if (!authToken) {
+      resetMealHistoryCache();
+      return;
+    }
+    // Lazy import so this module's runtime cost is paid once, only when
+    // we actually have a token to prime under.
+    import('../src/services/api').then(api => {
+      primeMealHistoryCache(authToken, api.getMealHistory).catch(() => {});
+    }).catch(() => {});
+  }, [authToken]);
+
   // AppState listener:
   //   - 'active' → check for an orphaned plan job and resume polling
   //   - 'background' / 'inactive' → push local state to the backend as a
@@ -798,16 +1434,152 @@ export default function Index() {
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       if (nextState === 'active') {
+        const awayStartedAt = awayStartedAtRef.current;
+        awayStartedAtRef.current = null;
+        if (authToken && awayStartedAt && Date.now() - awayStartedAt >= RETURN_HOME_AFTER_AWAY_MS) {
+          hasRecentWorkoutActivity()
+            .then((hasWorkoutActivity) => {
+              if (activeWorkoutRef.current || hasWorkoutActivity) return;
+              resetOrdinaryAppNavigation();
+            })
+            .catch(() => {});
+        }
+        if (!authToken && authRestoreRetryNeededRef.current && !authRestoreInFlightRef.current) {
+          authRestoreInFlightRef.current = true;
+          loadAuthToken()
+            .then(async (token) => {
+              if (!token) return;
+              const meData = await getMe(token);
+              const restoredUserId = (meData as any)?.id ?? (meData as any)?.user_id ?? null;
+              await clearCacheIfAccountChanged(restoredUserId);
+              if ((meData as any)?.username) {
+                await AsyncStorage.setItem('user_username', (meData as any).username);
+              }
+              if (restoredUserId != null) await AsyncStorage.setItem(LAST_USER_ID_KEY, String(restoredUserId));
+              await loadProfile(token, restoredUserId);
+              pullUserStateFromBackend(token).catch(() => null);
+              authRestoreRetryNeededRef.current = false;
+              setAuthToken(token);
+              resetOrdinaryAppNavigation();
+            })
+            .catch((e) => {
+              if (isAuthFailureError(e)) {
+                authRestoreRetryNeededRef.current = false;
+              }
+              console.warn('[auth] foreground token restore retry failed:', e?.message ?? e);
+            })
+            .finally(() => {
+              authRestoreInFlightRef.current = false;
+            });
+        }
         resumePlanGenRef.current?.().catch(() => null);
+        if (authToken) {
+          flushPendingWorkoutCompletions(authToken)
+            .then((result) => {
+              if (result.synced > 0) {
+                setPlanRefreshKey(k => k + 1);
+                pushUserStateToBackend(authToken).catch(() => null);
+              }
+            })
+            .catch(() => null);
+        }
       } else if (nextState === 'background' || nextState === 'inactive') {
+        if (awayStartedAtRef.current == null) {
+          awayStartedAtRef.current = Date.now();
+        }
         if (authToken) pushUserStateToBackend(authToken).catch(() => null);
       }
     });
     return () => sub.remove();
-  }, [authToken]);
+  }, [authToken, resetOrdinaryAppNavigation]);
+
+  useEffect(() => {
+    if (!authToken || !userProfile || tierOf(userProfile) !== 'pro') return undefined;
+    let cancelled = false;
+    let inFlight = false;
+    const syncSunExposure = () => {
+      if (cancelled || inFlight || AppState.currentState !== 'active') return;
+      inFlight = true;
+      syncSunExposureForToday(authToken)
+        .catch(() => null)
+        .finally(() => { inFlight = false; });
+    };
+    syncSunExposure();
+    const interval = setInterval(syncSunExposure, SUN_EXPOSURE_SYNC_INTERVAL_MS);
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      if (nextState === 'active') syncSunExposure();
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      sub.remove();
+    };
+  }, [
+    authToken,
+    userProfile?.subscriptionTier,
+    userProfile?.subscriptionStatus,
+    userProfile?.subscriptionExpiresAt,
+    userProfile?.trialEndsAt,
+  ]);
 
   const initApp = async () => {
+    if (Platform.OS === 'web') {
+      try {
+        const persistedToken = await loadAuthToken().catch((e: any) => {
+          console.warn('[auth] web token read failed:', e?.message ?? e);
+          return null;
+        });
+        if (persistedToken) {
+          try {
+            const meData = await getMe(persistedToken);
+            const persistedUserId = (meData as any)?.id ?? (meData as any)?.user_id ?? null;
+            await clearCacheIfAccountChanged(persistedUserId);
+            if ((meData as any)?.username) {
+              await AsyncStorage.setItem('user_username', (meData as any).username);
+            }
+            if (persistedUserId != null) {
+              await AsyncStorage.setItem(LAST_USER_ID_KEY, String(persistedUserId));
+            }
+            try {
+              const { needsLegalReAcceptance, LEGAL_VERSION: currentLegalVersion } = await import('../src/constants/legal');
+              const locallyAccepted = await AsyncStorage.getItem(LEGAL_LOCAL_ACCEPTED_KEY).catch(() => null);
+              if (locallyAccepted !== currentLegalVersion) {
+                if (needsLegalReAcceptance(meData as any)) {
+                  setLegalReAcceptNeeded(true);
+                } else {
+                  AsyncStorage.setItem(LEGAL_LOCAL_ACCEPTED_KEY, currentLegalVersion).catch(() => {});
+                }
+              }
+            } catch {}
+            await loadProfile(persistedToken, persistedUserId);
+            pullUserStateFromBackend(persistedToken).catch(() => null);
+            setAuthToken(persistedToken);
+          } catch (err: any) {
+            if (isAuthFailureError(err)) {
+              await hardResetSession();
+            } else {
+              try {
+                await loadProfile(persistedToken);
+                setAuthToken(persistedToken);
+              } catch {}
+            }
+          }
+        }
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
     const CACHE_VERSION = '5';
+    let restoredActiveWorkout: WorkoutDay | null = null;
+    let restoredActiveWorkoutApplied = false;
+    const applyRestoredActiveWorkout = () => {
+      if (!restoredActiveWorkout || restoredActiveWorkoutApplied) return;
+      restoredActiveWorkoutApplied = true;
+      setPlayStartCountdown(false);
+      setActiveWorkout(restoredActiveWorkout);
+    };
     const storedVersion = await AsyncStorage.getItem('cacheVersion');
     if (storedVersion !== CACHE_VERSION) {
       await AsyncStorage.multiRemove([
@@ -827,8 +1599,8 @@ export default function Index() {
     if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
 
     // Restore active workout if user was mid-session when the app was killed.
-    // Show a resume/discard prompt so the user isn't silently thrown back
-    // into a workout they may have intended to abandon.
+    // If sets were already logged, the logger should reopen directly from
+    // local state; network/profile/watch sync can catch up behind it.
     try {
       const savedWorkout = await AsyncStorage.getItem('activeWorkoutSession');
       if (savedWorkout) {
@@ -836,13 +1608,13 @@ export default function Index() {
         if (parsed && parsed.exercises) {
           const savedSets = await AsyncStorage.getItem('activeWorkoutSets');
           const loggedCount = savedSets
-            ? (JSON.parse(savedSets) as any[]).filter(e => e.sets?.length > 0).length
+            ? (JSON.parse(savedSets) as any[]).filter(e => e.sets?.length > 0 || e.warmupSets?.length > 0).length
             : 0;
-          // Only prompt resume if the user actually logged at least one set.
+          // Only auto-resume if the user actually logged at least one set.
           // Without this, starting a workout then force-killing the app
-          // before logging anything shows a confusing resume prompt.
+          // before logging anything would reopen a stale empty session.
           if (loggedCount > 0) {
-            setResumeWorkoutData({ workout: parsed, loggedCount });
+            restoredActiveWorkout = parsed as WorkoutDay;
           } else {
             AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
             AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
@@ -867,18 +1639,47 @@ export default function Index() {
     // instead of silently hanging. Network errors are tolerated — we keep the
     // token optimistically and let individual requests surface errors.
     //
-    // IMPORTANT: we `await loadProfile` BEFORE `setAuthToken` so the first
-    // render after isLoading=false has BOTH the token and the profile in
-    // place. Otherwise React renders one frame with authToken set but
-    // userProfile still null, which trips the `if (!userProfile) return
-    // <OnboardingScreen>` branch and flashes the onboarding screen for a
-    // split second.
-    const persistedToken = await loadAuthToken();
+    // IMPORTANT: normal boot still waits for profile before `setAuthToken`.
+    // The active-workout fast path below sets token + cached profile together
+    // before dropping the loading screen, so it avoids the same onboarding flash
+    // while letting set logging reopen ahead of remote sync.
+    let persistedToken: string | null = null;
+    let tokenReadFailed = false;
+    try {
+      persistedToken = await loadAuthToken();
+      authRestoreRetryNeededRef.current = false;
+    } catch (e: any) {
+      tokenReadFailed = true;
+      authRestoreRetryNeededRef.current = true;
+      console.warn('[auth] secure token read failed; preserving local/watch state and retrying on foreground:', e?.message ?? e);
+    }
+    if (persistedToken && restoredActiveWorkout) {
+      try {
+        const cachedProfileRaw = await AsyncStorage.getItem('userProfile');
+        const cachedProfile = cachedProfileRaw ? JSON.parse(cachedProfileRaw) as UserProfile : null;
+        const cachedOwnerId = cachedProfileOwnerId(cachedProfile);
+        const storedUserId = await AsyncStorage.getItem(LAST_USER_ID_KEY).catch(() => null);
+        const cachedProfileMatchesStoredUser = cachedOwnerId
+          ? storedUserId != null && cachedOwnerId === storedUserId
+          : storedUserId != null;
+        if (cachedProfile && cachedProfileMatchesStoredUser) {
+          applyRestoredActiveWorkout();
+          setUserProfile(cachedProfile);
+          setAuthToken(persistedToken);
+          setIsLoading(false);
+        }
+      } catch { /* fall through to normal boot if the cached profile is corrupt */ }
+    }
     if (persistedToken) {
       try {
         const meData = await getMe(persistedToken);
+        const persistedUserId = (meData as any)?.id ?? (meData as any)?.user_id ?? null;
+        await clearCacheIfAccountChanged(persistedUserId);
         if ((meData as any)?.username) {
           await AsyncStorage.setItem('user_username', (meData as any).username);
+        }
+        if (persistedUserId != null) {
+          await AsyncStorage.setItem(LAST_USER_ID_KEY, String(persistedUserId));
         }
         // Legal re-acceptance gate. `getMe` returns the per-section
         // accepted versions; compare to the current LEGAL_VERSION and
@@ -904,11 +1705,12 @@ export default function Index() {
             }
           }
         } catch { /* legal module optional in dev */ }
-        await loadProfile(persistedToken);
+        await loadProfile(persistedToken, persistedUserId);
         // Cold-start hydration: if local history / synced state are empty
         // (e.g. user wiped app data), restore from backend. pullUserState
         // handles the blob + has an explicit workoutHistory fallback.
         pullUserStateFromBackend(persistedToken).catch(() => null);
+        applyRestoredActiveWorkout();
         setAuthToken(persistedToken);
         // Stamp userId on watch bridge so applicationContext carries it.
         try {
@@ -920,16 +1722,52 @@ export default function Index() {
         } catch { /* bridge optional */ }
       } catch (err: any) {
         if (isAuthFailureError(err)) {
-          console.log('[initApp] stale token detected, hard-resetting session:', err?.message);
-          await hardResetSession();
+          // 401 doesn't always mean the user is gone — it can also mean
+          // the backend rotated SECRET_KEY between deploys (every JWT
+          // signed against the old key now fails signature check). If
+          // we have a usable cached profile on disk, keep the user
+          // signed in optimistically and let the next successful
+          // foreground call re-establish things. Only hard-reset when
+          // the cache is empty too — at that point we genuinely have
+          // nothing to render and the auth screen is the right
+          // destination.
+          const cached = await AsyncStorage.getItem('userProfile').catch(() => null);
+          if (cached) {
+            console.log('[initApp] 401 from /me but cached profile present — keeping session, will retry on next foreground:', err?.message);
+            try { await loadProfile(persistedToken); } catch {}
+            applyRestoredActiveWorkout();
+            setAuthToken(persistedToken);
+          } else {
+            console.log('[initApp] stale token + no cached profile, hard-resetting session:', err?.message);
+            await hardResetSession();
+          }
         } else {
           // Transient failure (no network, backend down): keep the token so
           // the next successful request re-establishes the session. We
           // still try to hydrate the profile from cache.
           try { await loadProfile(persistedToken); } catch {}
+          applyRestoredActiveWorkout();
           setAuthToken(persistedToken);
         }
       }
+    } else if (tokenReadFailed) {
+      // A locked iPhone can temporarily deny reads for older Keychain
+      // entries. Treat that as "auth unknown", not "signed out": clearing
+      // WCSession here strands the watch while the real token may still be
+      // present and readable after the next unlock/foreground transition.
+      console.log('[auth] secure token unavailable at startup; leaving watch payloads intact');
+    } else {
+      // No auth token at cold start. The watch's WCSession applicationContext
+      // persists across phone re-launches, so a previous user's workout/meals/
+      // supplements may still be sitting on the wrist. Push empty payloads
+      // and clear the bridge userId so the watch wipes its cache and the
+      // next sign-in starts from a clean slate.
+      try {
+        const { clearWatchData } = await import('../src/utils/watchSync');
+        const { WatchBridge } = await import('../modules/thallo-watch-bridge');
+        await clearWatchData();
+        WatchBridge.setUserId(null);
+      } catch { /* bridge optional */ }
     }
     setIsLoading(false);
 
@@ -1085,7 +1923,7 @@ export default function Index() {
     };
   };
 
-  const pushWeightSnapshotToWatch = async (profile: UserProfile): Promise<void> => {
+  const pushWeightSnapshotToWatch = async (profile: UserProfile, force = false): Promise<void> => {
     try {
       const entries = profile.weightEntries ?? [];
       const latest = entries[entries.length - 1];
@@ -1105,6 +1943,7 @@ export default function Index() {
         daysSinceLastLog: 0,
         emaLbs: ema,
         slopeLbsPerWeek: oldEma != null ? ema - oldEma : null,
+        force,
       });
     } catch {}
   };
@@ -1115,15 +1954,9 @@ export default function Index() {
     source: 'manual' | 'onboarding' | 'coach' | 'checkin' | 'watch' = 'manual',
   ): Promise<void> => {
     if (!authToken) return;
-    const canonicalWeight = Math.round(Number(weightLbs) * 10) / 10;
-    await Promise.all([
-      saveWeightEntryAPI(authToken, todayKey(), canonicalWeight, source).catch((e) =>
-        console.warn('[weight] entry sync failed (non-fatal)', e?.message ?? e),
-      ),
-      syncOnboarding(authToken, profile).catch((e) =>
-        console.warn('[weight] profile sync failed (non-fatal)', e?.message ?? e),
-      ),
-    ]);
+    await syncOnboarding(authToken, profile).catch((e) =>
+      console.warn('[weight] profile sync failed (non-fatal)', e?.message ?? e),
+    );
     await pushUserStateToBackend(authToken).catch(() => null);
   };
 
@@ -1211,7 +2044,7 @@ export default function Index() {
       if (aiPlans) {
         await applyPlanResult(aiPlans);
         await clearPlanGenMarker();
-        Alert.alert('Plan ready', 'Your new plan is done — tap anywhere to continue.');
+        console.log('[plan-gen] resumed job completed');
       } else {
         // Job completed with no data or already consumed — clear the stale marker
         await clearPlanGenMarker();
@@ -1247,14 +2080,24 @@ export default function Index() {
     resumePlanGenRef.current = resumePlanGenIfPending;
   });
 
-  const loadProfile = async (token: string): Promise<UserProfile | null> => {
+  const loadProfile = async (token: string, ownerUserId?: string | number | null): Promise<UserProfile | null> => {
     let profile: UserProfile | null = null;
+    const normalizedOwnerUserId = normalizeAuthUserId(ownerUserId);
     const stored = await AsyncStorage.getItem('userProfile');
     if (stored) {
       // Guard the parse — corrupted AsyncStorage blobs (rare but possible
       // after a force-kill mid-write) must not brick every future sign-in.
       // Fall through to the remote fetch and re-populate from there.
-      try { profile = JSON.parse(stored); }
+      try {
+        const parsed = JSON.parse(stored);
+        const parsedOwnerId = cachedProfileOwnerId(parsed);
+        if (normalizedOwnerUserId && parsedOwnerId && parsedOwnerId !== normalizedOwnerUserId) {
+          profile = null;
+          await AsyncStorage.removeItem('userProfile').catch(() => {});
+        } else {
+          profile = parsed;
+        }
+      }
       catch { profile = null; await AsyncStorage.removeItem('userProfile').catch(() => {}); }
     }
     const remote = await getMyProfile(token);
@@ -1265,6 +2108,7 @@ export default function Index() {
         ...remote,
         subscriptionTier: remote.subscriptionTier,
         customFoods: remote.customFoods?.length ? remote.customFoods : (profile.customFoods ?? []),
+        customExercises: mergeCustomExercises(remote.customExercises, profile.customExercises),
         savedMeals: remote.savedMeals?.length ? remote.savedMeals : (profile.savedMeals ?? []),
       } : remote;
       if (localProfile) {
@@ -1274,6 +2118,12 @@ export default function Index() {
       await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     }
     if (!profile) return null;
+    profile = withDefaultTheme(profile);
+    if (normalizedOwnerUserId) {
+      profile = stampCachedProfileOwner(profile, normalizedOwnerUserId);
+    }
+    profile = await pushCustomExercisesToBackend(token, profile);
+    await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     setUserProfile(profile);
     if (tierOf(profile) === 'free') {
       try {
@@ -1304,7 +2154,6 @@ export default function Index() {
         age: ps?.age, gender: ps?.gender,
       });
     }
-
     // Rehydrate in-memory caches that sign-out cleared — these live in
     // AsyncStorage persistently, but the React state got reset when the
     // user signed out, so supplements need re-setting.
@@ -1336,10 +2185,10 @@ export default function Index() {
       await saveAuthToken(token);
     }
 
-    // Detect a user switch on the same device. If a different user signs in,
-    // we wipe the previous user's cached state so their plans/notes/routines
-    // don't leak through. Same user returning? Keep the cache — sign-out
-    // should be non-destructive.
+    // Detect a user switch on the same device. If the prior cache is
+    // definitely owned by another user, or it predates owner stamping and
+    // has no last-user id, wipe it before hydration so meals/plans/routines
+    // cannot bleed across accounts.
     let incomingUserId: string | number | null = null;
     let incomingUsername: string | null = null;
     let meForLegalCheck: any = null;
@@ -1351,10 +2200,7 @@ export default function Index() {
     } catch {
       incomingUserId = null;
     }
-    const previousUserId = await AsyncStorage.getItem(LAST_USER_ID_KEY);
-    const userSwitched = incomingUserId != null
-      && previousUserId != null
-      && String(incomingUserId) !== String(previousUserId);
+    const shouldResetUserCache = !isNewUser && await clearCacheIfAccountChanged(incomingUserId);
     // For NEW users we hold off writing user-scoped storage until
     // onboarding completes — keeps signup ACID. For existing users
     // username/last-user are written after any previous-user wipe below.
@@ -1386,14 +2232,14 @@ export default function Index() {
       return;
     }
 
-    if (userSwitched) {
+    if (shouldResetUserCache) {
       // Different user on same device — clear the previous user's state
       // before hydrating this one so nothing leaks across accounts.
-      await clearUserScopedStorage();
       // Clear transient active-workout keys so the watch pull_state handler
       // doesn't see a stale isWorkoutInProgress flag for the new account.
       await AsyncStorage.multiRemove([
         'activeWorkoutStartTime', 'activeWatchSessionId', 'activeWorkoutSession',
+        'activeWorkoutTimers', 'activeWorkoutPausedAtMs', 'activeWorkoutPausedAccumMs',
       ]).catch(() => {});
       setTrainerNote(null);
       setNutritionistNote(null);
@@ -1431,12 +2277,17 @@ export default function Index() {
       } catch { /* legal module optional in dev */ }
     }
 
-    // Same user (or user-switched) — pull from backend first, then load
-    // profile from cache, THEN flip the token so the render lands straight
-    // on HomeScreen with all the data in place.
-    await pullUserStateFromBackend(token);
-    const loadedProfile = await loadProfile(token);
+    // Same user (or user-switched) — give backend state hydration a short
+    // head start, but never hold the login screen hostage to a slow cold
+    // state pull. The pull keeps running and lands caches as it finishes.
+    const statePull = pullUserStateFromBackend(token).catch(() => null);
+    await Promise.race([
+      statePull,
+      new Promise(resolve => setTimeout(resolve, 4500)),
+    ]);
+    const loadedProfile = await loadProfile(token, incomingUserId);
     setAuthToken(token);
+    resetOrdinaryAppNavigation();
 
     // Auto-reconnect Apple Health silently if the user previously enabled it.
     // HealthKit permissions are iOS-level and survive logout — we just need to
@@ -1452,7 +2303,7 @@ export default function Index() {
   };
 
   const handleProfileComplete = async (profile: UserProfile) => {
-    const stamped = stampGoalStart(profile, null);
+    const stamped = stampGoalStart(withDefaultTheme(profile), null);
     // Beta UI can show Pro affordances locally, but plan generation is
     // server-gated. `getMe` below must grant Pro before any Pro-only
     // generation calls run.
@@ -1476,8 +2327,11 @@ export default function Index() {
       const uname = (me as any)?.username ?? null;
       stampedWithTier = {
         ...stamped,
-        subscriptionTier: (me as any)?.subscription_tier === 'pro' ? 'pro' : 'free',
+        ...billingEntitlementToProfilePatch(me as any),
       };
+      if (uid != null) {
+        stampedWithTier = stampCachedProfileOwner(stampedWithTier, uid);
+      }
       await AsyncStorage.setItem('userProfile', JSON.stringify(stampedWithTier));
       if (uname) await AsyncStorage.setItem('user_username', uname);
       if (uid != null) await AsyncStorage.setItem(LAST_USER_ID_KEY, String(uid));
@@ -1499,31 +2353,32 @@ export default function Index() {
     }
     await onboardingSync;
 
-    // Show loading screen while generating the initial plan.
-    // DON'T set userProfile yet — that would mount HomeScreen which
-    // triggers its own loadPlans, causing a white flash.
-    setIsLoading(true);
-    setIsWorkoutUpdating(true);
-    setIsNutritionUpdating(true);
-    holdPlanGenAwake();
-    setPlanGenMarker('full').catch(() => null);
+    setUserProfile(stampedWithTier);
+    setIsLoading(false);
+    setIsWorkoutUpdating(false);
+    setIsNutritionUpdating(false);
 
-    getAIPlans(authToken, stampedWithTier, stampedWithTier.lastWorkoutContext ? { extraContext: `Recent workout context from user: ${stampedWithTier.lastWorkoutContext}` } : undefined)
-      .then(async (aiPlans) => {
-        // Centralized handler: writes all storage keys, stamps the
-        // templates with a fresh version, and wipes per-day nutrition
-        // saves so the new rotation actually replaces the old days
-        // instead of being shadowed by stale per-day storage.
+    const onboardingToken = authToken;
+    const onboardingProfile = stampedWithTier;
+    void (async () => {
+      holdPlanGenAwake();
+      await setPlanGenMarker('workout').catch(() => null);
+      try {
+        const aiPlans = await getAIWorkoutPlan(
+          onboardingToken,
+          onboardingProfile,
+          onboardingProfile.lastWorkoutContext
+            ? { extraContext: `Recent workout context from user: ${onboardingProfile.lastWorkoutContext}` }
+            : undefined,
+        );
         await applyPlanResult(aiPlans);
-        // Track when this week's plan started
         await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
-        await appendUserLog({ type: 'plan_generated', summary: `Initial plan generated for goal: ${stampedWithTier.goal.replace(/_/g, ' ')}` });
+        await appendUserLog({ type: 'plan_generated', summary: `Initial workout plan generated for goal: ${onboardingProfile.goal.replace(/_/g, ' ')}` });
         setPlanRefreshKey(k => k + 1);
 
-        // Parse onboarding workout context into logged sessions
-        if (stampedWithTier.lastWorkoutContext && authToken) {
+        if (onboardingProfile.lastWorkoutContext) {
           try {
-            const parsed = await parseRecentWorkouts(authToken, stampedWithTier.lastWorkoutContext);
+            const parsed = await parseRecentWorkouts(onboardingToken, onboardingProfile.lastWorkoutContext);
             console.log('[onboarding] parseRecentWorkouts response:', JSON.stringify(parsed));
             for (const s of (parsed.sessions ?? [])) {
               const session: WorkoutSession = {
@@ -1545,42 +2400,45 @@ export default function Index() {
                 completed: true,
               };
               await saveWorkoutSession(session);
-              // Sync to backend so getWorkoutStatus() sees it
               const sessionDate = s.date || new Date(session.date).toISOString().slice(0, 10);
               const exercisesPayload = workoutSessionToLoggedPayload(session);
-              await logWorkoutDone(
-                authToken,
-                sessionDate,
-                session.focus,
-                session.durationSeconds,
-                exercisesPayload.length > 0 ? exercisesPayload : undefined,
+              await completeWorkoutWithOfflineQueue(
+                onboardingToken,
+                {
+                  workout_date: sessionDate,
+                  focus_label: session.focus,
+                  duration_seconds: session.durationSeconds,
+                  exercises: exercisesPayload.length > 0 ? exercisesPayload : undefined,
+                  source: {
+                    sourceContext: 'coach_log',
+                    startedAt: session.startedAt ?? session.date,
+                    endedAt: session.endedAt ?? new Date(new Date(session.date).getTime() + session.durationSeconds * 1000).toISOString(),
+                    externalSourceId: session.id,
+                  },
+                },
+                session,
               ).catch(e =>
-                console.warn('[onboarding] logWorkoutDone failed for', sessionDate, e),
+                console.warn('[onboarding] workout completion queue failed for', sessionDate, e),
               );
             }
             if (parsed.sessions?.length) {
               console.log(`[onboarding] logged ${parsed.sessions.length} workout sessions from context`);
-              setPlanRefreshKey(k => k + 1); // refresh to show today as done
+              setPlanRefreshKey(k => k + 1);
             }
           } catch (e) {
             console.warn('[onboarding] failed to parse workout context:', e);
           }
         }
-      })
-      .catch((err) => {
+      } catch (err: any) {
         const msg = err?.message ?? '';
-        if (msg.toLowerCase().includes('cancelled')) return;  // user cancelled, no alert
-        if (msg.includes('orphaned_on_restart')) return;     // handled by resume flow
-        Alert.alert('Plan generation failed', msg || 'Could not reach the AI server. Make sure the backend is running and try again.');
-      })
-      .then(() => clearPlanGenMarker().catch(() => null))
-      .finally(() => {
-        setUserProfile(stampedWithTier);  // NOW mount HomeScreen — plan data is ready
-        setIsLoading(false);
-        setIsWorkoutUpdating(false);
-        setIsNutritionUpdating(false);
+        if (!msg.toLowerCase().includes('cancelled') && !msg.includes('orphaned_on_restart')) {
+          console.warn('[onboarding] background workout plan generation failed:', msg || err);
+        }
+      } finally {
+        await clearPlanGenMarker().catch(() => null);
         releasePlanGenAwake();
-      });
+      }
+    })();
   };
 
   const handleSignOut = async () => {
@@ -1606,20 +2464,25 @@ export default function Index() {
       WatchBridge.setUserId(null);
     } catch { /* watch bridge optional */ }
     try {
-      const [{ cancelWorkoutReminders }, { cancelMealReminder }, Notifications] = await Promise.all([
+      const [{ cancelWorkoutReminders }, { cancelMealReminder }, { cancelHydrationReminders }, { cancelAllCoachingNotifications }, Notifications] = await Promise.all([
         import('../src/utils/workoutReminders'),
         import('../src/utils/mealReminders'),
+        import('../src/utils/hydrationReminders'),
+        import('../src/utils/coachingNotifications'),
         import('expo-notifications'),
       ]);
       await raceTimeout(Promise.all([
         cancelWorkoutReminders().catch(() => {}),
         cancelMealReminder().catch(() => {}),
+        cancelHydrationReminders().catch(() => {}),
+        cancelAllCoachingNotifications().catch(() => {}),
         Notifications.cancelAllScheduledNotificationsAsync().catch(() => {}),
       ]), 1500);
     } catch { /* notification cleanup is best-effort */ }
-    await clearUserScopedStorage({ preserveKeys: [TUTORIAL_COMPLETED_KEY, LEGAL_LOCAL_ACCEPTED_KEY] });
+    await clearUserScopedStorage({ preserveKeys: [TUTORIAL_COMPLETED_KEY, LEGAL_LOCAL_ACCEPTED_KEY, LAST_USER_ID_KEY] });
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();
+    setAuthEntryMode(Platform.OS === 'web' ? 'login' : 'landing');
     setAuthToken(null);
     setUserProfile(null);
     setIsEditing(false);
@@ -1650,6 +2513,7 @@ export default function Index() {
     } finally {
       setIsWorkoutUpdating(false);
       setIsNutritionUpdating(false);
+      releasePlanGenAwake();
     }
   };
 
@@ -1700,8 +2564,8 @@ export default function Index() {
     // Goal/workout/mealplan edits affect the next generated week, so
     // confirm before saving any settings that change the future plan
     // shape. Mealplan was previously skipped — added so users get the
-    // same "applies next Monday" heads-up when changing meals/day,
-    // variety, or allergens mid-week.
+    // same "applies next Monday" heads-up when changing variety,
+    // allergens, or foods mid-week.
     //
     // CRITICAL: only show the warning when an existing plan is in
     // flight. First-time setup (right after onboarding) has no prior
@@ -1711,18 +2575,34 @@ export default function Index() {
     // active week being disrupted.
     const hasExistingPlan = !!userProfile && !!userProfile.goal;
     if (hasExistingPlan && (effectiveMode === 'goal' || effectiveMode === 'workout' || effectiveMode === 'mealplan')) {
-      const willRegen = effectiveMode === 'goal'
-        ? (userProfile?.goal !== updated.goal || userProfile?.goalDetails?.pace !== updated.goalDetails?.pace)
-        : effectiveMode === 'mealplan'
-        ? (userProfile?.mealsPerDay !== updated.mealsPerDay
-            || userProfile?.mealVariety !== updated.mealVariety
-            || JSON.stringify(userProfile?.allergies ?? []) !== JSON.stringify(updated.allergies ?? []))
-        : true;  // workout settings always regen
+      // Only open the "save for next week" modal if the user actually
+      // changed something in the relevant scope. The previous
+      // workout-mode branch hardcoded `true`, so simply opening the
+      // workout settings sheet and tapping Save (no fields touched)
+      // wrote a phantom "user · workout settings" row to the change
+      // history and nudged the user into a "scheduled" state they
+      // never asked for.
+      const willRegen = !planScopeIsUnchanged(userProfile, updated, effectiveMode as 'goal' | 'workout' | 'mealplan');
       if (willRegen) {
+        const repairInjuryConflicts = effectiveMode === 'workout' && activeInjuriesChanged(userProfile, updated);
+        const repairEquipmentConflicts = effectiveMode === 'workout' && equipmentWasRemoved(userProfile, updated);
+        const updateDurationCoveredKeys = [
+          'workoutDurationMinutes',
+          repairInjuryConflicts ? 'injuries' : null,
+          repairInjuryConflicts ? 'injuryEntries' : null,
+          repairEquipmentConflicts ? 'equipment' : null,
+        ].filter((key): key is string => !!key);
+        const updateSessionDuration =
+          effectiveMode === 'workout'
+          && workoutDurationChanged(userProfile, updated)
+          && !equipmentWasAdded(userProfile, updated)
+          && workoutSettingsUnchangedExcept(userProfile, updated, updateDurationCoveredKeys);
         setPendingSave({
           profile: updated,
           mode: effectiveMode,
-          repairInjuryConflicts: effectiveMode === 'workout' && activeInjuriesChanged(userProfile, updated),
+          repairInjuryConflicts,
+          repairEquipmentConflicts,
+          updateSessionDuration,
         });
         return;
       }
@@ -1733,7 +2613,12 @@ export default function Index() {
   const _doSaveProfile = async (
     updated: UserProfile,
     modeOverride?: typeof editMode,
-    options?: { updateRemainingWeekNutrition?: boolean; repairInjuryConflicts?: boolean },
+    options?: {
+      updateRemainingWeekNutrition?: boolean;
+      repairInjuryConflicts?: boolean;
+      repairEquipmentConflicts?: boolean;
+      updateSessionDuration?: boolean;
+    },
   ) => {
     const effectiveMode = modeOverride ?? editMode;
     let stamped = stampGoalStart(updated, userProfile);
@@ -1762,6 +2647,9 @@ export default function Index() {
     if (goalChanged) {
       await recordGoalChange(updated.goal, updated.goalDetails.pace, updated.physicalStats.weightLbs);
     }
+    if (authToken && (stamped.customExercises?.length ?? 0) > 0) {
+      stamped = await pushCustomExercisesToBackend(authToken, stamped);
+    }
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
     if (bodyWeightChanged) {
@@ -1784,19 +2672,31 @@ export default function Index() {
     // Sync to backend so the edit is available on other devices.
     // Await the sync so the backend has the latest profile before plan generation.
     if (authToken) {
+      const immediateWorkoutRepairRequested =
+        effectiveMode === 'workout'
+        && tierOf(stamped) === 'pro'
+        && (
+          options?.repairInjuryConflicts === true
+          || options?.repairEquipmentConflicts === true
+          || options?.updateSessionDuration === true
+        );
       if (bodyWeightChanged) {
         await syncWeightToBackend(stamped, stamped.physicalStats.weightLbs, 'manual');
       } else {
         await pushUserStateToBackend(authToken).catch(() => null);
-        await syncOnboarding(authToken, stamped).catch(() => null);
+        if (immediateWorkoutRepairRequested) {
+          await syncOnboarding(authToken, stamped);
+        } else {
+          await syncOnboarding(authToken, stamped).catch(() => null);
+        }
       }
 
       // CRITICAL: profile saves do not rebuild the active workout week.
-      // Injury changes are the safety exception: they run a deterministic
-      // repair that preserves the week structure and only rewrites today/future
-      // unlocked workouts. Meal plan saves also default to next-week-only, but
-      // the confirmation modal can opt into a scoped nutrition refresh for
-      // future eligible days.
+      // Injury and removed-equipment changes are safety/availability
+      // exceptions: they run deterministic repairs that preserve the week
+      // structure and only rewrite today/future unlocked workouts. Meal plan
+      // saves also default to next-week-only, but the confirmation modal can
+      // opt into a scoped nutrition refresh for future eligible days.
       // Previously this path eagerly regenerated nutrition on goal/mealplan
       // edits, which:
       //   1. Wiped today's planned meals out from under the user
@@ -1809,7 +2709,18 @@ export default function Index() {
       // auto-renew at week boundary picks them up on its own unless the user
       // explicitly asks to update remaining meals now.
       const regenWorkout = false;
-      const repairInjuryConflicts = effectiveMode === 'workout' && options?.repairInjuryConflicts === true;
+      const repairInjuryConflicts =
+        effectiveMode === 'workout'
+        && options?.repairInjuryConflicts === true
+        && tierOf(stamped) === 'pro';
+      const repairEquipmentConflicts =
+        effectiveMode === 'workout'
+        && options?.repairEquipmentConflicts === true
+        && tierOf(stamped) === 'pro';
+      const updateSessionDuration =
+        effectiveMode === 'workout'
+        && options?.updateSessionDuration === true
+        && tierOf(stamped) === 'pro';
       const refreshNutritionForWeight =
         bodyWeightChanged
         && !goalChanged
@@ -1830,42 +2741,36 @@ export default function Index() {
         });
       }
 
-      if (repairInjuryConflicts) {
+      if (repairInjuryConflicts || repairEquipmentConflicts || updateSessionDuration) {
         setIsWorkoutUpdating(true);
-        repairPlanWeekInjuryConflicts(authToken)
+        const repairSteps: Promise<unknown>[] = [];
+        if (repairInjuryConflicts) repairSteps.push(repairPlanWeekInjuryConflicts(authToken));
+        if (repairEquipmentConflicts) repairSteps.push(repairPlanWeekEquipmentConflicts(authToken));
+        if (updateSessionDuration) {
+          repairSteps.push(updatePlanWeekSessionDuration(authToken, stamped.workoutDurationMinutes ?? 60));
+        }
+        Promise.all(repairSteps)
           .then(async () => {
+            const updatedFor = [
+              repairInjuryConflicts ? 'active injuries' : null,
+              repairEquipmentConflicts ? 'available equipment' : null,
+              updateSessionDuration ? 'session length' : null,
+            ].filter(Boolean);
             await appendUserLog({
               type: 'plan_generated',
-              summary: 'Current week repaired for active injuries.',
+              summary: `Current week updated for ${updatedFor.join(', ')}.`,
             });
             setPlanRefreshKey(k => k + 1);
           })
           .catch((err: any) => {
             const msg = err?.message ?? '';
-            console.error('[repairPlanWeekInjuryConflicts] failed:', msg || err);
-            Alert.alert('Injury update failed', msg || 'Your injury settings were saved, but the current week could not be repaired. Try again from workout settings.');
+            console.error('[repairCurrentPlanWeek] failed:', msg || err);
+            Alert.alert('Current week update failed', msg || 'Your workout settings were saved, but the current week could not be repaired. Try again from workout settings.');
           })
           .finally(() => {
             setIsWorkoutUpdating(false);
           });
       } else if (regenWorkout || regenNutrition) {
-        // Preserve today's logged meals when regenerating nutrition
-        if (regenNutrition && !refreshRemainingNutrition) {
-          const today = todayKey();
-          const rawEdits = await AsyncStorage.getItem('mealEdits');
-          if (rawEdits) {
-            try {
-              const allEdits = JSON.parse(rawEdits);
-              const todayEdit = allEdits[today];
-              if (todayEdit) {
-                await AsyncStorage.setItem('mealEdits', JSON.stringify({ [today]: todayEdit }));
-              } else {
-                await AsyncStorage.removeItem('mealEdits');
-              }
-            } catch { await AsyncStorage.removeItem('mealEdits'); }
-          }
-        }
-
         const userLogRaw = await AsyncStorage.getItem('userLog');
         const userLog: import('../src/types').UserLogEntry[] = safeParse<import('../src/types').UserLogEntry[]>(userLogRaw, []);
 
@@ -1968,6 +2873,65 @@ export default function Index() {
     if (authToken) syncOnboarding(authToken, updated).catch(() => null);
   };
 
+  // Persist a single dislikedExercises append. Used by the in-workout
+  // thumbs-down — must not touch edit mode, weight history, goal /
+  // nutrition regen, or any of the side effects in `_doSaveProfile`.
+  // Local-first: AsyncStorage + setUserProfile commit synchronously;
+  // backend sync is best-effort and never blocks.
+  const handleDislikeExercise = useCallback((exerciseName: string) => {
+    if (!userProfile) return;
+    const trimmed = String(exerciseName ?? '').trim();
+    if (!trimmed) return;
+    const existing = userProfile.dislikedExercises ?? [];
+    if (existing.some(d => d.toLowerCase() === trimmed.toLowerCase())) return;
+    const updated: UserProfile = {
+      ...userProfile,
+      dislikedExercises: [...existing, trimmed],
+    };
+    setUserProfile(updated);
+    AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => null);
+    if (authToken) syncOnboarding(authToken, updated).catch(() => null);
+  }, [userProfile, authToken]);
+
+  const handleProfileUpdate = useCallback(async (changes: Partial<UserProfile>, skipRegen?: boolean) => {
+    if (!userProfile) return;
+    const updated = { ...userProfile, ...changes };
+    let stamped = changes.goal ? stampGoalStart(updated, userProfile) : updated;
+    if (changes.goal) {
+      await recordGoalChange(stamped.goal, stamped.goalDetails.pace, stamped.physicalStats.weightLbs);
+    }
+    if (authToken && changes.customExercises) {
+      stamped = await pushCustomExercisesToBackend(authToken, stamped);
+    }
+    await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
+    setUserProfile(stamped);
+    if (authToken) {
+      await Promise.all([
+        pushUserStateToBackend(authToken).catch(() => null),
+        syncOnboarding(authToken, stamped).catch(() => null),
+      ]);
+    }
+    if (changes.themePreference) {
+      import('../src/utils/watchSync')
+        .then(({ pushThemeToWatch }) => pushThemeToWatch(stamped.themePreference))
+        .catch(() => null);
+    }
+    if (skipRegen) {
+      console.log('[onProfileUpdate] profile saved, skipping regen');
+      setPlanRefreshKey(k => k + 1);
+      return;
+    }
+    const needsWorkout = !!changes.daysPerWeek || !!changes.workoutDurationMinutes || !!changes.equipment || !!changes.goal || !!changes.preferredSplit;
+    const needsNutrition = !!changes.goal;
+    if (needsWorkout || needsNutrition) {
+      console.log('[onProfileUpdate] profile saved; active PlanWeek left unchanged', {
+        needsWorkout,
+        needsNutrition,
+      });
+    }
+    setPlanRefreshKey(k => k + 1);
+  }, [authToken, userProfile]);
+
   const handleWorkoutFinish = (_session: WorkoutSession) => {
     setPlayStartCountdown(false);
     setActiveWorkout(null);
@@ -1991,7 +2955,7 @@ export default function Index() {
     setUserProfile(updated);
     setPlanRefreshKey(k => k + 1);
     await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${canonicalWeight} lbs` });
-    pushWeightSnapshotToWatch(updated).catch(() => null);
+    pushWeightSnapshotToWatch(updated, source === 'watch').catch(() => null);
     if (authToken) {
       await syncWeightToBackend(updated, canonicalWeight, source);
       await refreshRemainingNutritionForWeight(updated, canonicalWeight);
@@ -2024,7 +2988,42 @@ export default function Index() {
   };
 
   if (isLoading) return <SplashLoadingScreen />;
-  if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  if (!authToken) {
+    if (Platform.OS === 'web') {
+      return (
+        <AuthScreen
+          initialMode={authEntryMode === 'signup' ? 'signup' : 'login'}
+          onBack={() => router.replace('/')}
+          onAuthenticated={handleAuthenticated}
+        />
+      );
+    }
+    if (authEntryMode === 'landing') {
+      return (
+        <LandingScreen
+          onLogin={() => setAuthEntryMode('login')}
+          onSignup={() => setAuthEntryMode('signup')}
+          onWhyThallo={() => setAuthEntryMode('why-thallo')}
+        />
+      );
+    }
+    if (authEntryMode === 'why-thallo') {
+      return (
+        <WhyThalloScreen
+          onBack={() => setAuthEntryMode('landing')}
+          onLogin={() => setAuthEntryMode('login')}
+          onSignup={() => setAuthEntryMode('signup')}
+        />
+      );
+    }
+    return (
+      <AuthScreen
+        initialMode={authEntryMode}
+        onBack={() => setAuthEntryMode('landing')}
+        onAuthenticated={handleAuthenticated}
+      />
+    );
+  }
   if (!userProfile) return (
     <OnboardingScreen
       authToken={authToken ?? ''}
@@ -2036,6 +3035,7 @@ export default function Index() {
         await clearUserScopedStorage();
         try { await AsyncStorage.removeItem(LAST_USER_ID_KEY); } catch {}
         try { await clearAuthToken(); } catch {}
+        setAuthEntryMode('landing');
         setAuthToken(null);
         setUserProfile(null);
         setTrainerNote(null);
@@ -2044,6 +3044,46 @@ export default function Index() {
       }}
     />
   );
+
+  if (Platform.OS === 'web') {
+    return (
+      <>
+        <WebProgressShell
+          authToken={authToken}
+          userProfile={userProfile}
+          onSignOut={handleSignOut}
+          onUpdateWeight={handleUpdateWeight}
+          onCancelScheduledPlanChange={handleCancelScheduledPlanChange}
+        />
+        {legalReAcceptNeeded && authToken && (
+          <LegalDisclosureModal
+            visible
+            isReAcceptance
+            themeColors={getTheme(userProfile?.themePreference).colors}
+            onClose={() => undefined}
+            onAccept={async () => {
+              try {
+                const [{ acceptLegal }, { LEGAL_VERSION }, { getMe: refetchMe }] = await Promise.all([
+                  import('../src/services/api'),
+                  import('../src/constants/legal'),
+                  import('../src/services/api'),
+                ]);
+                await acceptLegal(authToken, LEGAL_VERSION);
+                try { await AsyncStorage.setItem(LEGAL_LOCAL_ACCEPTED_KEY, LEGAL_VERSION); } catch {}
+                setLegalReAcceptNeeded(false);
+                await refetchMe(authToken).catch(() => null);
+              } catch (err: any) {
+                Alert.alert(
+                  'Could not save acceptance',
+                  err?.message ?? 'Please try again. Continued use of Thallo requires acceptance.',
+                );
+              }
+            }}
+          />
+        )}
+      </>
+    );
+  }
 
   // ActiveWorkoutScreen is a long-duration full takeover — unmount HomeScreen
   // while a workout is active so its effects/timers stop.
@@ -2054,18 +3094,15 @@ export default function Index() {
         workout={activeWorkout}
         goal={userProfile.goal}
         themeName={userProfile.themePreference}
+        profileGender={userProfile.physicalStats.gender}
         weightLbs={userProfile.physicalStats.weightLbs}
         weightUnit={userProfile.weightUnit ?? 'lbs'}
         distanceUnit={userProfile.distanceUnit ?? 'mi'}
         playStartCountdown={playStartCountdown}
         onFinish={handleWorkoutFinish}
         onCancel={handleCancelActiveWorkout}
-        onDislikeExercise={(name) => {
-          const existing = userProfile.dislikedExercises ?? [];
-          if (existing.some(d => d.toLowerCase() === name.toLowerCase())) return;
-          const updated = [...existing, name];
-          handleProfileUpdate({ dislikedExercises: updated } as any, true);
-        }}
+        onDislikeExercise={handleDislikeExercise}
+        onProfileUpdate={handleProfileUpdate}
       />
     );
   }
@@ -2080,8 +3117,11 @@ export default function Index() {
         userProfile={userProfile}
         planRefreshKey={planRefreshKey}
         usernameRefreshKey={usernameRefreshKey}
+        homeResetKey={homeResetKey}
         isWorkoutUpdating={isWorkoutUpdating}
         isNutritionUpdating={isNutritionUpdating}
+        liveTutorialTargetTab={liveTutorialNavigation?.tab ?? null}
+        liveTutorialNavigationKey={liveTutorialNavigation?.requestId ?? 0}
         onCancelPlanGen={cancelPlanGen}
         trainerNote={trainerNote}
         nutritionistNote={nutritionistNote}
@@ -2100,8 +3140,13 @@ export default function Index() {
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
         onOpenSettings={() => setShowSettings(true)}
+        onOpenImportSettings={() => {
+          setSettingsOpenImportOnShow(true);
+          setShowSettings(true);
+        }}
         onHomeTabNavigate={() => {
           setShowSettings(false);
+          setSettingsOpenImportOnShow(false);
           setShowAccount(false);
           setShowProgress(false);
         }}
@@ -2118,42 +3163,7 @@ export default function Index() {
             await pushUserStateToBackend(authToken);
           }
         }}
-        onProfileUpdate={async (changes, skipRegen) => {
-          if (!userProfile || !authToken) return;
-          const updated = { ...userProfile, ...changes };
-          const stamped = changes.goal ? stampGoalStart(updated, userProfile) : updated;
-          if (changes.goal) {
-            await recordGoalChange(stamped.goal, stamped.goalDetails.pace, stamped.physicalStats.weightLbs);
-          }
-          await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
-          setUserProfile(stamped);
-          syncOnboarding(authToken, stamped).catch(() => null);
-          if (changes.themePreference) {
-            import('../src/utils/watchSync')
-              .then(({ pushThemeToWatch }) => pushThemeToWatch(stamped.themePreference))
-              .catch(() => null);
-          }
-          // If the chat already included an updated plan, just refresh without regen
-          if (skipRegen) {
-            console.log('[onProfileUpdate] profile saved, skipping regen (plan already applied from chat)');
-            setPlanRefreshKey(k => k + 1);
-            return;
-          }
-          // Save plan-affecting preferences without replacing the active
-          // PlanWeek. The next generated week reads these settings; immediate
-          // changes should go through explicit Change Focus / per-day edits.
-          const needsWorkout = !!changes.daysPerWeek || !!changes.workoutDurationMinutes || !!changes.equipment || !!changes.goal || !!changes.preferredSplit;
-          const needsNutrition = !!changes.goal;
-          if (needsWorkout || needsNutrition) {
-            console.log('[onProfileUpdate] profile saved; active PlanWeek left unchanged', {
-              needsWorkout,
-              needsNutrition,
-            });
-            setPlanRefreshKey(k => k + 1);
-          } else {
-            setPlanRefreshKey(k => k + 1);
-          }
-        }}
+        onProfileUpdate={handleProfileUpdate}
         onWeeklyRefresh={async (review) => {
           if (!authToken || !userProfile) return;
           await appendUserLog({
@@ -2261,6 +3271,7 @@ export default function Index() {
             setShowTutorial(true);
             setShowAccount(false);
           }}
+          onStartLiveTutorial={startLiveTutorial}
           onOpenSettings={() => {
             setShowAccount(false);
             setTimeout(() => setShowSettings(true), 200);
@@ -2277,25 +3288,13 @@ export default function Index() {
           profile={userProfile}
           themeName={userProfile.themePreference}
           authToken={authToken}
-          onClose={() => setShowSettings(false)}
-          onSignOut={handleSignOut}
-          onProfileUpdate={async (changes, skipRegen) => {
-            // Reuse the existing profile-update path so unit + theme
-            // changes follow the same persistence rules as everything
-            // else (no plan regen on display-only fields).
-            const updated = { ...userProfile, ...changes };
-            setUserProfile(updated);
-            await AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => {});
-            if (authToken) {
-              syncOnboarding(authToken, updated).catch(() => null);
-            }
-            if (changes.themePreference) {
-              try {
-                const { pushThemeToWatch } = await import('../src/utils/watchSync');
-                await pushThemeToWatch(updated.themePreference);
-              } catch {}
-            }
+          openImportOnShow={settingsOpenImportOnShow}
+          onClose={() => {
+            setShowSettings(false);
+            setSettingsOpenImportOnShow(false);
           }}
+          onSignOut={handleSignOut}
+          onProfileUpdate={handleProfileUpdate}
         />
       )}
 
@@ -2319,11 +3318,30 @@ export default function Index() {
               await pushThemeToWatch(updated.themePreference);
             } catch {}
           }}
-          onUpgrade={tierOf(userProfile) === 'pro' ? () => handleUpgradeToPro(userProfile) : undefined}
-          onClose={async ({ completed }) => {
+          onHealthSetup={handleTutorialHealthSetup}
+          onUpgrade={tierOf(userProfile) === 'free' ? () => setShowAccount(true) : undefined}
+          onClose={async ({ completed, startLiveTutorial: shouldStartLiveTutorial }) => {
             setShowTutorial(false);
             if (completed) {
               try { await AsyncStorage.setItem(TUTORIAL_COMPLETED_KEY, String(Date.now())); } catch {}
+            }
+            if (shouldStartLiveTutorial) startLiveTutorial();
+          }}
+        />
+      )}
+
+      {userProfile && (
+        <LiveTutorialOverlay
+          visible={showLiveTutorial}
+          tabs={liveTutorialTabs}
+          tier={tierOf(userProfile)}
+          themeName={userProfile.themePreference}
+          onNavigateTab={handleLiveTutorialNavigate}
+          onClose={async ({ completed }) => {
+            setShowLiveTutorial(false);
+            setLiveTutorialNavigation(null);
+            if (completed) {
+              try { await AsyncStorage.setItem(LIVE_TUTORIAL_COMPLETED_KEY, String(Date.now())); } catch {}
             }
           }}
         />
@@ -2345,6 +3363,7 @@ export default function Index() {
             onSave={handleSaveProfile}
             onCancel={() => { setIsEditing(false); setEditMode('goal'); setEditInitialMealTab(undefined); }}
             onRoutinesChanged={() => setPlanRefreshKey(k => k + 1)}
+            onProfileUpdate={handleProfileUpdate}
           />
         )}
       </Modal>
@@ -2381,90 +3400,28 @@ export default function Index() {
         )}
       </Modal>
 
-      {/* Resume workout — persistent banner. A force-quit mid-session should
-          be recoverable without blocking the entire app behind a modal. */}
-      {resumeWorkoutData && (() => {
-        const tc = getTheme(userProfile?.themePreference).colors;
-        return (
-          <View
-            pointerEvents="box-none"
-            style={{
-              position: 'absolute',
-              left: 14,
-              right: 14,
-              top: Platform.OS === 'ios' ? 58 : 28,
-              zIndex: 80,
-            }}
-          >
-            <View style={{
-              backgroundColor: tc.surface,
-              borderRadius: 14,
-              padding: 14,
-              borderWidth: 1,
-              borderColor: tc.primary + '66',
-              shadowColor: '#000',
-              shadowOpacity: 0.22,
-              shadowRadius: 14,
-              shadowOffset: { width: 0, height: 8 },
-              elevation: 8,
-            }}>
-              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
-                <View style={{
-                  width: 34, height: 34, borderRadius: 17,
-                  alignItems: 'center', justifyContent: 'center',
-                  backgroundColor: tc.primary + '1F',
-                }}>
-                  <Ionicons name="barbell-outline" size={18} color={tc.primary} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 15, fontWeight: '900', color: tc.textPrimary }}>
-                    Continue your workout
-                  </Text>
-                  <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 3, lineHeight: 17 }}>
-                    {resumeWorkoutData.workout.focus || 'Workout'} · {resumeWorkoutData.loggedCount} exercise{resumeWorkoutData.loggedCount !== 1 ? 's' : ''} logged
-                  </Text>
-                </View>
-              </View>
-              <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-                <TouchableOpacity
-                  style={{ flex: 1, backgroundColor: tc.primary, borderRadius: 10, paddingVertical: 11, alignItems: 'center' }}
-                  onPress={() => {
-                    setPlayStartCountdown(false);
-                    setActiveWorkout(resumeWorkoutData.workout);
-                    setResumeWorkoutData(null);
-                  }}>
-                  <Text style={{ color: '#fff', fontSize: 14, fontWeight: '800' }}>Resume</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={{ flex: 1, borderRadius: 10, paddingVertical: 11, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
-                  onPress={() => {
-                    AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
-                    AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
-                    AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
-                    setResumeWorkoutData(null);
-                  }}>
-                  <Text style={{ color: tc.error ?? '#EF4444', fontSize: 14, fontWeight: '700' }}>Discard</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        );
-      })()}
-
       {/* Save confirmation — themed modal */}
       {pendingSave && (() => {
         const tc = getTheme(userProfile?.themePreference).colors;
         const isGoal = pendingSave.mode === 'goal';
         const isMealplan = pendingSave.mode === 'mealplan';
         const shouldRepairInjuries = pendingSave.mode === 'workout' && pendingSave.repairInjuryConflicts === true;
+        const shouldRepairEquipment = pendingSave.mode === 'workout' && pendingSave.repairEquipmentConflicts === true;
+        const shouldUpdateSessionDuration = pendingSave.mode === 'workout' && pendingSave.updateSessionDuration === true;
+        const currentWeekUpdateParts = [
+          shouldUpdateSessionDuration ? 'new session length' : null,
+          shouldRepairInjuries ? 'active injuries' : null,
+          shouldRepairEquipment ? 'removed equipment' : null,
+        ].filter(Boolean);
+        const canUpdateCurrentWeek = currentWeekUpdateParts.length > 0;
         // Plan changes normally apply to the start of the NEXT plan week
         // because mid-week regen would invalidate the user's in-flight
-        // schedule. Injury changes are a safety exception: they can repair
-        // today/future unlocked workouts immediately without changing the
-        // week shape. The next-week start is the active PlanWeek's end_date
-        // + 1 (sign-up-day cadence) — pulled up from HomeScreen via
-        // setActivePlanWeekEnd. Falls back to today + 7 only when no
-        // PlanWeek exists (free users, brand-new signup).
+        // schedule. Injury, removed-equipment, and session-duration changes
+        // are scoped exceptions: they can update today/future unlocked
+        // workouts immediately without changing the week shape. The next-week
+        // start is the active PlanWeek's end_date + 1 (sign-up-day cadence) —
+        // pulled up from HomeScreen via setActivePlanWeekEnd. Falls back to
+        // today + 7 only when no PlanWeek exists (free users, brand-new signup).
         const effectiveDate = nextPlanWeekStart(activePlanWeekEnd);
         const effectiveDateLabel = formatPlanStartDateShort(effectiveDate);
         const titleText = isGoal
@@ -2476,17 +3433,25 @@ export default function Index() {
           ? `Your active week stays unchanged so your in-flight plan is not disrupted. Your new goal applies starting ${effectiveDateLabel}.`
           : isMealplan
             ? `Today's meals stay as-is. Save for ${effectiveDateLabel}, or update remaining eligible days this week.`
-            : shouldRepairInjuries
-              ? `Save for ${effectiveDateLabel}, or update today and remaining unlocked workouts now so they avoid active injuries. Completed and started days stay unchanged.`
+            : canUpdateCurrentWeek
+              ? shouldUpdateSessionDuration && !shouldRepairInjuries && !shouldRepairEquipment
+                ? `Save for ${effectiveDateLabel}, or rebuild today and remaining unlocked workouts now to fit the new session length. Completed and started days stay unchanged.`
+                : `Save for ${effectiveDateLabel}, or update today and remaining unlocked workouts now for ${currentWeekUpdateParts.join(', ')}. Completed and started days stay unchanged.`
               : `Your current week stays unchanged. The next training week starting ${effectiveDateLabel} will use these settings; use Change Focus or Swap for immediate day-level tweaks.`;
-        const summaryText = isGoal
-          ? `Goal updated to ${(pendingSave.profile.goalDetails?.pace ?? '').toString() || pendingSave.profile.goal.replace(/_/g, ' ')}`
-          : isMealplan
-            ? `Meal plan settings updated (${pendingSave.profile.mealsPerDay ?? 3} meals/day · variety ${pendingSave.profile.mealVariety ?? 5})`
-            : `Workout settings updated (${pendingSave.profile.daysPerWeek ?? 0} days/week · ${pendingSave.profile.workoutDurationMinutes ?? 0} min)`;
+        // Field-level diff so the change row reads as e.g. "Pace:
+        // aggressive → moderate · Goal: lose weight → maintain"
+        // instead of the previous "Goal updated to moderate" which
+        // didn't tell the user what actually changed.
+        const summaryText = summarizeScopeDiff(
+          userProfile,
+          pendingSave.profile,
+          pendingSave.mode as 'goal' | 'workout' | 'mealplan',
+        );
         const commitPendingSave = async (
           updateRemainingWeekNutrition = false,
           repairInjuryConflicts = false,
+          repairEquipmentConflicts = false,
+          updateSessionDuration = false,
         ) => {
           if (!pendingSave) return;
           const saved = pendingSave;
@@ -2499,7 +3464,7 @@ export default function Index() {
             await _doSaveProfile(
               saved.profile,
               saved.mode as any,
-              { updateRemainingWeekNutrition, repairInjuryConflicts },
+              { updateRemainingWeekNutrition, repairInjuryConflicts, repairEquipmentConflicts, updateSessionDuration },
             );
             let nextProfileForChange = nextProfile;
             try {
@@ -2508,8 +3473,32 @@ export default function Index() {
             } catch { /* keep fallback snapshot */ }
             try {
               const scope = saved.mode as 'goal' | 'workout' | 'mealplan';
+              // Final-mile guard: even if upstream let us through (e.g.
+              // an array reordered without semantic change), don't
+              // write a plan-change row if the scope-relevant snapshot
+              // is identical. Prevents phantom "user · X Settings"
+              // entries from cluttering the change history + banner.
+              if (planScopeIsUnchanged(previousProfile, nextProfileForChange, scope)) {
+                return;
+              }
               const immediateMealRefresh = scope === 'mealplan' && updateRemainingWeekNutrition;
               const immediateInjuryRepair = scope === 'workout' && repairInjuryConflicts;
+              const immediateEquipmentRepair = scope === 'workout' && repairEquipmentConflicts;
+              const immediateDurationUpdate = scope === 'workout' && updateSessionDuration;
+              const coveredWorkoutKeys = [
+                immediateInjuryRepair ? 'injuries' : null,
+                immediateInjuryRepair ? 'injuryEntries' : null,
+                immediateEquipmentRepair ? 'equipment' : null,
+                immediateDurationUpdate ? 'workoutDurationMinutes' : null,
+              ].filter((key): key is string => !!key);
+              const immediateWorkoutUpdateCoversChange =
+                (immediateInjuryRepair || immediateEquipmentRepair || immediateDurationUpdate)
+                && workoutSettingsUnchangedExcept(previousProfile, nextProfileForChange, coveredWorkoutKeys);
+              const immediateWorkoutLabels = [
+                immediateInjuryRepair ? 'active injuries' : null,
+                immediateEquipmentRepair ? 'equipment' : null,
+                immediateDurationUpdate ? 'session length' : null,
+              ].filter(Boolean);
               await savePlanChange({
                 id: `user-${Date.now()}`,
                 changedAt: new Date().toISOString(),
@@ -2517,11 +3506,20 @@ export default function Index() {
                 scope,
                 summary: immediateMealRefresh
                   ? `${summaryText}; remaining eligible days refreshed`
-                  : immediateInjuryRepair
-                    ? `${summaryText}; current week repaired for active injuries`
-                  : summaryText,
+                  : immediateWorkoutLabels.length > 0
+                    ? `${summaryText}; current week updated for ${immediateWorkoutLabels.join(', ')}`
+                    : summaryText,
                 question: '',
-                effectiveDate: (immediateMealRefresh || immediateInjuryRepair) ? new Date() : effectiveDate,
+                // effectiveDate must be a YYYY-MM-DD string — the
+                // PlanChangeEntry type is `string`, and
+                // `planChangeIsScheduled` does a string-comparison
+                // against today's dateKey. The previous code passed
+                // `new Date()` for the immediate paths, which got
+                // JSON-coerced to a full ISO with time and broke
+                // the "is this scheduled?" check downstream.
+                effectiveDate: (immediateMealRefresh || immediateWorkoutUpdateCoversChange)
+                  ? planDateKey(new Date())
+                  : effectiveDate,
                 previousProfile: previousProfile ? planChangeProfileSnapshot(previousProfile, scope) : undefined,
                 nextProfile: planChangeProfileSnapshot(nextProfileForChange, scope),
               });
@@ -2536,8 +3534,11 @@ export default function Index() {
         return (
           <Modal visible transparent animationType="fade" onRequestClose={() => setPendingSave(null)}>
             <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-              <View style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
-                <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
+              <View
+                accessibilityViewIsModal
+                importantForAccessibility="yes"
+                style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
+                <Text accessibilityRole="header" style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
                   {titleText}
                 </Text>
                 <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginBottom: 14, lineHeight: 18 }}>
@@ -2545,42 +3546,49 @@ export default function Index() {
                 </Text>
                 <View style={{ backgroundColor: tc.primary + '14', borderRadius: 10, padding: 10, marginBottom: 18, borderWidth: 1, borderColor: tc.primary + '33' }}>
                   <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.5, marginBottom: 2 }}>
-                    {shouldRepairInjuries ? 'UPDATES CURRENT WEEK' : isMealplan ? 'NEXT WEEK STARTS' : 'APPLIES'} {shouldRepairInjuries ? 'NOW' : effectiveDateLabel.toUpperCase()}
+                    {canUpdateCurrentWeek ? 'UPDATES CURRENT WEEK' : isMealplan ? 'NEXT WEEK STARTS' : 'APPLIES'} {canUpdateCurrentWeek ? 'NOW' : effectiveDateLabel.toUpperCase()}
                   </Text>
                   <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 15 }}>
                     Tracked in Progress → Change History so you can review when each change took effect.
                   </Text>
                 </View>
-                {(isMealplan || shouldRepairInjuries) && (
+                {(isMealplan || canUpdateCurrentWeek) && (
                   <TouchableOpacity
                     style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
                     testID="pending-save-update-remaining"
-                    accessibilityLabel="pending-save-update-remaining"
-                    onPress={() => isMealplan ? commitPendingSave(true, false) : commitPendingSave(false, true)}>
-                    <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>
+                    accessibilityRole="button"
+                    accessibilityLabel={isMealplan ? 'Save and update remaining week' : 'Save and update current week'}
+                    onPress={() => isMealplan
+                      ? commitPendingSave(true, false, false)
+                      : commitPendingSave(false, shouldRepairInjuries, shouldRepairEquipment, shouldUpdateSessionDuration)
+                    }>
+                    <Text style={{ color: getContrastingTextColor(tc.primary), fontSize: 15, fontWeight: '700' }}>
                       {isMealplan ? 'Save + Update Remaining Week' : 'Save + Update Current Week'}
                     </Text>
                   </TouchableOpacity>
                 )}
                 <TouchableOpacity
                   style={{
-                    backgroundColor: (isMealplan || shouldRepairInjuries) ? 'transparent' : tc.primary,
+                    backgroundColor: (isMealplan || canUpdateCurrentWeek) ? 'transparent' : tc.primary,
                     borderRadius: 12,
                     paddingVertical: 14,
                     alignItems: 'center',
                     marginBottom: 10,
-                    borderWidth: (isMealplan || shouldRepairInjuries) ? 1 : 0,
-                    borderColor: (isMealplan || shouldRepairInjuries) ? tc.border : 'transparent',
+                    borderWidth: (isMealplan || canUpdateCurrentWeek) ? 1 : 0,
+                    borderColor: (isMealplan || canUpdateCurrentWeek) ? tc.border : 'transparent',
                   }}
                   testID="pending-save-confirm"
-                  accessibilityLabel="pending-save-confirm"
+                  accessibilityRole="button"
+                  accessibilityLabel={isGoal ? 'Save goal' : (isMealplan || canUpdateCurrentWeek) ? 'Save for next week' : 'Save settings'}
                   onPress={() => commitPendingSave(false)}>
-                  <Text style={{ color: (isMealplan || shouldRepairInjuries) ? tc.textPrimary : '#fff', fontSize: 16, fontWeight: '700' }}>
-                    {isGoal ? 'Save Goal' : (isMealplan || shouldRepairInjuries) ? 'Save For Next Week' : 'Save Settings'}
+                  <Text style={{ color: (isMealplan || canUpdateCurrentWeek) ? tc.textPrimary : getContrastingTextColor(tc.primary), fontSize: 16, fontWeight: '700' }}>
+                    {isGoal ? 'Save Goal' : (isMealplan || canUpdateCurrentWeek) ? 'Save For Next Week' : 'Save Settings'}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={{ borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel"
                   onPress={() => setPendingSave(null)}>
                   <Text style={{ color: tc.textSecondary, fontSize: 15, fontWeight: '600' }}>Cancel</Text>
                 </TouchableOpacity>
@@ -2593,135 +3601,22 @@ export default function Index() {
   );
 }
 
-// ── Splash Loading Screen ─────────────────────────────────────────────────────
-
-function SplashLoadingScreen() {
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const spinAnim = useRef(new Animated.Value(0)).current;
-  const shimmerAnim = useRef(new Animated.Value(0)).current;
-  const [tipIndex, setTipIndex] = useState(0);
-  const tipFade = useRef(new Animated.Value(1)).current;
-
-  const TIPS = [
-    'Building your personalized plan...',
-    'Calibrating workout intensity...',
-    'Preparing your nutrition targets...',
-  ];
-
-  // Logo dimensions — kept in one place so the shimmer band stays in sync.
-  const LOGO_W = 260;
-  const LOGO_H = 100;
-  const SHIMMER_W = 120;
-
-  useEffect(() => {
-    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
-
-    // Continuous spinner rotation
-    const spin = Animated.loop(
-      Animated.timing(spinAnim, { toValue: 1, duration: 1200, useNativeDriver: true })
-    );
-    spin.start();
-
-    // Shimmer sweep — 2.2s sweep + 0.8s pause. Uses easing so the band
-    // glides in and out softly rather than snapping edge-to-edge.
-    const shimmer = Animated.loop(
-      Animated.sequence([
-        Animated.timing(shimmerAnim, {
-          toValue: 1, duration: 2200, useNativeDriver: true,
-          easing: Easing.inOut(Easing.cubic),
-        }),
-        Animated.delay(800),
-      ])
-    );
-    shimmer.start();
-
-    const tipTimer = setInterval(() => {
-      Animated.timing(tipFade, { toValue: 0, duration: 250, useNativeDriver: true }).start(() => {
-        setTipIndex(prev => (prev + 1) % TIPS.length);
-        Animated.timing(tipFade, { toValue: 1, duration: 250, useNativeDriver: true }).start();
-      });
-    }, 2500);
-
-    return () => { spin.stop(); shimmer.stop(); clearInterval(tipTimer); };
-  }, []);
-
-  const spinInterpolate = spinAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
-
-  const shimmerTranslate = shimmerAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [-SHIMMER_W, LOGO_W],
-  });
-
-  return (
-    <View style={{
-      flex: 1, backgroundColor: '#0D0F14',
-      alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32,
-    }}>
-      {/* Logo with shimmer sweep */}
-      <Animated.View style={{ opacity: fadeAnim, marginBottom: 12, width: LOGO_W, height: LOGO_H, overflow: 'hidden' }}>
-        <Image
-          source={require('../assets/images/thallo-logo-white-transparent-New.png')}
-          style={{ width: LOGO_W, height: LOGO_H }}
-          resizeMode="contain"
-        />
-        <Animated.View
-          pointerEvents="none"
-          style={{
-            position: 'absolute', top: 0, left: 0, bottom: 0,
-            width: SHIMMER_W,
-            transform: [{ translateX: shimmerTranslate }, { skewX: '-20deg' }],
-          }}>
-          <LinearGradient
-            colors={['rgba(21,199,184,0)', 'rgba(21,199,184,0.35)', 'rgba(21,199,184,0)']}
-            start={{ x: 0, y: 0.5 }}
-            end={{ x: 1, y: 0.5 }}
-            style={{ flex: 1 }}
-          />
-        </Animated.View>
-      </Animated.View>
-
-      {/* Tagline — matches auth screen */}
-      <Animated.Text style={{
-        color: '#8A90A0', fontSize: 15, fontWeight: '500', textAlign: 'center',
-        letterSpacing: 0.2, marginBottom: 48, opacity: fadeAnim,
-      }}>
-        Personalized training, nutrition, and AI coaching.
-      </Animated.Text>
-
-      {/* Spinner — clean rotating arc */}
-      <Animated.View style={{
-        width: 40, height: 40, borderRadius: 20,
-        borderWidth: 3, borderColor: '#1E2430',
-        borderTopColor: '#15C7B8',
-        transform: [{ rotate: spinInterpolate }],
-        marginBottom: 20,
-      }} />
-
-      {/* Rotating status text */}
-      <Animated.Text style={{
-        color: '#4A5568', fontSize: 13, fontWeight: '500',
-        textAlign: 'center', opacity: tipFade,
-      }}>
-        {TIPS[tipIndex]}
-      </Animated.Text>
-
-    </View>
-  );
+export default function Index() {
+  if (Platform.OS === 'web') {
+    return <AboutPage />;
+  }
+  return <NativeIndex />;
 }
-
 
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onUsernameChanged, onShowTutorial, onOpenSettings,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onUsernameChanged, onShowTutorial, onStartLiveTutorial, onOpenSettings,
 }: {
   token: string;
   profile: UserProfile;
   setUserProfile: (p: UserProfile) => void;
-  onUpgradeToPro: (p: UserProfile) => void;
+  onUpgradeToPro: (p: UserProfile) => void | Promise<void>;
   onClose: () => void;
   onSignOut: () => void;
   onUsernameChanged?: (username: string) => void;
@@ -2730,12 +3625,34 @@ function AccountInfoModal({
    *  to navigate). Owner is the app root, which renders the
    *  TutorialOverlay. */
   onShowTutorial?: () => void;
+  onStartLiveTutorial?: () => void;
   onOpenSettings?: () => void;
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
   const betaFullAccess = isBetaFullAccessEnabled();
+  const billingBetaEnabled = isFeatureEnabled('billing.revenueCat');
+  // Dummy test billing — flip free↔Pro with no real payment. Enabled in
+  // local/dev builds by default; hidden when beta-full-access forces Pro.
+  const dummyBillingEnabled = isFeatureEnabled('billing.dummyPayment') && !betaFullAccess;
   const subscriptionTier = tierOf(profile);
+  const subscriptionLabel = subscriptionStatusLabel(profile);
+  const subscriptionStatusValue = String(profile.subscriptionStatus ?? '').toLowerCase();
+  const subscriptionIsRevenueCat = profile.subscriptionSource === 'revenuecat';
+  const subscriptionIsSignupTrial = isTrialing(profile) && profile.subscriptionSource !== 'revenuecat';
+  const subscriptionIsCancelledSignupTrial =
+    subscriptionStatusValue === 'trial_cancelled'
+    && profile.subscriptionSource !== 'revenuecat'
+    && subscriptionTier === 'pro'
+    && trialDaysRemaining(profile) > 0;
+  const subscriptionCanCancelSignupTrial = subscriptionIsSignupTrial || subscriptionIsCancelledSignupTrial;
+  const subscriptionCanManageStore = billingBetaEnabled && subscriptionIsRevenueCat && subscriptionTier === 'pro';
+  const subscriptionActionStartsPurchase = subscriptionTier === 'free' || subscriptionIsSignupTrial || subscriptionIsCancelledSignupTrial;
+  const trialEndsAtLabel = (() => {
+    const parsed = Date.parse(profile.trialEndsAt ?? '');
+    if (!Number.isFinite(parsed)) return null;
+    return new Date(parsed).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  })();
   // Memoized — without this, every keystroke / state change in this
   // modal recreates the entire StyleSheet (40+ entries) and triggers
   // a re-mount of every styled child. Open felt sluggish.
@@ -2754,6 +3671,7 @@ function AccountInfoModal({
   const [showTierInfo, setShowTierInfo] = useState(false);
   const [showLegal, setShowLegal] = useState(false);
   const [accountBusy, setAccountBusy] = useState<string | null>(null);
+  const [dummyPaymentOpen, setDummyPaymentOpen] = useState(false);
   const [nameFirst, setNameFirst] = useState(profile.firstName ?? '');
   const [nameLast, setNameLast] = useState(profile.lastName ?? '');
   const [nameStatus, setNameStatus] = useState('');
@@ -2775,20 +3693,15 @@ function AccountInfoModal({
   const formatProfilePounds = (value: number): string =>
     Number.isInteger(value) ? `${value}` : value.toFixed(1);
   const physicalStats = ((profile as Partial<UserProfile>).physicalStats ?? {}) as any;
-  const goalDetails = ((profile as Partial<UserProfile>).goalDetails ?? {}) as any;
   const goalText = cleanProfileText(profile.goal);
   const goalValue = goalText
     ? goalText.replace(/_/g, ' ')
     : '—';
   const weightLbs = profileNumberValue(physicalStats.weightLbs ?? physicalStats.weight_lbs);
-  const targetWeightLbs = profileNumberValue(goalDetails.targetWeightLbs ?? goalDetails.target_weight_lbs);
   const birthdate = cleanProfileText(physicalStats.birthdate ?? physicalStats.birth_date);
   const age = effectiveAge({ birthdate: birthdate || null, age: profileNumberValue(physicalStats.age) });
   const weightValue = weightLbs != null && weightLbs > 0
     ? `${formatProfilePounds(weightLbs)} lbs`
-    : '—';
-  const targetWeightValue = targetWeightLbs != null && targetWeightLbs > 0
-    ? `${formatProfilePounds(targetWeightLbs)} lbs`
     : '—';
   const ageValue = age != null && age > 0 ? String(Math.round(age)) : '—';
   const ACCOUNT_ME_CACHE_KEY = 'accountModal.meCache.v1';
@@ -2850,6 +3763,10 @@ function AccountInfoModal({
             setNameFirst(data.first_name ?? profile.firstName ?? '');
             setNameLast(data.last_name ?? profile.lastName ?? '');
             setHasRecoveryQuestion(!!data.has_recovery_question);
+            const entitlementPatch = billingEntitlementToProfilePatch(data);
+            const updatedProfile = { ...profile, ...entitlementPatch };
+            setUserProfile(updatedProfile);
+            AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile)).catch(() => {});
           });
           // Persist for next open. Token included so a user-switch
           // invalidates the cache automatically.
@@ -2878,12 +3795,16 @@ function AccountInfoModal({
       import('../src/utils/watchSync')
         .then(async ({ getWatchSyncSnapshot, WatchBridge }) => {
           const snap = await getWatchSyncSnapshot();
+          const watchAppPresent =
+            WatchBridge.isReachable()
+            || WatchBridge.isWatchAppInstalled()
+            || !!snap?.installed;
           const availability = !WatchBridge.isAvailable()
             ? 'bridge unavailable'
             : WatchBridge.isReachable()
               ? 'reachable'
               : WatchBridge.isPaired()
-                ? (WatchBridge.isWatchAppInstalled() ? 'paired, waiting' : 'paired, app not installed')
+                ? (watchAppPresent ? 'paired, waiting' : 'paired, open watch app')
                 : 'not paired';
           applyIfMounted(() => {
             if (!snap) {
@@ -2907,19 +3828,17 @@ function AccountInfoModal({
     <View
       style={am.row}
       testID={testID}
-      accessibilityLabel={testID}
+      accessibilityLabel={`${label}, ${value}`}
       accessible={!!testID}
       collapsable={false}>
       <Text
         style={am.rowLabel}
-        testID={testID ? `${testID}-label` : undefined}
-        accessibilityLabel={testID ? `${testID}-label` : undefined}>
+        testID={testID ? `${testID}-label` : undefined}>
         {label}
       </Text>
       <Text
         style={am.rowValue}
-        testID={testID ? `${testID}-value` : undefined}
-        accessibilityLabel={testID ? `${testID}-value` : undefined}>
+        testID={testID ? `${testID}-value` : undefined}>
         {value}
       </Text>
     </View>
@@ -3003,8 +3922,9 @@ function AccountInfoModal({
       disabled={busy}
       activeOpacity={0.8}
       testID={testID}
-      accessibilityLabel={testID}
+      accessibilityLabel={label}
       accessibilityRole="button"
+      accessibilityState={{ disabled: busy, busy }}
     >
       <View style={{ flex: 1 }}>
         <Text style={[am.securityLabel, tone === 'danger' && { color: tc.error }]}>{label}</Text>
@@ -3050,13 +3970,148 @@ function AccountInfoModal({
     }
   };
 
+  const applyBillingEntitlement = async (entitlement: Awaited<ReturnType<typeof syncRevenueCatEntitlement>>): Promise<UserProfile> => {
+    const updated = { ...profile, ...billingEntitlementToProfilePatch(entitlement) };
+    setUserProfile(updated);
+    await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
+    return updated;
+  };
+
+  const applyServerBillingEntitlement = async (): Promise<UserProfile> => {
+    return applyBillingEntitlement(await syncRevenueCatEntitlement(token));
+  };
+
+  const handleMockDowngrade = async () => {
+    if (!token) return;
+    setAccountBusy('billing');
+    try {
+      const { mockDowngrade } = await import('../src/services/api');
+      await applyBillingEntitlement(await mockDowngrade(token));
+      await clearAllPlanCache().catch(() => null);
+      Alert.alert('Free active (test)', 'Dummy downgrade complete — you are on Free now.');
+    } catch (e: any) {
+      Alert.alert('Test downgrade failed', e?.message ?? 'Could not complete the dummy downgrade.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const resolveRevenueCatAppUserId = async (): Promise<string> => {
+    if (profile.revenueCatAppUserId) return profile.revenueCatAppUserId;
+    const updated = await applyServerBillingEntitlement();
+    if (updated.revenueCatAppUserId) return updated.revenueCatAppUserId;
+    throw new Error('Could not prepare your subscription account. Try again.');
+  };
+
+  const handleStartProSubscription = async () => {
+    setAccountBusy('billing');
+    try {
+      const appUserId = await resolveRevenueCatAppUserId();
+      const { purchaseProSubscription } = await import('../src/services/billing');
+      const purchase = await purchaseProSubscription(appUserId);
+      const updated = await applyServerBillingEntitlement();
+      if (serverTierOf(updated) === 'pro') {
+        await onUpgradeToPro(updated);
+        Alert.alert('Pro active', 'Your Thallo Pro access is active.');
+      } else if (purchase.isActive) {
+        Alert.alert('Purchase complete', 'Your purchase succeeded. Thallo is waiting for the subscription webhook to finish syncing.');
+      }
+    } catch (e: any) {
+      const message = String(e?.message ?? '');
+      if (!message.toLowerCase().includes('cancel')) {
+        Alert.alert('Subscription unavailable', message || 'Could not start the purchase flow.');
+      }
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleRestorePurchases = async () => {
+    setAccountBusy('restore');
+    try {
+      const appUserId = await resolveRevenueCatAppUserId();
+      const { restoreRevenueCatPurchases } = await import('../src/services/billing');
+      const restored = await restoreRevenueCatPurchases(appUserId);
+      const updated = await applyServerBillingEntitlement();
+      if (serverTierOf(updated) === 'pro') {
+        await onUpgradeToPro(updated);
+        Alert.alert('Purchases restored', 'Your Thallo Pro access is active.');
+      } else {
+        Alert.alert(
+          'No active Pro subscription',
+          restored.isActive
+            ? 'RevenueCat found access, but the server has not received it yet. Try again in a moment.'
+            : 'No active Pro subscription was found for this store account.',
+        );
+      }
+    } catch (e: any) {
+      Alert.alert('Restore unavailable', e?.message ?? 'Could not restore purchases.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleRefreshSubscription = async () => {
+    setAccountBusy('billing-sync');
+    try {
+      const updated = await applyServerBillingEntitlement();
+      Alert.alert('Subscription refreshed', subscriptionStatusLabel(updated));
+    } catch (e: any) {
+      Alert.alert('Refresh unavailable', e?.message ?? 'Could not refresh subscription status.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleManageStoreSubscription = async () => {
+    setAccountBusy('billing-manage');
+    try {
+      const appUserId = await resolveRevenueCatAppUserId();
+      const { openRevenueCatSubscriptionManagement } = await import('../src/services/billing');
+      await openRevenueCatSubscriptionManagement(appUserId);
+      const updated = await applyServerBillingEntitlement();
+      Alert.alert('Subscription refreshed', subscriptionStatusLabel(updated));
+    } catch (e: any) {
+      Alert.alert('Subscription settings unavailable', e?.message ?? 'Could not open subscription settings.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleCancelSignupTrial = () => {
+    Alert.alert(
+      'Switch to Free now?',
+      'This ends your signup trial immediately. Your logged workouts, meals, weight, and preferences stay in your account.',
+      [
+        { text: 'Stay Pro', style: 'cancel' },
+        {
+          text: 'Switch to Free',
+          style: 'destructive',
+          onPress: async () => {
+            setAccountBusy('cancel-trial');
+            try {
+              const entitlement = await cancelSignupTrial(token);
+              const updated = await applyBillingEntitlement(entitlement);
+              await clearAllPlanCache().catch(() => null);
+              Alert.alert('Free active', subscriptionStatusLabel(updated));
+            } catch (e: any) {
+              Alert.alert('Could not switch to Free', e?.message ?? 'Try again.');
+            } finally {
+              setAccountBusy(null);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const handleDeleteAccount = () => {
     Alert.alert(
       'Delete account?',
       // Two-step confirmation. The first alert spells out exactly what
       // happens (retention window, irreversibility, data loss) — users
       // shouldn't tap-through a "are you sure" without seeing the cost.
-      "This disables your login immediately and anonymizes your account.\n\nWithin 30 days, all personal data — workouts, meals, weight, photos, supplements, social ties — is permanently removed and cannot be recovered.\n\nExport your data first if you want a copy.",
+      "This disables your login immediately, deletes app-created profile, workout, meal, weight, health, supplement, social, telemetry, and settings rows, and anonymizes account identifiers.\n\nAn anonymized account shell may remain for up to 30 days before hard deletion. Backups, logs, vendor records, and records needed for security, billing, fraud prevention, or moderation may follow separate retention schedules.\n\nExport your data first if you want a copy.",
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -3105,11 +4160,16 @@ function AccountInfoModal({
         />
         <View
           testID="account-modal"
-          accessibilityLabel="account-modal"
-          accessible={false}
+          accessibilityViewIsModal
+          importantForAccessibility="yes"
           style={[am.sheet, { height: '85%', maxHeight: '85%' }]}>
-          <View style={am.handle} />
-          <Text style={am.title}>Account</Text>
+          <BottomSheetDismissHandle
+            onClose={onClose}
+            color={tc.border}
+            containerStyle={am.handleTap}
+            handleStyle={am.handle}
+          />
+          <Text accessibilityRole="header" style={am.title}>Account</Text>
 
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 16 }} showsVerticalScrollIndicator={false} bounces={false}>
           {/* Static profile data renders immediately. Only the rows that
@@ -3149,7 +4209,9 @@ function AccountInfoModal({
                 </Text>
                 <TouchableOpacity
                   testID="account-name-save"
-                  accessibilityLabel="account-name-save"
+                  accessibilityRole="button"
+                  accessibilityLabel="Save name"
+                  accessibilityState={{ disabled: accountBusy === 'name', busy: accountBusy === 'name' }}
                   onPress={handleSaveName}
                   disabled={accountBusy === 'name'}
                   style={[am.nameSaveBtn, { opacity: accountBusy === 'name' ? 0.6 : 1 }]}
@@ -3161,7 +4223,7 @@ function AccountInfoModal({
               </View>
             </View>
             <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} testID="account-email-row" />
-            <View style={am.nameBlock} testID="account-username-row" accessibilityLabel="account-username-row">
+            <View style={am.nameBlock} testID="account-username-row">
               <Text style={am.rowLabel}>Username</Text>
               <TextInput
                 testID="account-username-input"
@@ -3186,7 +4248,9 @@ function AccountInfoModal({
                 </Text>
                 <TouchableOpacity
                   testID="account-username-save"
-                  accessibilityLabel="account-username-save"
+                  accessibilityRole="button"
+                  accessibilityLabel="Save username"
+                  accessibilityState={{ disabled: loading || accountBusy === 'username', busy: accountBusy === 'username' }}
                   onPress={handleSaveUsername}
                   disabled={loading || accountBusy === 'username'}
                   style={[am.nameSaveBtn, { opacity: loading || accountBusy === 'username' ? 0.6 : 1 }]}
@@ -3203,7 +4267,6 @@ function AccountInfoModal({
             <Row label="Legal Version" value={accountData ? (accountData.legalAccepted ? LEGAL_VERSION : 'Needs review') : (loading ? 'Loading…' : '—')} testID="account-legal-version-row" />
             <Row label="Goal"   value={goalValue} testID="account-goal-row" />
             <Row label="Weight" value={weightValue} testID="account-weight-row" />
-            <Row label="Goal Weight" value={targetWeightValue} testID="account-goal-weight-row" />
             <Row label="Age"    value={ageValue} testID="account-age-row" />
             {!loading && !accountData && (
               <Text style={am.errorText}>Could not load full account info — tap retry by reopening.</Text>
@@ -3214,7 +4277,9 @@ function AccountInfoModal({
             style={am.securityRow}
             onPress={() => setShowRecoveryModal(true)}
             testID="account-recovery-question"
-            accessibilityLabel="account-recovery-question">
+            accessibilityRole="button"
+            accessibilityLabel="Recovery question"
+            accessibilityHint={hasRecoveryQuestion ? 'Set. Tap to change.' : 'Not set. Tap to set up password recovery.'}>
             <View style={{ flex: 1 }}>
               <Text style={am.securityLabel}>Recovery Question</Text>
               <Text style={am.securityDesc}>
@@ -3238,15 +4303,6 @@ function AccountInfoModal({
             />
           )}
 
-          {onOpenSettings && (
-            <ActionRow
-              label="Settings"
-              desc="Notifications, units (lbs/kg, mi/km), and permissions."
-              onPress={onOpenSettings}
-              testID="account-settings-open"
-            />
-          )}
-
           <ActionRow
             label="Legal & Safety"
             desc="Review Terms, Privacy, Health Disclaimer, and AI Disclosure."
@@ -3261,6 +4317,65 @@ function AccountInfoModal({
               onPress={handleRequestEmailVerification}
               busy={accountBusy === 'verify'}
               testID="account-verify-email"
+            />
+          )}
+
+          {billingBetaEnabled && !betaFullAccess && (
+            <>
+              <ActionRow
+                label={subscriptionActionStartsPurchase ? 'Start Pro Subscription' : 'Refresh Subscription'}
+                desc={subscriptionActionStartsPurchase
+                  ? 'Open the store purchase sheet. Trial pricing appears there when your store account is eligible.'
+                  : 'Sync the latest store entitlement with Thallo.'}
+                onPress={subscriptionActionStartsPurchase ? handleStartProSubscription : handleRefreshSubscription}
+                busy={accountBusy === 'billing' || accountBusy === 'billing-sync'}
+                testID={subscriptionActionStartsPurchase ? 'account-start-pro' : 'account-refresh-subscription'}
+              />
+              <ActionRow
+                label="Restore Purchases"
+                desc="Reconnect an existing App Store or Play Store subscription."
+                onPress={handleRestorePurchases}
+                busy={accountBusy === 'restore'}
+                testID="account-restore-purchases"
+              />
+              {subscriptionCanManageStore && (
+                <ActionRow
+                  label="Cancel Store Subscription"
+                  desc="Opens your store subscription settings. Free starts when the store entitlement ends."
+                  onPress={handleManageStoreSubscription}
+                  busy={accountBusy === 'billing-manage'}
+                  testID="account-manage-subscription"
+                />
+              )}
+            </>
+          )}
+
+          {dummyBillingEnabled && (
+            subscriptionTier === 'pro' ? (
+              <ActionRow
+                label="Switch to Free Now (test)"
+                desc="Immediate dummy downgrade — clears trial Pro for testing. No real billing."
+                onPress={handleMockDowngrade}
+                busy={accountBusy === 'billing'}
+                testID="account-mock-downgrade"
+              />
+            ) : (
+              <ActionRow
+                label="Upgrade to Pro (test)"
+                desc="Open the placeholder checkout. No real charge — for testing the Pro experience."
+                onPress={() => setDummyPaymentOpen(true)}
+                testID="account-mock-upgrade"
+              />
+            )
+          )}
+
+          {subscriptionCanCancelSignupTrial && !betaFullAccess && (
+            <ActionRow
+              label="Switch to Free Now"
+              desc="Ends your signup trial immediately and keeps your account data."
+              onPress={handleCancelSignupTrial}
+              busy={accountBusy === 'cancel-trial'}
+              testID="account-cancel-signup-trial"
             />
           )}
 
@@ -3305,6 +4420,19 @@ function AccountInfoModal({
             />
           )}
 
+          <DummyPaymentModal
+            visible={dummyPaymentOpen}
+            token={token}
+            themeName={profile.themePreference}
+            onClose={() => setDummyPaymentOpen(false)}
+            onSuccess={async (entitlement) => {
+              const updated = await applyBillingEntitlement(entitlement);
+              if (serverTierOf(updated) === 'pro') {
+                await onUpgradeToPro(updated);
+              }
+            }}
+          />
+
           {/* Pro vs Free feature comparison modal — gated on showTierInfo
               so the heavy 100-line subtree doesn't mount eagerly while
               AccountInfoModal is opening. */}
@@ -3333,9 +4461,13 @@ function AccountInfoModal({
                   <Text style={{ fontSize: 20, fontWeight: '900', color: tc.textPrimary, flex: 1 }}>
                     What's in each tier
                   </Text>
-                  <TouchableOpacity onPress={() => setShowTierInfo(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                    <Text style={{ fontSize: 22, color: tc.textMuted }}>×</Text>
-                  </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setShowTierInfo(false)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close tier information">
+                  <Text style={{ fontSize: 22, color: tc.textMuted }}>×</Text>
+                </TouchableOpacity>
                 </View>
 
                 <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={true} bounces={true}>
@@ -3350,15 +4482,9 @@ function AccountInfoModal({
                         <Text style={{ fontSize: 11, color: tc.textMuted }}>Manual tracking and starter tools</Text>
                       </View>
                     </View>
-                    {[
-                      'Manual workouts and custom activity logging',
-                      'Manual meals, hydration, and meal routines',
-                      'Weight and body measurement tracking',
-                      'Basic history and progress views',
-                      `Up to ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates`,
-                    ].map((label) => (
+                    {FREE_TIER_CAPABILITIES.map(({ icon, label }) => (
                       <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 }}>
-                        <Text style={{ fontSize: 14, color: tc.textMuted }}>{'·'}</Text>
+                        <Ionicons name={icon as any} size={15} color={tc.textMuted} />
                         <Text style={{ fontSize: 13, color: tc.textSecondary }}>{label}</Text>
                       </View>
                     ))}
@@ -3380,17 +4506,7 @@ function AccountInfoModal({
                     <Text style={{ fontSize: 12, color: tc.textSecondary, marginBottom: 10, marginLeft: 36, lineHeight: 17 }}>
                       Everything in Free, plus:
                     </Text>
-                    {[
-                      ['calendar-outline',    'Visible generated workout PlanWeeks'],
-                      ['swap-horizontal-outline', 'Change Focus, swaps, and day rebuilds'],
-                      ['restaurant-outline',  'AI meal plans, meal swaps, and grocery help'],
-                      ['camera-outline',      'Food photo scanning and AI food lookup'],
-                      ['chatbubble-outline',  'Coach chat for training and nutrition'],
-                      ['body-outline',        'Body and form photo analysis'],
-                      ['leaf-outline',        'Nutrition scoring and gut insights'],
-                      ['pulse-outline',       'Readiness, fatigue, sleep, and recovery cards'],
-                      ['bar-chart-outline',   'Weekly digest and advanced trend surfaces'],
-                    ].map(([icon, label]) => (
+                    {PRO_TIER_CAPABILITIES.map(({ icon, label }) => (
                       <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 }}>
                         <Ionicons name={icon as any} size={15} color={tc.primary} />
                         <Text style={{ fontSize: 13, color: tc.textPrimary, flex: 1 }}>{label}</Text>
@@ -3401,6 +4517,8 @@ function AccountInfoModal({
 
                 <TouchableOpacity
                   onPress={() => setShowTierInfo(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close tier information"
                   style={{
                     marginTop: 14, paddingVertical: 12, borderRadius: 10,
                     backgroundColor: tc.primary, alignItems: 'center',
@@ -3423,7 +4541,11 @@ function AccountInfoModal({
                 <Text style={{ fontSize: 10, fontWeight: '800', color: tc.primary, letterSpacing: 0.8, flex: 1 }}>
                   FREE BETA ACCESS
                 </Text>
-                <TouchableOpacity onPress={() => setShowTierInfo(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <TouchableOpacity
+                  onPress={() => setShowTierInfo(true)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="What is included in beta access">
                   <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>What's included?</Text>
                 </TouchableOpacity>
               </View>
@@ -3440,7 +4562,11 @@ function AccountInfoModal({
                 <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, flex: 1 }}>
                   SUBSCRIPTION TIER
                 </Text>
-                <TouchableOpacity onPress={() => setShowTierInfo(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <TouchableOpacity
+                  onPress={() => setShowTierInfo(true)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="What is included in each subscription tier">
                   <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>What's included?</Text>
                 </TouchableOpacity>
               </View>
@@ -3454,13 +4580,21 @@ function AccountInfoModal({
                   fontSize: 13, fontWeight: '800', letterSpacing: 0.6,
                   color: subscriptionTier === 'pro' ? tc.background : tc.textSecondary,
                 }}>
-                  {subscriptionTier === 'pro' ? 'PRO' : 'FREE'}
+                  {subscriptionLabel.toUpperCase()}
                 </Text>
               </View>
               <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
-                {subscriptionTier === 'free'
-                  ? `Free: manual workout + meal logging, basic progress, and ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates.`
-                  : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
+                {subscriptionIsCancelledSignupTrial
+                  ? trialEndsAtLabel
+                    ? `Your signup trial is cancelled. Pro stays active until ${trialEndsAtLabel}, then your account switches to Free.`
+                    : 'Your signup trial is cancelled. Pro stays active until the trial ends, then your account switches to Free.'
+                  : isTrialing(profile)
+                  ? billingBetaEnabled
+                    ? `Your signup trial unlocks Pro features for ${SIGNUP_TRIAL_DAYS} days. Start a store subscription to keep Pro after the trial ends.`
+                    : `Your signup trial unlocks Pro features for ${SIGNUP_TRIAL_DAYS} days.`
+                  : subscriptionTier === 'free'
+                  ? FREE_TIER_SUMMARY
+                  : PRO_TIER_SUMMARY}
               </Text>
             </View>
           )}
@@ -3468,7 +4602,8 @@ function AccountInfoModal({
           <TouchableOpacity
             style={am.signOutBtn}
             testID="account-sign-out"
-            accessibilityLabel="account-sign-out"
+            accessibilityRole="button"
+            accessibilityLabel="Sign out"
             onPress={() => { onClose(); onSignOut(); }}>
             <Text style={am.signOutText}>Sign Out</Text>
           </TouchableOpacity>
@@ -3480,7 +4615,8 @@ function AccountInfoModal({
           {onShowTutorial && (
             <TouchableOpacity
               testID="account-show-tutorial"
-              accessibilityLabel="account-show-tutorial"
+              accessibilityRole="button"
+              accessibilityLabel="Show tutorial again"
               onPress={() => onShowTutorial()}
               style={{ marginTop: 8, alignItems: 'center', paddingVertical: 8 }}>
               <Text style={{ fontSize: 11, fontWeight: '700', color: c.textMuted, letterSpacing: 0.5 }}>
@@ -3489,10 +4625,24 @@ function AccountInfoModal({
             </TouchableOpacity>
           )}
 
+          {onStartLiveTutorial && (
+            <TouchableOpacity
+              testID="account-start-live-tutorial"
+              accessibilityRole="button"
+              accessibilityLabel="Start live tutorial"
+              onPress={() => onStartLiveTutorial()}
+              style={{ marginTop: 2, alignItems: 'center', paddingVertical: 8 }}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: c.textMuted, letterSpacing: 0.5 }}>
+                Start live tutorial
+              </Text>
+            </TouchableOpacity>
+          )}
+
           <TouchableOpacity
             onPress={onClose}
             testID="account-close"
-            accessibilityLabel="account-close"
+            accessibilityRole="button"
+            accessibilityLabel="Close account"
             style={am.closeBtn}>
             <Text style={am.closeText}>Close</Text>
           </TouchableOpacity>
@@ -3512,7 +4662,8 @@ function createAmStyles(c: ReturnType<typeof getTheme>['colors']) { return Style
     borderTopWidth: 1, borderTopColor: c.border,
     gap: 16,
   },
-  handle:  { width: 36, height: 4, backgroundColor: c.border, borderRadius: 2, alignSelf: 'center' },
+  handleTap: { minHeight: 24, marginTop: -12, marginBottom: -8 },
+  handle:  { width: 36, height: 4, borderRadius: 2 },
   title:   { fontSize: 20, fontWeight: '700', color: c.textPrimary },
 
   infoSection: {
@@ -3543,7 +4694,8 @@ function createAmStyles(c: ReturnType<typeof getTheme>['colors']) { return Style
     backgroundColor: c.surface,
     color: c.textPrimary,
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '400',
+    letterSpacing: 0,
   },
   nameFooter: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   nameStatus: { flex: 1, fontSize: 11, color: c.textMuted, lineHeight: 15 },

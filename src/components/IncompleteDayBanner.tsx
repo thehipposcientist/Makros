@@ -12,7 +12,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
-import { getMealHistory } from '../services/api';
+import { getMealHistory, upsertDayState } from '../services/api';
 
 interface Props {
   authToken: string;
@@ -78,9 +78,16 @@ export default function IncompleteDayBanner({
   useEffect(() => { check(); }, [check]);
 
   const dismiss = async (reason: 'fillIn' | 'wasRight') => {
+    const dateKey = yesterdayKey();
     try {
-      await AsyncStorage.setItem(DISMISSED_KEY_PREFIX + yesterdayKey(), '1');
+      await AsyncStorage.setItem(DISMISSED_KEY_PREFIX + dateKey, '1');
     } catch {}
+    if (reason === 'wasRight') {
+      upsertDayState(authToken, dateKey, {
+        nutrition_log_status: 'complete',
+        nutrition_log_status_source: 'incomplete_day_banner',
+      }).catch(() => {});
+    }
     setVisible(false);
     if (reason === 'fillIn') onFillIn?.();
   };

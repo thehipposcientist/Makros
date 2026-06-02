@@ -2,7 +2,7 @@
 //
 // Responsibilities:
 //   1. Push today's workout (with correct lifecycle status) + theme +
-//      meals + hydration to the watch whenever they change.
+//      meals + hydration + activity to the watch whenever they change.
 //   2. Subscribe to commands from the watch (Start / Skip / End / rest
 //      controls / toggle meal) and route them into phone actions.
 //
@@ -20,19 +20,33 @@ import {
   WatchProgress,
   WatchMealsPayload,
   WatchHydrationPayload,
+  WatchActivityPayload,
   WatchSupplementsPayload,
   WatchSupplementItem,
+  WatchLifestylePayload,
   WatchSleepPayload,
   WatchReadinessPayload,
   WatchReadinessFactor,
   WatchWeightPayload,
+  WatchTemplatesPayload,
+  WatchTemplateSummary,
 } from '../../modules/thallo-watch-bridge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme, isLightThemeName, resolveThemeName } from '../constants/theme';
-import { recordTelemetryEvent } from '../services/api';
+import { issueWatchToken, recordTelemetryEvent, type DailyLifestyleLog } from '../services/api';
 import { getActiveWatchSessionId } from './activeWatchSession';
-import { isGuideExercise, shouldHideReps } from './exerciseDisplay';
+import { recordWatchCommandEvent } from './watchCommandProcessor';
+import {
+  isGuideExercise,
+  shouldHideReps,
+  watchExerciseTargetWeightLbs,
+  watchExerciseTracksWeight,
+} from './exerciseDisplay';
+import { displayFocusForWorkout } from './workoutFocusDisplay';
+import { buildWarmupPlan } from './workoutWarmup';
+import { buildWatchMealsPayload, type WatchMealDisplayTargets } from './watchMealsPayload';
+import { isSetlessCardioExercise } from './cardioDisplay.ts';
 
 export { WatchBridge };
 
@@ -41,6 +55,11 @@ const WATCH_WORKOUT_SCHEMA_VERSION = 2 as const;
 let workoutRevisionSequence = 0;
 let progressRevisionSequence = 0;
 const lastPayloadSignatures = new Map<string, string>();
+const lastPayloadNativeWriteAtMs = new Map<string, number>();
+const WATCH_UNCHANGED_REASSERT_MS = 2 * 60_000;
+const WATCH_CELLULAR_PROVISION_INTERVAL_MS = 12 * 60 * 60_000;
+let lastWatchCellularProvisionKey: string | null = null;
+let lastWatchCellularProvisionAtMs = 0;
 
 export type WatchSyncSnapshot = {
   surface: string;
@@ -81,10 +100,20 @@ function payloadSignature(payload: unknown): string {
 }
 
 function shouldSkipUnchanged(surface: string, payload: unknown, force?: boolean): boolean {
+  const now = Date.now();
+  if (force) {
+    lastPayloadNativeWriteAtMs.set(surface, now);
+    return false;
+  }
   const signature = payloadSignature(payload);
   const previous = lastPayloadSignatures.get(surface);
+  const lastNativeWriteAt = lastPayloadNativeWriteAtMs.get(surface) ?? 0;
   lastPayloadSignatures.set(surface, signature);
-  return !force && previous === signature;
+  if (previous === signature && now - lastNativeWriteAt < WATCH_UNCHANGED_REASSERT_MS) {
+    return true;
+  }
+  lastPayloadNativeWriteAtMs.set(surface, now);
+  return false;
 }
 
 async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: string): Promise<WatchSyncSnapshot> {
@@ -95,7 +124,9 @@ async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: st
     atMs: Date.now(),
     reachable: WatchBridge.isAvailable() ? WatchBridge.isReachable() : false,
     paired: WatchBridge.isAvailable() ? WatchBridge.isPaired() : false,
-    installed: WatchBridge.isAvailable() ? WatchBridge.isWatchAppInstalled() : false,
+    installed: WatchBridge.isAvailable()
+      ? (WatchBridge.isReachable() || WatchBridge.isWatchAppInstalled())
+      : false,
   };
   try { await AsyncStorage.setItem(WATCH_SYNC_STATUS_KEY, JSON.stringify(snapshot)); } catch {}
   return snapshot;
@@ -103,6 +134,12 @@ async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: st
 
 async function recordWatchSync(surface: string, ok: boolean, detail?: string): Promise<void> {
   const snapshot = await updateWatchSyncSnapshot(surface, ok, detail);
+  recordWatchCommandEvent({
+    phase: 'snapshot',
+    command: surface,
+    surface: 'bridge',
+    detail: `${ok ? 'ok' : 'FAIL'}${detail ? ` ${detail}` : ''}`,
+  });
   recordTelemetryEvent('watch_sync_result', {
     surface,
     ok,
@@ -145,11 +182,31 @@ function positiveInt(value: unknown, fallback: number): number {
   return Math.max(1, Math.floor(parsed));
 }
 
+function targetSetsForWatchExercise(exercise: Record<string, unknown>): number {
+  if (isSetlessCardioExercise({
+    ...exercise,
+    targetSets: exercise.sets ?? exercise.targetSets ?? exercise.target_sets,
+    targetReps: exercise.reps ?? exercise.targetReps ?? exercise.target_reps,
+  })) {
+    return 0;
+  }
+  return positiveInt(exercise.sets ?? exercise.targetSets ?? exercise.target_sets, 3);
+}
+
+function nonNegativeInt(value: unknown, fallback = 0): number {
+  const parsed = finiteNumber(value);
+  if (parsed == null || parsed < 0) return fallback;
+  return Math.max(0, Math.floor(parsed));
+}
+
 function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
-const WATCH_TIMED_NAME_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box|plank|dead hang|wall sit|hollow.?hold|l.?sit/i;
+// Keep this name-only fallback narrow. Strength movements like rows,
+// lateral walks, walking lunges, plank taps, and crunches must stay
+// reps-based unless structured metadata or the reps target says otherwise.
+const WATCH_TIMED_NAME_RE = /treadmill|stationary bike|elliptical|rowing machine|\brower\b|\browing\b|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|^(?:brisk |incline |outdoor |treadmill )?walk(?:ing)?\b(?!\s+lunges?\b)|boxing|kickboxing|martial.?arts|mma|sparring|bag.?work|shadow.?box/i;
 const WATCH_DISTANCE_TARGET_RE = /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:yd|yds|yard|yards|m|meter|meters|metre|metres|ft|feet|km|mi|mile|miles)\b/i;
 
 function watchDurationPrefersMinutes(exercise: any): boolean {
@@ -159,7 +216,12 @@ function watchDurationPrefersMinutes(exercise: any): boolean {
   return primaryMuscle === 'cardio'
     || trainingType === 'cardio'
     || trainingType === 'conditioning'
-    || /treadmill|bike|cycling|row|elliptical|stair|run|jog|swim|cardio|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box/.test(name);
+    // `row` was bare here previously, which matched every row lift
+    // (Barbell Row, Dumbbell Row, Pendlay Row, etc.) and caused their
+    // numeric rep ranges to be parsed as minutes by
+    // parseWatchDurationTargetSeconds — surfacing a hold timer on the
+    // watch. Restrict to actual rowing cardio.
+    || /treadmill|bike|cycling|\browing\b|rowing machine|rower|elliptical|stair|\brun\b|running|\bjog\b|jogging|swim|cardio|zone ?2|tempo|steady state|long run|^(?:brisk |incline |outdoor |treadmill )?walk(?:ing)?\b(?!\s+lunges?\b)|boxing|kickboxing|martial.?arts|mma|sparring|bag.?work|shadow.?box/.test(name);
 }
 
 function parseWatchDurationTargetSeconds(target: unknown, preferMinutes: boolean): number | null {
@@ -250,16 +312,28 @@ async function stampBridgeUserId(userId?: string | null): Promise<string | null>
 }
 
 export type WatchExerciseClient = {
+  clientExerciseId?: string | null;
   name: string;
+  slug?: string | null;
   sets: number;
   reps: string;
   restSeconds: number;
   equipment?: string | null;
+  primaryMuscle?: string | null;
+  secondaryMuscles?: string[] | null;
+  isCompound?: boolean | null;
+  movementPattern?: string | null;
   plannedTargetWeightLbs?: number | null;
+  tracksWeight?: boolean;
   isTimed?: boolean;
   plannedDurationSeconds?: number | null;
   recommendation?: string | null;
+  recommendedReps?: string | null;
+  completedSets?: number | null;
+  isDone?: boolean;
+  slotLabel?: string | null;
   slotRole?: string | null;
+  prescriptionType?: string | null;
   isGuide?: boolean;
   swapOptions?: Array<{
     name: string;
@@ -310,6 +384,10 @@ export function buildWatchWorkoutPayload(
     // schedule resolves a real workout later, the next push overwrites.
     return {
       focus: opts.status === 'rest' ? 'Rest' : 'Loading…',
+      stimulus: null,
+      sourceContext: null,
+      templateId: null,
+      planDayId: null,
       durationMinutes: 0,
       dateISO: opts.dateISO || localDateISO(),
       status: opts.status,
@@ -321,13 +399,34 @@ export function buildWatchWorkoutPayload(
       syncedAtMs: Date.now(),
     };
   }
+  const warmupSteps = opts.warmupSteps ?? buildWarmupPlan(day);
   // Every exercise is shipped (including warmup slots — the watch's
   // active-workout view treats warmup as its own sequence step and
   // badges it so users know to dial intensity down).
   const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => {
     const guide = isGuideExercise(e, day);
     const plannedDurationSeconds = plannedDurationSecondsForWatchExercise(e);
-    const timed = !guide && isTimedWatchExercise(e, plannedDurationSeconds);
+    const timed = guide
+      ? plannedDurationSeconds != null
+      : isTimedWatchExercise(e, plannedDurationSeconds);
+    const tracksWeight = !guide && watchExerciseTracksWeight(e);
+    const targetSets = targetSetsForWatchExercise(e);
+    const completedSets = nonNegativeInt(
+      e.completedSets
+        ?? e.completed_sets
+        ?? e.loggedSetsCount
+        ?? e.logged_sets_count
+        ?? (Array.isArray(e.loggedSets) ? e.loggedSets.length : undefined)
+        ?? (Array.isArray(e.sets) ? e.sets.length : undefined),
+      0,
+    );
+    const isDone = typeof e.isDone === 'boolean'
+      ? e.isDone
+      : typeof e.done === 'boolean'
+        ? e.done
+        // Setless cardio reports targetSets === 0; `0 >= 0` would mark it
+        // done before it ever starts, so require a real set target here.
+        : targetSets > 0 && completedSets >= targetSets;
     const swapOptions = Array.isArray(e.swapOptions)
       ? e.swapOptions
         .map((option: any) => ({
@@ -340,21 +439,36 @@ export function buildWatchWorkoutPayload(
         .slice(0, 5)
       : [];
     return {
+      clientExerciseId: nullableString(e.clientExerciseId ?? e.client_exercise_id ?? e.watchClientExerciseId),
       name: String(e.name || 'Exercise'),
-      sets: positiveInt(e.sets, 3),
+      slug: nullableString(e.slug ?? e.exerciseSlug ?? e._slug),
+      sets: targetSets,
       reps: String(e.reps ?? ''),
       restSeconds: guide ? 0 : positiveInt(e.restSeconds ?? e.rest_seconds, 60),
       equipment: nullableString(e.equipment),
-      plannedTargetWeightLbs: guide ? null : finiteNumber(
-        e.plannedTargetWeightLbs
-          ?? e.targetWeightLbs
-          ?? e.recommendedWeightLbs
-          ?? e.weight,
-      ),
+      primaryMuscle: nullableString(e.primaryMuscle ?? e.primary_muscle ?? e._primary_muscle),
+      secondaryMuscles: Array.isArray(e.secondaryMuscles)
+        ? e.secondaryMuscles.map((m: unknown) => nullableString(m)).filter(Boolean) as string[]
+        : Array.isArray(e.secondary_muscles)
+          ? e.secondary_muscles.map((m: unknown) => nullableString(m)).filter(Boolean) as string[]
+          : null,
+      isCompound: typeof e.isCompound === 'boolean'
+        ? e.isCompound
+        : typeof e.is_compound === 'boolean'
+          ? e.is_compound
+          : null,
+      movementPattern: nullableString(e.movementPattern ?? e.movement_pattern),
+      plannedTargetWeightLbs: tracksWeight ? watchExerciseTargetWeightLbs(e) : null,
+      tracksWeight,
       isTimed: timed,
       plannedDurationSeconds,
       recommendation: guide ? null : nullableString(e.recommendation),
+      recommendedReps: guide ? null : nullableString(e.recommendedReps ?? e.recommended_reps),
+      completedSets,
+      isDone,
+      slotLabel: nullableString(e.slot_label ?? e.slotLabel),
       slotRole: nullableString(e.slot_role ?? e.slotRole),
+      prescriptionType: nullableString(e.prescriptionType ?? e.prescription_type),
       isGuide: guide,
       ...(swapOptions.length > 0 ? { swapOptions } : {}),
     };
@@ -362,7 +476,12 @@ export function buildWatchWorkoutPayload(
   const durationMinutes = positiveInt((day as any).durationMinutes ?? (day as any).duration, 60);
   const hrZones = normalizeWatchHrZones((day as any).hrZones ?? (day as any).hr_zones);
   return {
-    focus: String(day.focus || 'Workout'),
+    focus: displayFocusForWorkout(day),
+    stimulus: nullableString((day as any).stimulus ?? (day as any)._stimulus),
+    sourceContext: nullableString((day as any)._source_context ?? (day as any).sourceContext ?? (day as any).source_context)
+      ?? (opts.status === 'active' || opts.status === 'scheduled' ? 'planned' : null),
+    templateId: nullableString((day as any)._template_id ?? (day as any).templateId ?? (day as any).template_id),
+    planDayId: finiteNumber((day as any).planDayId ?? (day as any).plan_day_id),
     durationMinutes,
     dateISO: opts.dateISO || localDateISO(),
     status: opts.status,
@@ -372,8 +491,8 @@ export function buildWatchWorkoutPayload(
     exercises,
     // Only include warmupSteps on live / scheduled statuses — watch
     // shouldn't show a warmup card on a completed or skipped day.
-    ...(opts.warmupSteps && opts.warmupSteps.length > 0 && (opts.status === 'active' || opts.status === 'scheduled')
-      ? { warmupSteps: opts.warmupSteps }
+    ...(warmupSteps && warmupSteps.length > 0 && (opts.status === 'active' || opts.status === 'scheduled')
+      ? { warmupSteps }
       : {}),
     ...(hrZones.length > 0 ? { hrZones } : {}),
     userId: opts.userId ?? null,
@@ -418,6 +537,7 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
     themeName:     resolvedThemeName,
     interfaceStyle: isLightThemeName(resolvedThemeName) ? 'light' : 'dark',
     syncedAtMs:    Date.now(),
+    distanceUnit:  'mi',
     background:    String(t.background),
     surface:       String(t.surface),
     surfaceRaised: String((t as any).surfaceRaised ?? t.surface),
@@ -441,6 +561,16 @@ async function getStoredThemePreference(): Promise<AppThemeName | undefined> {
     }
   } catch {}
   return undefined;
+}
+
+async function getStoredDistanceUnitPreference(): Promise<'mi' | 'km'> {
+  try {
+    const raw = await AsyncStorage.getItem('userProfile');
+    if (!raw) return 'mi';
+    const parsed = JSON.parse(raw);
+    return parsed?.distanceUnit === 'km' ? 'km' : 'mi';
+  } catch {}
+  return 'mi';
 }
 
 export type WatchSleepInput = {
@@ -484,12 +614,6 @@ export function buildWatchSleepPayloadFromSummary(summary: SleepSummaryLike | nu
   const deepHours = finiteNumber(stages.deep);
   const asleepMin = sleepMinutes
     ?? (hours != null ? Math.round(hours * 60) : null);
-  const canReportUnavailable = !!summary && summary.hkAvailable !== false;
-  const unavailableSummary = canReportUnavailable
-    ? (hours != null
-      ? `${hours.toFixed(1)}h logged - sleep score unavailable.`
-      : 'Sleep score unavailable - no overnight sleep was recorded.')
-    : null;
 
   return {
     score: score ?? null,
@@ -499,10 +623,12 @@ export function buildWatchSleepPayloadFromSummary(summary: SleepSummaryLike | nu
     deepMin: deepHours != null ? Math.round(deepHours * 60) : null,
     restingHr: finiteNumber(summary?.restingHeartRate) ?? finiteNumber(raw?.restingHeartRate),
     hrvMs: finiteNumber(summary?.hrv) ?? finiteNumber(raw?.hrvAvg),
-    label: label ?? (canReportUnavailable ? 'Unavailable' : null),
+    label: label ?? null,
     summary: score != null && hours != null
       ? `${hours.toFixed(1)}h slept - ${label ?? 'Sleep score'}`
-      : unavailableSummary,
+      : hours != null
+        ? `${hours.toFixed(1)}h logged - sleep score unavailable.`
+        : null,
   };
 }
 
@@ -515,6 +641,42 @@ export function buildWatchSleepPayloadFromSummary(summary: SleepSummaryLike | nu
 // even if `isPaired` is briefly false.
 function canPush(): boolean {
   return WatchBridge.isAvailable();
+}
+
+export async function provisionWatchCellularAuth(
+  authToken: string | null | undefined,
+  opts: { force?: boolean } = {},
+): Promise<boolean> {
+  if (!authToken || !canPush()) return false;
+  const now = Date.now();
+  const cacheKey = authToken.slice(0, 24);
+  if (
+    !opts.force
+    && lastWatchCellularProvisionKey === cacheKey
+    && now - lastWatchCellularProvisionAtMs < WATCH_CELLULAR_PROVISION_INTERVAL_MS
+  ) {
+    return true;
+  }
+  try {
+    const issued = await issueWatchToken(authToken, { device_id: 'paired-watch' });
+    await stampBridgeUserId(String(issued.user_id));
+    const ok = await WatchBridge.syncCellularAuth({
+      apiBaseUrl: issued.api_base_url,
+      accessToken: issued.access_token,
+      expiresAt: issued.expires_at,
+      userId: issued.user_id,
+      issuedAtMs: now,
+    });
+    if (ok) {
+      lastWatchCellularProvisionKey = cacheKey;
+      lastWatchCellularProvisionAtMs = now;
+    }
+    await recordWatchSync('cellular_auth', !!ok);
+    return !!ok;
+  } catch {
+    await recordWatchSync('cellular_auth', false);
+    return false;
+  }
 }
 
 function wsLog(fn: string, extra?: Record<string, any>): void {
@@ -561,28 +723,24 @@ export async function pushWorkoutToWatch(
     await recordWatchSyncUnchanged('workout');
     return true;
   }
-  // Keep payload size in the sync status detail so failures can still
-  // be inspected without noisy watch console logs.
-  let payloadBytes = 0;
-  try { payloadBytes = JSON.stringify(envelope).length; } catch {}
   wsLog('pushWorkoutToWatch', {
     status: opts.status,
     reason: envelope.reason,
     revision: envelope.revision,
     focus: payload.focus,
     exercises: payload.exercises?.length ?? 0,
-    bytes: payloadBytes,
     userId: userId?.slice(0, 4),
   });
   const ok = await WatchBridge.syncWorkout(envelope);
   if (!ok) lastPayloadSignatures.delete('workout');
-  await recordWatchSync('workout', !!ok, `${envelope.reason}/${opts.status} ex=${payload.exercises?.length ?? 0} b=${payloadBytes}`);
+  await recordWatchSync('workout', !!ok, `${envelope.reason}/${opts.status} ex=${payload.exercises?.length ?? 0}`);
   return ok;
 }
 
 export async function pushThemeToWatch(themeName: AppThemeName | undefined, opts: { force?: boolean } = {}) {
   const latestThemeName = themeName ? resolveThemeName(themeName) : await getStoredThemePreference();
   const palette = buildWatchPalette(latestThemeName);
+  palette.distanceUnit = await getStoredDistanceUnitPreference();
   if (!canPush()) { await recordWatchSync('theme', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   if (shouldSkipUnchanged('theme', palette, opts.force)) {
@@ -623,64 +781,26 @@ export async function pushMealsToWatch(
   checkedMeals: Record<string, boolean> | null | undefined,
   dateISO?: string,
   score?: number | null,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; displayTargets?: WatchMealDisplayTargets | null } = {},
 ): Promise<boolean> {
   if (!plan) return false;
   if (!canPush()) { await recordWatchSync('meals', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
 
-  const targets = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const mealArr = plan.meals ?? [];
-  const checks = checkedMeals ?? {};
-
-  // Actual = sum of checked meals' macros. Matches the phone's
-  // NutritionCard calculation so numbers stay aligned.
-  let actCal = 0, actPro = 0, actCarb = 0, actFat = 0;
-  const items = mealArr.map((m: any, i: number) => {
-    const mealType = `meal_${i}`;
-    const checked = !!checks[mealType];
-    if (checked) {
-      actCal  += Number(m.calories ?? 0);
-      actPro  += Number(m.protein  ?? 0);
-      actCarb += Number(m.carbs    ?? 0);
-      actFat  += Number(m.fat      ?? 0);
-    }
-    return {
-      mealType,
-      name: String(m.meal || m.name || `Meal ${i + 1}`),
-      calories: Math.round(Number(m.calories ?? 0)),
-      proteinG: Math.round(Number(m.protein  ?? 0)),
-      carbsG:   Math.round(Number(m.carbs    ?? 0)),
-      fatG:     Math.round(Number(m.fat      ?? 0)),
-      checked,
-    };
-  });
-
-  const payload: WatchMealsPayload = {
-    dateISO: dateISO || localDateISO(),
-    targets: {
-      calories: Math.round(Number(targets.calories ?? 0)),
-      proteinG: Math.round(Number(targets.protein  ?? 0)),
-      carbsG:   Math.round(Number(targets.carbs    ?? 0)),
-      fatG:     Math.round(Number(targets.fat      ?? 0)),
-    },
-    actual: {
-      calories: Math.round(actCal),
-      proteinG: Math.round(actPro),
-      carbsG:   Math.round(actCarb),
-      fatG:     Math.round(actFat),
-    },
-    score: score ?? null,
-    meals: items,
-    syncedAtMs: Date.now(),
-  };
+  const payload: WatchMealsPayload = buildWatchMealsPayload(
+    plan,
+    checkedMeals,
+    dateISO || localDateISO(),
+    score,
+    { displayTargets: opts.displayTargets },
+  );
   if (shouldSkipUnchanged('meals', payload, opts.force)) {
     await recordWatchSyncUnchanged('meals');
     return true;
   }
   const ok = await WatchBridge.syncMeals(payload);
   if (!ok) lastPayloadSignatures.delete('meals');
-  await recordWatchSync('meals', !!ok, `${items.length} meals`);
+  await recordWatchSync('meals', !!ok, `${payload.meals.length} meals`);
   return ok;
 }
 
@@ -691,16 +811,22 @@ export async function pushHydrationToWatch(opts: {
   dateISO?: string;
   ounces?: number | null;
   targetOunces?: number | null;
+  targetOuncesMin?: number | null;
+  targetOuncesMax?: number | null;
   force?: boolean;
 }): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('hydration', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const ounces = finiteNumber(opts.ounces) ?? 0;
   const target = finiteNumber(opts.targetOunces) ?? 64;
+  const targetMin = finiteNumber(opts.targetOuncesMin);
+  const targetMax = finiteNumber(opts.targetOuncesMax);
   const payload: WatchHydrationPayload = {
     dateISO: opts.dateISO || localDateISO(),
     ounces: Math.max(0, Math.round(ounces * 10) / 10),
     targetOunces: Math.max(0, Math.round(target)),
+    ...(targetMin != null ? { targetOuncesMin: Math.max(0, Math.round(targetMin)) } : {}),
+    ...(targetMax != null ? { targetOuncesMax: Math.max(0, Math.round(targetMax)) } : {}),
     syncedAtMs: Date.now(),
   };
   if (shouldSkipUnchanged('hydration', payload, opts.force)) {
@@ -711,6 +837,158 @@ export async function pushHydrationToWatch(opts: {
   const ok = await WatchBridge.syncHydration(payload);
   if (!ok) lastPayloadSignatures.delete('hydration');
   await recordWatchSync('hydration', !!ok, `${payload.ounces}/${payload.targetOunces} oz`);
+  return ok;
+}
+
+export async function pushActivityToWatch(opts: {
+  dateISO?: string;
+  stepsToday?: number | null;
+  stepGoal?: number | null;
+  force?: boolean;
+}): Promise<boolean> {
+  if (!canPush()) { await recordWatchSync('activity', false, 'bridge_unavailable'); return false; }
+  await stampBridgeUserId();
+  const steps = finiteNumber(opts.stepsToday);
+  const goal = finiteNumber(opts.stepGoal);
+  const payload: WatchActivityPayload = {
+    dateISO: opts.dateISO || localDateISO(),
+    stepsToday: steps != null ? Math.max(0, Math.round(steps)) : null,
+    ...(goal != null ? { stepGoal: Math.max(0, Math.round(goal)) } : {}),
+    syncedAtMs: Date.now(),
+  };
+  if (shouldSkipUnchanged('activity', payload, opts.force)) {
+    await recordWatchSyncUnchanged('activity');
+    return true;
+  }
+  wsLog('pushActivityToWatch', { steps: payload.stepsToday });
+  const ok = await WatchBridge.syncActivity(payload);
+  if (!ok) lastPayloadSignatures.delete('activity');
+  await recordWatchSync('activity', !!ok, payload.stepsToday != null ? `${payload.stepsToday} steps` : 'no steps');
+  return ok;
+}
+
+export async function pushLifestyleToWatch(
+  log: DailyLifestyleLog | null | undefined,
+  opts: { dateISO?: string; force?: boolean } = {},
+): Promise<boolean> {
+  if (!canPush()) { await recordWatchSync('lifestyle', false, 'bridge_unavailable'); return false; }
+  await stampBridgeUserId();
+  const dateISO = (log?.localDate || opts.dateISO || localDateISO()).slice(0, 10);
+  const payload: WatchLifestylePayload = {
+    dateISO,
+    hasLog: !!log?.hasLog || !!log?.id,
+    alcoholLevel: log?.alcoholLevel ?? null,
+    alcoholDrinks: finiteNumber(log?.alcoholDrinks),
+    alcoholTiming: log?.alcoholTiming ?? null,
+    cannabisLevel: log?.cannabisLevel ?? null,
+    cannabisTiming: log?.cannabisTiming ?? null,
+    bowelMovementCount: log?.bowelMovementCount == null ? null : nonNegativeInt(log.bowelMovementCount, 0),
+    bowelConsistency: log?.bowelConsistency ?? null,
+    stressLevel: log?.stressLevel ?? null,
+    illnessState: log?.illnessState ?? null,
+    caffeineMg: finiteNumber(log?.caffeineMg),
+    caffeineTiming: log?.caffeineTiming ?? null,
+    lateCaffeine: typeof log?.lateCaffeine === 'boolean' ? log.lateCaffeine : null,
+    appetite: log?.appetite ?? null,
+    syncedAtMs: Date.now(),
+  };
+  if (shouldSkipUnchanged('lifestyle', payload, opts.force)) {
+    await recordWatchSyncUnchanged('lifestyle');
+    return true;
+  }
+  wsLog('pushLifestyleToWatch', { dateISO, hasLog: payload.hasLog });
+  const ok = await WatchBridge.syncLifestyle(payload);
+  if (!ok) lastPayloadSignatures.delete('lifestyle');
+  await recordWatchSync('lifestyle', !!ok, payload.hasLog ? 'logged' : 'empty');
+  return ok;
+}
+
+/** Push the user's saved workout templates to the watch so the
+ *  Strength picker can render them without a phone roundtrip. Called
+ *  after templates change locally + on initial sync after sign-in.
+ *  Trims each template to a small summary (name + focus + exercise
+ *  list), while keeping enough per-exercise metadata for watch quick-add
+ *  to preserve the selected prescription. */
+export async function pushTemplatesToWatch(
+  templates: ReadonlyArray<{
+    id: string;
+    name: string;
+    workout?: {
+      focus?: string;
+      exercises?: Array<{
+        name?: string;
+        sets?: number | string;
+        reps?: number | string;
+        restSeconds?: number | string;
+        rest_seconds?: number | string;
+        equipment?: string | null;
+        primaryMuscle?: string | null;
+        primary_muscle?: string | null;
+        secondaryMuscles?: string[] | null;
+        secondary_muscles?: string[] | null;
+        isCompound?: boolean | null;
+        is_compound?: boolean | null;
+        movementPattern?: string | null;
+        movement_pattern?: string | null;
+        imageUrl?: string | null;
+        image_url?: string | null;
+        videoId?: string | null;
+        video_id?: string | null;
+        demoExerciseDbId?: string | null;
+        demo_exercise_db_id?: string | null;
+        slug?: string | null;
+      }>;
+    };
+  }> | null | undefined,
+  opts: { force?: boolean } = {},
+): Promise<boolean> {
+  if (!canPush()) { await recordWatchSync('templates', false, 'bridge_unavailable'); return false; }
+  await stampBridgeUserId();
+  const summaries: WatchTemplateSummary[] = (templates ?? []).map(t => ({
+    id: String(t.id ?? ''),
+    name: String(t.name ?? 'Workout'),
+    focus: String(t.workout?.focus ?? 'Workout'),
+    exercises: (t.workout?.exercises ?? []).map(ex => {
+      const secondaryMuscles = Array.isArray(ex.secondaryMuscles)
+        ? ex.secondaryMuscles
+        : Array.isArray(ex.secondary_muscles)
+          ? ex.secondary_muscles
+          : [];
+      return {
+        name: String(ex.name ?? 'Exercise'),
+        sets: Math.max(0, Math.floor(Number(ex.sets) || 0)),
+        reps: String(ex.reps ?? '8-12'),
+        restSeconds: positiveInt(ex.restSeconds ?? ex.rest_seconds, 60),
+        equipment: nullableString(ex.equipment),
+        primaryMuscle: nullableString(ex.primaryMuscle ?? ex.primary_muscle),
+        secondaryMuscles: secondaryMuscles
+          .map(m => nullableString(m))
+          .filter(Boolean) as string[],
+        isCompound: typeof ex.isCompound === 'boolean'
+          ? ex.isCompound
+          : typeof ex.is_compound === 'boolean'
+            ? ex.is_compound
+            : null,
+        movementPattern: nullableString(ex.movementPattern ?? ex.movement_pattern),
+        imageUrl: nullableString(ex.imageUrl ?? ex.image_url),
+        videoId: nullableString(ex.videoId ?? ex.video_id),
+        demoExerciseDbId: nullableString(ex.demoExerciseDbId ?? ex.demo_exercise_db_id),
+        slug: nullableString(ex.slug),
+      };
+    }),
+  })).filter(t => t.id && t.name);
+  const payload: WatchTemplatesPayload = {
+    templates: summaries,
+    syncedAtMs: Date.now(),
+  };
+  if (shouldSkipUnchanged('templates', payload, opts.force)) {
+    await recordWatchSyncUnchanged('templates');
+    return true;
+  }
+  wsLog('pushTemplatesToWatch', { count: summaries.length });
+  const ok = await WatchBridge.syncTemplates(payload);
+  if (!ok) lastPayloadSignatures.delete('templates');
+  await recordWatchSync('templates', !!ok, `${summaries.length} templates`);
   return ok;
 }
 
@@ -857,7 +1135,7 @@ export async function clearMealsFromWatch(): Promise<boolean> {
 }
 
 /** Wipe the watch's local store on sign-out / user-switch. Pushes
- *  empty payloads for workout / meals / hydration / supplements / theme and
+ *  empty payloads for workout / meals / hydration / activity / supplements / theme and
  *  clears userId so the watch doesn't retain the previous user's
  *  data after a swap. Theme is also cleared because it carries the
  *  previous user's palette and the watch would briefly flash it
@@ -911,6 +1189,62 @@ export async function clearWatchData(): Promise<void> {
     targetOunces: 0,
     syncedAtMs: now,
   }).catch(() => {});
+  await WatchBridge.syncActivity({
+    dateISO: localDateISO(),
+    stepsToday: null,
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncLifestyle({
+    dateISO: localDateISO(),
+    hasLog: false,
+    alcoholLevel: null,
+    alcoholDrinks: null,
+    alcoholTiming: null,
+    cannabisLevel: null,
+    cannabisTiming: null,
+    bowelMovementCount: null,
+    bowelConsistency: null,
+    stressLevel: null,
+    illnessState: null,
+    caffeineMg: null,
+    caffeineTiming: null,
+    lateCaffeine: null,
+    appetite: null,
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncSleep({
+    score: null,
+    hoursLastNight: null,
+    asleepMin: null,
+    remMin: null,
+    deepMin: null,
+    restingHr: null,
+    hrvMs: null,
+    label: null,
+    summary: null,
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncReadiness({
+    score: null,
+    label: null,
+    summary: null,
+    factors: [],
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncWeight({
+    latestLbs: null,
+    daysSinceLastLog: null,
+    emaLbs: null,
+    slopeLbsPerWeek: null,
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncTemplates({
+    templates: [],
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncCellularAuth({ clear: true, issuedAtMs: now }).catch(() => {});
+  lastWatchCellularProvisionKey = null;
+  lastWatchCellularProvisionAtMs = 0;
   await WatchBridge.syncTheme(buildWatchPalette(undefined)).catch(() => {});
   wsLog('clearWatchData');
 }
@@ -924,6 +1258,8 @@ export async function pushSupplementsToWatch(
     name: string;
     dose?: string | null;
     timing?: string | null;
+    groupLabel?: string | null;
+    group_label?: string | null;
     taken?: boolean;
     skipped?: boolean;
   }>,
@@ -939,6 +1275,7 @@ export async function pushSupplementsToWatch(
       name: String(s.name ?? 'Supplement'),
       dose: s.dose ?? null,
       timing: s.timing ?? null,
+      groupLabel: s.groupLabel ?? s.group_label ?? null,
       taken: !!s.taken,
       skipped: !!s.skipped,
     })),

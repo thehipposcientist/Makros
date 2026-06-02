@@ -12,8 +12,9 @@
 //   - SpO2 + respiratory rate are guardrails, not primary drivers.
 //   - Missing quality data = neutral-to-conservative. Duration alone
 //     should not produce an "Excellent" recovery read.
-//   - Red-flag nights apply score caps, because one bad recovery
-//     signal can be hidden by otherwise-good pillars.
+//   - Prefer soft penalties over hard caps, because caps feel
+//     unintuitive and create score cliffs. Keep caps for rare,
+//     explainable guardrails only.
 
 import type { SleepScore, SleepScorePillars, SleepStages } from '../types';
 
@@ -30,6 +31,7 @@ export interface SleepScoreInput {
   respiratoryRate: number | null;
   age: number | null;
   stages?: SleepStages | null;
+  bedtimeMinutes?: number | null;
   // History (personalized mode only):
   hrvHistory?: number[] | null;           // last 14-30 nightly HRV values
   rhrHistory?: number[] | null;           // last 14-30 resting-heart-rate values
@@ -55,8 +57,9 @@ export function scoreSleepMVP(input: SleepScoreInput): SleepScore | null {
   // because deep sleep drives physical recovery (HGH release, slow-
   // wave consolidation) and REM is more cognitive-recovery skewed.
   // Awake/fragmentation is small (5) because efficiency already
-  // captures the gross signal. Severe wake time is handled by score
-  // caps below so a fragmented night cannot look deceptively "fair".
+  // captures the gross signal. Severe wake time is handled by rare
+  // guardrails below so a fragmented night cannot look deceptively
+  // "fair".
   const duration = scoreDuration(hours);                                          // 32
   const efficiency = scoreEfficiency(hours, input.inBedMinutes, 18);              // 18
   const hrvFallback = scoreHrvFallback(input.hrvMs, input.age);                   // 20
@@ -85,16 +88,21 @@ export function scoreSleepMVP(input: SleepScoreInput): SleepScore | null {
     0,
     100,
   );
-  const caps = sleepScoreCaps(input, {
+  const recoveryRisk = calculateRecoveryRiskFactor(input, {
+    efficiency,
+    hrv: hrvFallback,
+  });
+  const guardrails = applyExtremeGuardrails(rawTotal * recoveryRisk.factor, input, {
     efficiency,
     hrv: hrvFallback,
     maxQualitySignalsForExcellent: 2,
   });
-  const total = Math.min(rawTotal, caps.cap);
+  const total = guardrails.score;
 
-  // Insight order: score caps explain why a score is lower than the
-  // pillar sum, then prioritize deep over REM over fragmentation.
-  const insights = buildInsights([caps, duration, efficiency, hrvFallback, deepSleep, remSleep, healthFlags, awakeFrag]);
+  // Insight order: rare guardrails / soft recovery limiters explain why
+  // a score is lower than the pillar sum, then prioritize deep over REM
+  // over fragmentation.
+  const insights = buildInsights([guardrails, recoveryRisk, duration, efficiency, hrvFallback, deepSleep, remSleep, healthFlags, awakeFrag]);
 
   return {
     score: Math.round(total),
@@ -107,6 +115,7 @@ export function scoreSleepMVP(input: SleepScoreInput): SleepScore | null {
     respiratoryRate: input.respiratoryRate,
     oxygenSaturation: input.spo2Percent,
     efficiency: efficiency.ratio ?? null,
+    bedtimeMinutes: input.bedtimeMinutes ?? null,
     pillars,
     insights,
   };
@@ -122,7 +131,7 @@ export function scoreSleepPersonalized(input: SleepScoreInput): SleepScore | nul
   const duration = scoreDurationPersonalized(hours);                              // 28
   const efficiency = scoreEfficiency(hours, input.inBedMinutes, 17);              // 17
   const hrvBaseline = scoreHrvBaselinePersonalized(input.hrvMs, input.hrvHistory ?? null, input.age, 18); // 18
-  const regularity = scoreRegularity(input.bedtimeHistory ?? null);               // 15
+  const regularity = scoreRegularity(input.bedtimeHistory ?? null, input.bedtimeMinutes ?? null); // 15
   const deepSleep = scoreDeepSleep(input.deepSleepHours, hours, 9);               //  9
   const remSleep = scoreRemSleep(input.remSleepHours, hours, 4);                  //  4
   const healthFlags = scoreHealthFlagsPersonalized(input);                     // 5
@@ -147,14 +156,18 @@ export function scoreSleepPersonalized(input: SleepScoreInput): SleepScore | nul
     0,
     100,
   );
-  const caps = sleepScoreCaps(input, {
+  const recoveryRisk = calculateRecoveryRiskFactor(input, {
+    efficiency,
+    hrv: hrvBaseline,
+  });
+  const guardrails = applyExtremeGuardrails(rawTotal * recoveryRisk.factor, input, {
     efficiency,
     hrv: hrvBaseline,
     maxQualitySignalsForExcellent: 1,
   });
-  const total = Math.min(rawTotal, caps.cap);
+  const total = guardrails.score;
 
-  const insights = buildInsights([caps, duration, efficiency, hrvBaseline, regularity, deepSleep, remSleep, healthFlags, awakeFrag]);
+  const insights = buildInsights([guardrails, recoveryRisk, duration, efficiency, hrvBaseline, regularity, deepSleep, remSleep, healthFlags, awakeFrag]);
 
   return {
     score: Math.round(total),
@@ -167,6 +180,7 @@ export function scoreSleepPersonalized(input: SleepScoreInput): SleepScore | nul
     respiratoryRate: input.respiratoryRate,
     oxygenSaturation: input.spo2Percent,
     efficiency: efficiency.ratio ?? null,
+    bedtimeMinutes: input.bedtimeMinutes ?? null,
     pillars,
     insights,
   };
@@ -180,9 +194,18 @@ interface PillarResult {
   ratio?: number | null;
 }
 
+interface RecoveryRiskResult extends PillarResult {
+  factor: number;
+}
+
+interface GuardrailResult extends PillarResult {
+  score: number;
+  cap: number;
+}
+
 // Duration — the single biggest factor. Full credit requires a full
-// recovery window; short nights are intentionally capped later so good
-// stage ratios can't make a 5h night look excellent.
+// recovery window; short nights are limited again by a soft final
+// multiplier so good stage ratios can't make a 5h night look excellent.
 //
 // Use a smooth log-normal curve outside the 7-9h target instead of
 // hard bands. This keeps nearby nights nearby in score: 6.49h and
@@ -268,18 +291,24 @@ function scoreHrvFallback(hrv: number | null, age: number | null): PillarResult 
 // personalized weight (18) flows through the band table without
 // hardcoding numbers.)
 
-// Sleep regularity — circular SD of bedtime minutes-from-midnight.
-function scoreRegularity(bedtimes: number[] | null): PillarResult {
-  if (!bedtimes || bedtimes.length < 7) return { points: 7, insight: 'Bedtime regularity still calibrating' };
-  const sd = circularBedtimeDeviation(bedtimes);
+// Sleep regularity — last night's bedtime against the recent circular-mean
+// bedtime. Falls back to historical scatter when the current onset is missing.
+function scoreRegularity(bedtimes: number[] | null, currentBedtime: number | null = null): PillarResult {
+  const valid = (bedtimes ?? []).filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1440);
+  if (valid.length < 7) return { points: 7, insight: 'Bedtime regularity still calibrating' };
+  const current = normalizeClockMinute(currentBedtime);
+  const center = current != null ? circularBedtimeMean(valid) : null;
+  const variance = current != null && center != null
+    ? circularMinuteDistance(current, center)
+    : circularBedtimeDeviation(valid);
   let points: number;
   let insight: string | undefined;
-  if (sd <= 30) points = 15;
-  else if (sd <= 45) points = 11;
-  else if (sd <= 60) { points = 7; insight = 'Irregular sleep timing'; }
-  else if (sd <= 90) { points = 3; insight = 'Very irregular sleep timing'; }
-  else { points = 0; insight = 'Very irregular sleep timing'; }
-  return { points, insight, ratio: sd };
+  if (variance <= 30) points = 15;
+  else if (variance <= 45) points = 11;
+  else if (variance <= 60) { points = 7; insight = current != null ? 'Bedtime drifted outside your usual rhythm' : 'Irregular sleep timing'; }
+  else if (variance <= 90) { points = 3; insight = current != null ? 'Bedtime was far from your usual rhythm' : 'Very irregular sleep timing'; }
+  else { points = 0; insight = current != null ? 'Bedtime was far from your usual rhythm' : 'Very irregular sleep timing'; }
+  return { points, insight, ratio: variance };
 }
 
 // Deep sleep pillar — the higher-weight half of the old stage
@@ -372,7 +401,7 @@ function scoreRemSleep(
 // what `efficiency` already captures. Efficiency = asleep/in-bed
 // catches gross fragmentation; this pillar catches the case where
 // total awake minutes are notable even on a high-efficiency night.
-// Small-weight by design (5 in MVP, 4 in Personalized); hard caps below
+// Small-weight by design (5 in MVP, 4 in Personalized); rare guardrails
 // handle severe wake time so we don't overstate recovery on sick nights.
 function scoreAwakeFragmentation(
   awakeMin: number | null,
@@ -492,14 +521,89 @@ function scoreHealthFlagsPersonalized(input: SleepScoreInput): PillarResult {
   return scoreHealthFlags(input, 5);
 }
 
-function sleepScoreCaps(
+export function calculateDurationAdequacyFactor(hours: number): number {
+  if (!Number.isFinite(hours) || hours <= 0) return 0.35;
+  if (hours >= 7) return 1;
+  if (hours < 4) return lerp(0.35, 0.52, smoothstep(0.5, 4, hours));
+  if (hours < 5) return lerp(0.52, 0.68, smoothstep(4, 5, hours));
+  if (hours < 6) return lerp(0.68, 0.82, smoothstep(5, 6, hours));
+  return lerp(0.82, 1, smoothstep(6, 7, hours));
+}
+
+export function calculateOversleepPenalty(hours: number): number {
+  if (!Number.isFinite(hours) || hours <= 9.5) return 1;
+  if (hours < 10.5) return lerp(1, 0.96, smoothstep(9.5, 10.5, hours));
+  if (hours < 11.5) return lerp(0.96, 0.86, smoothstep(10.5, 11.5, hours));
+  if (hours < 13) return lerp(0.86, 0.68, smoothstep(11.5, 13, hours));
+  return clamp(0.68 - (hours - 13) * 0.04, 0.60, 0.68);
+}
+
+function calculateRecoveryRiskFactor(
+  input: SleepScoreInput,
+  signals: {
+    efficiency: PillarResult;
+    hrv: PillarResult;
+  },
+): RecoveryRiskResult {
+  const hours = input.totalSleepHours ?? 0;
+  const durationFactor = calculateDurationAdequacyFactor(hours);
+  const oversleepFactor = calculateOversleepPenalty(hours);
+  let factor = durationFactor * oversleepFactor;
+
+  const eff = signals.efficiency.ratio;
+  if (eff != null && eff < 0.88) {
+    const effFactor = eff <= 0.70 ? 0.86 : lerp(0.86, 1, smoothstep(0.70, 0.88, eff));
+    factor *= effFactor;
+  }
+
+  const awakeMin = awakeMinutesFromInput(input);
+  if (awakeMin != null && awakeMin > 60) {
+    const awakeFactor = awakeMin >= 135 ? 0.86 : lerp(1, 0.92, smoothstep(60, 120, awakeMin));
+    factor *= awakeFactor;
+  }
+
+  const hrvRatio = signals.hrv.ratio;
+  if (hrvRatio != null && hrvRatio < 0.80) {
+    const hrvFactor = hrvRatio <= 0.55 ? 0.90 : lerp(0.90, 1, smoothstep(0.55, 0.80, hrvRatio));
+    factor *= hrvFactor;
+  }
+
+  const stress = recoveryStressSignals(input, hrvRatio);
+  if (stress.count >= 2) factor *= stress.severeCount >= 1 ? 0.94 : 0.97;
+
+  factor = clamp(factor, 0.35, 1);
+
+  let insight: string | undefined;
+  if (hours < 5) {
+    insight = 'Very short sleep strongly limited recovery today';
+  } else if (hours < 6.5) {
+    insight = 'Short sleep softly limited recovery today';
+  } else if (hours < 7) {
+    insight = 'Slightly short sleep limited top-end recovery';
+  } else if (hours > 11.5) {
+    insight = 'Very long sleep softly limited recovery today';
+  } else if (hours > 10.5) {
+    insight = 'Long sleep softly limited top-end recovery';
+  } else if (eff != null && eff < 0.80) {
+    insight = 'Low sleep efficiency softly limited recovery today';
+  } else if (awakeMin != null && awakeMin > 75) {
+    insight = 'Wake fragmentation softly limited recovery today';
+  } else if (stress.count >= 2) {
+    insight = "Recovery markers softly limited today's score";
+  }
+
+  return { points: 0, factor, insight };
+}
+
+function applyExtremeGuardrails(
+  score: number,
   input: SleepScoreInput,
   signals: {
     efficiency: PillarResult;
     hrv: PillarResult;
     maxQualitySignalsForExcellent: number;
   },
-): PillarResult & { cap: number } {
+): GuardrailResult {
   const hours = input.totalSleepHours ?? 0;
   let cap = 100;
   let insight: string | undefined;
@@ -511,59 +615,47 @@ function sleepScoreCaps(
     }
   };
 
-  if (hours < 5) applyCap(45, 'Very short sleep caps recovery today');
-  else if (hours < 6) applyCap(59, 'Short sleep caps recovery today');
-  else if (hours < 6.5) applyCap(69, 'Sleep duration limits recovery today');
-  else if (hours < 7) applyCap(84, 'Slightly short sleep limits top-end recovery');
-  else if (hours > 11.5) applyCap(79, 'Very long sleep can signal accumulated fatigue or illness');
-  else if (hours > 10.5) applyCap(88, 'Long sleep can signal accumulated fatigue');
+  // Extreme guardrails stay rare and explainable. Normal short/long
+  // sleep uses soft penalties over hard caps, because caps feel
+  // unintuitive and create score cliffs.
+  if (hours < 2) applyCap(25, 'Extremely low sleep duration');
+  else if (hours < 3) applyCap(35, 'Extremely low sleep duration');
+  else if (hours < 4) applyCap(49, 'Extremely low sleep duration limits recovery today');
+  else if (hours > 14) applyCap(69, 'Sleep duration looks unusually long — sensor overlap may be inflating it');
 
   const eff = signals.efficiency.ratio;
   if (eff != null) {
-    if (eff < 0.75) applyCap(59, 'Fragmented sleep caps recovery today');
-    else if (eff < 0.80) applyCap(69, 'Low sleep efficiency limits recovery');
-    else if (eff < 0.85) applyCap(79, 'Sleep efficiency limits top-end recovery');
-  }
-
-  const deepMin = typeof input.deepSleepHours === 'number' ? input.deepSleepHours * 60 : null;
-  if (hours >= 6.5 && deepMin != null) {
-    if (deepMin < 40) applyCap(79, 'Very low deep sleep limits recovery');
-    else if (deepMin < 60) applyCap(84, 'Low deep sleep limits top-end recovery');
+    if (eff < 0.65) applyCap(49, 'Extremely low sleep efficiency');
+    else if (eff < 0.70) applyCap(59, 'Very low sleep efficiency');
   }
 
   const awakeMin = awakeMinutesFromInput(input);
   if (awakeMin != null) {
     if (awakeMin >= 180) applyCap(35, 'Extreme wake time caps recovery today');
     else if (awakeMin >= 135) applyCap(44, 'Very high wake time caps recovery today');
-    else if (awakeMin >= 105) applyCap(49, 'Severe wake time caps recovery today');
-    else if (awakeMin >= 75) applyCap(59, 'High wake time caps recovery today');
-    else if (awakeMin > 45) applyCap(69, 'Wake time limits recovery today');
+    else if (awakeMin >= 120) applyCap(49, 'Severe wake time caps recovery today');
   }
 
-  const hrvRatio = signals.hrv.ratio;
-  if (hrvRatio != null) {
-    if (hrvRatio < 0.65) applyCap(69, 'Low HRV caps recovery today');
-    else if (hrvRatio < 0.80) applyCap(79, 'HRV limits top-end recovery');
+  if (input.spo2Percent != null) {
+    if (input.spo2Percent < 90) applyCap(49, 'Very low oxygen signal caps recovery today');
+    else if (input.spo2Percent < 92) applyCap(59, 'Low oxygen signal caps recovery today');
+    else if (input.spo2Percent < 94) applyCap(69, 'Low oxygen signal caps recovery today');
+  }
+  if (input.respiratoryRate != null) {
+    if (input.respiratoryRate < 8 || input.respiratoryRate > 28) {
+      applyCap(59, 'Breathing signal caps recovery today');
+    } else if (input.respiratoryRate < 10 || input.respiratoryRate > 22) {
+      applyCap(79, 'Breathing signal limits top-end recovery');
+    }
   }
 
-  if (input.spo2Percent != null && input.spo2Percent < 94) {
-    applyCap(69, 'Low oxygen signal caps recovery today');
-  }
-  if (input.respiratoryRate != null && (input.respiratoryRate < 10 || input.respiratoryRate > 22)) {
-    applyCap(79, 'Breathing signal limits top-end recovery');
-  }
-
-  const stress = recoveryStressSignals(input, hrvRatio);
+  const stress = recoveryStressSignals(input, signals.hrv.ratio);
   if (stress.severeCount >= 2) applyCap(49, 'Multiple recovery markers were off overnight');
-  else if (stress.count >= 2) applyCap(59, 'Recovery markers limit training readiness today');
-  if (hours > 10 && stress.count >= 2) {
-    applyCap(69, 'Long sleep plus off recovery markers caps recovery today');
-  } else if (hours > 10 && stress.count >= 1) {
-    applyCap(84, 'Long sleep plus an off recovery marker limits top-end recovery');
-  }
-  if (awakeMin != null && awakeMin >= 105 && stress.count >= 2) {
+  else if (stress.severeCount >= 1 && stress.count >= 3) applyCap(59, 'Recovery markers limit training readiness today');
+
+  if (awakeMin != null && awakeMin >= 120 && stress.count >= 2) {
     applyCap(39, 'Fragmented sleep plus stress markers caps recovery today');
-  } else if (awakeMin != null && awakeMin >= 105 && stress.count >= 1) {
+  } else if (awakeMin != null && awakeMin >= 120 && stress.count >= 1) {
     applyCap(42, 'Fragmented sleep plus an off recovery marker caps recovery today');
   }
 
@@ -578,7 +670,7 @@ function sleepScoreCaps(
     applyCap(84, 'Sleep score still has limited quality data');
   }
 
-  return { points: 0, cap, insight };
+  return { points: 0, cap, score: Math.min(score, cap), insight };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -690,6 +782,62 @@ export function circularBedtimeDeviation(bedtimes: number[]): number {
   return (circSdRad / TWO_PI) * 1440;
 }
 
+function normalizeClockMinute(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const rounded = Math.round(value);
+  if (rounded < 0 || rounded >= 1440) return null;
+  return rounded;
+}
+
+function circularBedtimeMean(bedtimes: number[]): number | null {
+  const valid = bedtimes.filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1440);
+  if (!valid.length) return null;
+  const TWO_PI = Math.PI * 2;
+  const radians = valid.map((m) => (m / 1440) * TWO_PI);
+  const sinSum = radians.reduce((s, r) => s + Math.sin(r), 0);
+  const cosSum = radians.reduce((s, r) => s + Math.cos(r), 0);
+  const meanRad = Math.atan2(sinSum / valid.length, cosSum / valid.length);
+  return ((((meanRad / TWO_PI) * 1440) % 1440) + 1440) % 1440;
+}
+
+export function circularMinuteDistance(a: number, b: number): number {
+  const from = normalizeClockMinute(a);
+  const to = normalizeClockMinute(b);
+  if (from == null || to == null) return Number.POSITIVE_INFINITY;
+  const direct = Math.abs(from - to);
+  return Math.min(direct, 1440 - direct);
+}
+
+export interface BedtimeWindow {
+  centerMinutes: number;   // circular-mean bedtime (minutes from midnight, 0-1439)
+  sdMinutes: number;       // circular SD across the sampled nights
+  startMinutes: number;    // suggested window start (0-1439)
+  endMinutes: number;      // suggested window end (0-1439)
+  nights: number;          // sample size the window was built from
+}
+
+// Full-credit bedtime target from recent nightly onset times. The center is
+// the circular MEAN of the samples; the half-width matches the regularity
+// pillar's full-support band so the UI window aligns with scoring.
+// Returns null until 7 nights exist — the same floor `scoreRegularity`
+// uses before it leaves "still calibrating".
+export function bedtimeWindowFromHistory(bedtimes: number[]): BedtimeWindow | null {
+  const valid = bedtimes.filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1440);
+  if (valid.length < 7) return null;
+  const centerMinutes = circularBedtimeMean(valid);
+  if (centerMinutes == null) return null;
+  const sdMinutes = circularBedtimeDeviation(valid);
+  const halfWidth = 30;
+  const wrap = (m: number) => ((Math.round(m) % 1440) + 1440) % 1440;
+  return {
+    centerMinutes,
+    sdMinutes,
+    startMinutes: wrap(centerMinutes - halfWidth),
+    endMinutes: wrap(centerMinutes + halfWidth),
+    nights: valid.length,
+  };
+}
+
 // Convert a Date to minutes-from-midnight in the device's local timezone.
 export function minutesFromMidnight(date: Date): number {
   return date.getHours() * 60 + date.getMinutes();
@@ -720,6 +868,15 @@ function emptyStages(totalHrs: number, deep: number | null, rem: number | null):
     awake: 0,
     total: round1(totalHrs),
   };
+}
+
+function lerp(start: number, end: number, t: number): number {
+  return start + (end - start) * t;
+}
+
+function smoothstep(edge0: number, edge1: number, value: number): number {
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 function round1(n: number): number { return Math.round(n * 10) / 10; }

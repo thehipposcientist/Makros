@@ -16,10 +16,11 @@ import { getTheme, radius } from '../constants/theme';
 import { HEALTH_PLATFORM_LABEL } from '../constants/platformHealth';
 import { AppThemeName, HealthSummary } from '../types';
 import { scorePreparedness, PreparednessResult } from '../services/preparedness';
-import { loadSleepHistory, getCycleStatus } from '../services/appleHealth';
+import { getPlatformCycleStatus, loadPlatformSleepHistory } from '../services/platformHealth';
 import { getFatigueScore, getMealAverages } from '../services/api';
 import { loadWorkoutHistory, loadHealthSummary } from '../utils/workoutHistory';
 import FadeInView from './FadeInView';
+import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from './ScoreInfoModal';
 
 /** Pillar bar with animated width AND animated color crossfade between
  *  threshold tiers. The track holds a base layer at the new color and
@@ -96,6 +97,7 @@ export default function PreparednessCard({
   const [result, setResult] = useState<PreparednessResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -107,14 +109,14 @@ export default function PreparednessCard({
       const rhrNow = summary?.restingHeartRate ?? null;
 
       // HRV baseline from nightly history.
-      const history = await loadSleepHistory().catch(() => []);
+      const history = await loadPlatformSleepHistory().catch(() => []);
       const hrvHistory = history.map(n => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
 
       // Backend fatigue + nutrition averages (7d) + cycle phase.
       const [fatigue, meals, cycle] = await Promise.all([
         getFatigueScore(authToken).catch(() => null),
         getMealAverages(authToken, 7).catch(() => null),
-        getCycleStatus().catch(() => null),
+        getPlatformCycleStatus().catch(() => null),
       ]);
 
       // Yesterday's workout minutes.
@@ -130,7 +132,7 @@ export default function PreparednessCard({
         hrvHistory,
         restingHeartRate: rhrNow,
         rhrHistory: [], // could persist a nightly RHR list later; 0-length is fine (neutral)
-        readinessFromBackend: fatigue?.readiness_score ?? null,
+        readinessFromBackend: fatigue?.muscle_recovery_score ?? fatigue?.readiness_score ?? null,
         proteinGrams: meals?.avg_protein_g ?? null,
         proteinTargetGrams: proteinTarget ?? null,
         calorieIntake: meals?.avg_calories ?? null,
@@ -181,10 +183,9 @@ export default function PreparednessCard({
     setExpanded(e => !e);
   };
 
-  // Each pillar row carries an explicit `missingKey` so the UI can
-  // render "—" instead of a fake bar at 0 when the input is genuinely
-  // unavailable. Without this, missing HRV looked like "low HRV" even
-  // though the user just doesn't wear an Apple Watch overnight.
+  // Each pillar row carries an explicit `missingKey`; rows without a
+  // source sample are hidden so users without a wearable/source app do
+  // not see a wall of dashes for HRV/RHR/sleep.
   const pillarRows: Array<{ label: string; pts: number; max: number; missingKey: string }> = [
     { label: 'Sleep',            pts: result.pillars.sleep,            max: 30, missingKey: 'sleep' },
     { label: 'HRV',              pts: result.pillars.hrv,              max: 20, missingKey: 'hrv' },
@@ -193,8 +194,11 @@ export default function PreparednessCard({
     { label: 'Resting HR',       pts: result.pillars.restingHr,        max: 10, missingKey: 'rhr' },
     { label: "Yesterday's load", pts: result.pillars.yesterdayStrain,  max: 5,  missingKey: '__never__' },
   ];
+  const displayedPillarRows = pillarRows.filter(row => !result.missing.includes(row.missingKey));
+  const hiddenPillarCount = pillarRows.length - displayedPillarRows.length;
 
   return (
+    <>
     <TouchableOpacity
       activeOpacity={0.85}
       onPress={toggle}
@@ -221,13 +225,19 @@ export default function PreparednessCard({
             </Text>
           )}
         </View>
+        <TouchableOpacity
+          accessibilityLabel="How readiness is calculated"
+          onPress={(e) => { e.stopPropagation(); setInfoOpen(true); }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ padding: 2 }}>
+          <Ionicons name="information-circle-outline" size={16} color={tc.textMuted} />
+        </TouchableOpacity>
         <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
       </View>
 
       {expanded && (
         <View style={{ marginTop: 10, gap: 4 }}>
-          {pillarRows.map(({ label, pts, max, missingKey }, rowIdx) => {
-            const isMissing = result.missing.includes(missingKey);
+          {displayedPillarRows.map(({ label, pts, max }, rowIdx) => {
             const pct = Math.max(0, Math.min(1, pts / max));
             const barColor = pct >= 0.75 ? tc.success : pct >= 0.50 ? tc.primary : pct >= 0.30 ? tc.warning : tc.error;
             return (
@@ -236,18 +246,19 @@ export default function PreparednessCard({
                 <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
                   {label}
                 </Text>
-                {isMissing ? (
-                  <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border, opacity: 0.4 }} />
-                ) : (
-                  <AnimatedPillarBar pct={Math.max(3, pct * 100)} color={barColor} trackColor={tc.border} />
-                )}
-                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: isMissing ? tc.textMuted : tc.textSecondary, textAlign: 'right' }}>
-                  {isMissing ? '—' : `${pts}/${max}`}
+                <AnimatedPillarBar pct={Math.max(3, pct * 100)} color={barColor} trackColor={tc.border} />
+                <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textSecondary, textAlign: 'right' }}>
+                  {pts}/{max}
                 </Text>
               </View>
               </FadeInView>
             );
           })}
+          {hiddenPillarCount > 0 && (
+            <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4, fontStyle: 'italic' }}>
+              {hiddenPillarCount} driver{hiddenPillarCount === 1 ? '' : 's'} hidden until recent samples arrive.
+            </Text>
+          )}
           {result.insights.length > 1 && (
             <View style={{ marginTop: 8, gap: 4 }}>
               {result.insights.slice(1).map((line, i) => (
@@ -260,11 +271,44 @@ export default function PreparednessCard({
           )}
           {result.missing.length > 0 && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-              Missing: {result.missing.join(', ')} - {Platform.OS === 'android' ? 'Health Connect can add sleep and heart-rate context once supported.' : `${HEALTH_PLATFORM_LABEL} is optional, but it adds sleep and heart-rate context here.`}
+              {Platform.OS === 'android' ? 'Health Connect can add sleep and heart-rate context once supported.' : `${HEALTH_PLATFORM_LABEL} is optional, but the plan still works without it.`}
             </Text>
           )}
         </View>
       )}
     </TouchableOpacity>
+    <ScoreInfoModal
+      visible={infoOpen}
+      onClose={() => setInfoOpen(false)}
+      eyebrow="READY TO TRAIN"
+      title="How readiness is scored"
+      iconName="flash-outline"
+      iconColor={tc.primary}
+      themeName={themeName}>
+      <ScoreInfoBody themeName={themeName}>
+        A 0–100 read of how prepared your body is for a hard session today.
+        Pillars without backing data are skipped, so missing signals
+        lower confidence (the "X/Y signals" tag) rather than your score.
+      </ScoreInfoBody>
+      <ScoreInfoSection title="What goes in" themeName={themeName}>
+        <ScoreInfoRow label="Sleep (30)" value="last night's sleep score" themeName={themeName} />
+        <ScoreInfoRow label="HRV (20)" value="vs your 14d baseline" themeName={themeName} />
+        <ScoreInfoRow label="Muscle recovery (20)" value="trailing fatigue across groups" themeName={themeName} />
+        <ScoreInfoRow label="Nutrition (15)" value="7d protein + calorie hit-rate" themeName={themeName} />
+        <ScoreInfoRow label="Resting HR (10)" value="elevated vs baseline penalizes" themeName={themeName} />
+        <ScoreInfoRow label="Yesterday's load (5)" value="long session yesterday dampens today" themeName={themeName} />
+      </ScoreInfoSection>
+      <ScoreInfoSection title="Rating bands" themeName={themeName}>
+        <ScoreInfoRow label="80+" value="Primed" valueColor={tc.success} themeName={themeName} />
+        <ScoreInfoRow label="65–79" value="Ready" valueColor={tc.primary} themeName={themeName} />
+        <ScoreInfoRow label="45–64" value="Moderate" valueColor={tc.warning} themeName={themeName} />
+        <ScoreInfoRow label="Below 45" value="Fatigued" valueColor={tc.error} themeName={themeName} />
+      </ScoreInfoSection>
+      <ScoreInfoBody themeName={themeName} muted>
+        Recommendations from this score never edit your plan directly —
+        they only suggest. You can always train through a low day.
+      </ScoreInfoBody>
+    </ScoreInfoModal>
+    </>
   );
 }

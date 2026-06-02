@@ -6,7 +6,7 @@
 // `@EnvironmentObject var theme`.
 //
 // Until the first sync arrives we fall back to the phone app's default
-// `slate` palette.
+// `aurora` palette.
 
 import SwiftUI
 
@@ -14,6 +14,7 @@ struct WatchPalette: Codable, Equatable {
     var themeName: String?
     var interfaceStyle: String?
     var syncedAtMs: Double?
+    var distanceUnit: String?
     var background:    String
     var surface:       String
     var surfaceRaised: String
@@ -26,20 +27,22 @@ struct WatchPalette: Codable, Equatable {
     var error:         String
 
     static let appDefault = WatchPalette(
-        themeName: "slate",
+        themeName: "aurora",
         interfaceStyle: "dark",
         syncedAtMs: nil,
-        background:    "#182030",
-        surface:       "#222C3E",
-        surfaceRaised: "#2C3850",
-        primary:       "#F07848",
-        textPrimary:   "#E8F4FF",
-        textSecondary: "#A8C0D8",
-        textMuted:     "#6888A8",
-        success:       "#40C878",
-        warning:       "#F0A030",
-        error:         "#FF5058"
+        distanceUnit: "mi",
+        background:    "#060B14",
+        surface:       "#0C1420",
+        surfaceRaised: "#14202E",
+        primary:       "#40E8A0",
+        textPrimary:   "#E8F0F8",
+        textSecondary: "#90A8C0",
+        textMuted:     "#506878",
+        success:       "#40D888",
+        warning:       "#E8B040",
+        error:         "#F06070"
     )
+    static let aurora = appDefault
     static let midnight = appDefault
 }
 
@@ -70,10 +73,11 @@ extension Color {
 }
 
 final class ThemeStore: ObservableObject {
-    @Published var palette: WatchPalette = .midnight
+    @Published var palette: WatchPalette = .aurora
     private static let lightThemeNames: Set<String> = [
-        "sunrise", "parchment", "linen", "mint",
-        "butter", "seaglass", "lilac", "sky", "porcelain", "citrus", "rose",
+        "sunrise", "cardinal", "parchment", "linen",
+        "clover",
+        "butter", "summer", "lilac", "sky", "glacier", "citrus", "terra", "rose",
         "paper"
     ]
 
@@ -87,6 +91,7 @@ final class ThemeStore: ObservableObject {
     var success:       Color { Color(hex: palette.success) }
     var warning:       Color { Color(hex: palette.warning) }
     var error:         Color { Color(hex: palette.error) }
+    var distanceUnit: String { palette.distanceUnit == "km" ? "km" : "mi" }
     var preferredColorScheme: ColorScheme {
         switch palette.interfaceStyle?.lowercased() {
         case "light":

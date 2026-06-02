@@ -449,3 +449,15 @@ def split_into_columns_and_extras(panel: dict[str, float]) -> tuple[dict, dict]:
         else:
             extras[k] = v
     return top, extras
+
+
+# ── USDA-sourced panels for seed foods that originally shipped macros-only ────
+# Generated from USDA FoodData Central (per 100g) via the seed-backfill matcher
+# and hand-reviewed for match correctness (e.g. white potato vs sweet potato,
+# grapes vs grape leaves). Merged here so seed_foods() backfills these foods on
+# the next boot — closing the 71 -> ~102 micronutrient coverage gap. setdefault
+# preserves any hand-curated panel that already exists for the same key.
+from app.seed_micronutrients_usda import USDA_MICRONUTRIENTS as _USDA_MICRONUTRIENTS
+
+for _name, _panel in _USDA_MICRONUTRIENTS.items():
+    MICRONUTRIENTS.setdefault(_name, _panel)

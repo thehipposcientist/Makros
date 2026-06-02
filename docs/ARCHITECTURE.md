@@ -27,6 +27,7 @@
 | `backend/app/services/nutrition/recovery_flags.py` | Fueling and recovery flags; never scored |
 | `backend/app/services/nutrition/context.py` | Shared nutrition context for all AI surfaces |
 | `backend/app/services/nutrition/calorie_calculator.py` | TDEE and macro target computation |
+| `backend/app/services/nutrition/hydration.py` | Adaptive hydration target formula; supports heat add-on when callers provide ambient temperature |
 
 ## API / Orchestration
 
@@ -54,6 +55,8 @@
 | `src/screens/GearScreen.tsx` | Gear inventory, mileage tracking, AI gear identification |
 | `src/screens/SettingsScreen.tsx` | Notifications, units, HealthKit, app settings, account actions |
 | `src/screens/OnboardingScreen.tsx` | Goal/equipment/food onboarding flow |
+| `src/components/LiveActivityTracker.tsx` | Custom/live activity timer, HR zones, outdoor-cardio GPS distance/pace/route |
+| `src/utils/cardioGpsTracker.ts` | Phone-side GPS tracker for outdoor run/walk/ride/hike sessions |
 | `src/components/NutritionCard.tsx` | Daily nutrition display + micronutrient modal |
 | `src/components/WorkoutCard.tsx` | Workout day card with exercise list + time estimate |
 | `src/components/CoachCheckinModal.tsx` | Weekly check-in modal |

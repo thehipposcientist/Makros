@@ -1,6 +1,9 @@
 """Social router — friends, weekly digest, and bounded activity feed."""
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 import os
 from datetime import datetime, timezone
 
@@ -13,7 +16,7 @@ from app.database import get_session
 from sqlalchemy import func as sa_func
 from app.models import (
     User, UserSocialProfile, Friendship, UserReport, WeeklyDigestCache, UserGoal,
-    ActivityFeedItem, FeedLike, SocialNotification,
+    ActivityFeedItem, FeedLike, FeedComment, SocialNotification,
 )
 from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
 
@@ -22,6 +25,10 @@ _SOCIAL_FEED_FLAG = os.getenv("SOCIAL_FEED_ENABLED", "1").strip().lower()
 SOCIAL_FEED_ENABLED = _SOCIAL_FEED_FLAG not in {"0", "false", "no", "off"}
 FEED_EVENT_TYPES = ("workout_completed", "workout_post", "pr_achieved")
 FEED_WORKOUT_EVENT_TYPES = ("workout_completed", "workout_post")
+SOCIAL_PHOTO_UPLOAD_MAX_BYTES = 4 * 1024 * 1024
+SOCIAL_PHOTO_STORED_MAX_CHARS = 350_000
+SOCIAL_PHOTO_THUMB_MAX_DIM = 960
+SOCIAL_PHOTO_THUMB_QUALITY = 72
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -133,6 +140,37 @@ class SocialNotificationRead(BaseModel):
 class SocialNotificationsRead(BaseModel):
     items: list[SocialNotificationRead]
     unread_count: int
+
+
+class FeedCommentRead(BaseModel):
+    id: int
+    feed_item_id: int
+    user_id: int
+    username: str
+    display_name: str | None
+    avatar_url: str | None = None
+    body: str
+    created_at: str
+    can_delete: bool
+
+
+class FeedCommentsRead(BaseModel):
+    items: list[FeedCommentRead]
+    comment_count: int
+
+
+class CreateFeedCommentBody(BaseModel):
+    body: str
+
+    @field_validator("body")
+    @classmethod
+    def _trim_body(cls, v):
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("comment required")
+        if len(text) > 500:
+            raise ValueError("comment too long (max 500)")
+        return text
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -278,6 +316,120 @@ def _feed_like_count(db: Session, item_id: int) -> int:
         select(sa_func.count(FeedLike.id)).where(FeedLike.feed_item_id == item_id)
     ).first()
     return int(value or 0)
+
+
+def _feed_comment_count(db: Session, item_id: int) -> int:
+    value = db.exec(
+        select(sa_func.count(FeedComment.id)).where(FeedComment.feed_item_id == item_id)
+    ).first()
+    return int(value or 0)
+
+
+def _hydrate_feed_comments(
+    db: Session,
+    rows: list[FeedComment],
+    viewer_id: int,
+) -> list[FeedCommentRead]:
+    if not rows:
+        return []
+    from sqlmodel import col
+
+    author_ids = list({r.user_id for r in rows})
+    users_by_id = {
+        u.id: u for u in db.exec(
+            select(User)
+            .where(col(User.id).in_(author_ids))
+            .where(User.is_active == True)  # noqa: E712
+        ).all()
+    }
+    profs_by_id = {
+        p.user_id: p for p in db.exec(
+            select(UserSocialProfile).where(col(UserSocialProfile.user_id).in_(author_ids))
+        ).all()
+    }
+    out: list[FeedCommentRead] = []
+    for row in rows:
+        user = users_by_id.get(row.user_id)
+        prof = profs_by_id.get(row.user_id)
+        username = user.username if user else "unknown"
+        out.append(FeedCommentRead(
+            id=row.id,
+            feed_item_id=row.feed_item_id,
+            user_id=row.user_id,
+            username=username,
+            display_name=(prof.display_name if prof and prof.display_name else username),
+            avatar_url=_avatar_url(prof),
+            body=row.body,
+            created_at=row.created_at.isoformat() if row.created_at else "",
+            can_delete=row.user_id == viewer_id,
+        ))
+    return out
+
+
+def _feed_comment_summaries(
+    db: Session,
+    item_ids: list[int],
+    viewer_id: int,
+) -> tuple[dict[int, int], dict[int, list[FeedCommentRead]]]:
+    if not item_ids:
+        return {}, {}
+
+    count_rows = db.exec(
+        select(FeedComment.feed_item_id, sa_func.count())
+        .where(FeedComment.feed_item_id.in_(item_ids))  # type: ignore[union-attr]
+        .group_by(FeedComment.feed_item_id)
+    ).all()
+    comment_counts = {fid: int(cnt or 0) for fid, cnt in count_rows}
+
+    ranked = (
+        select(
+            FeedComment.id,
+            sa_func.row_number().over(
+                partition_by=FeedComment.feed_item_id,
+                order_by=FeedComment.created_at.desc(),  # type: ignore[union-attr]
+            ).label("rn"),
+        )
+        .where(FeedComment.feed_item_id.in_(item_ids))  # type: ignore[union-attr]
+        .subquery()
+    )
+    preview_rows = db.exec(
+        select(FeedComment)
+        .join(ranked, FeedComment.id == ranked.c.id)
+        .where(ranked.c.rn <= 2)
+        .order_by(FeedComment.feed_item_id, FeedComment.created_at.asc())  # type: ignore[union-attr]
+    ).all()
+
+    grouped: dict[int, list[FeedCommentRead]] = {}
+    for c in _hydrate_feed_comments(db, preview_rows, viewer_id):
+        grouped.setdefault(c.feed_item_id, []).append(c)
+    return comment_counts, grouped
+
+
+def _feed_engagement(
+    db: Session,
+    item_ids: list[int],
+    viewer_id: int,
+) -> tuple[dict[int, int], set[int], dict[int, int], dict[int, list[FeedCommentRead]]]:
+    like_counts: dict[int, int] = {}
+    liked_by_me: set[int] = set()
+    if item_ids:
+        count_rows = db.exec(
+            select(FeedLike.feed_item_id, sa_func.count())
+            .where(FeedLike.feed_item_id.in_(item_ids))  # type: ignore[union-attr]
+            .group_by(FeedLike.feed_item_id)
+        ).all()
+        for fid, cnt in count_rows:
+            like_counts[fid] = int(cnt or 0)
+        my_likes = db.exec(
+            select(FeedLike.feed_item_id).where(
+                FeedLike.user_id == viewer_id,
+                FeedLike.feed_item_id.in_(item_ids),  # type: ignore[union-attr]
+            )
+        ).all()
+        liked_by_me = set(my_likes)
+
+    comment_counts, recent_comments = _feed_comment_summaries(db, item_ids, viewer_id)
+    return like_counts, liked_by_me, comment_counts, recent_comments
 
 
 def _hydrate_notifications(db: Session, rows: list[SocialNotification]) -> list[SocialNotificationRead]:
@@ -719,9 +871,19 @@ def search_users(
         .where(User.is_active == True)  # noqa: E712  hide soft-deleted accounts
         .limit(10)
     ).all()
+    # Batch the profile lookup (was one query per result row — N+1 on every
+    # type-ahead keystroke). Mirrors the IN-set pattern used in list_friends.
+    user_ids = [u.id for u in rows]
+    profs_by_user: dict[int, UserSocialProfile] = {}
+    if user_ids:
+        from sqlmodel import col
+        for p in db.exec(
+            select(UserSocialProfile).where(col(UserSocialProfile.user_id).in_(user_ids))
+        ).all():
+            profs_by_user[p.user_id] = p
     out: list[SearchHit] = []
     for u in rows:
-        prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == u.id)).first()
+        prof = profs_by_user.get(u.id)
         out.append(SearchHit(
             user_id=u.id,
             username=u.username,
@@ -945,6 +1107,72 @@ def _sanitize_hr_summary(raw) -> dict | None:
     return clean or None
 
 
+def _strip_image_data_url(raw: str) -> str:
+    text = (raw or "").strip()
+    if text.lower().startswith("data:image/") and "," in text:
+        text = text.split(",", 1)[1]
+    return "".join(text.split())
+
+
+def _decode_social_photo(raw: str) -> bytes:
+    encoded = _strip_image_data_url(raw)
+    max_encoded = int(SOCIAL_PHOTO_UPLOAD_MAX_BYTES * 1.4) + 64
+    if len(encoded) > max_encoded:
+        raise HTTPException(status_code=413, detail="photo is too large")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="photo must be base64 encoded")
+    if len(data) > SOCIAL_PHOTO_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="photo is too large")
+    return data
+
+
+def _thumbnail_social_photo(raw: str) -> str:
+    data = _decode_social_photo(raw)
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        encoded = _strip_image_data_url(raw)
+        if len(encoded) <= SOCIAL_PHOTO_STORED_MAX_CHARS:
+            return encoded
+        raise HTTPException(status_code=500, detail="photo processing unavailable")
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in {"RGB", "L"}:
+                img = img.convert("RGB")
+            elif img.mode == "L":
+                img = img.convert("RGB")
+            for max_dim, quality in (
+                (SOCIAL_PHOTO_THUMB_MAX_DIM, SOCIAL_PHOTO_THUMB_QUALITY),
+                (720, 64),
+                (540, 58),
+            ):
+                candidate = img.copy()
+                candidate.thumbnail((max_dim, max_dim))
+                out = io.BytesIO()
+                candidate.save(out, format="JPEG", quality=quality, optimize=True)
+                encoded = base64.b64encode(out.getvalue()).decode("ascii")
+                if len(encoded) <= SOCIAL_PHOTO_STORED_MAX_CHARS:
+                    return encoded
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="photo must be a valid image")
+    raise HTTPException(status_code=413, detail="photo thumbnail is too large")
+
+
+def _social_photo_for_feed(raw) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    encoded = _strip_image_data_url(raw)
+    if len(encoded) <= SOCIAL_PHOTO_STORED_MAX_CHARS:
+        return encoded
+    return None
+
+
 def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> dict:
     raw = payload if isinstance(payload, dict) else {}
     if event_type == "workout_post":
@@ -952,8 +1180,8 @@ def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> di
         caption = raw.get("caption")
         if isinstance(caption, str) and caption:
             clean["caption"] = caption[:500]
-        photo = raw.get("photo_base64")
-        if isinstance(photo, str) and photo:
+        photo = _social_photo_for_feed(raw.get("photo_base64"))
+        if photo:
             clean["photo_base64"] = photo
         summary = raw.get("workout_summary")
         if isinstance(summary, dict):
@@ -1095,23 +1323,11 @@ def get_feed(
     rows = _bounded_feed_rows(db, q, limit)
 
     item_ids = [r.id for r in rows]
-    like_counts: dict[int, int] = {}
-    liked_by_me: set[int] = set()
-    if item_ids:
-        count_rows = db.exec(
-            select(FeedLike.feed_item_id, sa_func.count())
-            .where(FeedLike.feed_item_id.in_(item_ids))  # type: ignore[union-attr]
-            .group_by(FeedLike.feed_item_id)
-        ).all()
-        for fid, cnt in count_rows:
-            like_counts[fid] = cnt
-        my_likes = db.exec(
-            select(FeedLike.feed_item_id).where(
-                FeedLike.user_id == current_user.id,
-                FeedLike.feed_item_id.in_(item_ids),  # type: ignore[union-attr]
-            )
-        ).all()
-        liked_by_me = set(my_likes)
+    like_counts, liked_by_me, comment_counts, recent_comments = _feed_engagement(
+        db,
+        item_ids,
+        current_user.id,
+    )
 
     # Bulk-load user + profile rows for every author in `rows` so the
     # feed render is one query each instead of N+1. Soft-deleted users
@@ -1155,6 +1371,8 @@ def get_feed(
             "created_at": r.created_at.isoformat() if r.created_at else "",
             "like_count": like_counts.get(r.id, 0),
             "liked_by_me": r.id in liked_by_me,
+            "comment_count": comment_counts.get(r.id, 0),
+            "recent_comments": [c.model_dump() for c in recent_comments.get(r.id, [])],
         })
     return {"items": items}
 
@@ -1190,23 +1408,11 @@ def get_user_feed(
     rows = _bounded_feed_rows(db, q, limit)
 
     item_ids = [r.id for r in rows]
-    like_counts: dict[int, int] = {}
-    liked_by_me: set[int] = set()
-    if item_ids:
-        count_rows = db.exec(
-            select(FeedLike.feed_item_id, sa_func.count())
-            .where(FeedLike.feed_item_id.in_(item_ids))
-            .group_by(FeedLike.feed_item_id)
-        ).all()
-        for fid, cnt in count_rows:
-            like_counts[fid] = cnt
-        my_likes = db.exec(
-            select(FeedLike.feed_item_id).where(
-                FeedLike.user_id == current_user.id,
-                FeedLike.feed_item_id.in_(item_ids),
-            )
-        ).all()
-        liked_by_me = set(my_likes)
+    like_counts, liked_by_me, comment_counts, recent_comments = _feed_engagement(
+        db,
+        item_ids,
+        current_user.id,
+    )
 
     u = db.exec(
         select(User).where(User.id == user_id, User.is_active == True)  # noqa: E712
@@ -1229,6 +1435,8 @@ def get_user_feed(
             "created_at": r.created_at.isoformat() if r.created_at else "",
             "like_count": like_counts.get(r.id, 0),
             "liked_by_me": r.id in liked_by_me,
+            "comment_count": comment_counts.get(r.id, 0),
+            "recent_comments": [c.model_dump() for c in recent_comments.get(r.id, [])],
         })
     return {"items": items}
 
@@ -1320,7 +1528,7 @@ def create_post(
     if body.caption:
         payload["caption"] = body.caption
     if body.photo_base64:
-        payload["photo_base64"] = body.photo_base64
+        payload["photo_base64"] = _thumbnail_social_photo(body.photo_base64)
     if body.workout_summary:
         payload["workout_summary"] = _sanitize_workout_summary(body.workout_summary)
 
@@ -1351,9 +1559,104 @@ def delete_post(
     likes = db.exec(select(FeedLike).where(FeedLike.feed_item_id == post_id)).all()
     for lk in likes:
         db.delete(lk)
+    comments = db.exec(select(FeedComment).where(FeedComment.feed_item_id == post_id)).all()
+    for comment in comments:
+        db.delete(comment)
     db.delete(item)
     db.commit()
     return {"ok": True}
+
+
+def _load_commentable_feed_item(
+    db: Session,
+    item_id: int,
+    viewer_id: int,
+) -> ActivityFeedItem:
+    item = db.exec(select(ActivityFeedItem).where(ActivityFeedItem.id == item_id)).first()
+    if not item or item.event_type not in FEED_WORKOUT_EVENT_TYPES:
+        raise HTTPException(404, "item not found")
+    if not _can_view_feed_author(db, viewer_id, item.user_id):
+        raise HTTPException(404, "item not found")
+    return item
+
+
+@router.get("/feed/{item_id}/comments", response_model=FeedCommentsRead)
+def list_feed_comments(
+    item_id: int,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
+    _load_commentable_feed_item(db, item_id, current_user.id)
+    rows = db.exec(
+        select(FeedComment)
+        .where(FeedComment.feed_item_id == item_id)
+        .order_by(FeedComment.created_at.asc())  # type: ignore[union-attr]
+        .limit(max(1, min(limit, 100)))
+    ).all()
+    return FeedCommentsRead(
+        items=_hydrate_feed_comments(db, rows, current_user.id),
+        comment_count=_feed_comment_count(db, item_id),
+    )
+
+
+@router.post("/feed/{item_id}/comments")
+def create_feed_comment(
+    item_id: int,
+    body: CreateFeedCommentBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
+    item = _load_commentable_feed_item(db, item_id, current_user.id)
+    comment = FeedComment(
+        feed_item_id=item.id,
+        user_id=current_user.id,
+        body=body.body,
+    )
+    db.add(comment)
+    db.flush()
+    _create_social_notification(
+        db,
+        user_id=item.user_id,
+        actor_user_id=current_user.id,
+        notification_type="feed_comment",
+        subject_type="feed_item",
+        subject_id=item.id,
+        payload={**_feed_notification_payload(item), "comment": body.body[:80]},
+    )
+    db.commit()
+    db.refresh(comment)
+    return {
+        "comment": _hydrate_feed_comments(db, [comment], current_user.id)[0],
+        "comment_count": _feed_comment_count(db, item_id),
+    }
+
+
+@router.delete("/feed/{item_id}/comments/{comment_id}")
+def delete_feed_comment(
+    item_id: int,
+    comment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
+    _load_commentable_feed_item(db, item_id, current_user.id)
+    comment = db.exec(
+        select(FeedComment).where(
+            FeedComment.id == comment_id,
+            FeedComment.feed_item_id == item_id,
+        )
+    ).first()
+    if not comment or comment.user_id != current_user.id:
+        raise HTTPException(404, "comment not found")
+    db.delete(comment)
+    db.commit()
+    return {"ok": True, "comment_count": _feed_comment_count(db, item_id)}
 
 
 @router.post("/feed/{item_id}/like")

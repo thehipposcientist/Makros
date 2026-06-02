@@ -80,6 +80,7 @@ def muscle_balance(
     import re
     from sqlmodel import select
     from app.models import WorkoutSession, WorkoutExercise, ExerciseSet, Exercise
+    from app.services.workout.emphasis_tracking import detail_tags_for_exercise
 
     cutoff = date_type.today() - timedelta(days=days)
 
@@ -114,8 +115,10 @@ def muscle_balance(
     if not session_ids:
         return {
             "muscles": {},
+            "detail_muscles": {},
             "period_days": days,
             "total_sets": 0,
+            "detail_total_sets": 0,
             "balance_score": 0,
         }
 
@@ -132,6 +135,83 @@ def muscle_balance(
         if isinstance(value, list):
             return [_muscle_to_str(v) for v in value if _muscle_to_str(v)]
         return [_muscle_to_str(value)]
+
+    MUSCLE_ALIASES = {
+        "abs": "core",
+        "abdominals": "core",
+        "obliques": "core",
+        "lats": "back",
+        "traps": "back",
+        "upper_back": "back",
+        "upperback": "back",
+        "forearms": "biceps",
+        "brachialis": "biceps",
+        "adductors": "quads",
+        "abductors": "glutes",
+    }
+    KNOWN_MUSCLES = {
+        "chest", "back", "shoulders", "biceps", "triceps", "quads",
+        "hamstrings", "glutes", "calves", "core",
+    }
+
+    def _canonical_muscle(value) -> str | None:
+        muscle = _muscle_to_str(value)
+        if not muscle:
+            return None
+        if muscle in KNOWN_MUSCLES:
+            return muscle
+        return MUSCLE_ALIASES.get(muscle)
+
+    def _infer_primary_from_name(name: str | None) -> str | None:
+        n = (name or "").lower()
+        if skipped_exercise_re.search(n):
+            return None
+        if re.search(r"bench|push.?up|chest|pec|fly", n):
+            return "chest"
+        if re.search(r"row|pulldown|pull.?up|chin.?up|lat|deadlift|trap", n):
+            return "back"
+        if re.search(r"shoulder|overhead|ohp|lateral raise|rear delt|face pull", n):
+            return "shoulders"
+        if re.search(r"curl|bicep", n):
+            return "biceps"
+        if re.search(r"tricep|dip|skull", n):
+            return "triceps"
+        if re.search(r"squat|leg press|lunge|split squat|step.?up|extension", n):
+            return "quads"
+        if re.search(r"romanian|rdl|hamstring|leg curl|good morning", n):
+            return "hamstrings"
+        if re.search(r"hip thrust|glute|kickback|bridge", n):
+            return "glutes"
+        if re.search(r"calf", n):
+            return "calves"
+        if re.search(r"\babs?\b|crunch|\bcore\b|russian twist|leg raise|sit.?up|knee raise|woodchopper", n):
+            return "core"
+        return None
+
+    def _infer_secondaries_from_name(name: str | None, primary: str | None) -> list[str]:
+        n = (name or "").lower()
+        if skipped_exercise_re.search(n):
+            return []
+        out: list[str] = []
+
+        def add(muscle: str) -> None:
+            if muscle != primary and muscle not in out:
+                out.append(muscle)
+
+        if re.search(r"bench|push.?up|chest|pec|fly", n):
+            add("triceps")
+            add("shoulders")
+        if re.search(r"row|pulldown|pull.?up|chin.?up|lat", n):
+            add("biceps")
+        if re.search(r"shoulder press|overhead|ohp|military press|pike push", n):
+            add("triceps")
+        if re.search(r"squat|leg press|lunge|split squat|step.?up", n):
+            add("glutes")
+        if re.search(r"deadlift|romanian|rdl|hamstring|leg curl|good morning", n):
+            add("hamstrings")
+            add("glutes")
+            add("back")
+        return out
 
     EXCLUDED_BUCKETS = {"", "full_body", "cardio", "mobility", "recovery", "stretch", "systemic"}
     SKIPPED_SET_TYPES = {"warmup", "warm_up", "mobility", "recovery"}
@@ -152,6 +232,7 @@ def muscle_balance(
             WorkoutExercise.name,
             Exercise.primary_muscle,
             Exercise.secondary_muscles,
+            Exercise.emphasis,
             Exercise.exercise_type,
             Exercise.movement_pattern,
             WorkoutExercise.primary_muscle_snapshot,
@@ -165,7 +246,8 @@ def muscle_balance(
     ).all()
 
     muscle_sets: dict[str, float] = {}
-    for _we_id, name, pm, sm, exercise_type, movement_pattern, pm_snapshot, sm_snapshot, set_type in rows:
+    detail_sets: dict[str, float] = {}
+    for _we_id, name, pm, sm, stored_emphasis, exercise_type, movement_pattern, pm_snapshot, sm_snapshot, set_type in rows:
         if (set_type or "working").lower() in SKIPPED_SET_TYPES:
             continue
         if _muscle_to_str(exercise_type) in SKIPPED_ACTIVITY_TYPES:
@@ -174,20 +256,37 @@ def muscle_balance(
             continue
         if skipped_exercise_re.search(name or ""):
             continue
-        primary = _muscle_to_str(pm_snapshot) or _muscle_to_str(pm)
-        secondaries = _muscles_to_list(sm_snapshot) or _muscles_to_list(sm)
-        if primary not in EXCLUDED_BUCKETS:
+        primary = _canonical_muscle(pm_snapshot) or _canonical_muscle(pm) or _infer_primary_from_name(name)
+        raw_secondaries = _muscles_to_list(sm_snapshot) or _muscles_to_list(sm)
+        secondaries: list[str] = []
+        for raw_secondary in raw_secondaries:
+            secondary = _canonical_muscle(raw_secondary)
+            if not secondary or secondary == primary or secondary in secondaries:
+                continue
+            secondaries.append(secondary)
+        if not secondaries:
+            secondaries = _infer_secondaries_from_name(name, primary)
+        if primary and primary not in EXCLUDED_BUCKETS:
             muscle_sets[primary] = muscle_sets.get(primary, 0) + 1.0
         for secondary in secondaries:
             if secondary in EXCLUDED_BUCKETS:
                 continue
             muscle_sets[secondary] = muscle_sets.get(secondary, 0) + 0.5
+        for tag in detail_tags_for_exercise(
+            name=name,
+            primary_muscle=primary,
+            secondary_muscles=secondaries,
+            stored_emphasis=stored_emphasis,
+        ):
+            detail_sets[tag] = detail_sets.get(tag, 0) + 1.0
 
     if not muscle_sets:
         return {
             "muscles": {},
+            "detail_muscles": {},
             "period_days": days,
             "total_sets": 0,
+            "detail_total_sets": 0,
             "balance_score": 0,
         }
 
@@ -195,6 +294,12 @@ def muscle_balance(
     muscles = {
         m: {"sets": round(v, 1), "pct": round(v / total * 100, 1)}
         for m, v in sorted(muscle_sets.items(), key=lambda x: -x[1])
+    }
+    detail_total = sum(detail_sets.values()) or 0
+    detail_denominator = detail_total or 1
+    detail_muscles = {
+        m: {"sets": round(v, 1), "pct": round(v / detail_denominator * 100, 1)}
+        for m, v in sorted(detail_sets.items(), key=lambda x: -x[1])
     }
 
     BALANCE_MUSCLES = {"chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes"}
@@ -206,7 +311,9 @@ def muscle_balance(
 
     return {
         "muscles": muscles,
+        "detail_muscles": detail_muscles,
         "period_days": days,
         "total_sets": round(total, 1),
+        "detail_total_sets": round(detail_total, 1),
         "balance_score": balance_score,
     }

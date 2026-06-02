@@ -131,6 +131,11 @@ _GOAL_DAYS_FREQUENCY: dict[tuple[str, int], CoreFrequency] = {
     ("fat_loss", 5):    CoreFrequency(2, 3, 3),
     ("fat_loss", 6):    CoreFrequency(3, 3, 3),
     ("fat_loss", 7):    CoreFrequency(3, 3, 3),
+    ("toning", 3):      CoreFrequency(2, 2, 2),
+    ("toning", 4):      CoreFrequency(2, 3, 3),
+    ("toning", 5):      CoreFrequency(2, 3, 3),
+    ("toning", 6):      CoreFrequency(3, 3, 3),
+    ("toning", 7):      CoreFrequency(3, 3, 3),
     # endurance / athletic / hyrox — trunk endurance + anti-rotation focus
     ("endurance", 3):             CoreFrequency(2, 2, 2),
     ("endurance", 4):             CoreFrequency(2, 2, 3),
@@ -161,8 +166,23 @@ _GOAL_DAYS_FREQUENCY: dict[tuple[str, int], CoreFrequency] = {
     ("maintain", 3):        CoreFrequency(1, 2, 2),
     ("maintain", 4):        CoreFrequency(2, 2, 2),
     ("maintain", 5):        CoreFrequency(2, 2, 2),
-    ("maintain", 6):        CoreFrequency(2, 2, 3),
-    ("maintain", 7):        CoreFrequency(2, 2, 3),
+    ("maintain", 6):        CoreFrequency(2, 3, 3),
+    ("maintain", 7):        CoreFrequency(2, 3, 3),
+    # Special mobility/recovery planner modes currently flow through
+    # `GoalProfile.bucket == "general_health"` in the full planner.
+    # Keep direct helper calls explicit and aligned with that traced
+    # behavior: these are targets only, with actual direct core often
+    # lower because the recipes are mostly cardio/mobility/recovery.
+    ("flexibility", 3):     CoreFrequency(1, 2, 2),
+    ("flexibility", 4):     CoreFrequency(2, 2, 2),
+    ("flexibility", 5):     CoreFrequency(2, 2, 3),
+    ("flexibility", 6):     CoreFrequency(2, 3, 3),
+    ("flexibility", 7):     CoreFrequency(2, 3, 3),
+    ("stress_relief", 3):   CoreFrequency(1, 2, 2),
+    ("stress_relief", 4):   CoreFrequency(2, 2, 2),
+    ("stress_relief", 5):   CoreFrequency(2, 2, 3),
+    ("stress_relief", 6):   CoreFrequency(2, 3, 3),
+    ("stress_relief", 7):   CoreFrequency(2, 3, 3),
 }
 
 
@@ -421,6 +441,14 @@ class CoreDecision:
     rest_seconds: int = 45    # rest between exercises within the circuit
 
 
+@dataclass(frozen=True)
+class CoreProgrammingSummary:
+    target_core_days: int
+    actual_core_days_generated: int
+    core_skip_reasons: tuple[str, ...]
+    core_skip_reason_counts: tuple[tuple[str, int], ...] = ()
+
+
 def _is_session_dense(slots_count: int, session_minutes: Optional[int]) -> bool:
     """Heuristic: a session is dense when it already has enough slots
     to fill its time budget. Adding core on top of a maxed-out
@@ -521,19 +549,27 @@ def decide_core_for_day(
       5. Otherwise pick a category that (a) fits the day type and
          (b) hasn't been used in the last 2 sessions.
     """
+    if archetype in _NEVER_CORE_ARCHETYPES:
+        family = ARCHETYPE_TO_FOCUS_FAMILY.get(archetype)
+        if family in ("lower", "legs"):
+            reason = "heavy_lower" if "heavy" in archetype.value else "lower_day"
+        else:
+            reason = "incompatible_archetype"
+        return CoreDecision(False, None, 0, reason)
+
     day_type = _day_type_for_archetype(archetype)
     if day_type is None and not is_recovery_day:
-        return CoreDecision(False, None, 0, "heavy_lower_or_no_match")
+        return CoreDecision(False, None, 0, "incompatible_archetype")
 
     if remaining_weekly_budget <= 0:
         return CoreDecision(False, None, 0, "weekly_budget_met")
 
     bucket = _duration_bucket(session_minutes)
     if bucket == "short" and goal not in ("fat_loss", "endurance", "athletic_performance", "hyrox"):
-        return CoreDecision(False, None, 0, "short_session_non_metabolic")
+        return CoreDecision(False, None, 0, "time_cap")
 
     if _is_session_dense(slots_count, session_minutes):
-        return CoreDecision(False, None, 0, "session_dense")
+        return CoreDecision(False, None, 0, "session_density")
 
     # Pick categories. Preference list tailored to the day type, with
     # recently-used categories pushed to the back so we rotate.
@@ -573,7 +609,11 @@ def program_core_across_week(
     days_per_week: int,
     session_minutes: Optional[int],
     seed: int = 0,
-) -> list[tuple[str, Optional[list[Slot]], DayArchetype, Optional[dict]]]:
+    return_summary: bool = False,
+) -> list[tuple[str, Optional[list[Slot]], DayArchetype, Optional[dict]]] | tuple[
+    list[tuple[str, Optional[list[Slot]], DayArchetype, Optional[dict]]],
+    CoreProgrammingSummary,
+]:
     """Top-level: walk the week and append core slots to whichever
     days qualify. Returns a new templates list with the same shape so
     callers can swap it in without other changes.
@@ -585,11 +625,20 @@ def program_core_across_week(
         happened recently (last 2 days).
       - Emit core slots at the END of each chosen day's slot list
         (placement rule: core is ALWAYS terminal, never mid-session).
+      - When return_summary=True, also return target vs actual direct
+        core days plus skip reasons explaining intentional shortfalls.
     """
     freq = weekly_core_target(goal, days_per_week)
     remaining_budget = freq.default
     used_category_sessions: list[tuple[str, ...]] = []
     rng = random.Random(seed)
+    actual_core_days_generated = 0
+    skip_reason_counts: dict[str, int] = {}
+
+    def _record_skip(reason: str) -> None:
+        if remaining_budget <= 0 or reason == "weekly_budget_met":
+            return
+        skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
 
     out: list = []
     for (name, slots, archetype, gen_day) in templates:
@@ -597,6 +646,7 @@ def program_core_across_week(
             # Pre-generated day (recovery/mobility). Don't inject
             # slots — they bypass the slot pipeline entirely. Carry
             # through untouched.
+            _record_skip("incompatible_archetype")
             out.append((name, slots, archetype, gen_day))
             continue
 
@@ -626,8 +676,21 @@ def program_core_across_week(
             out.append((name, new_slots, archetype, gen_day))
             used_category_sessions.append(decision.categories)
             remaining_budget -= 1
+            actual_core_days_generated += 1
         else:
+            _record_skip(decision.reason)
             out.append((name, slots, archetype, gen_day))
 
     _ = rng  # reserved for future randomized tie-breaking
+    if return_summary:
+        ordered_counts = tuple(
+            sorted(skip_reason_counts.items(), key=lambda item: item[0])
+        )
+        summary = CoreProgrammingSummary(
+            target_core_days=freq.default,
+            actual_core_days_generated=actual_core_days_generated,
+            core_skip_reasons=tuple(reason for reason, _ in ordered_counts),
+            core_skip_reason_counts=ordered_counts,
+        )
+        return out, summary
     return out

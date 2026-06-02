@@ -121,6 +121,10 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 | `SECRET_KEY` | output of `openssl rand -hex 32` |
 | `OPENAI_API_KEY` | your OpenAI key |
 | `USDA_FDC_API_KEY` | your USDA key |
+| `FATSECRET_CLIENT_ID` | FatSecret Platform client ID, omit until approved/configured |
+| `FATSECRET_CLIENT_SECRET` | FatSecret Platform client secret, omit until approved/configured |
+| `FATSECRET_SCOPE` | `basic` initially; use `premier` for Premier/Premier Free search v5 |
+| `FATSECRET_SEARCH_VERSION` | `v1` initially; use `v5` with Premier access |
 | `DATABASE_URL` | connection string from step 1 |
 | `ALGORITHM` | `HS256` |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` |
@@ -131,9 +135,12 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 | `MODEL_PLAN_GENERATION` | `gpt-4o-mini` |
 | `MODEL_PLAN_UPDATE` | `gpt-4o-mini` |
 | `MODEL_MEAL_PARSING` | `gpt-4o-mini` |
+| `MODEL_TRANSCRIPTION` | `gpt-4o-mini-transcribe` |
 | `MODEL_IMAGE` | `gpt-5.4-mini` |
 | `PLAN_REVIEW_ENABLED` | `0` |
 | `NUTRITION_REVIEW_ENABLED` | `0` |
+| `STARTUP_DATA_MAINTENANCE_ENABLED` | `0` |
+| `STARTUP_BACKFILLS_ENABLED` | `0` |
 | `LOG_LEVEL` | `INFO` |
 | `SMTP_HOST` | SMTP hostname from SES/Postmark/SendGrid/etc. |
 | `SMTP_PORT` | usually `587` |
@@ -153,7 +160,7 @@ Use a branded sender for beta if possible: `support@thallo.app` through Google W
 
 Set `CORS_ORIGINS` only for browser clients, as a comma-separated list of exact HTTPS origins such as `https://thallo.app,https://www.thallo.app`. For native-app-only production deployments, leave it unset; production then allows no browser origins. Never set `CORS_ORIGINS=*` in production.
 
-For a free external beta, `BETA_FULL_ACCESS_ENABLED` defaults to `1` so new accounts receive server-side Pro access. Set it to `0` before paid launch so new accounts fail closed to Free unless a server-side entitlement grants Pro.
+For production, leave `BETA_FULL_ACCESS_ENABLED=0` and use `SIGNUP_TRIAL_DAYS=7` for the new-user Pro trial. Paid access should come from RevenueCat webhooks or `/billing/revenuecat/sync`; only set `BETA_FULL_ACCESS_ENABLED=1` for an intentional free beta build. The visible RevenueCat signup banner and purchase/restore buttons are guarded by `EXPO_PUBLIC_BILLING_REVENUECAT=1`.
 
 ### Networking
 - Incoming: Public endpoint.
@@ -246,10 +253,11 @@ Edit `app.json` → `expo.extra.apiBaseUrl` → paste your App Runner URL:
 ```json
 "extra": {
   "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com",
-  "freeBetaFullAccess": true
+  "freeBetaFullAccess": false,
+  "featureFlags": { "billing": { "revenueCat": false } }
 }
 ```
-`freeBetaFullAccess` only opens client-side UI gates. For the free external beta, the backend defaults `BETA_FULL_ACCESS_ENABLED` to `1` so newly registered users receive server-side Pro access for plan generation. Turn both beta flags off when StoreKit/RevenueCat and server-side entitlement checks are ready.
+`freeBetaFullAccess` only opens client-side UI gates and should stay false for production billing. RevenueCat API keys are injected by `app.config.js` from `EXPO_PUBLIC_REVENUECAT_IOS_API_KEY`, `EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY`, and `EXPO_PUBLIC_REVENUECAT_PRO_ENTITLEMENT_ID`; set `EXPO_PUBLIC_BILLING_REVENUECAT=1` only for the paid-subscription beta build.
 Commit and push.
 
 For Google sign-in, add the OAuth client IDs to the EAS build environment before building. These IDs are public identifiers, not secrets, and `app.config.js` exposes them to the app through Expo `extra`.
@@ -364,5 +372,5 @@ Skips all first-time prompts (credentials, API key, etc are cached). Testers get
 - **Custom domain / HTTPS cert.** App Runner's default domain works; when you're ready, see App Runner → Custom domains for the one-click flow.
 - **Sentry / error reporting.** Recommended before public launch. `docs/RECOMMENDATIONS.md` has the item tracked.
 - **CI/CD GitHub Actions.** Current workflow is manual `docker push` + `eas build`. Automate before the team grows past one dev.
-- **Public App Store release.** Needs screenshots, app description, privacy policy URL, review submission. Not a pilot concern.
+- **Public App Store release.** Needs screenshots, app description, hosted privacy policy and terms URLs from `docs/legal/`, review submission. Not a pilot concern.
 - **Alembic migrations.** Backend currently uses SQLModel `create_all` + idempotent `ALTER TYPE`/`ALTER TABLE … IF NOT EXISTS` helpers. Fine for pilot additive changes; revisit before the first breaking schema change.

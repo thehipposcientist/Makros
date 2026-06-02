@@ -1,0 +1,8 @@
+   1 }, [progressWeekWindow, summaries]);
+   1 }, [paceHistory]);
+   1 }, [historyQuery, historyDateFilter, historyTypeFilter]);
+   1 }, [history, selectedExercise]);
+   1 }, [history, prs]);
+   1 }, [history, isActive]);
+   1 }, [healthSummary, paceHistory, summaries]);
+   1 }, [authToken, isActive, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length, showWorkoutProgress]);

@@ -1,6 +1,6 @@
 import type { UserProfile } from '../types';
 
-export type HomeTabKey = 'friends' | 'workout' | 'meals' | 'progress' | 'you';
+export type HomeTabKey = 'today' | 'friends' | 'workout' | 'meals' | 'progress' | 'you';
 
 export function shouldShowWorkouts(profile: Pick<UserProfile, 'hiddenSurfaces'> | null | undefined): boolean {
   return profile?.hiddenSurfaces?.workouts !== true;
@@ -17,7 +17,5 @@ export function isHomeTabVisible(tab: HomeTabKey, profile: Pick<UserProfile, 'hi
 }
 
 export function fallbackHomeTab(profile: Pick<UserProfile, 'hiddenSurfaces'> | null | undefined): HomeTabKey {
-  if (shouldShowWorkouts(profile)) return 'workout';
-  if (shouldShowMeals(profile)) return 'meals';
-  return 'progress';
+  return 'today';
 }

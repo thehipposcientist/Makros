@@ -11,6 +11,7 @@ export type GoalForecastProfile = {
     pace?: string | null;
     targetWeightLbs?: number | null;
     startWeightLbs?: number | null;
+    startBodyFatPct?: number | null;
     goalStartedAt?: string | null;
   } | null;
   physicalStats?: { weightLbs?: number | null } | null;
@@ -73,10 +74,53 @@ export type GoalForecastBodyScan = {
   weightLbs?: number | null;
 };
 
+/** Maintenance + goal-adjusted calorie targets from the backend
+ *  `/profile/calorie-ranges` endpoint. Used to personalize the weekly
+ *  weight-change rate from the user's actual TDEE rather than a flat
+ *  pace constant. Optional — when null, the forecast falls back to the
+ *  static pace table. */
+export type GoalForecastCalorieRanges = {
+  maintenanceCalories: number;
+  cutAdjustmentKcal?: number | null;
+  bulkAdjustmentKcal?: number | null;
+};
+
 export type GoalForecastStat = {
   label: string;
   value: string;
   detail: string;
+};
+
+export type GoalForecastExecutionWeights = {
+  training: number;
+  nutrition: number;
+  recovery: number;
+};
+
+export type GoalForecastExecutionBreakdown = {
+  training: number;
+  nutrition: number;
+  recovery: number;
+  recoveryAssumedNeutral: boolean;
+  weights: GoalForecastExecutionWeights;
+};
+
+/** "By date X you will be at Y" projection — independent of ETA. Always
+ *  projects N weeks out (defaults to WINDOW_WEEKS) at current execution.
+ *  `label` is goal-aware: fat-loss/muscle gives projected scale weight,
+ *  recomp gives fat-loss range (no absolute BF% unless start scan exists). */
+export type GoalForecastHorizon = {
+  weeks: number;
+  /** ISO date (YYYY-MM-DD) for the projection target. */
+  date: string;
+  /** Pre-formatted display string. */
+  label: string;
+  /** Projected scale weight in lbs at the horizon, when applicable. */
+  scaleWeightLbs?: number | null;
+  /** Projected total fat-mass change over the horizon (positive = fat lost). */
+  fatLossLbs?: number | null;
+  /** Projected body-fat % at the horizon. Only set when start scan exists. */
+  bodyFatPct?: number | null;
 };
 
 export type GoalForecastModel = {
@@ -87,7 +131,11 @@ export type GoalForecastModel = {
   metricLabel: string;
   metricValue: string;
   metricDetail: string;
+  rawExecution: number;
+  executionScore: number;
   executionPct: number;
+  forecastMultiplier: number;
+  executionBreakdown: GoalForecastExecutionBreakdown;
   progressPct: number;
   confidence: GoalForecastConfidence;
   confidenceDetail: string;
@@ -97,6 +145,9 @@ export type GoalForecastModel = {
   drivers: string[];
   limiters: string[];
   stats: GoalForecastStat[];
+  /** "In 6 weeks: X" projection. Null when the bucket has no useful
+   *  weight-based forecast (strength / endurance / athletic). */
+  horizonProjection: GoalForecastHorizon | null;
 };
 
 export type BuildGoalForecastInput = {
@@ -110,7 +161,9 @@ export type BuildGoalForecastInput = {
   paceHistory?: GoalForecastPacePoint[] | null;
   oneRepMaxLifts?: GoalForecastLift[] | null;
   bodyScanHistory?: GoalForecastBodyScan[] | null;
+  calorieRanges?: GoalForecastCalorieRanges | null;
   vo2Max?: number | null;
+  avgSleepHours?: number | null;
   weightUnit?: WeightUnit;
   distanceUnit?: DistanceUnit;
   today?: Date;
@@ -123,6 +176,8 @@ const RECENT_DAYS = 14;
 const WEIGHT_TREND_DAYS = 42;
 const WINDOW_WEEKS = 6;
 const MAX_TARGET_ETA_WEEKS = 104;
+const EXECUTION_CAP = 1.08;
+const FORECAST_MULTIPLIER_FLOOR = 0.35;
 
 const FAT_LOSS_GOALS = new Set(['lose_fat', 'fat_loss', 'get_lean', 'cut', 'preserve_muscle_cutting', 'tone', 'get_toned', 'toning']);
 const MUSCLE_GOALS = new Set([
@@ -367,7 +422,38 @@ function latestBodyScan(scans: GoalForecastBodyScan[]): GoalForecastBodyScan | n
     .sort((a, b) => dayMs(String(b.date ?? '')) - dayMs(String(a.date ?? '')))[0] ?? null;
 }
 
-function nutritionExecution(input: {
+export function getExecutionWeights(bucket: GoalForecastBucket): GoalForecastExecutionWeights {
+  if (bucket === 'fat_loss') return { training: 0.25, nutrition: 0.60, recovery: 0.15 };
+  if (bucket === 'muscle_gain') return { training: 0.45, nutrition: 0.40, recovery: 0.15 };
+  if (bucket === 'strength') return { training: 0.55, nutrition: 0.25, recovery: 0.20 };
+  return { training: 0.40, nutrition: 0.45, recovery: 0.15 };
+}
+
+export function computeTrainingExecution(input: {
+  workoutDays: number;
+  plannedDays: number;
+  totalTrainingMinutes?: number | null;
+  activityMinutes?: number | null;
+  expectedMinutes?: number | null;
+}): { score: number; attendanceExecution: number; activityVolume: number } {
+  const plannedDays = Math.max(1, Math.round(finite(input.plannedDays) ?? 1));
+  const workoutDays = Math.max(0, finite(input.workoutDays) ?? 0);
+  const attendanceExecution = clamp(workoutDays / plannedDays, 0, EXECUTION_CAP);
+  const minutes = Math.max(0, finite(input.totalTrainingMinutes) ?? finite(input.activityMinutes) ?? 0);
+  const expectedMinutes = Math.max(1, finite(input.expectedMinutes) ?? Math.max(60, plannedDays * 45));
+  const activityVolume = clamp(minutes / expectedMinutes, 0, EXECUTION_CAP);
+
+  // Attendance is the main training signal. Extra logged activity can lift
+  // the score, but lifting-only users are not penalized for missing cardio.
+  const score = clamp(
+    Math.max(attendanceExecution, attendanceExecution * 0.6 + activityVolume * 0.4),
+    0,
+    EXECUTION_CAP,
+  );
+  return { score, attendanceExecution, activityVolume };
+}
+
+export function computeNutritionExecution(input: {
   meals: { days: number; windowDays: number; trackingPct: number };
   mealAverages: GoalForecastMealAverages | null;
   nutritionScoreWeekly: GoalForecastNutritionWeekly | null;
@@ -377,33 +463,33 @@ function nutritionExecution(input: {
   const limiters: string[] = [];
   const coverage = clamp(input.meals.trackingPct / 100, 0, 1);
   const weeklyScore = finite(input.nutritionScoreWeekly?.avg_score);
-  const scoreComponent = weeklyScore != null && weeklyScore > 0 ? clamp(weeklyScore / 100, 0.35, 1.05) : null;
+  const scoreComponent = weeklyScore != null && weeklyScore > 0 ? clamp(weeklyScore / 100, 0, EXECUTION_CAP) : null;
   const proteinHits = finite(input.nutritionScoreWeekly?.days_hit_protein);
   const calorieHits = finite(input.nutritionScoreWeekly?.days_hit_calories);
-  const scoreDays = finite(input.nutritionScoreWeekly?.days_with_data);
-  const proteinHitRate = proteinHits != null && scoreDays && scoreDays > 0 ? clamp(proteinHits / scoreDays, 0.25, 1.05) : null;
-  const calorieHitRate = calorieHits != null && scoreDays && scoreDays > 0 ? clamp(calorieHits / scoreDays, 0.25, 1.05) : null;
+  const scoreDays = finite(input.nutritionScoreWeekly?.days_with_data) ?? input.meals.days;
+  const proteinHitRate = proteinHits != null && scoreDays && scoreDays > 0 ? clamp(proteinHits / scoreDays, 0, EXECUTION_CAP) : null;
+  const calorieHitRate = calorieHits != null && scoreDays && scoreDays > 0 ? clamp(calorieHits / scoreDays, 0, EXECUTION_CAP) : null;
   const avgProtein = finite(input.mealAverages?.avg_protein_g_when_logged) ?? finite(input.mealAverages?.avg_protein_g);
   const proteinFallback = avgProtein != null && input.currentWeightLbs
-    ? clamp(avgProtein / Math.max(90, input.currentWeightLbs * 0.8), 0.25, 1.05)
+    ? clamp(avgProtein / Math.max(90, input.currentWeightLbs * 0.8), 0, EXECUTION_CAP)
     : null;
-
-  let score = 0.45 * coverage;
-  let remaining = 0.55;
-  if (scoreComponent != null) {
-    score += 0.25 * scoreComponent;
-    remaining -= 0.25;
-  }
   const proteinComponent = proteinHitRate ?? proteinFallback;
-  if (proteinComponent != null) {
-    score += 0.20 * proteinComponent;
-    remaining -= 0.20;
+
+  const targetComponents: Array<{ value: number; weight: number }> = [];
+  if (scoreComponent != null) targetComponents.push({ value: scoreComponent, weight: 0.50 });
+  if (proteinComponent != null) targetComponents.push({ value: proteinComponent, weight: 0.30 });
+  if (calorieHitRate != null) targetComponents.push({ value: calorieHitRate, weight: 0.20 });
+
+  let score: number;
+  if (targetComponents.length > 0) {
+    const totalWeight = targetComponents.reduce((sum, item) => sum + item.weight, 0);
+    const targetAdherence = targetComponents.reduce((sum, item) => sum + item.value * item.weight, 0) / totalWeight;
+    score = 0.30 * coverage + 0.70 * targetAdherence;
+  } else {
+    // Logging matters, but coverage alone should not look like perfect
+    // nutrition execution when calories/protein targets are unknown.
+    score = Math.min(0.70, 0.30 * coverage + 0.40);
   }
-  if (calorieHitRate != null) {
-    score += 0.10 * calorieHitRate;
-    remaining -= 0.10;
-  }
-  score += Math.max(0, remaining) * Math.max(coverage, proteinComponent ?? 0.55);
 
   if (input.meals.days >= Math.ceil(input.meals.windowDays * 0.7)) drivers.push(`${input.meals.days}/${input.meals.windowDays} nutrition days logged`);
   else if (input.meals.days > 0) limiters.push(`only ${input.meals.days}/${input.meals.windowDays} nutrition days logged`);
@@ -418,13 +504,230 @@ function nutritionExecution(input: {
     else limiters.push('calories missed target often');
   }
 
-  return { score: clamp(score, 0.35, 1.05), drivers, limiters };
+  return { score: clamp(score, 0, EXECUTION_CAP), drivers, limiters };
+}
+
+export function computeRecoveryExecution(avgSleepHours?: number | null): { score: number; assumedNeutral: boolean } {
+  if (avgSleepHours == null) {
+    // Recovery is assumed neutral when unavailable so forecasts do not
+    // punish users who have not connected sleep data.
+    return { score: 1.0, assumedNeutral: true };
+  }
+  const sleep = finite(avgSleepHours);
+  if (sleep == null) {
+    return { score: 1.0, assumedNeutral: true };
+  }
+  if (sleep >= 7.0) return { score: 1.0, assumedNeutral: false };
+  if (sleep >= 6.5) return { score: 0.92, assumedNeutral: false };
+  if (sleep >= 6.0) return { score: 0.82, assumedNeutral: false };
+  return { score: 0.70, assumedNeutral: false };
+}
+
+export function computeExecutionScore(input: {
+  bucket: GoalForecastBucket;
+  trainingExecution: number;
+  nutritionExecution: number;
+  recoveryExecution: number;
+}): {
+  rawExecution: number;
+  executionScore: number;
+  executionPct: number;
+  forecastMultiplier: number;
+  weights: GoalForecastExecutionWeights;
+} {
+  const weights = getExecutionWeights(input.bucket);
+  const rawExecution =
+    clamp(input.trainingExecution, 0, EXECUTION_CAP) * weights.training +
+    clamp(input.nutritionExecution, 0, EXECUTION_CAP) * weights.nutrition +
+    clamp(input.recoveryExecution, 0, EXECUTION_CAP) * weights.recovery;
+
+  // User-facing execution is an honest adherence score. The protective
+  // 35% floor belongs only to goal projections, not to display.
+  const executionScore = clamp(rawExecution, 0, EXECUTION_CAP);
+  const forecastMultiplier = clamp(rawExecution, FORECAST_MULTIPLIER_FLOOR, EXECUTION_CAP);
+  return {
+    rawExecution,
+    executionScore,
+    executionPct: Math.round(executionScore * 100),
+    forecastMultiplier,
+    weights,
+  };
 }
 
 function confidenceDetail(confidence: GoalForecastConfidence): string {
   if (confidence === 'high') return 'Training, nutrition, and body signals are populated.';
   if (confidence === 'medium') return 'Enough signal for a directional estimate.';
   return 'Add workouts, meals, and weigh-ins to sharpen this estimate.';
+}
+
+function horizonDate(today: Date, weeks: number): string {
+  const d = new Date(today.getTime() + weeks * 7 * DAY_MS);
+  return dateKey(d);
+}
+
+function weightTrendConfidence(input: { slopeLbsPerWeek: number | null; sampleCount: number; spanDays: number }): number {
+  if (input.slopeLbsPerWeek == null) return 0;
+  if (input.sampleCount >= 6 && input.spanDays >= 21) return 0.70;
+  if (input.sampleCount >= 4 && input.spanDays >= 14) return 0.55;
+  if (input.sampleCount >= 2 && input.spanDays >= 7) return 0.35;
+  return 0;
+}
+
+function projectedFatLossWeeklyRate(input: {
+  plannedWeeklyLoss: number;
+  forecastMultiplier: number;
+  weightSlopeLbsPerWeek: number | null;
+  observedConfidence: number;
+}): number {
+  const planned = input.plannedWeeklyLoss * input.forecastMultiplier;
+  const slope = input.weightSlopeLbsPerWeek;
+  const confidence = clamp(input.observedConfidence, 0, 1);
+  if (slope != null && slope < 0 && confidence > 0) {
+    const observedWeeklyLoss = clamp(Math.abs(slope), 0.1, input.plannedWeeklyLoss * 1.2);
+    // A reliable observed trend already contains real-world adherence, so
+    // blend it with the plan-scaled pace instead of multiplying it again.
+    return Math.max(0.1, observedWeeklyLoss * confidence + planned * (1 - confidence));
+  }
+  return Math.max(0.1, planned);
+}
+
+function buildHorizonProjection(input: {
+  bucket: GoalForecastBucket;
+  weeks: number;
+  today: Date;
+  pace: 'conservative' | 'moderate' | 'aggressive';
+  forecastMultiplier: number;
+  currentWeightLbs: number | null;
+  weightSlopeLbsPerWeek: number | null;
+  weightTrendConfidence: number;
+  startBodyFatPct: number | null;
+  weightUnit: WeightUnit;
+  calorieRanges: GoalForecastCalorieRanges | null;
+}): GoalForecastHorizon | null {
+  const { bucket, weeks, today, pace, forecastMultiplier, currentWeightLbs, weightUnit } = input;
+  const date = horizonDate(today, weeks);
+
+  if (bucket === 'fat_loss') {
+    const fatLossRate = personalizedWeeklyRateLbs({
+      bucket,
+      ranges: input.calorieRanges,
+      fallback: FAT_LOSS_LBS_PER_WEEK[pace],
+      ceiling: FAT_LOSS_LBS_PER_WEEK.aggressive,
+    });
+    const base = fatLossRate.rate;
+    const weeklyLoss = projectedFatLossWeeklyRate({
+      plannedWeeklyLoss: base,
+      forecastMultiplier,
+      weightSlopeLbsPerWeek: input.weightSlopeLbsPerWeek,
+      observedConfidence: input.weightTrendConfidence,
+    });
+    const projectedLoss = round1(weeklyLoss * weeks);
+    const projectedWeight = currentWeightLbs != null
+      ? round1(currentWeightLbs - projectedLoss)
+      : null;
+    const projectedBfPct = input.startBodyFatPct != null && currentWeightLbs != null
+      ? round1(projectBodyFatPct(currentWeightLbs, input.startBodyFatPct, projectedLoss))
+      : null;
+    const weightStr = projectedWeight != null ? formatWeight(projectedWeight, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }) : null;
+    const lossStr = signedWeight(-projectedLoss, weightUnit);
+    const label = weightStr
+      ? `In ${formatWeeks(weeks)}: ${weightStr} (${lossStr} fat est.)`
+      : `In ${formatWeeks(weeks)}: ${lossStr} fat est.`;
+    return { weeks, date, label, scaleWeightLbs: projectedWeight, fatLossLbs: projectedLoss, bodyFatPct: projectedBfPct };
+  }
+
+  if (bucket === 'muscle_gain') {
+    const muscleGainRate = personalizedWeeklyRateLbs({
+      bucket,
+      ranges: input.calorieRanges,
+      fallback: MUSCLE_GAIN_LBS_PER_WEEK[pace],
+      ceiling: MUSCLE_GAIN_LBS_PER_WEEK.aggressive,
+    });
+    const weeklyGain = Math.max(0.05, muscleGainRate.rate * forecastMultiplier);
+    const projectedGain = round1(weeklyGain * weeks);
+    const projectedWeight = currentWeightLbs != null
+      ? round1(currentWeightLbs + projectedGain)
+      : null;
+    const weightStr = projectedWeight != null ? formatWeight(projectedWeight, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }) : null;
+    const label = weightStr
+      ? `In ${formatWeeks(weeks)}: ${weightStr} (${signedWeight(projectedGain, weightUnit)})`
+      : `In ${formatWeeks(weeks)}: ${signedWeight(projectedGain, weightUnit)}`;
+    return { weeks, date, label, scaleWeightLbs: projectedWeight, fatLossLbs: null, bodyFatPct: null };
+  }
+
+  if (bucket === 'body_recomp') {
+    const [low, high] = RECOMP_FAT_LOSS_LBS_PER_WEEK[pace];
+    const fatLow = round1(low * weeks * forecastMultiplier);
+    const fatHigh = round1(high * weeks * forecastMultiplier);
+    const fatMid = round1((fatLow + fatHigh) / 2);
+    // Only project absolute BF% when we have a real starting scan. Without
+    // one, show directional fat-loss only — per product call: never display
+    // an estimated body-fat % the user hasn't measured or entered.
+    const projectedBfPct = input.startBodyFatPct != null && currentWeightLbs != null
+      ? round1(projectBodyFatPct(currentWeightLbs, input.startBodyFatPct, fatMid))
+      : null;
+    const range = `${fatLow.toFixed(1)}–${fatHigh.toFixed(1)} lb`;
+    const label = projectedBfPct != null
+      ? `In ${formatWeeks(weeks)}: ~${projectedBfPct}% BF (-${range} fat est.)`
+      : `In ${formatWeeks(weeks)}: -${range} fat est., scale ±1 lb`;
+    return { weeks, date, label, scaleWeightLbs: null, fatLossLbs: fatMid, bodyFatPct: projectedBfPct };
+  }
+
+  return null;
+}
+
+/** Estimate BF% N weeks out assuming the projected fat loss is real
+ *  fat (LBM preserved). Anchors LBM on the start scan + current weight.
+ *  Used for fat-loss + recomp horizon projections. */
+function projectBodyFatPct(
+  currentWeightLbs: number,
+  startBfPct: number,
+  fatLossLbs: number,
+): number {
+  const currentFat = currentWeightLbs * (startBfPct / 100);
+  const currentLean = currentWeightLbs - currentFat;
+  const newFat = Math.max(0, currentFat - fatLossLbs);
+  const newWeight = currentLean + newFat;
+  return newWeight > 0 ? (newFat / newWeight) * 100 : 0;
+}
+
+const KCAL_PER_LB_FAT = 3500;
+// Hypertrophy efficiency — only ~50% of a muscle-gain surplus shows up as
+// scale weight at moderate paces (the rest is metabolic/water/glycogen
+// noise that doesn't persist). Without this derate, +300 kcal/day surplus
+// would project +0.6 lb/wk, which overstates actual lean accrual by ~2×.
+const MUSCLE_GAIN_KCAL_EFFICIENCY = 0.5;
+
+/** Convert the user's actual daily kcal adjustment to a projected weekly
+ *  scale-weight change. Returns `fallback` when calorieRanges or the
+ *  required adjustment field is absent. Capped at 120% of the aggressive
+ *  pace constant so a misconfigured target can't produce absurd numbers
+ *  (e.g. a 1500-kcal deficit on a 130-lb user). */
+function personalizedWeeklyRateLbs(input: {
+  bucket: GoalForecastBucket;
+  ranges: GoalForecastCalorieRanges | null | undefined;
+  fallback: number;
+  ceiling: number;
+}): { rate: number; personalized: boolean } {
+  const { bucket, ranges, fallback, ceiling } = input;
+  if (!ranges || !Number.isFinite(ranges.maintenanceCalories)) {
+    return { rate: fallback, personalized: false };
+  }
+  const adj = bucket === 'fat_loss'
+    ? finite(ranges.cutAdjustmentKcal)
+    : bucket === 'muscle_gain'
+      ? finite(ranges.bulkAdjustmentKcal)
+      : null;
+  if (adj == null || adj === 0) {
+    return { rate: fallback, personalized: false };
+  }
+  const efficiency = bucket === 'muscle_gain' ? MUSCLE_GAIN_KCAL_EFFICIENCY : 1;
+  const rawRate = (Math.abs(adj) * 7 / KCAL_PER_LB_FAT) * efficiency;
+  // Floor at half the fallback so a near-maintenance setup still projects
+  // *some* progress, ceiling at 120% of aggressive so demographic outliers
+  // don't render impossible numbers.
+  const rate = clamp(rawRate, fallback * 0.5, ceiling * 1.2);
+  return { rate, personalized: true };
 }
 
 function titleForBucket(bucket: GoalForecastBucket): string {
@@ -450,26 +753,47 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
   const summaries = input.summaries ?? [];
   const workoutDays14 = countRecentWorkoutDays(history, summaries, today);
   const planned14 = Math.max(1, Math.round(finite(profile.daysPerWeek) ?? 3) * 2);
-  const trainingExecution = clamp(workoutDays14 / planned14, 0, 1.15);
+  const cardioMiles14 = (input.paceHistory ?? [])
+    .filter(point => inRecentWindow(point.date, today, RECENT_DAYS))
+    .reduce((sum, point) => sum + Math.max(0, finite(point.distance) ?? 0), 0);
+  const recentSummaries = summaries.filter(row => inRecentWindow(row.date, today, RECENT_DAYS));
+  const totalTrainingMinutes14 = recentSummaries
+    .reduce((sum, row) => sum + Math.round((finite(row.durationSeconds) ?? 0) / 60), 0);
+  const cardioMinutes14 = recentSummaries
+    .filter(row => (finite(row.totalSets) ?? 0) <= 0)
+    .reduce((sum, row) => sum + Math.round((finite(row.durationSeconds) ?? 0) / 60), 0);
+  const legacyActivityMinutes14 = summaries
+    .filter(row => inRecentWindow(row.date, today, RECENT_DAYS))
+    .reduce((sum, row) => sum + Math.round((finite(row.durationSeconds) ?? 0) / 60), 0);
+  const expectedMinutes14 = Math.max(60, planned14 * 45);
+  const training = computeTrainingExecution({
+    workoutDays: workoutDays14,
+    plannedDays: planned14,
+    totalTrainingMinutes: totalTrainingMinutes14,
+    activityMinutes: legacyActivityMinutes14,
+    expectedMinutes: expectedMinutes14,
+  });
+  const trainingExecution = training.score;
   const weights = weightTrend(input.weightEntries ?? [], today);
+  const trendConfidence = weightTrendConfidence(weights);
   const currentWeight = weights.latestWeightLbs ?? finite(profile.physicalStats?.weightLbs);
   const targetWeight = finite(profile.goalDetails?.targetWeightLbs);
   const bodyScan = latestBodyScan(input.bodyScanHistory ?? []);
   const meals = countRecentMealDays(input.mealHistory ?? [], input.mealAverages ?? null, input.nutritionScoreWeekly ?? null, today);
-  const nutrition = nutritionExecution({
+  const nutrition = computeNutritionExecution({
     meals,
     mealAverages: input.mealAverages ?? null,
     nutritionScoreWeekly: input.nutritionScoreWeekly ?? null,
     currentWeightLbs: currentWeight,
   });
-  const execution = clamp(trainingExecution * 0.40 + nutrition.score * 0.50 + 0.10, 0.35, 1.08);
-  const executionPct = Math.round(execution * 100);
-  const cardioMiles14 = (input.paceHistory ?? [])
-    .filter(point => inRecentWindow(point.date, today, RECENT_DAYS))
-    .reduce((sum, point) => sum + Math.max(0, finite(point.distance) ?? 0), 0);
-  const cardioMinutes14 = summaries
-    .filter(row => inRecentWindow(row.date, today, RECENT_DAYS))
-    .reduce((sum, row) => sum + Math.round((finite(row.durationSeconds) ?? 0) / 60), 0);
+  const recovery = computeRecoveryExecution(input.avgSleepHours);
+  const execution = computeExecutionScore({
+    bucket,
+    trainingExecution,
+    nutritionExecution: nutrition.score,
+    recoveryExecution: recovery.score,
+  });
+  const { rawExecution, executionScore, executionPct, forecastMultiplier } = execution;
 
   const drivers: string[] = [];
   const limiters: string[] = [];
@@ -481,25 +805,33 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
   const bodySignal = bodyScan != null || weights.slopeLbsPerWeek != null || (currentWeight != null && targetWeight != null);
   const confidenceScore = (workoutDays14 >= 2 ? 1 : 0) + (meals.days >= 4 ? 2 : meals.days >= 2 ? 1 : 0) + (bodySignal ? 1 : 0);
   const confidence: GoalForecastConfidence = confidenceScore >= 4 ? 'high' : confidenceScore >= 2 ? 'medium' : 'low';
-  const tone: GoalForecastTone = execution >= 0.78 ? 'success' : execution < 0.58 ? 'warning' : 'neutral';
+  const tone: GoalForecastTone = executionScore >= 0.78 ? 'success' : executionScore < 0.58 ? 'warning' : 'neutral';
   const assumption = `Assumes the next ${formatWeeks(projectionWeeks)} look like your current plan execution.`;
   const updateReason = limiters.length > 0
     ? `Estimate adjusted down because ${limiters[0]}.`
     : 'Estimate held because training and nutrition are supporting the goal.';
 
-  let headline = `At current pace: ${Math.round((workoutDays14 / 2) * projectionWeeks * execution)} training days in ${formatWeeks(projectionWeeks)}`;
+  let headline = `At current pace: ${Math.round((workoutDays14 / 2) * projectionWeeks * forecastMultiplier)} training days in ${formatWeeks(projectionWeeks)}`;
   let subheadline = `${timing.startedLabel}; current training and nutrition set this estimate.`;
   let metricLabel = 'Consistency';
-  let metricValue = `${Math.round((workoutDays14 / 2) * projectionWeeks * execution)} days`;
+  let metricValue = `${Math.round((workoutDays14 / 2) * projectionWeeks * forecastMultiplier)} days`;
   let metricDetail = `${executionPct}% current execution`;
-  let progressPct = execution;
+  let progressPct = executionScore;
 
   if (bucket === 'fat_loss') {
-    const base = FAT_LOSS_LBS_PER_WEEK[pace];
-    const observed = weights.slopeLbsPerWeek != null && weights.slopeLbsPerWeek < 0
-      ? Math.min(base, Math.abs(weights.slopeLbsPerWeek) * 0.55 + base * 0.45)
-      : base;
-    const weeklyLoss = Math.max(0.1, observed * execution);
+    const fatLossRate = personalizedWeeklyRateLbs({
+      bucket,
+      ranges: input.calorieRanges ?? null,
+      fallback: FAT_LOSS_LBS_PER_WEEK[pace],
+      ceiling: FAT_LOSS_LBS_PER_WEEK.aggressive,
+    });
+    const base = fatLossRate.rate;
+    const weeklyLoss = projectedFatLossWeeklyRate({
+      plannedWeeklyLoss: base,
+      forecastMultiplier,
+      weightSlopeLbsPerWeek: weights.slopeLbsPerWeek,
+      observedConfidence: trendConfidence,
+    });
     let loss = round1(weeklyLoss * projectionWeeks);
     if (targetWeight != null && currentWeight != null && currentWeight > targetWeight) {
       const remaining = currentWeight - targetWeight;
@@ -528,7 +860,13 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
       subheadline = `${timing.startedLabel}; estimate blends goal pace, nutrition, training, and weight trend.`;
     }
   } else if (bucket === 'muscle_gain') {
-    const weeklyGain = Math.max(0.05, MUSCLE_GAIN_LBS_PER_WEEK[pace] * execution);
+    const muscleGainRate = personalizedWeeklyRateLbs({
+      bucket,
+      ranges: input.calorieRanges ?? null,
+      fallback: MUSCLE_GAIN_LBS_PER_WEEK[pace],
+      ceiling: MUSCLE_GAIN_LBS_PER_WEEK.aggressive,
+    });
+    const weeklyGain = Math.max(0.05, muscleGainRate.rate * forecastMultiplier);
     const gain = round1(weeklyGain * projectionWeeks);
     if (targetWeight != null && currentWeight != null && currentWeight < targetWeight) {
       const remaining = targetWeight - currentWeight;
@@ -556,8 +894,8 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
     }
   } else if (bucket === 'body_recomp') {
     const [low, high] = RECOMP_FAT_LOSS_LBS_PER_WEEK[pace];
-    const fatLow = round1(low * projectionWeeks * execution);
-    const fatHigh = round1(high * projectionWeeks * execution);
+    const fatLow = round1(low * projectionWeeks * forecastMultiplier);
+    const fatHigh = round1(high * projectionWeeks * forecastMultiplier);
     const fatMid = round1(((fatLow + fatHigh) / 2));
     metricValue = signedWeight(-fatMid, weightUnit);
     if (currentWeight && currentWeight > 0) {
@@ -573,7 +911,7 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
       ? `${timing.startedLabel}; latest scan ${bodyScan.bodyFatPct}% body fat.`
       : `${timing.startedLabel}; assumes scale stays mostly stable while strength and protein stay consistent.`;
   } else if (bucket === 'strength') {
-    const pct = round1(STRENGTH_GAIN_PCT_6W[pace] * (projectionWeeks / WINDOW_WEEKS) * execution);
+    const pct = round1(STRENGTH_GAIN_PCT_6W[pace] * (projectionWeeks / WINDOW_WEEKS) * forecastMultiplier);
     const topLift = (input.oneRepMaxLifts ?? []).find(lift => finite(lift.oneRepMaxLbs) != null);
     metricValue = signedPct(pct);
     metricLabel = 'Strength marker';
@@ -581,10 +919,10 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
     headline = `At current pace: ${metricValue} strength marker in ${formatWeeks(projectionWeeks)}`;
     subheadline = `${timing.startedLabel}; estimate uses lifting adherence, nutrition, and recovery consistency.`;
   } else if (bucket === 'endurance' || bucket === 'hyrox') {
-    const cardioExecution = clamp(trainingExecution * 0.65 + nutrition.score * 0.20 + 0.15, 0.35, 1.1);
+    const cardioExecution = clamp(trainingExecution * 0.65 + nutrition.score * 0.20 + recovery.score * 0.15, FORECAST_MULTIPLIER_FLOOR, EXECUTION_CAP);
     const vo2Gain = Math.max(0.1, round1(VO2_GAIN_6W[pace] * (projectionWeeks / WINDOW_WEEKS) * cardioExecution));
-    const projectedMiles = cardioMiles14 > 0 ? (cardioMiles14 / 2) * projectionWeeks * Math.max(0.65, execution) : 0;
-    const projectedMinutes = Math.round((cardioMinutes14 / 2) * projectionWeeks * Math.max(0.65, execution));
+    const projectedMiles = cardioMiles14 > 0 ? (cardioMiles14 / 2) * projectionWeeks * Math.max(0.65, forecastMultiplier) : 0;
+    const projectedMinutes = Math.round((cardioMinutes14 / 2) * projectionWeeks * Math.max(0.65, forecastMultiplier));
     metricValue = signedVo2(vo2Gain);
     metricLabel = bucket === 'hyrox' ? 'Hybrid VO2 estimate' : 'VO2 estimate';
     metricDetail = input.vo2Max != null
@@ -595,7 +933,7 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
     headline = `At current pace: ${metricValue} VO2 Max in ${formatWeeks(projectionWeeks)}`;
     subheadline = `${timing.startedLabel}; estimate updates from logged cardio and training consistency.`;
   } else if (bucket === 'athletic') {
-    const projectedDays = Math.round((workoutDays14 / 2) * projectionWeeks * Math.max(0.65, execution));
+    const projectedDays = Math.round((workoutDays14 / 2) * projectionWeeks * Math.max(0.65, forecastMultiplier));
     metricValue = `${projectedDays} days`;
     metricLabel = 'Performance prep';
     metricDetail = `${executionPct}% current execution`;
@@ -613,6 +951,23 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
         : { label: 'Execution', value: `${executionPct}%`, detail: 'current plan' },
   ];
 
+  // Fixed-horizon projection ("In 6 weeks: X"). Independent of ETA so
+  // the card always shows a forward-looking number even when the user
+  // has no target weight set.
+  const horizonProjection = buildHorizonProjection({
+    bucket,
+    weeks: WINDOW_WEEKS,
+    today,
+    pace,
+    forecastMultiplier,
+    currentWeightLbs: currentWeight ?? null,
+    weightSlopeLbsPerWeek: weights.slopeLbsPerWeek,
+    weightTrendConfidence: trendConfidence,
+    startBodyFatPct: finite(profile.goalDetails?.startBodyFatPct),
+    weightUnit,
+    calorieRanges: input.calorieRanges ?? null,
+  });
+
   return {
     bucket,
     title: titleForBucket(bucket),
@@ -621,7 +976,17 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
     metricLabel,
     metricValue,
     metricDetail,
+    rawExecution,
+    executionScore,
     executionPct,
+    forecastMultiplier,
+    executionBreakdown: {
+      training: trainingExecution,
+      nutrition: nutrition.score,
+      recovery: recovery.score,
+      recoveryAssumedNeutral: recovery.assumedNeutral,
+      weights: execution.weights,
+    },
     progressPct: clamp(progressPct, 0, 1),
     confidence,
     confidenceDetail: confidenceDetail(confidence),
@@ -631,5 +996,6 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
     drivers: drivers.slice(0, 3),
     limiters: limiters.slice(0, 3),
     stats,
+    horizonProjection,
   };
 }

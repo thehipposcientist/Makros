@@ -97,6 +97,24 @@ def test_carb_floor():
     print(f"  ✓ carb floor enforced ({out.carbs_g}g)")
 
 
+def test_fat_floor_reduces_carb_upshift():
+    print("[test] fat floor limits carb upshift")
+    base = MacroSet(
+        calories=2335,
+        protein_g=180,
+        carbs_g=280,
+        fat_g=55,
+        fat_floor_g=50,
+    )
+    out = redistribute_macros(base, day_type="heavy")
+    assert out.fat_g >= 50, f"fat floor breached: {out.fat_g}"
+    assert 0 < out.carbs_g - base.carbs_g < 25, (
+        f"expected reduced carb shift, got {out.carbs_g - base.carbs_g}"
+    )
+    assert_close(out.calories, base.calories, 6, "calories after reduced shift")
+    print(f"  ✓ carb shift reduced to +{out.carbs_g - base.carbs_g}g while fat held at {out.fat_g}g")
+
+
 def test_redistribute_for_day_wrapper():
     print("[test] redistribute_for_day classifies + redistributes")
     base = base_macros()
@@ -112,5 +130,6 @@ if __name__ == "__main__":
     test_goal_caps()
     test_calorie_invariant()
     test_carb_floor()
+    test_fat_floor_reduces_carb_upshift()
     test_redistribute_for_day_wrapper()
     print("\n✅ test_carb_distribution.py PASSED")

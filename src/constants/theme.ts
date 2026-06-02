@@ -2,12 +2,15 @@ import { Platform, TextStyle, ViewStyle } from 'react-native';
 
 export type AppThemeName =
   | 'midnight' | 'ocean'    | 'amethyst'
-  | 'ember'    | 'wine'     | 'obsidian'
-  | 'blossom'  | 'void'     | 'dusk'     | 'lavender' | 'aurora' | 'evergreen'
-  | 'sunrise'  | 'parchment'| 'linen'    | 'mint'
-  | 'butter'   | 'seaglass' | 'lilac'    | 'sky'
-  | 'porcelain'| 'citrus'
-  | 'slate'    | 'ash'      | 'cosmos'
+  | 'ember'    | 'infrared' | 'wine'     | 'obsidian' | 'carbon'
+  | 'blossom'  | 'orchid'   | 'void'     | 'dusk'     | 'lavender' | 'aurora' | 'alpine'
+  | 'sunrise'  | 'cardinal' | 'parchment'| 'linen'
+  // Light green-on-white companion to obsidian (Black Gold) — same
+  // minimal-luxury feel on a clean white surface.
+  | 'clover'
+  | 'butter'   | 'summer'   | 'lilac'    | 'sky'      | 'glacier'
+  | 'citrus'   | 'terra'
+  | 'slate'    | 'graphite' | 'ash'      | 'cosmos'
   | 'cinder'   | 'smoke'    | 'maroon'
   | 'rose'
   // Minimalist monochrome — no color identity, just grayscale tiers.
@@ -54,6 +57,8 @@ export interface AppTheme {
   };
 }
 
+export const DEFAULT_THEME_NAME: AppThemeName = 'aurora';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Section color philosophy:
 //   Each theme's workout / meals / ai section palette reflects that theme's
@@ -67,7 +72,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
   midnight: {
     name: 'midnight',
     label: 'Midnight Pulse',
-    description: 'Pitch-black with teal primary — the clean dark default.',
+    description: 'Pitch-black with teal primary — clean, dark, and focused.',
     colors: {
       background:    '#0D0F14',
       surface:       '#161A22',
@@ -79,7 +84,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#7CFCB2',
       textPrimary:   '#F5F7FB',
       textSecondary: '#A8B3C7',
-      textMuted:     '#687388',
+      textMuted:     '#828B9C',
       error:         '#FF5D73',
       warning:       '#FFB454',
       success:       '#59D98E',
@@ -108,7 +113,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FF6858',
       textPrimary:   '#E4F4FF',
       textSecondary: '#88B4D4',
-      textMuted:     '#4C7090',
+      textMuted:     '#6C8AA4',
       error:         '#FF5060',
       warning:       '#F0A820',
       success:       '#28C870',
@@ -131,13 +136,13 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#12091E',
       surfaceRaised: '#1C1030',
       border:        '#2E1850',
-      primary:       '#9838F8',
+      primary:       '#A654F9',
       primaryDark:   '#7020C8',
       primaryLight:  '#C888FF',
       accent:        '#28E8C0',
       textPrimary:   '#F0E8FF',
       textSecondary: '#B098D8',
-      textMuted:     '#706890',
+      textMuted:     '#837C9E',
       error:         '#FF4868',
       warning:       '#E0A030',
       success:       '#38C888',
@@ -168,7 +173,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FFD020',
       textPrimary:   '#FFF8F0',
       textSecondary: '#D0A888',
-      textMuted:     '#907060',
+      textMuted:     '#987A6B',
       error:         '#FF3030',
       warning:       '#FFD020',
       success:       '#50C060',
@@ -182,6 +187,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
+  infrared: {
+    name: 'infrared',
+    label: 'Infrared Night',
+    description: 'Near-black charcoal with hot red-orange primary and icy cyan contrast — high-energy without the full flame palette.',
+    colors: {
+      background:    '#08090B',
+      surface:       '#111418',
+      surfaceRaised: '#1B2026',
+      border:        '#2D3740',
+      primary:       '#FF3D2E',
+      primaryDark:   '#C51C14',
+      primaryLight:  '#FF8A72',
+      accent:        '#38D8F0',
+      textPrimary:   '#F7F3F0',
+      textSecondary: '#B7A9A2',
+      textMuted:     '#8F8582',
+      error:         '#FF4A5A',
+      warning:       '#F2A93B',
+      success:       '#45C878',
+    },
+    sections: {
+      workout: { soft: '#2C100C', strong: '#FF3D2E', text: '#FFA090' },
+      meals:   { soft: '#0A2022', strong: '#38D8F0', text: '#98EEF8' },
+      ai:      { soft: '#18122A', strong: '#8C78F0', text: '#C8BFFF' },
+      planner: { soft: '#271A08', strong: '#F2A93B', text: '#F8D590' },
+      account: { soft: '#241018', strong: '#FF5C86', text: '#FFB0C8' },
+    },
+  },
+
   wine: {
     name: 'wine',
     label: 'Merlot Dark',
@@ -191,13 +225,13 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#1C0B10',
       surfaceRaised: '#2A1018',
       border:        '#461828',
-      primary:       '#C82848',
+      primary:       '#D45770',
       primaryDark:   '#9A1830',
       primaryLight:  '#E87898',
       accent:        '#D0A040',
       textPrimary:   '#F8EEF0',
       textSecondary: '#C898A8',
-      textMuted:     '#886070',
+      textMuted:     '#9A7885',
       error:         '#FF3848',
       warning:       '#D4A020',
       success:       '#3AB870',
@@ -226,8 +260,8 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#7898C8',
       textPrimary:   '#F0EAD8',
       textSecondary: '#B0A888',
-      textMuted:     '#706850',
-      error:         '#CC3838',
+      textMuted:     '#88826E',
+      error:         '#D45858',
       warning:       '#C09020',
       success:       '#3EA858',
     },
@@ -237,6 +271,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#0C1428', strong: '#4878C8', text: '#98B8EE' },
       planner: { soft: '#181408', strong: '#E0B840', text: '#F8E080' },
       account: { soft: '#181408', strong: '#A88020', text: '#DCC060' },
+    },
+  },
+
+  carbon: {
+    name: 'carbon',
+    label: 'Carbon Ruby',
+    description: 'Matte carbon black with ruby primary and cool steel-blue contrast — sharp, modern, and controlled.',
+    colors: {
+      background:    '#080A0D',
+      surface:       '#11151A',
+      surfaceRaised: '#1B222A',
+      border:        '#2A3440',
+      primary:       '#E35684',
+      primaryDark:   '#9F123F',
+      primaryLight:  '#FF6F9A',
+      accent:        '#5DA9E9',
+      textPrimary:   '#F4F7FA',
+      textSecondary: '#A9B5C0',
+      textMuted:     '#7F8B95',
+      error:         '#FF4A64',
+      warning:       '#E8A83A',
+      success:       '#48C878',
+    },
+    sections: {
+      workout: { soft: '#24101A', strong: '#D91E5B', text: '#FF8CAE' },
+      meals:   { soft: '#0E241B', strong: '#48C878', text: '#9BE8B8' },
+      ai:      { soft: '#0E1A2A', strong: '#5DA9E9', text: '#A6D4FF' },
+      planner: { soft: '#201828', strong: '#9B72E8', text: '#CAB0FF' },
+      account: { soft: '#241A0C', strong: '#E8A83A', text: '#F6D184' },
     },
   },
 
@@ -251,14 +314,14 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#222C3E',
       surfaceRaised: '#2C3850',
       border:        '#3A4C66',
-      primary:       '#F07848',
+      primary:       '#F18357',
       primaryDark:   '#C05828',
       primaryLight:  '#F8A880',
       accent:        '#40C8D0',
       textPrimary:   '#E8F4FF',
       textSecondary: '#A8C0D8',
-      textMuted:     '#6888A8',
-      error:         '#FF5058',
+      textMuted:     '#8BA3BC',
+      error:         '#FF757B',
       warning:       '#F0A030',
       success:       '#40C878',
     },
@@ -268,6 +331,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#201408', strong: '#F07848', text: '#F8C0A0' },
       planner: { soft: '#1E1840', strong: '#7870E8', text: '#C0B8FF' },
       account: { soft: '#0E2010', strong: '#40C878', text: '#98E8B0' },
+    },
+  },
+
+  graphite: {
+    name: 'graphite',
+    label: 'Graphite Volt',
+    description: 'Dark graphite panels with lime-yellow primary and cobalt contrast — sporty, sharp, and kinetic.',
+    colors: {
+      background:    '#111315',
+      surface:       '#1A1D20',
+      surfaceRaised: '#242A2E',
+      border:        '#384047',
+      primary:       '#D6F23A',
+      primaryDark:   '#A6C20F',
+      primaryLight:  '#EBFF7A',
+      accent:        '#4C7DFF',
+      textPrimary:   '#F3F6F0',
+      textSecondary: '#AEB8B0',
+      textMuted:     '#89928D',
+      error:         '#F15F5F',
+      warning:       '#E8B840',
+      success:       '#55C878',
+    },
+    sections: {
+      workout: { soft: '#1D240A', strong: '#D6F23A', text: '#ECFF8A' },
+      meals:   { soft: '#0E2318', strong: '#55C878', text: '#A0E8B8' },
+      ai:      { soft: '#101832', strong: '#4C7DFF', text: '#A8C0FF' },
+      planner: { soft: '#241C08', strong: '#E8B840', text: '#F4D780' },
+      account: { soft: '#231014', strong: '#E85C78', text: '#F8A8B8' },
     },
   },
 
@@ -288,7 +380,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FFD020',
       textPrimary:   '#FFF0F8',
       textSecondary: '#D098B8',
-      textMuted:     '#906880',
+      textMuted:     '#A07D92',
       error:         '#FF3048',
       warning:       '#FFD020',
       success:       '#40C870',
@@ -299,6 +391,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#300830', strong: '#FF1890', text: '#FF90D0' },
       planner: { soft: '#281808', strong: '#FFD020', text: '#FFF080' },
       account: { soft: '#300828', strong: '#FF40A0', text: '#FFA8D8' },
+    },
+  },
+
+  orchid: {
+    name: 'orchid',
+    label: 'Orchid Dusk',
+    description: 'Medium-dark plum with rose-pink primary and cool aqua contrast — pink, soft, and still evening-weight.',
+    colors: {
+      background:    '#241724',
+      surface:       '#302230',
+      surfaceRaised: '#3D2B3B',
+      border:        '#5B3A55',
+      primary:       '#F169A7',
+      primaryDark:   '#BC2F70',
+      primaryLight:  '#FF9BC8',
+      accent:        '#4FD0C8',
+      textPrimary:   '#FFF1F8',
+      textSecondary: '#D2A8BE',
+      textMuted:     '#AA92A0',
+      error:         '#F26E77',
+      warning:       '#D9A441',
+      success:       '#4BC47A',
+    },
+    sections: {
+      workout: { soft: '#231D36', strong: '#8E78E8', text: '#CDBFFF' },
+      meals:   { soft: '#1B302D', strong: '#4FD0C8', text: '#A8F1EA' },
+      ai:      { soft: '#361A2B', strong: '#F05A9E', text: '#FFADCF' },
+      planner: { soft: '#34270E', strong: '#D9A441', text: '#F0CF78' },
+      account: { soft: '#2E1B28', strong: '#C87AB8', text: '#F2B9DF' },
     },
   },
 
@@ -319,7 +440,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FF6B6B',
       textPrimary:   '#FFFFFF',
       textSecondary: '#B0B0B0',
-      textMuted:     '#666666',
+      textMuted:     '#7E7E7E',
       error:         '#FF4444',
       warning:       '#FFB020',
       success:       '#44CC66',
@@ -348,8 +469,8 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#A088D8',
       textPrimary:   '#EAE6F0',
       textSecondary: '#A8A0C0',
-      textMuted:     '#686080',
-      error:         '#E85050',
+      textMuted:     '#8B859D',
+      error:         '#E95555',
       warning:       '#D8A040',
       success:       '#48B878',
     },
@@ -377,7 +498,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#78D8B0',
       textPrimary:   '#EEE8F8',
       textSecondary: '#B0A0C8',
-      textMuted:     '#706488',
+      textMuted:     '#8E85A1',
       error:         '#E86070',
       warning:       '#D8A848',
       success:       '#58C888',
@@ -406,7 +527,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#60B8F0',
       textPrimary:   '#E8F0F8',
       textSecondary: '#90A8C0',
-      textMuted:     '#506878',
+      textMuted:     '#778996',
       error:         '#F06070',
       warning:       '#E8B040',
       success:       '#40D888',
@@ -420,32 +541,32 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  evergreen: {
-    name: 'evergreen',
-    label: 'Evergreen Night',
-    description: 'Deep forest green with mint primary and warm amber contrast - grounded and dark.',
+  alpine: {
+    name: 'alpine',
+    label: 'Alpine Copper',
+    description: 'Deep green-black with alpine green primary and burnished copper contrast — natural, strong, and premium.',
     colors: {
-      background:    '#06110C',
-      surface:       '#0B1A12',
-      surfaceRaised: '#12251A',
-      border:        '#1F3A2A',
-      primary:       '#42D982',
-      primaryDark:   '#1FA35A',
-      primaryLight:  '#92F2B8',
-      accent:        '#D6A13A',
-      textPrimary:   '#ECF8EF',
-      textSecondary: '#9FC4A8',
-      textMuted:     '#5E7D68',
-      error:         '#F05A64',
-      warning:       '#D6A13A',
-      success:       '#4ED88A',
+      background:    '#07110E',
+      surface:       '#0E1C17',
+      surfaceRaised: '#162720',
+      border:        '#264236',
+      primary:       '#3EBC78',
+      primaryDark:   '#20824F',
+      primaryLight:  '#8BE0AF',
+      accent:        '#C77A3C',
+      textPrimary:   '#EAF7F0',
+      textSecondary: '#9AB8A8',
+      textMuted:     '#799084',
+      error:         '#E55D5D',
+      warning:       '#D99A38',
+      success:       '#46C27D',
     },
     sections: {
-      workout: { soft: '#0A2214', strong: '#42D982', text: '#9EF2BC' },
-      meals:   { soft: '#231B08', strong: '#D6A13A', text: '#F2CD78' },
-      ai:      { soft: '#071C20', strong: '#38C8D0', text: '#92E8EC' },
-      planner: { soft: '#14200C', strong: '#A6D94A', text: '#D8F298' },
-      account: { soft: '#241008', strong: '#D77A3D', text: '#F0AE80' },
+      workout: { soft: '#0C2418', strong: '#3EBC78', text: '#98E8B8' },
+      meals:   { soft: '#271608', strong: '#C77A3C', text: '#E8B07C' },
+      ai:      { soft: '#0A1C24', strong: '#48B8D8', text: '#9ADCF0' },
+      planner: { soft: '#1A240A', strong: '#9BC44A', text: '#CFE88A' },
+      account: { soft: '#241408', strong: '#D69048', text: '#F0C088' },
     },
   },
 
@@ -460,16 +581,16 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#FFFDF9',
       surfaceRaised: '#FDEDDC',
       border:        '#E8CDB5',
-      primary:       '#F28C28',
+      primary:       '#A05C1A',
       primaryDark:   '#D46F0A',
       primaryLight:  '#FBC98C',
       accent:        '#D96C8B',
       textPrimary:   '#402A1E',
       textSecondary: '#75584A',
-      textMuted:     '#A2806D',
-      error:         '#D64545',
-      warning:       '#D99A00',
-      success:       '#2F9E66',
+      textMuted:     '#826657',
+      error:         '#C13E3E',
+      warning:       '#8F6600',
+      success:       '#257B50',
     },
     sections: {
       workout: { soft: '#DDEEFF', strong: '#3A82CC', text: '#1A4A88' },
@@ -480,27 +601,56 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
+  cardinal: {
+    name: 'cardinal',
+    label: 'Cardinal Studio',
+    description: 'Clean white-ivory surfaces with cardinal red primary and deep navy contrast — premium, crisp, and assertive.',
+    colors: {
+      background:    '#FFF9F6',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#F7EAE6',
+      border:        '#E4C6C0',
+      primary:       '#B51F34',
+      primaryDark:   '#841122',
+      primaryLight:  '#E36478',
+      accent:        '#153A66',
+      textPrimary:   '#251015',
+      textSecondary: '#63424A',
+      textMuted:     '#7F646A',
+      error:         '#C52232',
+      warning:       '#955F0F',
+      success:       '#28794A',
+    },
+    sections: {
+      workout: { soft: '#DDE8F6', strong: '#153A66', text: '#0C2542' },
+      meals:   { soft: '#DCEFE3', strong: '#287A4B', text: '#0C3A20' },
+      ai:      { soft: '#F7DCE2', strong: '#B51F34', text: '#5A0E1A' },
+      planner: { soft: '#F8E9CA', strong: '#B87512', text: '#553300' },
+      account: { soft: '#E9E0F4', strong: '#6E4AA8', text: '#2C1858' },
+    },
+  },
+
   // ── LIGHT / NEUTRAL ──────────────────────────────────────────────────────────
 
   parchment: {
     name: 'parchment',
     label: 'Parchment & Bark',
-    description: 'Clean white background with warm coffee-brown primary — natural, calm, and earthy.',
+    description: 'Warm parchment-tan background with coffee-brown primary — natural, calm, and earthy.',
     colors: {
-      background:    '#FAF7F4',
-      surface:       '#FFFFFF',
-      surfaceRaised: '#F0EAE2',
-      border:        '#D8C8B8',
+      background:    '#F1E8D6',
+      surface:       '#FBF5E8',
+      surfaceRaised: '#E5D7C0',
+      border:        '#C9B594',
       primary:       '#7C4F2A',
       primaryDark:   '#5A3418',
       primaryLight:  '#B08A60',
       accent:        '#C07830',
       textPrimary:   '#2A1E14',
       textSecondary: '#6A4E38',
-      textMuted:     '#A08870',
-      error:         '#C43030',
-      warning:       '#B87800',
-      success:       '#307848',
+      textMuted:     '#6D5C4C',
+      error:         '#B22C2C',
+      warning:       '#835500',
+      success:       '#2B6B40',
     },
     sections: {
       workout: { soft: '#E8E0D8', strong: '#7C4F2A', text: '#3A200C' },
@@ -520,16 +670,16 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#FFFDF6',
       surfaceRaised: '#EFE8D8',
       border:        '#D4CAB4',
-      primary:       '#6A8030',
+      primary:       '#5C6F2A',
       primaryDark:   '#4A5A1A',
       primaryLight:  '#9CB058',
       accent:        '#B85830',
       textPrimary:   '#1E2410',
       textSecondary: '#4C5A34',
-      textMuted:     '#8A9468',
+      textMuted:     '#656C4C',
       error:         '#B8342C',
-      warning:       '#B07020',
-      success:       '#3A7A48',
+      warning:       '#925D1B',
+      success:       '#387545',
     },
     sections: {
       workout: { soft: '#E8F0D4', strong: '#6A8030', text: '#2A4010' },
@@ -540,32 +690,36 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  mint: {
-    name: 'mint',
-    label: 'Mint Fresh',
-    description: 'Pale mint background with deep teal primary and coral accent — clean, cool, refreshing.',
+  // Crisp white background with deep clover green as the only accent.
+  // Light minimal-luxury counterpart to `obsidian` (Black Gold) — same
+  // clean single-accent identity, just green-on-white instead of
+  // gold-on-black.
+  clover: {
+    name: 'clover',
+    label: 'Clover White',
+    description: 'Crisp white background with deep clover green as the only accent — clean, fresh, the green-and-white counterpart to Ivory Gold.',
     colors: {
-      background:    '#EDF8F2',
+      background:    '#F6FBF4',
       surface:       '#FFFFFF',
-      surfaceRaised: '#DCEFE4',
-      border:        '#B4D8C4',
-      primary:       '#0E8078',
-      primaryDark:   '#065850',
-      primaryLight:  '#48B8A8',
-      accent:        '#E06848',
-      textPrimary:   '#082418',
-      textSecondary: '#2C5244',
-      textMuted:     '#5A7868',
-      error:         '#CC2E3C',
-      warning:       '#B87800',
-      success:       '#1A8A54',
+      surfaceRaised: '#E8F2E4',
+      border:        '#BFD8B8',
+      primary:       '#2A7A3E',
+      primaryDark:   '#175420',
+      primaryLight:  '#5BB572',
+      accent:        '#A87E18',
+      textPrimary:   '#0E2014',
+      textSecondary: '#36523C',
+      textMuted:     '#5F7064',
+      error:         '#B82828',
+      warning:       '#8A670E',
+      success:       '#1F7A38',
     },
     sections: {
-      workout: { soft: '#C8ECE0', strong: '#0E8078', text: '#033630' },
-      meals:   { soft: '#FFE4D8', strong: '#E06848', text: '#6A1C08' },
-      ai:      { soft: '#E4E4F8', strong: '#5848CC', text: '#1C0C6A' },
-      planner: { soft: '#FFF0C8', strong: '#B87800', text: '#5A3C00' },
-      account: { soft: '#F8E0EC', strong: '#C0347C', text: '#5A0838' },
+      workout: { soft: '#D6ECD2', strong: '#2A7A3E', text: '#0E3818' },
+      meals:   { soft: '#D6ECD2', strong: '#2A7A3E', text: '#0E3818' },
+      ai:      { soft: '#DEE4F4', strong: '#3858A0', text: '#18285A' },
+      planner: { soft: '#F4EAC8', strong: '#A87E18', text: '#5A4108' },
+      account: { soft: '#E2EDDA', strong: '#3E8A50', text: '#163C1E' },
     },
   },
 
@@ -578,16 +732,16 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#FFFFFF',
       surfaceRaised: '#FBEFC7',
       border:        '#E8D18A',
-      primary:       '#C07608',
+      primary:       '#9A5E06',
       primaryDark:   '#8A5404',
       primaryLight:  '#E8A840',
       accent:        '#2A5E8C',
       textPrimary:   '#2A1F04',
       textSecondary: '#5A4218',
-      textMuted:     '#8A7446',
+      textMuted:     '#7E6A40',
       error:         '#C42030',
-      warning:       '#AE7400',
-      success:       '#2A8048',
+      warning:       '#946300',
+      success:       '#287B45',
     },
     sections: {
       workout: { soft: '#FBE8A8', strong: '#C07608', text: '#4A2C04' },
@@ -598,32 +752,32 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  seaglass: {
-    name: 'seaglass',
-    label: 'Sea Glass',
-    description: 'Pale seafoam background with teal glass primary and warm coral accent — airy, coastal, light.',
+  summer: {
+    name: 'summer',
+    label: 'Summer Tide',
+    description: 'Sunlit aqua with leaf-green primary and clear pool-blue accents - fresh, bright, and active.',
     colors: {
-      background:    '#EEF8F5',
+      background:    '#E9F8F4',
       surface:       '#FFFFFF',
-      surfaceRaised: '#D7EEE8',
-      border:        '#A9D4CA',
-      primary:       '#2C8C84',
-      primaryDark:   '#17645F',
-      primaryLight:  '#73C8BE',
-      accent:        '#D16F5C',
-      textPrimary:   '#0C2627',
-      textSecondary: '#315A5A',
-      textMuted:     '#668A88',
-      error:         '#C73A42',
-      warning:       '#A86F16',
-      success:       '#247A54',
+      surfaceRaised: '#D7F0EA',
+      border:        '#9CCFC4',
+      primary:       '#18784C',
+      primaryDark:   '#11673F',
+      primaryLight:  '#65C98F',
+      accent:        '#1687C5',
+      textPrimary:   '#06251E',
+      textSecondary: '#285B55',
+      textMuted:     '#4F706C',
+      error:         '#BE3944',
+      warning:       '#905F0E',
+      success:       '#18784C',
     },
     sections: {
-      workout: { soft: '#CFEAE6', strong: '#2C8C84', text: '#0E403D' },
-      meals:   { soft: '#F9DED8', strong: '#D16F5C', text: '#6A2418' },
-      ai:      { soft: '#DDE7FA', strong: '#3C72B8', text: '#123A68' },
-      planner: { soft: '#F7E9C8', strong: '#A86F16', text: '#543604' },
-      account: { soft: '#D8EFE8', strong: '#247A54', text: '#0A3A24' },
+      workout: { soft: '#D5EBFF', strong: '#1687C5', text: '#0B4568' },
+      meals:   { soft: '#D7F2DF', strong: '#1F9A61', text: '#0E4A2D' },
+      ai:      { soft: '#DCECF8', strong: '#2A75B8', text: '#123E66' },
+      planner: { soft: '#D6F1EA', strong: '#20A9A0', text: '#07514B' },
+      account: { soft: '#E2F3D8', strong: '#5CA43A', text: '#244F16' },
     },
   },
 
@@ -642,10 +796,10 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#E89470',
       textPrimary:   '#1F1030',
       textSecondary: '#4A3664',
-      textMuted:     '#806A98',
-      error:         '#C42848',
-      warning:       '#B87000',
-      success:       '#2A8048',
+      textMuted:     '#715D86',
+      error:         '#C02747',
+      warning:       '#915800',
+      success:       '#267341',
     },
     sections: {
       workout: { soft: '#DCCCF0', strong: '#6B3AA8', text: '#2A0E58' },
@@ -665,16 +819,16 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#FFFFFF',
       surfaceRaised: '#D4ECF6',
       border:        '#A8D0E0',
-      primary:       '#0E7AB8',
+      primary:       '#0D6EA6',
       primaryDark:   '#075280',
       primaryLight:  '#4FB0E0',
       accent:        '#E06840',
       textPrimary:   '#08202C',
       textSecondary: '#285468',
-      textMuted:     '#5C8090',
-      error:         '#CC2E3C',
-      warning:       '#B87800',
-      success:       '#1A8A54',
+      textMuted:     '#4E6D7A',
+      error:         '#C42C3A',
+      warning:       '#905E00',
+      success:       '#167748',
     },
     sections: {
       workout: { soft: '#CCE6F2', strong: '#0E7AB8', text: '#08303C' },
@@ -685,32 +839,32 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
-  porcelain: {
-    name: 'porcelain',
-    label: 'Porcelain Blue',
-    description: 'Cool white background with crisp blue primary and soft apricot contrast.',
+  glacier: {
+    name: 'glacier',
+    label: 'Glacier Lab',
+    description: 'Cool white-blue surfaces with cobalt primary and clean cyan contrast — bright, precise, and technical.',
     colors: {
-      background:    '#F6FAFF',
+      background:    '#F4FAFF',
       surface:       '#FFFFFF',
-      surfaceRaised: '#E7F0FA',
-      border:        '#BFD0E2',
-      primary:       '#1E6FB8',
-      primaryDark:   '#104E86',
-      primaryLight:  '#69A7DD',
-      accent:        '#E07A5F',
-      textPrimary:   '#071A2C',
+      surfaceRaised: '#E4F0FA',
+      border:        '#B8CCDD',
+      primary:       '#1967DC',
+      primaryDark:   '#124A9C',
+      primaryLight:  '#6EA8FF',
+      accent:        '#00AFC7',
+      textPrimary:   '#061525',
       textSecondary: '#35516A',
-      textMuted:     '#6D8196',
-      error:         '#C73A42',
-      warning:       '#B4770E',
-      success:       '#247A56',
+      textMuted:     '#5C6E80',
+      error:         '#C23949',
+      warning:       '#975F10',
+      success:       '#1D7A5B',
     },
     sections: {
-      workout: { soft: '#D7E9FA', strong: '#1E6FB8', text: '#0E3E68' },
-      meals:   { soft: '#DDF1E5', strong: '#247A56', text: '#0C3A26' },
-      ai:      { soft: '#E8E1F7', strong: '#6652B8', text: '#21156A' },
-      planner: { soft: '#F9E4D8', strong: '#C95F43', text: '#632010' },
-      account: { soft: '#D9F0F0', strong: '#267D84', text: '#0C3B40' },
+      workout: { soft: '#DCEBFF', strong: '#1B6EEA', text: '#082C66' },
+      meals:   { soft: '#DDF3EC', strong: '#1E8060', text: '#073A2A' },
+      ai:      { soft: '#E7E2FA', strong: '#6950C8', text: '#24146E' },
+      planner: { soft: '#D8F1F6', strong: '#00AFC7', text: '#06424A' },
+      account: { soft: '#F4E2E8', strong: '#B94A68', text: '#5A1028' },
     },
   },
 
@@ -723,16 +877,16 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#FFFFFF',
       surfaceRaised: '#EEF4C8',
       border:        '#CBDC8A',
-      primary:       '#5D8A18',
+      primary:       '#517815',
       primaryDark:   '#3D5F0B',
       primaryLight:  '#9CCB43',
       accent:        '#E36F35',
       textPrimary:   '#17220A',
       textSecondary: '#43562A',
-      textMuted:     '#77885A',
+      textMuted:     '#64724C',
       error:         '#C33A34',
-      warning:       '#B87900',
-      success:       '#2F8C55',
+      warning:       '#956200',
+      success:       '#297B4B',
     },
     sections: {
       workout: { soft: '#E4F3C4', strong: '#5D8A18', text: '#243E08' },
@@ -740,6 +894,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#DDE7F8', strong: '#386FB4', text: '#123760' },
       planner: { soft: '#FFF0BD', strong: '#B87900', text: '#513600' },
       account: { soft: '#F4DCEB', strong: '#B73A7E', text: '#551238' },
+    },
+  },
+
+  terra: {
+    name: 'terra',
+    label: 'Terra Clay',
+    description: 'Soft stone-sage surfaces with clay red primary and deep olive contrast — grounded without feeling heavy.',
+    colors: {
+      background:    '#F3F6F1',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#E4EBDD',
+      border:        '#C3D0BF',
+      primary:       '#A2523E',
+      primaryDark:   '#843B2E',
+      primaryLight:  '#DF8C75',
+      accent:        '#386F5A',
+      textPrimary:   '#17221D',
+      textSecondary: '#485A51',
+      textMuted:     '#5F6C64',
+      error:         '#B93642',
+      warning:       '#846415',
+      success:       '#30754D',
+    },
+    sections: {
+      workout: { soft: '#E8DDD8', strong: '#B85D46', text: '#552014' },
+      meals:   { soft: '#DDEBE1', strong: '#386F5A', text: '#123826' },
+      ai:      { soft: '#E6E1F2', strong: '#6E58A8', text: '#261A5A' },
+      planner: { soft: '#EEF0D8', strong: '#8A8F2A', text: '#343A0A' },
+      account: { soft: '#DCE8ED', strong: '#2E7288', text: '#0D3844' },
     },
   },
 
@@ -754,16 +937,16 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#FFFFFF',
       surfaceRaised: '#F8E0E8',
       border:        '#E0B8C4',
-      primary:       '#C04870',
+      primary:       '#AD4165',
       primaryDark:   '#903050',
       primaryLight:  '#E888A8',
       accent:        '#C89040',
       textPrimary:   '#1E0A10',
       textSecondary: '#5A2838',
-      textMuted:     '#9A6878',
+      textMuted:     '#865A68',
       error:         '#C42030',
-      warning:       '#B07800',
-      success:       '#1A8A54',
+      warning:       '#8B5F00',
+      success:       '#167547',
     },
     sections: {
       workout: { soft: '#F8D8E4', strong: '#C04870', text: '#3A0A18' },
@@ -791,8 +974,8 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FF9840',
       textPrimary:   '#F4F0E8',
       textSecondary: '#B8A890',
-      textMuted:     '#786858',
-      error:         '#FF4848',
+      textMuted:     '#9C9185',
+      error:         '#FF5A5A',
       warning:       '#F0A820',
       success:       '#50C070',
     },
@@ -820,7 +1003,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#90B8FF',
       textPrimary:   '#E8ECFF',
       textSecondary: '#98A8D0',
-      textMuted:     '#5060A0',
+      textMuted:     '#818DBB',
       error:         '#F05870',
       warning:       '#E8B040',
       success:       '#48C878',
@@ -845,14 +1028,14 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       surface:       '#20262E',
       surfaceRaised: '#2A323C',
       border:        '#3A4450',
-      primary:       '#FF2898',
+      primary:       '#FF59B0',
       primaryDark:   '#C80070',
       primaryLight:  '#FF80CC',
       accent:        '#20E890',
       textPrimary:   '#F2F4F8',
       textSecondary: '#A0AABB',
-      textMuted:     '#606878',
-      error:         '#F04858',
+      textMuted:     '#949AA5',
+      error:         '#F36E7B',
       warning:       '#F0A828',
       success:       '#48C870',
     },
@@ -880,8 +1063,8 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FF8040',
       textPrimary:   '#EEF4FF',
       textSecondary: '#90A8C0',
-      textMuted:     '#507080',
-      error:         '#F05870',
+      textMuted:     '#8DA2AC',
+      error:         '#F3798D',
       warning:       '#F0A830',
       success:       '#40C870',
     },
@@ -909,8 +1092,8 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#FF6840',
       textPrimary:   '#FFF0F4',
       textSecondary: '#C098A8',
-      textMuted:     '#806070',
-      error:         '#F04850',
+      textMuted:     '#A08894',
+      error:         '#F25A62',
       warning:       '#F0A828',
       success:       '#40C870',
     },
@@ -948,7 +1131,7 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#E5E5E5',
       textPrimary:   '#FFFFFF',
       textSecondary: '#B8B8B8',
-      textMuted:     '#6E6E6E',
+      textMuted:     '#828282',
       // Tiny touches of color reserved for true semantic states only —
       // the full spectrum of gray would erase the affordance of "this
       // is bad" vs "this is good".
@@ -985,9 +1168,9 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       accent:        '#1A1A1A',
       textPrimary:   '#000000',
       textSecondary: '#3A3A3A',
-      textMuted:     '#7A7A7A',
+      textMuted:     '#6B6B6B',
       error:         '#C03030',
-      warning:       '#B07020',
+      warning:       '#97601C',
       success:       '#3A7A3A',
     },
     sections: {
@@ -1006,17 +1189,21 @@ export const THEME_PICKER_ORDER = [
   // aesthetic and easy to miss buried under colored options.
   'onyx', 'paper',
   'midnight', 'ocean', 'amethyst',
-  'ember', 'wine', 'obsidian',
-  'slate', 'blossom', 'void', 'dusk', 'lavender', 'aurora', 'evergreen',
-  'sunrise', 'parchment', 'linen', 'mint',
-  'butter', 'seaglass', 'lilac', 'sky',
-  'porcelain', 'citrus', 'rose', 'ash', 'cosmos',
+  'ember', 'infrared', 'wine', 'obsidian', 'carbon',
+  'slate', 'graphite', 'blossom', 'orchid', 'void', 'dusk', 'lavender', 'aurora', 'alpine',
+  'sunrise', 'cardinal', 'parchment', 'linen',
+  // Light green-on-white counterpart to obsidian — placed next to the
+  // other warm/clean lights so it groups naturally in the picker.
+  'clover',
+  'butter', 'summer', 'lilac', 'sky', 'glacier',
+  'citrus', 'terra', 'rose', 'ash', 'cosmos',
   'cinder', 'smoke', 'maroon',
 ] as const satisfies readonly AppThemeName[];
 
 export const LIGHT_THEME_NAMES = [
-  'sunrise', 'parchment', 'linen', 'mint',
-  'butter', 'seaglass', 'lilac', 'sky', 'porcelain', 'citrus', 'rose',
+  'sunrise', 'cardinal', 'parchment', 'linen',
+  'clover',
+  'butter', 'summer', 'lilac', 'sky', 'glacier', 'citrus', 'terra', 'rose',
   // Paper is a light theme — drives status-bar style + "is light"
   // branching in HomeScreen so the dark statusbar text shows up
   // correctly against the white background.
@@ -1025,14 +1212,18 @@ export const LIGHT_THEME_NAMES = [
 
 const LEGACY_THEME_ALIASES: Record<string, AppThemeName> = {
   scarlet: 'wine',
+  mint: 'summer',
+  seaglass: 'summer',
+  porcelain: 'sky',
+  evergreen: 'alpine',
 };
 
 export function resolveThemeName(themeName?: AppThemeName | string): AppThemeName {
-  const candidate = themeName ?? 'slate';
+  const candidate = themeName ?? DEFAULT_THEME_NAME;
   if ((APP_THEMES as Record<string, AppTheme | undefined>)[candidate]) {
     return candidate as AppThemeName;
   }
-  return LEGACY_THEME_ALIASES[candidate] ?? 'slate';
+  return LEGACY_THEME_ALIASES[candidate] ?? DEFAULT_THEME_NAME;
 }
 
 export function isLightThemeName(themeName?: AppThemeName | string): boolean {
@@ -1072,27 +1263,65 @@ export function getContrastingTextColor(hex: string): string {
   return lum > 0.6 ? '#000000' : '#FFFFFF';
 }
 
-export const colors = APP_THEMES.slate.colors;
+/** Off-state track color for a `Switch`. The default RN off-track is a
+ *  faint border tone — on light themes that reads as a near-invisible
+ *  light-tan track + white thumb on a near-white surface, so you can't
+ *  tell the toggle is off (or there at all). `textMuted` is a mid-tone
+ *  that contrasts with both the surface and the white thumb on every
+ *  theme, light or dark. Pair with the default (white) thumb. */
+export function toggleOffTrack(colors: ThemeColors): string {
+  return colors.textMuted;
+}
+
+export const colors = APP_THEMES[DEFAULT_THEME_NAME].colors;
 
 export function getTheme(themeName?: AppThemeName | string): AppTheme {
   return APP_THEMES[resolveThemeName(themeName)];
 }
 
+// ─── Layout tokens ─────────────────────────────────────────────────────────
+//
+// Use these for every padding / margin / borderRadius value. Inline magic
+// numbers (`padding: 14`, `borderRadius: 7`) are the reason themes and
+// dynamic-type sizing look inconsistent across the app — they don't scale
+// with the design system. When you genuinely need an in-between value,
+// add a token here rather than inline.
+//
+// `pill` is the canonical "fully rounded" value for chips, badges, and
+// progress bars; using `full` (999) on small components renders the same
+// but `pill` reads more intentional in code review.
+
 export const radius = {
+  none: 0,
+  xs: 4,
   sm: 8,
   md: 12,
   lg: 16,
   xl: 20,
+  pill: 999,
   full: 999,
 } as const;
 
 export const spacing = {
+  none: 0,
+  xxs: 2,
   xs: 4,
   sm: 8,
   md: 12,
   lg: 16,
   xl: 20,
   xxl: 24,
+  xxxl: 32,
+} as const;
+
+/** Hit-slop preset — meets Apple's 44pt touch target on chips/icons that
+ *  render smaller than 44pt visually. Spread onto any TouchableOpacity
+ *  whose visible area is under 32pt. */
+export const hitSlop = {
+  // Use for icon-only buttons (close X, swap arrows, info ⓘ).
+  icon: { top: 12, bottom: 12, left: 12, right: 12 },
+  // Use for compact chips / inline links.
+  chip: { top: 8, bottom: 8, left: 8, right: 8 },
 } as const;
 
 const FONT_SANS = Platform.select({

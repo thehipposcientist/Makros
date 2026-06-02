@@ -89,3 +89,50 @@ export function WorkoutDaySkeleton() {
     </Animated.View>
   );
 }
+
+/** Pre-built skeleton for a charted card on Progress (weight chart,
+ *  body scan, recompTrajectory, cardio load). Roughly matches the
+ *  layout of those cards so the page doesn't jump on first paint. */
+export function ChartCardSkeleton({ height = 160 }: { height?: number } = {}) {
+  return (
+    <Animated.View style={{ padding: 14, gap: 10, borderRadius: 12 }}>
+      <Animated.View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <SkeletonLoader width="45%" height={14} />
+        <SkeletonLoader width={60} height={14} borderRadius={7} />
+      </Animated.View>
+      <SkeletonLoader width="32%" height={26} borderRadius={6} />
+      <SkeletonLoader width="60%" height={11} />
+      <SkeletonLoader width="100%" height={height} borderRadius={10} style={{ marginTop: 6 }} />
+    </Animated.View>
+  );
+}
+
+/** Pre-built skeleton for a single-stat tile (Tracking row on Home,
+ *  daily macro circles, "Day X/42" tile). */
+export function StatTileSkeleton({ height = 84 }: { height?: number } = {}) {
+  return (
+    <Animated.View style={{ padding: 12, gap: 6, borderRadius: 12, height, justifyContent: 'center' }}>
+      <SkeletonLoader width="50%" height={10} />
+      <SkeletonLoader width="35%" height={22} borderRadius={6} />
+      <SkeletonLoader width="65%" height={10} />
+    </Animated.View>
+  );
+}
+
+/** Pre-built skeleton for a horizontal row of chips (nutrition Essentials,
+ *  fats panel, etc). Render INSIDE the modal that owns the section title. */
+export function MicroChipRowSkeleton({ count = 4 }: { count?: number } = {}) {
+  return (
+    <Animated.View style={{ flexDirection: 'row', gap: 8, paddingVertical: 4 }}>
+      {Array.from({ length: count }).map((_, i) => (
+        <SkeletonLoader
+          key={i}
+          width={86}
+          height={64}
+          borderRadius={10}
+          style={{ flex: 1, minWidth: 0 }}
+        />
+      ))}
+    </Animated.View>
+  );
+}

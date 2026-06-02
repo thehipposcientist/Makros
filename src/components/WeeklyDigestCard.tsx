@@ -12,6 +12,10 @@ interface Props {
   themeName?: AppThemeName;
   /** Override "today" for testing / Storybook. */
   todayOverride?: Date;
+  /** Bypass the day/hour gate. Set when the user has just finished
+   *  the last planned workout of the active PlanWeek so the recap
+   *  populates immediately on Home. */
+  forceShow?: boolean;
 }
 
 /** Returns e.g. "2026-W16" — a stable key for one calendar week. Isoweek. */
@@ -45,7 +49,7 @@ function deltaLabel(delta: number, suffix: string = ''): string {
   return `${sign}${delta}${suffix} vs last week`;
 }
 
-export default function WeeklyDigestCard({ authToken, themeName, todayOverride }: Props) {
+export default function WeeklyDigestCard({ authToken, themeName, todayOverride, forceShow }: Props) {
   const tc = getTheme(themeName).colors;
   const now = todayOverride ?? new Date();
   const weekKey = isoWeekKey(now);
@@ -88,7 +92,7 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
   };
 
   if (dismissed) return null;
-  if (!shouldShowWeeklyDigest(now)) return null;
+  if (!forceShow && !shouldShowWeeklyDigest(now)) return null;
 
   if (loading) {
     return (
@@ -111,6 +115,9 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
 
   const sessionsDelta = digest.deltas.sessions;
   const setsDelta = digest.deltas.total_sets;
+  const loggedDayCalories = digest.nutrition.avg_calories_when_logged ?? digest.nutrition.avg_calories;
+  const loggedDayProtein = digest.nutrition.avg_protein_g_when_logged ?? digest.nutrition.avg_protein_g;
+  const nutritionAverageLabel = digest.nutrition.days_logged >= 7 ? 'Avg' : 'Logged avg';
   const copy = sessionsDelta > 0
     ? `You trained ${sessionsDelta} more day${sessionsDelta === 1 ? '' : 's'} than last week — keep it going.`
     : sessionsDelta < 0
@@ -185,8 +192,8 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
 
       {digest.nutrition.days_logged > 0 && (
         <View style={{ marginTop: 8, flexDirection: 'row', gap: 12 }}>
-          <Text style={{ fontSize: 12, color: tc.textMuted }}>
-            Avg {Math.round(digest.nutrition.avg_calories)} cal · {Math.round(digest.nutrition.avg_protein_g)}g protein
+          <Text style={{ flex: 1, minWidth: 0, fontSize: 12, color: tc.textMuted }} numberOfLines={2}>
+            {nutritionAverageLabel} {Math.round(loggedDayCalories)} cal · {Math.round(loggedDayProtein)}g protein
           </Text>
           {digest.nutrition.protein_hit_pct != null && (
             <Text style={{ fontSize: 12, color: digest.nutrition.protein_hit_pct >= 90 ? tc.primary : tc.textMuted, fontWeight: '600' }}>

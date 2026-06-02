@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { HydrationStatus } from '../services/api';
+import { hydrationTargetRangeOz } from './hydration';
 
 export const HYDRATION_CACHE_KEY = 'hydrationByDate_v1';
 
@@ -15,12 +16,18 @@ function normalizeRow(row: any): CachedHydrationStatus | null {
   const date = typeof row.date === 'string' ? row.date.slice(0, 10) : '';
   const ounces = Number(row.ounces);
   const target = Number(row.target_ounces);
+  const normalizedTarget = Number.isFinite(target) && target > 0 ? target : 64;
+  const range = hydrationTargetRangeOz(normalizedTarget);
+  const explicitMin = Number(row.target_ounces_min);
+  const explicitMax = Number(row.target_ounces_max);
   if (!date || !Number.isFinite(ounces)) return null;
   return {
     ...row,
     date,
     ounces: Math.max(0, Math.round(ounces * 10) / 10),
-    target_ounces: Number.isFinite(target) && target > 0 ? target : 64,
+    target_ounces: normalizedTarget,
+    target_ounces_min: Number.isFinite(explicitMin) && explicitMin > 0 ? explicitMin : range?.min,
+    target_ounces_max: Number.isFinite(explicitMax) && explicitMax > 0 ? explicitMax : range?.max,
     pending: !!row.pending,
     updatedAtMs: Number.isFinite(Number(row.updatedAtMs)) ? Number(row.updatedAtMs) : Date.now(),
   };

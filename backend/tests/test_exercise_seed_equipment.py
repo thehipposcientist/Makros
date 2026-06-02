@@ -148,8 +148,11 @@ def test_seed_equipment_corrections_are_regressed() -> None:
         }
 
     assert required("plate_pinch") == {"weight_plates"}
-    assert required("rope_pushdown") == {"cable_machine", "rope_attachment"}
-    assert required("face_pull") == {"cable_machine", "rope_attachment"}
+    assert required("rope_pushdown") == {"single_cable_station", "rope_attachment"}
+    assert required("face_pull") == {"single_cable_station", "rope_attachment"}
+    assert required("band_squat") == {"barbell", "resistance_bands", "squat_rack"}
+    assert by_slug["band_squat"]["equipment_bucket"] == "gym"
+    assert by_slug["band_squat"]["substitution_group"] == "squat_barbell"
 
     preacher_expected = (
         {"preacher_curl_machine"}
@@ -172,6 +175,70 @@ def test_seed_equipment_corrections_are_regressed() -> None:
     )
     assert required("glute_kickback_machine") == glute_expected
     _ok("plate, rope, face-pull, and machine equipment mappings verified")
+
+
+def test_cable_laterality_equipment_and_swap_groups_are_regressed() -> None:
+    print("\n[test] cable laterality uses distinct handles and swap groups")
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.equipment import resolve_owned_equipment_slugs
+    from app.services.workout.planner import _equipment_satisfied
+
+    by_slug = {e["slug"]: e for e in SEED_EXERCISES}
+
+    def required(slug: str) -> set[str]:
+        return {
+            gear["slug"]
+            for gear in by_slug[slug].get("equipment", [])
+            if gear.get("required", True)
+        }
+
+    assert by_slug["single_arm_cable_row"]["laterality"] == "unilateral"
+    assert by_slug["seated_cable_row"]["laterality"] == "bilateral"
+    assert required("single_arm_cable_row") == {"single_cable_station", "d_handle"}
+    assert required("seated_cable_row") == {"single_cable_station", "v_bar_attachment"}
+    assert (
+        by_slug["single_arm_cable_row"]["substitution_group"]
+        != by_slug["seated_cable_row"]["substitution_group"]
+    )
+
+    assert by_slug["single_arm_cable_press"]["substitution_group"] == "horizontal_press_cable_unilateral"
+    assert by_slug["bilateral_cable_chest_press"]["substitution_group"] == "horizontal_press_cable"
+    assert required("single_arm_cable_press") == {"single_cable_station", "d_handle"}
+    assert required("single_arm_cable_fly") == {"single_cable_station", "d_handle"}
+    assert required("bilateral_cable_chest_press") == {"dual_cable_station", "d_handle"}
+    assert required("cable_fly") == {"dual_cable_station", "d_handle"}
+    assert required("low_to_high_cable_fly") == {"dual_cable_station", "d_handle"}
+    assert required("high_to_low_cable_fly") == {"dual_cable_station", "d_handle"}
+    assert required("cable_rear_delt_fly") == {"dual_cable_station", "d_handle"}
+
+    assert by_slug["single_arm_lat_pulldown"]["substitution_group"] == "lat_pulldown_unilateral"
+    assert by_slug["lat_pulldown"]["substitution_group"] == "vertical_pull_machine"
+    assert required("single_arm_lat_pulldown") == {"single_cable_station", "d_handle"}
+    assert required("lat_pulldown") == {"lat_pulldown_machine", "straight_bar_attachment"}
+
+    cable_owned = resolve_owned_equipment_slugs(["Cable machine"])
+    assert {
+        "single_cable_station",
+        "dual_cable_station",
+        "d_handle",
+        "rope_attachment",
+        "straight_bar_attachment",
+        "v_bar_attachment",
+    } <= cable_owned
+    single_owned = resolve_owned_equipment_slugs(["Single cable station"])
+    assert "single_cable_station" in single_owned
+    assert "dual_cable_station" not in single_owned
+    assert _equipment_satisfied(by_slug["single_arm_cable_row"], single_owned)
+    assert not _equipment_satisfied(by_slug["bilateral_cable_chest_press"], single_owned)
+    dual_owned = resolve_owned_equipment_slugs(["Dual cable station"])
+    assert {"single_cable_station", "dual_cable_station"} <= dual_owned
+    assert _equipment_satisfied(by_slug["single_arm_cable_row"], dual_owned)
+    assert _equipment_satisfied(by_slug["bilateral_cable_chest_press"], dual_owned)
+    trainer_owned = resolve_owned_equipment_slugs(["Functional trainer"])
+    assert "dual_cable_station" in trainer_owned
+    lat_owned = resolve_owned_equipment_slugs(["Lat pulldown"])
+    assert {"lat_pulldown_machine", "straight_bar_attachment", "v_bar_attachment"} <= lat_owned
+    _ok("single-arm cable variants remain distinct from bilateral cable variants")
 
 
 def test_machine_naming_aliases_and_missing_pieces_are_regressed() -> None:
@@ -481,6 +548,26 @@ def test_support_dependent_moves_require_support_equipment() -> None:
     _ok(f"{len(required_support)} support-dependent moves are gated")
 
 
+def test_preacher_curl_requires_pad_and_one_curl_implement() -> None:
+    print("\n[test] preacher curl requires support pad plus one curl implement")
+    import importlib
+    import app.seed_exercises_data as seed_data
+    import app.services.workout.planner as planner
+
+    seed_data = importlib.reload(seed_data)
+    planner = importlib.reload(planner)
+    preacher = next(e for e in seed_data.SEED_EXERCISES if e.get("slug") == "preacher_curl")
+    primary_slugs = {gear["slug"] for gear in preacher.get("equipment", []) if gear.get("role") == "primary"}
+    assert {"ez_curl_bar", "barbell", "dumbbells"} <= primary_slugs
+    _equipment_satisfied = planner._equipment_satisfied
+    assert not _equipment_satisfied(preacher, {"preacher_bench"})
+    assert not _equipment_satisfied(preacher, {"dumbbells"})
+    assert _equipment_satisfied(preacher, {"preacher_bench", "dumbbells"})
+    assert _equipment_satisfied(preacher, {"preacher_bench", "barbell"})
+    assert _equipment_satisfied(preacher, {"preacher_bench", "ez_curl_bar"})
+    _ok("preacher curl gates bench + DB/barbell/EZ-bar alternatives")
+
+
 def test_pull_rear_delt_slots_have_candidates() -> None:
     print("\n[test] pull rear-delt slots retain rear-delt candidates")
     from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
@@ -646,12 +733,67 @@ def test_active_exercise_names_avoid_generic_circuit_placeholders() -> None:
     _ok("no active seed exercise uses a generic circuit/routine/workout label")
 
 
+def test_ai_custom_machine_exercise_becomes_planner_candidate() -> None:
+    print("\n[test] AI-enriched custom machine exercises become planner candidates")
+    from app.models import UserCustomExercise
+    from app.services.workout.custom_catalog import (
+        custom_exercise_equipment_slugs,
+        planner_candidate_from_custom,
+    )
+    from app.services.workout.planner import PlannerInputs, Slot, pick_for_slot
+
+    row = UserCustomExercise(
+        id=42,
+        user_id=7,
+        name="Hammer Strength Incline Press",
+        normalized_name="hammer strength incline press",
+        primary_muscle="chest",
+        secondary_muscles=["shoulders", "triceps"],
+        equipment="Hammer Strength Incline Press Machine",
+        movement_pattern="horizontal_press",
+        is_compound=True,
+        source="ai",
+        plan_eligible=True,
+    )
+
+    slugs = custom_exercise_equipment_slugs(row)
+    assert "plate_loaded_chest_press_machine" in slugs, slugs
+    assert any(slug.startswith("custom_equipment__hammer_strength") for slug in slugs), slugs
+    private_slugs = [slug for slug in slugs if slug.startswith("custom_equipment__")]
+
+    candidate = planner_candidate_from_custom(row)
+    assert candidate is not None, "expected custom row to become a planner candidate"
+    assert candidate["name"] == "Hammer Strength Incline Press"
+    assert candidate["movement_pattern"] == "horizontal_press"
+    assert candidate["equipment_label"] == "Hammer Strength Incline Press Machine"
+    assert candidate["is_custom"] is True
+
+    pick = pick_for_slot(
+        [candidate],
+        Slot("Primary Press", "horizontal_press", "chest", "primary"),
+        PlannerInputs(
+            goal="muscle_gain",
+            days_per_week=4,
+            experience="intermediate",
+            equipment_slugs=tuple(sorted(private_slugs)),
+            rng_seed=4,
+        ),
+        set(),
+        set(),
+        day_focus_family="push",
+    )
+    assert pick is not None, "expected planner to select the custom machine"
+    assert pick["slug"] == "user_custom_7_42", pick
+    _ok(f"custom machine was selectable: {pick['name']}")
+
+
 cases = [
     test_seed_exercise_equipment_references_are_canonical,
     test_wger_import_equipment_map_uses_seed_slugs,
     test_required_equipment_preserves_multi_gear_requirements,
     test_seed_tracking_modes_are_valid_and_regressed,
     test_seed_equipment_corrections_are_regressed,
+    test_cable_laterality_equipment_and_swap_groups_are_regressed,
     test_machine_naming_aliases_and_missing_pieces_are_regressed,
     test_cardio_backfill_equipment_is_concrete,
     test_generate_cardio_day_uses_seeded_names,
@@ -664,12 +806,14 @@ cases = [
     test_adjustable_dumbbells_unlock_dumbbell_library,
     test_planner_reachable_movement_patterns_are_enforced,
     test_support_dependent_moves_require_support_equipment,
+    test_preacher_curl_requires_pad_and_one_curl_implement,
     test_pull_rear_delt_slots_have_candidates,
     test_primary_slots_prefer_primary_muscle_intent,
     test_strength_load_settings_snap_to_available_weights,
     test_scan_equipment_list_covers_new_equipment_names,
     test_bodyweight_conditioning_replaces_generic_hiit_placeholder,
     test_active_exercise_names_avoid_generic_circuit_placeholders,
+    test_ai_custom_machine_exercise_becomes_planner_candidate,
 ]
 
 

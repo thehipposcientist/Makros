@@ -38,7 +38,7 @@ def _make_mem_engine():
         WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet,
         UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState,
         DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob,
-        UserState, WorkoutPlan, NutritionPlan,
+        UserState, WorkoutPlan, NutritionPlan, PlanWeek, PlanDay,
     )
 
     from sqlalchemy.pool import StaticPool
@@ -194,6 +194,147 @@ def test_persist_no_op_when_db_or_user_missing() -> None:
     _persist_active_nutrition_plan(None, 1, [_make_template(0)], req=req)
     _persist_active_nutrition_plan(object(), None, [_make_template(0)], req=req)  # noqa
     _ok("helper is a safe no-op when db or user_id is None")
+
+
+def test_food_quality_hydration_fills_generated_items() -> None:
+    """Generated meal items should carry the same metadata fields the
+    NutritionCard uses for whole/processed labels and protein tiles."""
+    print("\n[test] generated nutrition items get food-quality metadata")
+    from app.routers.ai import plans as plans_mod
+    from app.services.nutrition import ai_classify as ai_mod
+
+    class _Meta:
+        def __init__(self, bucket: str, protein: str, plant_count: int) -> None:
+            self.processing_bucket = bucket
+            self.protein_source = protein
+            self.plant_count_value = plant_count
+            self.fermented_flag = False
+            self.probiotic_flag = False
+            self.omega3_flag = False
+            self.seafood_flag = False
+            self.fruit_flag = False
+            self.vegetable_flag = False
+            self.alcohol_flag = False
+            self.processed_meat_flag = False
+            self.refined_grain_flag = False
+
+    calls: list[tuple[str, bool]] = []
+
+    def _fake_get_or_create_metadata(raw_name, db, *, allow_ai=True, **kwargs):
+        calls.append((raw_name, allow_ai))
+        if "oat" in raw_name.lower():
+            return _Meta("minimally_processed", "plant", 1)
+        return _Meta("processed", "animal", 0)
+
+    orig = ai_mod.get_or_create_metadata
+    ai_mod.get_or_create_metadata = _fake_get_or_create_metadata
+    try:
+        templates = [{
+            "meals": [{
+                "meal": "Breakfast",
+                "items": [
+                    {"name": "Plain oats"},
+                    {"name": "Chicken breast", "protein_source": "animal"},
+                ],
+            }],
+        }]
+        changed = plans_mod._hydrate_food_quality_fields(templates, object(), allow_ai=True)
+        assert changed is True
+        oats = templates[0]["meals"][0]["items"][0]
+        chicken = templates[0]["meals"][0]["items"][1]
+        assert oats["processing_bucket"] == "minimally_processed"
+        assert oats["food_quality"] == "whole"
+        assert oats["protein_source"] == "plant"
+        assert oats["plant_count"] == 1
+        assert chicken["processing_bucket"] == "processed"
+        assert chicken["food_quality"] == "processed"
+        assert ("Plain oats", True) in calls
+        assert ("Chicken breast", True) in calls
+    finally:
+        ai_mod.get_or_create_metadata = orig
+    _ok("hydration adds whole/processed labels to generated items")
+
+
+def test_active_week_nutrition_quality_hydration_updates_plan_days() -> None:
+    """Existing PlanDay nutrition copies can be lazily filled without
+    regenerating the active week."""
+    print("\n[test] active PlanDay nutrition gets food-quality metadata")
+    from datetime import date, timedelta
+    from sqlmodel import Session, select
+
+    from app.models import PlanDay, PlanWeek
+    from app.routers.ai import plans as plans_mod
+    from app.services.nutrition import ai_classify as ai_mod
+    from app.services.workout.weekly_recipe import PLANNER_VERSION
+
+    class _Meta:
+        processing_bucket = "minimally_processed"
+        protein_source = "plant"
+        plant_count_value = 1
+        fermented_flag = False
+        probiotic_flag = False
+        omega3_flag = False
+        seafood_flag = False
+        fruit_flag = False
+        vegetable_flag = False
+        alcohol_flag = False
+        processed_meat_flag = False
+        refined_grain_flag = False
+
+    calls: list[tuple[str, bool]] = []
+
+    def _fake_get_or_create_metadata(raw_name, db, *, allow_ai=True, **kwargs):
+        calls.append((raw_name, allow_ai))
+        return _Meta()
+
+    orig = ai_mod.get_or_create_metadata
+    ai_mod.get_or_create_metadata = _fake_get_or_create_metadata
+    try:
+        engine = _make_mem_engine()
+        with Session(engine) as s:
+            user = _insert_user(s)
+            start = date.today()
+            week = PlanWeek(
+                user_id=user.id,
+                start_date=start,
+                end_date=start + timedelta(days=6),
+                planner_version=PLANNER_VERSION,
+                goal="recomp",
+                days_per_week=4,
+                status="active",
+            )
+            s.add(week)
+            s.commit()
+            s.refresh(week)
+            day = PlanDay(
+                plan_week_id=week.id,
+                user_id=user.id,
+                day_date=start,
+                day_index=0,
+                status="planned",
+                nutrition_json={
+                    "meals": [{
+                        "meal": "Breakfast",
+                        "items": [{"name": "Plain oats"}],
+                    }],
+                },
+            )
+            s.add(day)
+            s.commit()
+
+            updated = plans_mod._hydrate_active_week_nutrition_quality_fields(
+                s, user.id, allow_ai=False,
+            )
+            assert updated == 1
+            saved = s.exec(select(PlanDay).where(PlanDay.id == day.id)).first()
+            item = saved.nutrition_json["meals"][0]["items"][0]
+            assert item["processing_bucket"] == "minimally_processed"
+            assert item["food_quality"] == "whole"
+            assert item["plant_count"] == 1
+            assert ("Plain oats", False) in calls
+    finally:
+        ai_mod.get_or_create_metadata = orig
+    _ok("active week day copies are filled from cached metadata")
 
 
 # ── Endpoint smoke test (uses FastAPI TestClient against the mem DB) ──

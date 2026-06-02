@@ -10,6 +10,18 @@ coverage/
 build/
 dist/
 
+# build artifacts — large binaries that should never live in git history.
+# These were ballooning .git past 30 GB and bloating every EAS bundle
+# (EAS uses .gitignore when no .easignore is present).
+*.ipa
+*.apk
+*.aab
+ios/DerivedData/
+android/.gradle/
+# Input zip for scripts/sync-move-kit-demos.mjs. The generated runtime
+# output (src/utils/moveKitExerciseVideos.ts) is tracked — the zip isn't.
+assets/full-library.zip
+
 # misc
 .DS_Store
 .env

@@ -339,6 +339,133 @@ def test_log_meal_from_plan_replaces_edited_meal_items() -> None:
     _ok("edited meal replaces prior items without duplicate meal rows")
 
 
+def test_plan_check_extra_snack_slots_do_not_replace_each_other() -> None:
+    """meal_4+ all persist as MealType.SNACK, but they are distinct plan
+    slots. Logging meal_5 must not overwrite meal_4."""
+    print("\n[test] plan_check extra snack slots stay distinct")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_meal_history, log_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 5, 15)
+    with Session(engine) as s:
+        u = User(email="extra-slots@example.com", username="extraslots", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        first = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_4",
+            meal_data={
+                "meal": "Afternoon Shake",
+                "items": [
+                    {"name": "Whey", "quantity": 1, "unit": "scoop", "calories": 180, "protein": 24, "carbs": 4, "fat": 3},
+                ],
+            },
+            consumed_at=datetime(2026, 5, 15, 15, 0, tzinfo=timezone.utc),
+            db=s,
+        )
+        second = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_5",
+            meal_data={
+                "meal": "Evening Bowl",
+                "items": [
+                    {"name": "Rice", "quantity": 1, "unit": "cup", "calories": 240, "protein": 5, "carbs": 52, "fat": 1},
+                ],
+            },
+            consumed_at=datetime(2026, 5, 15, 19, 0, tzinfo=timezone.utc),
+            db=s,
+        )
+
+        assert first["id"] != second["id"], (first, second)
+        rows = s.exec(
+            select(Meal)
+            .where(Meal.user_id == u.id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.meal_type == MealType.SNACK)
+            .where(Meal.source == MealSource.GENERATED)
+        ).all()
+        assert len(rows) == 2, rows
+        assert sorted(r.client_meal_key for r in rows) == ["meal_4", "meal_5"], rows
+        history = get_meal_history(u.id, days=1, limit=10, db=s, end_date=meal_date)
+        assert len(history) == 2, history
+    _ok("meal_4 and meal_5 both remain in generated history")
+
+
+def test_plan_check_does_not_overwrite_manual_logged_same_name() -> None:
+    """A plan check-off that matches an existing manual log in the SAME slot
+    (identical name + items) is the same eating event re-saved, so it merges
+    into the one row instead of creating a duplicate — this is the fix for the
+    "editing a logged meal duplicated it" bug. The merge preserves the manual
+    row's id and its LOGGED identity (a plan check-off must never silently
+    reclassify a manually logged meal as a generated plan meal)."""
+    print("\n[test] plan_check merges into manual same-slot meal, preserving identity")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource
+    from app.models import User, Meal  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import log_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 5, 15)
+    payload = {
+        "meal": "Chicken Rice Bowl",
+        "items": [
+            {"name": "Chicken", "quantity": 1, "unit": "serving", "calories": 220, "protein": 38, "carbs": 0, "fat": 6},
+        ],
+    }
+    with Session(engine) as s:
+        u = User(email="same-name@example.com", username="samename", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        manual = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_3",
+            meal_data=payload,
+            source="manual_add",
+            consumed_at=datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+            db=s,
+        )
+        plan = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_3",
+            meal_data=payload,
+            source="plan_check",
+            consumed_at=datetime(2026, 5, 15, 18, 0, tzinfo=timezone.utc),
+            db=s,
+        )
+
+        assert manual["id"] == plan["id"], (manual, plan)
+        rows = s.exec(select(Meal).where(Meal.user_id == u.id).where(Meal.meal_date == meal_date)).all()
+        assert len(rows) == 1, rows
+        # Merged in place — the manual row keeps its LOGGED identity.
+        assert rows[0].source == MealSource.LOGGED, rows[0].source
+        # The check-off time replaces the original (same meal, edited time).
+        assert rows[0].consumed_at.hour == 18, rows[0].consumed_at
+    _ok("plan check-off merges into the manual row, preserving its LOGGED identity")
+
+
 def test_unlog_meal_from_plan_removes_checked_row_from_rollups() -> None:
     """Unchecking a meal should remove its persisted backend log so
     Progress nutrition/gut facts cannot drift from meal history."""
@@ -395,6 +522,227 @@ def test_unlog_meal_from_plan_removes_checked_row_from_rollups() -> None:
         assert after["total_meals_logged"] == 0, after
         assert after["avg_calories_when_logged"] == 0, after
     _ok("unchecked meal no longer appears in history or averages")
+
+
+def test_unlog_meal_clears_day_state_without_removing_plan_meal() -> None:
+    """Unchecking a visible meal removes the log row, not the plan row.
+
+    The mobile app may keep a favorite/manual copy in UserDayState so it can
+    still be edited or checked later. The server must clear log provenance from
+    that copy; otherwise a reinstall/refetch can make the meal look logged
+    again or make the next edit recreate the deleted log.
+    """
+    print("\n[test] unlog_meal_from_plan clears day-state log stamp without removing meal")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import User, UserDayState  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import log_meal_from_plan, unlog_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 5, 22)
+    meal_data = {
+        "meal": "Chicken Bowl",
+        "items": [
+            {"name": "Chicken", "quantity": 1, "unit": "serving", "calories": 300, "protein": 40, "carbs": 10, "fat": 8},
+        ],
+    }
+    client_key = "local_chicken_bowl"
+    with Session(engine) as s:
+        u = User(email="meal-unlog-state@example.com", username="mealunlogstate", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        logged = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            client_meal_key=client_key,
+            meal_data=meal_data,
+            source="manual_add",
+            consumed_at=datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc),
+            db=s,
+        )
+        state = UserDayState(
+            user_id=u.id,
+            day_key=meal_date,
+            meal_checks={client_key: True},
+            nutrition_plan={
+                "meals": [{
+                    **meal_data,
+                    "_clientMealKey": client_key,
+                    "_loggedMealId": logged["id"],
+                    "_consumedAt": "2026-05-22T12:00:00+00:00",
+                    "_localId": "saved_log_1",
+                    "_savedMealId": 7,
+                }],
+                "targets": {"calories": 2000, "protein": 150, "carbs": 200, "fat": 60},
+            },
+        )
+        s.add(state); s.commit()
+
+        result = unlog_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            client_meal_key=client_key,
+            meal_data={**meal_data, "_loggedMealId": logged["id"]},
+            source="plan_check",
+            db=s,
+        )
+        assert result["deleted"] == 1, result
+        s.refresh(state)
+        meals = state.nutrition_plan["meals"]
+        assert len(meals) == 1, meals
+        assert meals[0]["meal"] == "Chicken Bowl"
+        assert "_loggedMealId" not in meals[0], meals[0]
+        assert "_consumedAt" not in meals[0], meals[0]
+        assert meals[0]["_savedMealId"] == 7, meals[0]
+        assert state.meal_checks == {client_key: False}, state.meal_checks
+    _ok("unchecking clears log stamp but keeps the visible meal")
+
+
+def test_delete_logged_meal_clears_user_day_state_copy() -> None:
+    """Hard-deleting a logged meal must clear the persisted day-state copy
+    too, or the mobile app can replay it on cold start."""
+    print("\n[test] delete_logged_meal clears UserDayState nutrition copy")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem, UserDayState  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.meals import delete_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 5, 18)
+    with Session(engine) as s:
+        u = User(email="meal-delete-state@example.com", username="mealdelete", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        meal = Meal(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type=MealType.SNACK,
+            name="Protein bar",
+            source=MealSource.LOGGED,
+            client_meal_key="meal_3",
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Protein bar",
+            quantity=1,
+            unit="bar",
+            calories=210,
+            protein_g=20,
+            carbs_g=22,
+            fat_g=6,
+        ))
+        s.add(UserDayState(
+            user_id=u.id,
+            day_key=meal_date,
+            meal_checks={"meal_0": True, "meal_1": True, "meal_2": True, "meal_3": True, "meal_4": True},
+            nutrition_plan={
+                "meals": [
+                    {"meal": "Breakfast", "calories": 300},
+                    {"meal": "Lunch", "calories": 500},
+                    {"meal": "Snack", "calories": 150},
+                    {"meal": "Protein bar", "calories": 210, "_loggedMealId": meal.id},
+                    {"meal": "Dinner", "calories": 600},
+                ],
+                "targets": {"calories": 2200, "protein": 160, "carbs": 240, "fat": 70},
+            },
+        ))
+        s.commit(); s.refresh(meal)
+
+        delete_meal(meal.id, current_user=u, db=s)
+
+        state = s.exec(
+            select(UserDayState).where(UserDayState.user_id == u.id, UserDayState.day_key == meal_date)
+        ).first()
+        assert state is not None
+        assert [m["meal"] for m in state.nutrition_plan["meals"]] == ["Breakfast", "Lunch", "Snack", "Dinner"]
+        assert state.meal_checks == {"meal_0": True, "meal_1": True, "meal_2": True, "meal_3": True}
+        assert s.get(Meal, meal.id) is None
+        assert s.exec(select(MealItem).where(MealItem.meal_id == meal.id)).all() == []
+    _ok("hard delete removes day-state meal and shifts following checks")
+
+
+def test_delete_logged_meal_uses_stable_client_key_without_shifting_checks() -> None:
+    """Stable client meal keys are row identity; deleting one row must not
+    reinterpret the remaining stable checks by array position."""
+    print("\n[test] delete_logged_meal uses stable client key without shifting checks")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem, UserDayState  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.meals import delete_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 5, 19)
+    deleted_key = "log_901"
+    kept_key = "local_dinner_1"
+    with Session(engine) as s:
+        u = User(email="meal-delete-stable@example.com", username="mealdeletestable", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        meal = Meal(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type=MealType.BREAKFAST,
+            name="Egg Breakfast",
+            source=MealSource.LOGGED,
+            client_meal_key=deleted_key,
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Eggs",
+            quantity=2,
+            unit="piece",
+            calories=180,
+            protein_g=14,
+            carbs_g=1,
+            fat_g=12,
+        ))
+        s.add(UserDayState(
+            user_id=u.id,
+            day_key=meal_date,
+            meal_checks={deleted_key: True, kept_key: True},
+            nutrition_plan={
+                "meals": [
+                    {"meal": "Egg Breakfast", "calories": 180, "_loggedMealId": meal.id, "_clientMealKey": deleted_key},
+                    {"meal": "Dinner", "calories": 600, "_clientMealKey": kept_key},
+                ],
+                "targets": {"calories": 2200, "protein": 160, "carbs": 240, "fat": 70},
+            },
+        ))
+        s.commit(); s.refresh(meal)
+
+        delete_meal(meal.id, current_user=u, db=s)
+
+        state = s.exec(
+            select(UserDayState).where(UserDayState.user_id == u.id, UserDayState.day_key == meal_date)
+        ).first()
+        assert state is not None
+        assert [m["meal"] for m in state.nutrition_plan["meals"]] == ["Dinner"]
+        assert state.meal_checks == {kept_key: True}, state.meal_checks
+    _ok("hard delete removes stable-key row without reindexing remaining checks")
 
 
 def test_log_meal_from_plan_collapses_existing_generated_duplicates() -> None:
@@ -804,8 +1152,310 @@ def test_saved_meal_log_retry_is_idempotent() -> None:
         rows = s.exec(select(Meal).where(Meal.user_id == u.id)).all()
         assert first["meal_id"] == second["meal_id"], (first, second)
         assert len(rows) == 1, rows
+        assert rows[0].saved_meal_id == saved.id, rows[0]
         assert second["times_logged"] == 1, second
     _ok("saved meal retry returns existing log row")
+
+
+def test_create_saved_meal_from_logged_history_links_source_meal() -> None:
+    """Saving a previous-day logged meal as a favorite should clone its
+    backend item snapshots and link the source row without letting later
+    favorite edits rewrite that history meal."""
+    print("\n[test] create saved meal from logged history links source meal")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import User, SavedMeal, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.saved_meals import create_saved_meal, update_saved_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="saved-from-history@example.com", username="savedfromhistory", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        meal = Meal(
+            user_id=u.id,
+            meal_date=date(2026, 4, 24),
+            meal_type=MealType.LUNCH,
+            name="Turkey bowl",
+            source=MealSource.LOGGED,
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Turkey",
+            quantity=1,
+            unit="serving",
+            calories=240,
+            protein_g=42,
+            carbs_g=0,
+            fat_g=8,
+            calcium_mg=22,
+            potassium_mg=315,
+            vitamin_b12_mcg=1.1,
+        ))
+        s.commit(); s.refresh(meal)
+
+        created = create_saved_meal({"from_meal_id": meal.id}, current_user=u, db=s)
+        favorite = s.get(SavedMeal, created["id"])
+        source = s.get(Meal, meal.id)
+        assert favorite is not None, created
+        assert favorite.name == "Turkey bowl", favorite
+        assert favorite.items[0]["food_name"] == "Turkey", favorite.items
+        assert favorite.items[0]["potassium_mg"] == 315, favorite.items
+        assert favorite.items[0]["micronutrients"]["calcium"] == 22, favorite.items
+        assert favorite.items[0]["micronutrients"]["vitamin_b12"] == 1.1, favorite.items
+        assert source.saved_meal_id == favorite.id, source
+
+        update_saved_meal(favorite.id, {"name": "Turkey rice bowl"}, current_user=u, db=s)
+        s.refresh(source)
+        assert source.name == "Turkey bowl", source
+        assert source.saved_meal_id == favorite.id, source
+    _ok("favorite created from history row links source meal")
+
+
+def test_saved_meal_rename_keeps_logged_rows_snapshotted() -> None:
+    """Renaming a favorite should not rewrite logged meal history, even
+    when a meal is linked by saved_meal_id or legacy name/signature."""
+    print("\n[test] saved meal rename keeps logged rows snapshotted")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, SavedMeal, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.saved_meals import log_saved_meal, update_saved_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="saved-rename@example.com", username="savedrename", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        saved = SavedMeal(
+            user_id=u.id,
+            name="Veggie shake",
+            total_calories=211,
+            total_protein_g=6.5,
+            total_carbs_g=30,
+            total_fat_g=5,
+            items=[{
+                "food_name": "Veggie shake",
+                "quantity": 1,
+                "unit": "serving",
+                "calories": 211,
+                "protein_g": 6.5,
+                "carbs_g": 30,
+                "fat_g": 5,
+            }],
+        )
+        s.add(saved); s.commit(); s.refresh(saved)
+
+        logged = log_saved_meal(
+            saved.id,
+            {"meal_date": str(date(2026, 4, 24)), "meal_type": "lunch"},
+            current_user=u,
+            db=s,
+        )
+        legacy = Meal(
+            user_id=u.id,
+            meal_date=date(2026, 4, 23),
+            meal_type=MealType.LUNCH,
+            name="Veggie shake",
+            source=MealSource.LOGGED,
+        )
+        unrelated = Meal(
+            user_id=u.id,
+            meal_date=date(2026, 4, 22),
+            meal_type=MealType.LUNCH,
+            name="Veggie shake",
+            source=MealSource.LOGGED,
+        )
+        s.add(legacy); s.add(unrelated); s.flush()
+        s.add(MealItem(
+            meal_id=legacy.id,
+            food_name="Veggie shake",
+            quantity=1,
+            unit="serving",
+            calories=211,
+            protein_g=6.5,
+            carbs_g=30,
+            fat_g=5,
+        ))
+        s.add(MealItem(
+            meal_id=unrelated.id,
+            food_name="Veggie shake",
+            quantity=2,
+            unit="serving",
+            calories=422,
+            protein_g=13,
+            carbs_g=60,
+            fat_g=10,
+        ))
+        s.commit()
+
+        update_saved_meal(saved.id, {"name": "Green shake"}, current_user=u, db=s)
+
+        linked_row = s.get(Meal, logged["meal_id"])
+        legacy_row = s.get(Meal, legacy.id)
+        unrelated_row = s.get(Meal, unrelated.id)
+        assert linked_row.name == "Veggie shake", linked_row
+        assert legacy_row.name == "Veggie shake", legacy_row
+        assert linked_row.saved_meal_id == saved.id, linked_row
+        assert legacy_row.saved_meal_id is None, legacy_row
+        assert unrelated_row.name == "Veggie shake", unrelated_row
+        assert unrelated_row.saved_meal_id is None, unrelated_row
+    _ok("saved meal rename leaves linked and legacy logs unchanged")
+
+
+def test_saved_meal_delete_detaches_logged_meals() -> None:
+    """Unfavoriting/deleting a saved meal should not delete or block the
+    real meal-history rows that were logged from it."""
+    print("\n[test] saved meal delete detaches logged meals")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import User, SavedMeal, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.saved_meals import delete_saved_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="saved-delete@example.com", username="saveddelete", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        saved = SavedMeal(
+            user_id=u.id,
+            name="Chicken bowl",
+            total_calories=500,
+            total_protein_g=42,
+            total_carbs_g=50,
+            total_fat_g=14,
+            items=[],
+        )
+        s.add(saved); s.commit(); s.refresh(saved)
+        meal = Meal(
+            user_id=u.id,
+            meal_date=date(2026, 4, 24),
+            meal_type=MealType.LUNCH,
+            name="Chicken bowl",
+            source=MealSource.LOGGED,
+            saved_meal_id=saved.id,
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Chicken",
+            quantity=1,
+            unit="serving",
+            calories=220,
+            protein_g=40,
+            carbs_g=0,
+            fat_g=6,
+        ))
+        s.commit(); s.refresh(meal)
+
+        delete_saved_meal(saved.id, current_user=u, db=s)
+
+        kept_meal = s.get(Meal, meal.id)
+        assert kept_meal is not None
+        assert kept_meal.saved_meal_id is None, kept_meal
+        assert s.get(SavedMeal, saved.id) is None
+    _ok("deleting saved meal leaves logged meal editable/deletable")
+
+
+def test_patch_saved_meal_log_detaches_and_replaces_items() -> None:
+    """Editing a meal that came from a favorite should turn it back into
+    an independent history row and replace item snapshots cleanly."""
+    print("\n[test] patch saved-meal log detaches and replaces items")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, SavedMeal, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.meals import update_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="saved-edit@example.com", username="savededit", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        saved = SavedMeal(
+            user_id=u.id,
+            name="Protein bowl",
+            total_calories=400,
+            total_protein_g=35,
+            total_carbs_g=35,
+            total_fat_g=12,
+            items=[],
+        )
+        s.add(saved); s.commit(); s.refresh(saved)
+        meal = Meal(
+            user_id=u.id,
+            meal_date=date(2026, 4, 24),
+            meal_type=MealType.LUNCH,
+            name="Protein bowl",
+            source=MealSource.LOGGED,
+            saved_meal_id=saved.id,
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Chicken",
+            quantity=1,
+            unit="serving",
+            calories=220,
+            protein_g=40,
+            carbs_g=0,
+            fat_g=6,
+        ))
+        s.commit(); s.refresh(meal)
+
+        updated = update_meal(
+            meal.id,
+            {
+                "name": "Edited protein bowl",
+                "items": [{
+                    "name": "Greek yogurt",
+                    "quantity": 1,
+                    "unit": "cup",
+                    "calories": 180,
+                    "protein": 20,
+                    "carbs": 8,
+                    "fat": 4,
+                }],
+            },
+            current_user=u,
+            db=s,
+        )
+
+        s.refresh(meal)
+        items = s.exec(select(MealItem).where(MealItem.meal_id == meal.id)).all()
+        assert updated.meal["name"] == "Edited protein bowl", updated
+        assert meal.saved_meal_id is None, meal
+        assert len(items) == 1, items
+        assert items[0].food_name == "Greek yogurt", items[0]
+        assert items[0].calories == 180, items[0]
+    _ok("editing saved-meal log detaches provenance and replaces items")
 
 
 def test_logged_ai_food_micros_are_persisted_for_gut_metrics() -> None:
@@ -954,6 +1604,7 @@ def test_patch_meal_items_refreshes_history_averages_and_gut_metrics() -> None:
                     "protein_g": 16,
                     "carbs_g": 36,
                     "fat_g": 4,
+                    "micronutrients": {"potassium": 400, "calcium": 80},
                 }],
             },
             current_user=u,
@@ -963,9 +1614,12 @@ def test_patch_meal_items_refreshes_history_averages_and_gut_metrics() -> None:
         rows = s.exec(select(MealItem).where(MealItem.meal_id == meal.id)).all()
         assert len(rows) == 1, rows
         assert rows[0].calories == 200, rows[0].model_dump()
+        assert rows[0].potassium_mg == 400, rows[0].model_dump()
+        assert rows[0].calcium_mg == 80, rows[0].model_dump()
 
         history = get_meal_history(u.id, days=1, db=s)
         assert history[0]["name"] == "Edited oats", history
+        assert history[0]["items"][0]["micronutrients"]["potassium"] == 400, history
         assert history[0]["totals"]["calories"] == 200, history
         averages = get_rolling_averages(u.id, window=1, db=s)
         assert averages["avg_calories"] == 200.0, averages
@@ -1046,6 +1700,76 @@ def test_score_micros_read_unsuffixed_aliases_and_calorie_fallback() -> None:
         assert micros["vitamin_d_mcg"] == 2
         assert micros["vitamin_b12_mcg"] == 0.6
     _ok("score micronutrients survive alias keys and missing serving_grams")
+
+
+def test_meal_history_rehydrates_food_nutrition_micros() -> None:
+    """History payloads must expose DB FoodNutrition micros for sparse item rows."""
+    print("\n[test] meal history rehydrates FoodNutrition micronutrients")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import FoodCategory, FoodSource, MealSource, MealType
+    from app.models import Food, FoodNutrition, Meal, MealItem, User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_meal_history
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="history-micros@example.com", username="historymicros", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        food = Food(
+            name="Micronutrient Yogurt",
+            normalized_name="micronutrient yogurt",
+            category=FoodCategory.DAIRY,
+            source=FoodSource.AI,
+        )
+        s.add(food); s.flush()
+        s.add(FoodNutrition(
+            food_id=food.id,
+            reference_grams=100,
+            calories=200,
+            protein=20,
+            carbs=20,
+            fat=5,
+            fiber=8,
+            sodium_mg=120,
+            extra_nutrients={"calcium": 300, "vitamin_d": 4, "zinc": 2},
+        ))
+        meal = Meal(
+            user_id=u.id,
+            meal_date=date.today(),
+            meal_type=MealType.SNACK,
+            name="Micronutrient Yogurt",
+            source=MealSource.LOGGED,
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Micronutrient Yogurt",
+            food_id=food.id,
+            quantity=1,
+            unit="serving",
+            serving_grams=None,
+            calories=100,
+            protein_g=10,
+            carbs_g=10,
+            fat_g=2.5,
+        ))
+        s.commit()
+
+        history = get_meal_history(u.id, days=1, db=s)
+        micros = history[0]["items"][0]["micronutrients"]
+        assert micros["fiber"] == 4, history
+        assert micros["sodium"] == 60, history
+        assert micros["calcium"] == 150, history
+        assert micros["vitamin_d"] == 2, history
+        assert micros["zinc"] == 1, history
+    _ok("meal history exposes DB-derived item micronutrients")
 
 
 def test_gut_rollup_uses_logged_days_not_empty_metric_placeholders() -> None:
@@ -1182,6 +1906,153 @@ def test_gut_rollup_serving_averages_include_omega3_supplements() -> None:
         assert rollup["omega3_servings"] == 1.5, rollup
         assert rollup["avg_omega3_servings"] == 0.8, rollup
     _ok("gut serving averages and omega-3 supplement rollup are stable")
+
+
+def test_gut_empty_rollup_exposes_prebiotic_and_fiber_density_fields() -> None:
+    """The empty rollup must carry the same keys as a populated one so the
+    UI never KeyErrors on a no-data week."""
+    print("\n[test] empty gut rollup exposes prebiotic + fiber-density fields")
+    from app.services.nutrition.gut_health import _empty_rollup
+
+    empty = _empty_rollup(7)
+    assert empty["prebiotic_g"] == 0.0, empty
+    assert empty["avg_prebiotic_g"] == 0.0, empty
+    assert empty["pct_days_fiber_density_target"] == 0.0, empty
+    _ok("empty rollup carries prebiotic_g, avg_prebiotic_g, pct_days_fiber_density_target")
+
+
+def test_gut_rollup_reports_fiber_density_target_days() -> None:
+    """pct_days_fiber_density_target counts logged days at/above
+    FIBER_TARGET_PER_1000 fiber per 1000 kcal, separate from the absolute
+    fiber-gram target."""
+    print("\n[test] gut rollup reports fiber-density target days")
+    from datetime import date, timedelta
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import DailyNutritionMetrics, User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.gut_health import compute_weekly_rollup, FIBER_TARGET_PER_1000
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+    with Session(engine) as s:
+        u = User(email="gut-density@example.com", username="gutdensity", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        # Day 1: high density (>= target). Day 2: low density (< target).
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today - timedelta(days=1),
+            calories_total=2000,
+            fiber_total_g=40,
+            fiber_per_1000_kcal=FIBER_TARGET_PER_1000 + 6,
+            item_count=4,
+            processing_counts={},
+        ))
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today,
+            calories_total=2000,
+            fiber_total_g=16,
+            fiber_per_1000_kcal=FIBER_TARGET_PER_1000 - 6,
+            item_count=4,
+            processing_counts={},
+        ))
+        s.commit()
+        rollup = compute_weekly_rollup(s, user_id=u.id, end_date=today, days=2)
+
+    assert rollup["days_with_data"] == 2, rollup
+    assert "pct_days_fiber_density_target" in rollup, rollup
+    assert rollup["pct_days_fiber_density_target"] == 50.0, rollup
+    _ok("fiber-density target reported as % of logged days above the per-1000 threshold")
+
+
+def test_gut_probiotic_aggregation_scales_servings_without_inventing_cfus() -> None:
+    """Probiotic servings scale by servings_consumed. CFUs are only counted
+    when probiotic_cfu_billions_per_serving is explicitly present — the
+    flag and the per-serving-servings fallbacks must never fabricate CFUs."""
+    print("\n[test] probiotic aggregation scales servings and never fakes CFUs")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import (  # noqa: F401
+        DailyNutritionMetrics, FoodMetadata, FoodNutrition, Meal, MealItem, User,
+    )
+    import app.models  # noqa: F401
+    import app.services.nutrition.gut_health as gh
+
+    today = date.today()
+    FOOD_ID = 90001
+
+    def _signals_for_meta(**meta_kwargs):
+        # serving_grams (200) / reference_grams (100) => servings_consumed = 2.0
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+        original = gh.get_or_create_metadata
+        gh.get_or_create_metadata = lambda *a, **k: FoodMetadata(
+            normalized_name="kefir",
+            processing_bucket="minimally_processed",
+            confidence=0.9,
+            source="curated",
+            protein_source="unknown",
+            likely_plant_foods=[],
+            **meta_kwargs,
+        )
+        try:
+            with Session(engine) as s:
+                u = User(email="pb@example.com", username="pbuser", hashed_password="x")
+                s.add(u); s.commit(); s.refresh(u)
+                s.add(FoodNutrition(food_id=FOOD_ID, reference_grams=100, calories=60))
+                m = Meal(
+                    user_id=u.id,
+                    meal_date=today,
+                    meal_type=MealType.BREAKFAST,
+                    name="Probiotic test",
+                    source=MealSource.LOGGED,
+                )
+                s.add(m); s.commit(); s.refresh(m)
+                s.add(MealItem(
+                    meal_id=m.id,
+                    food_name="kefir",
+                    food_id=FOOD_ID,
+                    quantity=1,
+                    unit="serving",
+                    serving_grams=200,
+                    calories=150,
+                    protein_g=8,
+                    carbs_g=12,
+                    fat_g=8,
+                ))
+                s.commit()
+                return gh._gather_raw_signals(s, u.id, today, allow_ai=False)
+        finally:
+            gh.get_or_create_metadata = original
+
+    # probiotic_flag fallback: servings scale by servings_consumed, no CFUs.
+    flag_only = _signals_for_meta(probiotic_flag=True)
+    assert flag_only.probiotic_servings == 2.0, flag_only
+    assert flag_only.probiotic_cfu_billions == 0.0, flag_only
+
+    # probiotic_servings_per_serving fallback: scales, still no CFUs.
+    pb_per_serving = _signals_for_meta(probiotic_servings_per_serving=0.5)
+    assert pb_per_serving.probiotic_servings == 1.0, pb_per_serving
+    assert pb_per_serving.probiotic_cfu_billions == 0.0, pb_per_serving
+
+    # Explicit CFU per serving: counted and scaled; servings tracked too.
+    with_cfu = _signals_for_meta(probiotic_cfu_billions_per_serving=10.0)
+    assert with_cfu.probiotic_cfu_billions == 20.0, with_cfu
+    assert with_cfu.probiotic_servings == 2.0, with_cfu
+
+    _ok("probiotic_flag/servings scale by servings_consumed; CFUs only from explicit per-serving value")
 
 
 def test_compute_daily_metrics_recovers_from_duplicate_insert_race() -> None:
@@ -1436,6 +2307,88 @@ def test_feedback_patch_preserves_exercise_based_fatigue_same_focus() -> None:
         workout_feed_rows = [r for r in feed_rows if r.event_type == "workout_completed"]
         assert len(workout_feed_rows) == 1, feed_rows
     _ok("feedback updates row without replacing actual muscle fatigue")
+
+
+def test_training_score_patch_persists_without_duplicate_completion() -> None:
+    """Training-score patch reuses /workouts/complete after PR detection.
+    It should update the existing completion row without creating another
+    completion or another social feed event."""
+    print("\n[test] workout training-score patch persists on completion")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import ActivityFeedItem, User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 2)
+    with Session(engine) as s:
+        u = User(email="workout-score@example.com", username="workoutscore", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Push",
+                duration_seconds=3000,
+                exercises=[
+                    CompletedExercisePayload(
+                        name="Barbell Bench Press",
+                        equipment="barbell",
+                        order_index=0,
+                        sets=[
+                            CompletedSetPayload(set_number=1, reps=5, weight_lbs=185, rir=2),
+                            CompletedSetPayload(set_number=2, reps=5, weight_lbs=185, rir=1),
+                        ],
+                    )
+                ],
+            ),
+            current_user=u,
+            db=s,
+        )
+        row = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).first()
+        assert row is not None
+        before_fatigue = dict(row.resolved_muscle_fatigue or {})
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Push",
+                duration_seconds=3000,
+                training_score=88,
+                training_rating="Crushed",
+                training_pillars={"effort": 30, "volume": 25, "duration": 15, "consistency": 13},
+                training_pillar_breakdown=[
+                    {"key": "stimulus", "label": "Stimulus", "value": 30, "max": 30, "present": True}
+                ],
+            ),
+            current_user=u,
+            db=s,
+        )
+
+        rows = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).all()
+        assert len(rows) == 1, rows
+        s.refresh(rows[0])
+        assert rows[0].training_score == 88
+        assert rows[0].training_rating == "Crushed"
+        assert rows[0].training_pillars["effort"] == 30
+        assert rows[0].training_pillar_breakdown[0]["key"] == "stimulus"
+        assert rows[0].resolved_muscle_fatigue == before_fatigue
+        feed_rows = s.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == u.id)).all()
+        workout_feed_rows = [r for r in feed_rows if r.event_type == "workout_completed"]
+        assert len(workout_feed_rows) == 1, feed_rows
+    _ok("training score patches existing completion without duplicate history")
 
 
 def test_feedback_patch_targets_focus_corrected_completion() -> None:
@@ -1695,7 +2648,7 @@ def test_manual_activity_identity_preserves_same_focus_rows_and_time() -> None:
         assert abs((_utc(rows[1].completed_at) - second_end).total_seconds()) < 1, rows[1].completed_at
 
         updated_end = datetime(2026, 5, 4, 7, 35, tzinfo=timezone.utc)
-        mark_workout_complete(
+        resp = mark_workout_complete(
             WorkoutCompleteRequest(
                 workout_date=workout_date,
                 focus_label="Running",
@@ -1720,6 +2673,280 @@ def test_manual_activity_identity_preserves_same_focus_rows_and_time() -> None:
         assert updated.calories_burned == 275, updated.calories_burned
         assert abs((_utc(updated.completed_at) - updated_end).total_seconds()) < 1, updated.completed_at
     _ok("same-focus manual rows stay distinct and decay from activity end")
+
+
+def test_custom_cardio_identity_preserves_same_focus_rows() -> None:
+    """Custom live-tracked cardio uses the same external-id identity rules
+    as manual imports, so two same-day runs do not overwrite each other."""
+    print("\n[test] custom cardio identity preserves same-focus rows")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import WorkoutCompleteRequest, mark_workout_complete
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 4)
+    first_start = datetime(2026, 5, 4, 7, 0, tzinfo=timezone.utc)
+    second_start = datetime(2026, 5, 4, 18, 0, tzinfo=timezone.utc)
+    with Session(engine) as s:
+        u = User(email="custom-cardio@example.com", username="customcardio", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        for external_id, start, miles in (
+            ("custom-run-1", first_start, 3.1),
+            ("custom-run-2", second_start, 2.4),
+        ):
+            mark_workout_complete(
+                WorkoutCompleteRequest(
+                    workout_date=workout_date,
+                    focus_label="Run",
+                    duration_seconds=1800,
+                    source_context="custom_cardio",
+                    activity_category="cardio",
+                    activity_subtype="run",
+                    activity_intensity="moderate",
+                    activity_source="live_tracker",
+                    distance_miles=miles,
+                    started_at=start,
+                    ended_at=start.replace(minute=start.minute + 30),
+                    external_source_id=external_id,
+                    calories_burned=250,
+                ),
+                current_user=u,
+                db=s,
+            )
+
+        rows = s.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == u.id)
+            .order_by(WorkoutCompletion.external_source_id)
+        ).all()
+        assert len(rows) == 2, rows
+        assert rows[0].external_source_id == "custom-run-1", rows[0].external_source_id
+        assert rows[0].distance_miles == 3.1, rows[0].distance_miles
+        assert rows[1].external_source_id == "custom-run-2", rows[1].external_source_id
+        assert rows[1].distance_miles == 2.4, rows[1].distance_miles
+    _ok("same-focus custom cardio rows stay distinct")
+
+
+def test_custom_strength_structured_history_preserves_same_focus_rows() -> None:
+    """Custom strength sessions must preserve both completion identity and
+    structured set rows so e1RM, PRs, weekly volume, and coach rollups see
+    every custom workout instead of only the last same-focus session."""
+    print("\n[test] custom strength structured history preserves same-focus rows")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion, WorkoutSession, WorkoutExercise, ExerciseSet  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        WorkoutSyncRequest,
+        mark_workout_complete,
+        sync_in_progress_workout,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 4)
+
+    def _bench_request(external_id: str, hour: int, weight: float) -> WorkoutCompleteRequest:
+        start = datetime(2026, 5, 4, hour, 0, tzinfo=timezone.utc)
+        return WorkoutCompleteRequest(
+            workout_date=workout_date,
+            focus_label="Strength",
+            duration_seconds=2700,
+            source_context="custom_strength",
+            activity_category="strength",
+            activity_subtype="strength",
+            activity_intensity="hard",
+            activity_source="live_tracker",
+            started_at=start,
+            ended_at=start.replace(minute=45),
+            external_source_id=external_id,
+            exercises=[
+                CompletedExercisePayload(
+                    name="Bench Press",
+                    slug="barbell_bench_press",
+                    equipment="barbell",
+                    primary_muscle="chest",
+                    secondary_muscles=["triceps", "shoulders"],
+                    is_compound=True,
+                    order_index=0,
+                    sets=[
+                        CompletedSetPayload(
+                            set_number=1,
+                            reps=5,
+                            weight_lbs=weight,
+                            rir=2,
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+    with Session(engine) as s:
+        u = User(email="custom-strength@example.com", username="customstrength", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        first_request = _bench_request("custom-lift-1", 7, 185)
+        sync_in_progress_workout(
+            WorkoutSyncRequest(
+                workout_date=first_request.workout_date,
+                focus_label=first_request.focus_label,
+                source_context=first_request.source_context,
+                exercises=first_request.exercises or [],
+            ),
+            current_user=u,
+            db=s,
+        )
+        mark_workout_complete(first_request, current_user=u, db=s)
+        mark_workout_complete(_bench_request("custom-lift-2", 18, 135), current_user=u, db=s)
+
+        completions = s.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == u.id)
+            .order_by(WorkoutCompletion.external_source_id)
+        ).all()
+        sessions = s.exec(
+            select(WorkoutSession)
+            .where(WorkoutSession.user_id == u.id)
+            .order_by(WorkoutSession.external_source_id)
+        ).all()
+        assert [c.external_source_id for c in completions] == ["custom-lift-1", "custom-lift-2"]
+        assert [row.external_source_id for row in sessions] == ["custom-lift-1", "custom-lift-2"]
+
+        exercise_rows = s.exec(
+            select(WorkoutExercise)
+            .where(WorkoutExercise.session_id.in_([row.id for row in sessions]))
+        ).all()
+        set_rows = s.exec(
+            select(ExerciseSet)
+            .where(ExerciseSet.workout_exercise_id.in_([row.id for row in exercise_rows]))
+        ).all()
+        assert len(set_rows) == 2, set_rows
+        assert sorted(round(row.actual_weight_lbs or 0) for row in set_rows) == [135, 185]
+
+        # Retry/update of the same external id replaces that session's sets
+        # instead of creating a third structured session.
+        mark_workout_complete(_bench_request("custom-lift-1", 7, 195), current_user=u, db=s)
+        sessions = s.exec(
+            select(WorkoutSession)
+            .where(WorkoutSession.user_id == u.id)
+            .order_by(WorkoutSession.external_source_id)
+        ).all()
+        assert len(sessions) == 2, sessions
+        first_session = [row for row in sessions if row.external_source_id == "custom-lift-1"][0]
+        first_exercises = s.exec(
+            select(WorkoutExercise).where(WorkoutExercise.session_id == first_session.id)
+        ).all()
+        first_sets = s.exec(
+            select(ExerciseSet)
+            .where(ExerciseSet.workout_exercise_id.in_([row.id for row in first_exercises]))
+        ).all()
+        assert len(first_sets) == 1, first_sets
+        assert round(first_sets[0].actual_weight_lbs or 0) == 195, first_sets[0].actual_weight_lbs
+    _ok("same-focus custom strength rows preserve structured set history")
+
+
+def test_warmup_sets_persist_without_counting_as_prs() -> None:
+    """Warm-up sets are stored for history detail, but progression/PR logic
+    should treat only working sets as performance signal."""
+    print("\n[test] warm-up sets persist without counting as PRs")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutSession, WorkoutExercise, ExerciseSet  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    def _request(day: date, external_id: str, warmup_weight: float | None = None) -> WorkoutCompleteRequest:
+        sets = []
+        if warmup_weight is not None:
+            sets.append(CompletedSetPayload(
+                set_number=-1,
+                reps=3,
+                weight_lbs=warmup_weight,
+                set_type="warmup",
+            ))
+        sets.append(CompletedSetPayload(
+            set_number=1,
+            reps=5,
+            weight_lbs=185,
+            set_type="working",
+        ))
+        return WorkoutCompleteRequest(
+            workout_date=day,
+            focus_label="Push",
+            duration_seconds=2400,
+            source_context="planned",
+            activity_category="strength",
+            external_source_id=external_id,
+            exercises=[
+                CompletedExercisePayload(
+                    name="Bench Press",
+                    slug="barbell_bench_press",
+                    equipment="barbell",
+                    primary_muscle="chest",
+                    secondary_muscles=["triceps", "shoulders"],
+                    is_compound=True,
+                    order_index=0,
+                    sets=sets,
+                )
+            ],
+        )
+
+    with Session(engine) as s:
+        u = User(email="warmups@example.com", username="warmups", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        mark_workout_complete(_request(date(2026, 5, 1), "warmup-pr-baseline"), current_user=u, db=s)
+        second = mark_workout_complete(_request(date(2026, 5, 8), "warmup-pr-repeat", 315), current_user=u, db=s)
+
+        assert second["prs"] == [], second["prs"]
+        session = s.exec(
+            select(WorkoutSession)
+            .where(WorkoutSession.external_source_id == "warmup-pr-repeat")
+        ).one()
+        exercise = s.exec(
+            select(WorkoutExercise)
+            .where(WorkoutExercise.session_id == session.id)
+        ).one()
+        rows = s.exec(
+            select(ExerciseSet)
+            .where(ExerciseSet.workout_exercise_id == exercise.id)
+            .order_by(ExerciseSet.set_number)
+        ).all()
+        assert [(row.set_number, row.set_type, row.actual_weight_lbs) for row in rows] == [
+            (-1, "warmup", 315),
+            (1, "working", 185),
+        ]
+    _ok("warm-up sets persist and stay out of PR detection")
 
 
 def test_manual_activity_completion_estimates_missing_calories() -> None:
@@ -1755,7 +2982,7 @@ def test_manual_activity_completion_estimates_missing_calories() -> None:
         ))
         s.commit()
 
-        mark_workout_complete(
+        resp = mark_workout_complete(
             WorkoutCompleteRequest(
                 workout_date=workout_date,
                 focus_label="Running",
@@ -1778,6 +3005,7 @@ def test_manual_activity_completion_estimates_missing_calories() -> None:
         assert row is not None
         assert row.calories_burned is not None
         assert 450 <= row.calories_burned <= 650, row.calories_burned
+        assert resp["calories_burned"] == row.calories_burned
     _ok(f"manual run stored estimated {row.calories_burned} kcal")
 
 
@@ -1837,6 +3065,89 @@ def test_delete_completion_by_external_source_id_keeps_same_day_rows() -> None:
     _ok("exact completion delete leaves sibling activity intact")
 
 
+def test_custom_activity_does_not_complete_active_plan_day() -> None:
+    """A custom ride on a planned lift day should remain extra activity."""
+    print("\n[test] custom activity does not complete active plan day")
+    from datetime import date, timedelta
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import User, PlanWeek, PlanDay  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        WorkoutCompleteRequest,
+        get_workout_status,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 4)
+    with Session(engine) as s:
+        u = User(email="extra-ride@example.com", username="extraride", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        week = PlanWeek(
+            user_id=u.id,
+            start_date=workout_date,
+            end_date=workout_date + timedelta(days=6),
+            planner_version="test",
+            goal="general_fitness",
+            days_per_week=4,
+            status="active",
+        )
+        s.add(week); s.commit(); s.refresh(week)
+        day = PlanDay(
+            plan_week_id=week.id,
+            user_id=u.id,
+            day_date=workout_date,
+            day_index=0,
+            status="planned",
+            is_rest=False,
+            workout_json={"focus": "Push + Core", "exercises": [{"name": "Bench Press"}]},
+        )
+        s.add(day); s.commit(); s.refresh(day)
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Ride",
+                duration_seconds=1800,
+                source_context="custom_cardio",
+                activity_category="cardio",
+                activity_subtype="ride",
+                activity_intensity="moderate",
+                activity_source="live_tracker",
+                distance_miles=6.2,
+                external_source_id="custom-ride-1",
+            ),
+            current_user=u,
+            db=s,
+        )
+        s.refresh(day)
+        assert day.status == "planned", day.status
+        assert get_workout_status(workout_date=workout_date, current_user=u, db=s)["done"] is False
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Push + Core",
+                duration_seconds=3600,
+                source_context="planned",
+                plan_day_id=day.id,
+                external_source_id="planned-push-1",
+            ),
+            current_user=u,
+            db=s,
+        )
+        s.refresh(day)
+        assert day.status == "completed", day.status
+        assert get_workout_status(workout_date=workout_date, current_user=u, db=s)["done"] is True
+    _ok("custom activity stays extra while planned completion closes PlanDay")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 cases = [
@@ -1847,7 +3158,12 @@ cases = [
     test_format_for_prompt_includes_meal_history_lines,
     test_log_meal_from_plan_persists_consumed_at,
     test_log_meal_from_plan_replaces_edited_meal_items,
+    test_plan_check_extra_snack_slots_do_not_replace_each_other,
+    test_plan_check_does_not_overwrite_manual_logged_same_name,
     test_unlog_meal_from_plan_removes_checked_row_from_rollups,
+    test_unlog_meal_clears_day_state_without_removing_plan_meal,
+    test_delete_logged_meal_clears_user_day_state_copy,
+    test_delete_logged_meal_uses_stable_client_key_without_shifting_checks,
     test_log_meal_from_plan_collapses_existing_generated_duplicates,
     test_manual_add_same_meal_twice_creates_two_history_rows,
     test_rolling_averages_ignore_duplicate_generated_plan_rows,
@@ -1855,22 +3171,35 @@ cases = [
     test_meal_history_limits_after_deduping_generated_rows,
     test_meal_history_window_matches_rolling_average_window,
     test_saved_meal_log_retry_is_idempotent,
+    test_create_saved_meal_from_logged_history_links_source_meal,
+    test_saved_meal_rename_keeps_logged_rows_snapshotted,
+    test_saved_meal_delete_detaches_logged_meals,
+    test_patch_saved_meal_log_detaches_and_replaces_items,
     test_logged_ai_food_micros_are_persisted_for_gut_metrics,
     test_patch_meal_items_refreshes_history_averages_and_gut_metrics,
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
+    test_meal_history_rehydrates_food_nutrition_micros,
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
     test_gut_rollup_serving_averages_include_omega3_supplements,
+    test_gut_empty_rollup_exposes_prebiotic_and_fiber_density_fields,
+    test_gut_rollup_reports_fiber_density_target_days,
+    test_gut_probiotic_aggregation_scales_servings_without_inventing_cfus,
     test_compute_daily_metrics_recovers_from_duplicate_insert_race,
     test_hydration_get_reads_requested_date,
     test_hydration_guidance_flags_low_sodium_long_session,
     test_hydration_guidance_recognizes_logged_electrolytes_and_creatine,
     test_feedback_patch_preserves_exercise_based_fatigue_same_focus,
+    test_training_score_patch_persists_without_duplicate_completion,
     test_feedback_patch_targets_focus_corrected_completion,
     test_planned_completion_keeps_plan_focus_after_partial_exercise_log,
     test_custom_exercise_muscles_feed_completion_fatigue,
     test_manual_activity_identity_preserves_same_focus_rows_and_time,
+    test_custom_cardio_identity_preserves_same_focus_rows,
+    test_custom_strength_structured_history_preserves_same_focus_rows,
+    test_warmup_sets_persist_without_counting_as_prs,
     test_manual_activity_completion_estimates_missing_calories,
     test_delete_completion_by_external_source_id_keeps_same_day_rows,
+    test_custom_activity_does_not_complete_active_plan_day,
 ]
 
 

@@ -2,21 +2,59 @@ import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, Dimensions, Alert,
+  Platform, Image, ImageBackground, Dimensions, Alert, Animated, Easing, useWindowDimensions,
 } from 'react-native';
 import Constants from 'expo-constants';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion, loginWithApple, loginWithGoogle } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
 import LegalDisclosureModal from '../components/LegalDisclosureModal';
 import { LEGAL_VERSION, legalAcceptanceLabel } from '../constants/legal';
+import { isFeatureEnabled } from '../utils/featureFlags';
+import { SIGNUP_TRIAL_DAYS } from '../utils/subscription';
+import { pexelsPhoto } from '../constants/stockImages';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
+
+const SIGNUP_FEATURE_PREVIEW: Array<{
+  key: string;
+  title: string;
+  body: string;
+  image: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  accent: string;
+}> = [
+  {
+    key: 'plan',
+    title: 'Plan your week',
+    body: 'Goal, schedule, gear, and recovery shape a stable 7-day plan.',
+    image: pexelsPhoto('5878699', { width: 520, height: 380 }),
+    icon: 'calendar-outline',
+    accent: '#15C7B8',
+  },
+  {
+    key: 'meals',
+    title: 'Track food faster',
+    body: 'Log meals, hydration, routines, supplements, and scans.',
+    image: pexelsPhoto('30635713', { width: 520, height: 380 }),
+    icon: 'restaurant-outline',
+    accent: '#7CFCB2',
+  },
+  {
+    key: 'signals',
+    title: 'Connect signals',
+    body: 'Use progress, readiness, body trends, and health data together.',
+    image: pexelsPhoto('32977239', { width: 520, height: 380 }),
+    icon: 'pulse-outline',
+    accent: '#40CCE8',
+  },
+];
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
 const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
@@ -47,11 +85,13 @@ const GOOGLE_OAUTH = googleOAuthConfig();
 
 interface AuthScreenProps {
   onAuthenticated: (token: string, isNewUser: boolean) => void;
+  initialMode?: 'login' | 'signup';
+  onBack?: () => void;
 }
 
-export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
+export default function AuthScreen({ onAuthenticated, initialMode = 'login', onBack }: AuthScreenProps) {
   // Reset flow is two-step: 'reset_email' (enter email + fetch question) → 'reset_answer' (answer + new password)
-  const [mode, setMode] = useState<'login' | 'signup' | 'reset_email' | 'reset_answer'>('login');
+  const [mode, setMode] = useState<'login' | 'signup' | 'reset_email' | 'reset_answer'>(initialMode);
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
@@ -72,6 +112,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [appleAvailable, setAppleAvailable] = useState(false);
+  const gradientAnim = useRef(new Animated.Value(0)).current;
+  const gradientDriftAnim = useRef(new Animated.Value(0)).current;
+  const gradientPulseAnim = useRef(new Animated.Value(0)).current;
 
   const emailTouched = email.length > 0;
   const emailValid = EMAIL_RE.test(email.trim());
@@ -79,22 +122,29 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const maestroTestAccount = __DEV__ && email.trim().endsWith('@test.thallo');
   const showSocialSignIn = mode === 'login' || mode === 'signup';
   const showAppleSignIn = Platform.OS === 'ios' && showSocialSignIn;
-  const socialVerb = mode === 'signup' ? 'Create account' : 'Sign in';
-  const googleClientId = GOOGLE_OAUTH.webClientId
-    ?? GOOGLE_OAUTH.iosClientId
-    ?? GOOGLE_OAUTH.androidClientId
-    ?? GOOGLE_CLIENT_ID_PLACEHOLDER;
   const activeGoogleClientId = Platform.select({
-    ios: GOOGLE_OAUTH.iosClientId ?? GOOGLE_OAUTH.webClientId,
-    android: GOOGLE_OAUTH.androidClientId ?? GOOGLE_OAUTH.webClientId,
-    default: GOOGLE_OAUTH.webClientId ?? GOOGLE_OAUTH.iosClientId ?? GOOGLE_OAUTH.androidClientId,
+    ios: GOOGLE_OAUTH.iosClientId,
+    android: GOOGLE_OAUTH.androidClientId,
+    default: GOOGLE_OAUTH.webClientId,
   });
   const googleConfigured = !!activeGoogleClientId;
+  const showGoogleSignIn = showSocialSignIn && googleConfigured;
+  const showSocialProviders = showGoogleSignIn || showAppleSignIn;
+  const billingBetaEnabled = isFeatureEnabled('billing.revenueCat');
+  const socialLegalProviders = showGoogleSignIn && showAppleSignIn
+    ? 'Google or Apple'
+    : showAppleSignIn
+      ? 'Apple'
+      : 'Google';
+  const googleClientId = activeGoogleClientId ?? GOOGLE_CLIENT_ID_PLACEHOLDER;
+  const { width: viewportWidth } = useWindowDimensions();
+  const webMode = Platform.OS === 'web';
+  const webCompact = webMode && viewportWidth < 900;
   const [googleRequest, googleResponse, promptGoogleAsync] = Google.useIdTokenAuthRequest({
     clientId: googleClientId,
-    webClientId: GOOGLE_OAUTH.webClientId ?? googleClientId,
-    iosClientId: GOOGLE_OAUTH.iosClientId ?? googleClientId,
-    androidClientId: GOOGLE_OAUTH.androidClientId ?? googleClientId,
+    webClientId: GOOGLE_OAUTH.webClientId ?? GOOGLE_CLIENT_ID_PLACEHOLDER,
+    iosClientId: GOOGLE_OAUTH.iosClientId ?? GOOGLE_CLIENT_ID_PLACEHOLDER,
+    androidClientId: GOOGLE_OAUTH.androidClientId ?? GOOGLE_CLIENT_ID_PLACEHOLDER,
     selectAccount: true,
   });
 
@@ -107,6 +157,111 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
   const handledGoogleTokenRef = useRef<string | null>(null);
+  const gradientShiftX = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [-SCREEN_W * 0.34, SCREEN_W * 0.22, -SCREEN_W * 0.34],
+  });
+  const gradientShiftY = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [-68, 48, -68],
+  });
+  const gradientPrimaryScale = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [1.02, 1.18, 1.02],
+  });
+  const gradientPrimaryRotate = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: ['-14deg', '7deg', '-14deg'],
+  });
+  const gradientReverseShiftX = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [SCREEN_W * 0.2, -SCREEN_W * 0.18, SCREEN_W * 0.2],
+  });
+  const gradientReverseShiftY = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [52, -46, 52],
+  });
+  const gradientReverseScale = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [1.16, 1.02, 1.16],
+  });
+  const gradientAccentOpacity = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.14, 0.42, 0.14],
+  });
+  const gradientHighlightOpacity = gradientAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.34, 0.14, 0.34],
+  });
+  const gradientRibbonShiftX = gradientDriftAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [SCREEN_W * 0.24, -SCREEN_W * 0.28, SCREEN_W * 0.24],
+  });
+  const gradientRibbonShiftY = gradientDriftAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [-36, 72, -36],
+  });
+  const gradientRibbonRotate = gradientDriftAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: ['18deg', '-9deg', '18deg'],
+  });
+  const gradientRibbonOpacity = gradientDriftAnim.interpolate({
+    inputRange: [0, 0.48, 1],
+    outputRange: [0.12, 0.3, 0.12],
+  });
+  const gradientFloorScale = gradientPulseAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [1.04, 1.2, 1.04],
+  });
+  const gradientFloorShiftX = gradientPulseAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [-SCREEN_W * 0.12, SCREEN_W * 0.16, -SCREEN_W * 0.12],
+  });
+  const gradientFloorOpacity = gradientPulseAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.16, 0.36, 0.16],
+  });
+
+  useEffect(() => {
+    const loops = [
+      Animated.loop(
+        Animated.timing(gradientAnim, {
+          toValue: 1,
+          duration: 11800,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ),
+      Animated.loop(
+        Animated.timing(gradientDriftAnim, {
+          toValue: 1,
+          duration: 16400,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ),
+      Animated.loop(
+        Animated.timing(gradientPulseAnim, {
+          toValue: 1,
+          duration: 9400,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ),
+    ];
+    loops.forEach(loop => loop.start());
+    return () => loops.forEach(loop => loop.stop());
+  }, [gradientAnim, gradientDriftAnim, gradientPulseAnim]);
+
+  useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      document.title = mode === 'signup' ? 'Thallo - Create account' : 'Thallo - Sign in';
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
@@ -133,6 +288,14 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     Alert.alert(title, message);
   };
 
+  const canContinueWithProvider = (provider: 'Apple' | 'Google'): boolean => {
+    if (mode !== 'signup' || acceptedLegal) return true;
+    const message = `Please accept the Terms, Privacy Policy, Health Disclaimer, and AI Disclosure before creating an account with ${provider}.`;
+    setError(message);
+    Alert.alert('Legal acceptance required', message);
+    return false;
+  };
+
   useEffect(() => {
     if (!googleResponse) return;
     if (googleResponse.type === 'success') {
@@ -148,10 +311,10 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         try {
           const { access_token, is_new_user } = await loginWithGoogle(identityToken, {
             legalVersion: LEGAL_VERSION,
-            acceptedTerms: true,
-            acceptedPrivacy: true,
-            acceptedHealthDisclaimer: true,
-            acceptedAiDisclaimer: true,
+            acceptedTerms: mode === 'signup' && acceptedLegal,
+            acceptedPrivacy: mode === 'signup' && acceptedLegal,
+            acceptedHealthDisclaimer: mode === 'signup' && acceptedLegal,
+            acceptedAiDisclaimer: mode === 'signup' && acceptedLegal,
           });
           onAuthenticated(access_token, is_new_user);
         } catch (e: any) {
@@ -169,10 +332,11 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         googleResponse.error?.message ?? googleResponse.params?.error_description ?? 'Unable to continue with Google',
       );
     }
-  }, [googleResponse]);
+  }, [googleResponse, mode, acceptedLegal]);
 
   const handleGoogleSignIn = async () => {
     if (loading) return;
+    if (!canContinueWithProvider('Google')) return;
     if (!googleConfigured) {
       showProviderError(
         'Google sign-in unavailable',
@@ -200,6 +364,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
   const handleAppleSignIn = async () => {
     if (loading) return;
+    if (!canContinueWithProvider('Apple')) return;
     setError('');
     setLoading(true);
     try {
@@ -221,10 +386,10 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         firstName: credential.fullName?.givenName ?? undefined,
         lastName: credential.fullName?.familyName ?? undefined,
         legalVersion: LEGAL_VERSION,
-        acceptedTerms: true,
-        acceptedPrivacy: true,
-        acceptedHealthDisclaimer: true,
-        acceptedAiDisclaimer: true,
+        acceptedTerms: mode === 'signup' && acceptedLegal,
+        acceptedPrivacy: mode === 'signup' && acceptedLegal,
+        acceptedHealthDisclaimer: mode === 'signup' && acceptedLegal,
+        acceptedAiDisclaimer: mode === 'signup' && acceptedLegal,
       });
       onAuthenticated(access_token, is_new_user);
     } catch (e: any) {
@@ -332,32 +497,196 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       style={styles.root}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={0}>
+      <View pointerEvents="none" style={styles.backgroundLayers}>
+        <LinearGradient
+          colors={['#080B12', '#10201F', '#161322', '#0D0F14']}
+          locations={[0, 0.36, 0.72, 1]}
+          start={{ x: 0.05, y: 0 }}
+          end={{ x: 0.95, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <Animated.View
+          style={[
+            styles.gradientWash,
+            styles.gradientWashPrimary,
+            {
+              opacity: gradientAccentOpacity,
+              transform: [
+                { translateX: gradientShiftX },
+                { translateY: gradientShiftY },
+                { rotate: gradientPrimaryRotate },
+                { scale: gradientPrimaryScale },
+              ],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={['rgba(21,199,184,0)', 'rgba(21,199,184,0.62)', 'rgba(124,252,178,0.1)']}
+            locations={[0, 0.44, 1]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
+        <Animated.View
+          style={[
+            styles.gradientWash,
+            styles.gradientWashSecondary,
+            {
+              opacity: gradientHighlightOpacity,
+              transform: [
+                { translateX: gradientReverseShiftX },
+                { translateY: gradientReverseShiftY },
+                { rotate: '12deg' },
+                { scale: gradientReverseScale },
+              ],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={['rgba(152,56,248,0)', 'rgba(64,204,232,0.42)', 'rgba(255,104,88,0.1)']}
+            locations={[0, 0.52, 1]}
+            start={{ x: 1, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
+        <Animated.View
+          style={[
+            styles.gradientRibbon,
+            {
+              opacity: gradientRibbonOpacity,
+              transform: [
+                { translateX: gradientRibbonShiftX },
+                { translateY: gradientRibbonShiftY },
+                { rotate: gradientRibbonRotate },
+              ],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={['rgba(255,104,88,0)', 'rgba(255,180,84,0.4)', 'rgba(21,199,184,0.22)', 'rgba(255,104,88,0)']}
+            locations={[0, 0.28, 0.66, 1]}
+            start={{ x: 0, y: 0.35 }}
+            end={{ x: 1, y: 0.65 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
+        <Animated.View
+          style={[
+            styles.gradientFloor,
+            {
+              opacity: gradientFloorOpacity,
+              transform: [
+                { translateX: gradientFloorShiftX },
+                { scale: gradientFloorScale },
+              ],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={['rgba(13,148,136,0)', 'rgba(13,148,136,0.34)', 'rgba(104,228,244,0.26)', 'rgba(13,148,136,0)']}
+            locations={[0, 0.32, 0.68, 1]}
+            start={{ x: 0, y: 1 }}
+            end={{ x: 1, y: 0 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
+        <LinearGradient
+          colors={['rgba(13,15,20,0.08)', 'rgba(13,15,20,0.54)', 'rgba(13,15,20,0.94)']}
+          locations={[0, 0.48, 1]}
+          style={StyleSheet.absoluteFill}
+        />
+      </View>
       <ScrollView
         ref={scrollRef}
         style={styles.scroll}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          webMode && styles.webContent,
+          webCompact && styles.webContentCompact,
+        ]}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         showsVerticalScrollIndicator={false}>
 
-        {/* Logo */}
-        <View style={styles.logoContainer}>
-          <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.tagline}>Personalized training, nutrition, and AI coaching.</Text>
-          <View style={styles.featureRow}>
-            {(['Personalized training plans', 'Nutrition support', 'AI coaching that adapts'] as const).map(f => (
-              <View key={f} style={styles.featureChip}>
-                <Text style={styles.featureChipText}>{f}</Text>
+        <View style={[webMode && styles.webShell, webCompact && styles.webShellCompact]}>
+          {webMode && !webCompact ? (
+            <View style={styles.webIntroPanel}>
+              <Text style={styles.webEyebrow}>Thallo web</Text>
+              <Text style={styles.webIntroTitle}>Review the week without opening the phone app.</Text>
+              <Text style={styles.webIntroBody}>
+                Today, trends, body history, health signals, and coaching insights in a calmer browser layout.
+              </Text>
+              <View style={styles.webIntroList}>
+                {[
+                  ['calendar-outline', 'Stable 7-day plan context'],
+                  ['bar-chart-outline', 'Workout and body history'],
+                  ['pulse-outline', 'Recovery and health signals'],
+                ].map(([icon, label]) => (
+                  <View key={label} style={styles.webIntroItem}>
+                    <View style={styles.webIntroIcon}>
+                      <Ionicons name={icon as keyof typeof Ionicons.glyphMap} size={16} color={colors.primary} />
+                    </View>
+                    <Text style={styles.webIntroItemText}>{label}</Text>
+                  </View>
+                ))}
               </View>
-            ))}
-          </View>
-          <Text style={styles.subtag}>Set up in under 3 minutes</Text>
-        </View>
+              {onBack ? (
+                <TouchableOpacity activeOpacity={0.76} onPress={onBack} style={styles.webMarketingLink}>
+                  <Ionicons name="arrow-back-outline" size={16} color={colors.textSecondary} />
+                  <Text style={styles.webMarketingLinkText}>Back to Thallo</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
 
-        <View style={styles.divider} />
+          <View style={[webMode && styles.webAuthPane]}>
+            {/* Logo */}
+            <View style={[
+              styles.logoContainer,
+              onBack && styles.logoContainerCompact,
+              webMode && styles.webLogoContainer,
+            ]}>
+              {onBack && (
+                <TouchableOpacity
+                  testID="auth-back-to-landing"
+                  activeOpacity={0.75}
+                  style={[styles.backButton, webMode && styles.webBackButton]}
+                  onPress={onBack}
+                >
+                  <Ionicons name="chevron-back" size={18} color={colors.textPrimary} />
+                  <Text style={styles.backButtonText}>Back</Text>
+                </TouchableOpacity>
+              )}
+              <Image
+                source={logo}
+                style={[styles.logo, onBack && styles.logoCompact, webMode && styles.webLogo]}
+                resizeMode="contain"
+              />
+              {onBack ? (
+                <Text style={[styles.authTitle, webMode && styles.webAuthTitle]}>
+                  {mode === 'signup' ? 'Create your Thallo account' : 'Welcome back'}
+                </Text>
+              ) : (
+                <>
+                  <Text style={styles.tagline}>Personalized training, nutrition, and AI coaching.</Text>
+                  <View style={styles.featureRow}>
+                    {(['Personalized training plans', 'Nutrition support', 'AI coaching that adapts'] as const).map(f => (
+                      <View key={f} style={styles.featureChip}>
+                        <Text style={styles.featureChipText}>{f}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={styles.subtag}>Set up in under 3 minutes</Text>
+                </>
+              )}
+            </View>
 
-        {/* Auth form */}
-        <View style={styles.formCard}>
+            <View style={[styles.divider, webMode && styles.webDivider]} />
+
+            {/* Auth form */}
+            <View style={[styles.formCard, webMode && styles.webFormCard]}>
           {/* Login / Sign Up toggle — sliding pill indicator */}
           <View style={styles.toggle}>
             <TouchableOpacity
@@ -376,26 +705,88 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </TouchableOpacity>
           </View>
 
-          {showSocialSignIn && (
+          {mode === 'signup' && billingBetaEnabled && (
+            <View
+              style={styles.trialBanner}
+              testID="auth-signup-trial-banner"
+              accessibilityLabel="auth-signup-trial-banner"
+            >
+              <View style={styles.trialIcon}>
+                <Ionicons name="sparkles-outline" size={17} color={colors.primary} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.trialTitle}>{SIGNUP_TRIAL_DAYS}-day Pro trial included</Text>
+                <Text style={styles.trialText}>
+                  Generated plans, coach chat, scans, readiness, and nutrition scoring unlock after account creation. No payment at signup.
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {mode === 'signup' && (
+            <View style={styles.signupFeaturePanel}>
+              <View style={styles.signupFeatureHeader}>
+                <View>
+                  <Text style={styles.signupFeatureEyebrow}>After signup</Text>
+                  <Text style={styles.signupFeatureTitle}>What Thallo can do for you</Text>
+                </View>
+                <Ionicons name="sparkles-outline" size={18} color={colors.primary} />
+              </View>
+              <ScrollView
+                horizontal
+                decelerationRate="fast"
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.signupFeatureScrollerContent}
+                style={styles.signupFeatureScroller}
+              >
+                {SIGNUP_FEATURE_PREVIEW.map((feature) => (
+                  <ImageBackground
+                    key={feature.key}
+                    source={{ uri: feature.image }}
+                    resizeMode="cover"
+                    imageStyle={styles.signupFeatureImage}
+                    style={styles.signupFeatureCard}
+                  >
+                    <LinearGradient
+                      colors={['rgba(5,10,14,0.16)', 'rgba(5,10,14,0.72)']}
+                      locations={[0, 1]}
+                      style={StyleSheet.absoluteFill}
+                    />
+                    <View style={[styles.signupFeatureIcon, { backgroundColor: feature.accent + '2E' }]}>
+                      <Ionicons name={feature.icon} size={16} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.signupFeatureCopy}>
+                      <Text style={styles.signupFeatureCardTitle} numberOfLines={1}>{feature.title}</Text>
+                      <Text style={styles.signupFeatureCardBody} numberOfLines={3}>{feature.body}</Text>
+                    </View>
+                  </ImageBackground>
+                ))}
+              </ScrollView>
+            </View>
+          )}
+
+          {showSocialProviders && (
             <View style={styles.socialBlock}>
               <View style={styles.socialRow}>
-                <TouchableOpacity
-                  testID="auth-google-button"
-                  activeOpacity={0.78}
-                  style={[styles.socialProviderButton, loading && styles.socialProviderButtonDisabled]}
-                  onPress={handleGoogleSignIn}
-                  disabled={loading}
-                >
-                  <Ionicons name="logo-google" size={18} color="#4285F4" />
-                  <Text
-                    style={styles.socialProviderText}
-                    numberOfLines={1}
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.82}
+                {showGoogleSignIn && (
+                  <TouchableOpacity
+                    testID="auth-google-button"
+                    activeOpacity={0.78}
+                    style={[styles.socialProviderButton, loading && styles.socialProviderButtonDisabled]}
+                    onPress={handleGoogleSignIn}
+                    disabled={loading}
                   >
-                    {socialVerb} with Google
-                  </Text>
-                </TouchableOpacity>
+                    <Ionicons name="logo-google" size={18} color="#4285F4" />
+                    <Text
+                      style={styles.socialProviderText}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.82}
+                    >
+                      Google
+                    </Text>
+                  </TouchableOpacity>
+                )}
                 {showAppleSignIn && (
                   <TouchableOpacity
                     testID="auth-apple-button"
@@ -411,14 +802,16 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                       adjustsFontSizeToFit
                       minimumFontScale={0.82}
                     >
-                      {socialVerb} with Apple
+                      Apple
                     </Text>
                   </TouchableOpacity>
                 )}
               </View>
               <TouchableOpacity onPress={() => setShowLegal(true)} activeOpacity={0.75}>
                 <Text style={styles.socialLegalText}>
-                  By continuing with {showAppleSignIn ? 'Google or Apple' : 'Google'}, you accept Thallo's Terms, Privacy Policy, Health Disclaimer, and AI Disclosure.
+                  {mode === 'signup'
+                    ? `To create an account with ${socialLegalProviders}, review and accept Thallo's Terms, Privacy Policy, Health Disclaimer, and AI Disclosure below.`
+                    : `Existing accounts can sign in with ${socialLegalProviders}. New accounts require legal acceptance on the Create Account tab.`}
                 </Text>
               </TouchableOpacity>
               <View style={styles.orRow}>
@@ -703,9 +1096,11 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               <Text style={styles.forgotText}>Back to sign in</Text>
             </TouchableOpacity>
           )}
+            </View>
+          </View>
         </View>
 
-        <View style={{ height: 40 }} />
+        <View style={[styles.bottomSpacer, webMode && styles.webBottomSpacer]} />
       </ScrollView>
       <LegalDisclosureModal visible={showLegal} onClose={() => setShowLegal(false)} />
     </KeyboardAvoidingView>
@@ -713,12 +1108,170 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 }
 
 const styles = StyleSheet.create({
-  root:   { flex: 1, backgroundColor: colors.background },
+  root:   { flex: 1, backgroundColor: colors.background, overflow: 'hidden' },
+  backgroundLayers: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
+  gradientWash: {
+    position: 'absolute',
+    left: -SCREEN_W * 0.22,
+    right: -SCREEN_W * 0.22,
+  },
+  gradientWashPrimary: {
+    top: 66,
+    height: 330,
+  },
+  gradientWashSecondary: {
+    bottom: 116,
+    height: 280,
+  },
+  gradientRibbon: {
+    position: 'absolute',
+    top: 18,
+    left: -SCREEN_W * 0.48,
+    width: SCREEN_W * 1.96,
+    height: 250,
+  },
+  gradientFloor: {
+    position: 'absolute',
+    left: -SCREEN_W * 0.38,
+    right: -SCREEN_W * 0.38,
+    bottom: -18,
+    height: 310,
+  },
   scroll: { flex: 1 },
   content: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 60, paddingBottom: 24 },
+  webContent: {
+    minHeight: '100%',
+    paddingHorizontal: 32,
+    paddingTop: 32,
+    paddingBottom: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  webContentCompact: {
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 18,
+    justifyContent: 'flex-start',
+  },
+  webShell: {
+    width: '100%',
+    maxWidth: 980,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 34,
+  },
+  webShellCompact: {
+    maxWidth: 460,
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: 0,
+  },
+  webIntroPanel: {
+    flex: 1,
+    maxWidth: 430,
+    gap: 18,
+    paddingVertical: 16,
+  },
+  webEyebrow: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  webIntroTitle: {
+    color: colors.textPrimary,
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  webIntroBody: {
+    color: colors.textSecondary,
+    fontSize: 15,
+    lineHeight: 23,
+    fontWeight: '600',
+    maxWidth: 390,
+  },
+  webIntroList: {
+    gap: 10,
+    marginTop: 2,
+  },
+  webIntroItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  webIntroIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.primary + '44',
+    backgroundColor: colors.primary + '14',
+  },
+  webIntroItemText: {
+    color: colors.textPrimary,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  webMarketingLink: {
+    alignSelf: 'flex-start',
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface + 'A8',
+  },
+  webMarketingLinkText: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  webAuthPane: {
+    width: 420,
+    maxWidth: '100%',
+  },
 
   logoContainer: { alignItems: 'center', marginTop: 20, marginBottom: 24 },
+  logoContainerCompact: { marginTop: 0, marginBottom: 18 },
+  webLogoContainer: {
+    marginTop: 0,
+    marginBottom: 12,
+  },
+  backButton: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 12,
+    marginBottom: 10,
+  },
+  webBackButton: {
+    minHeight: 34,
+    marginBottom: 8,
+  },
+  backButtonText: { color: colors.textPrimary, fontSize: 13, fontWeight: '800' },
   logo:          { width: SCREEN_W * 0.70, height: 130 },
+  logoCompact:   { width: SCREEN_W * 0.48, height: 84 },
+  webLogo:       { width: 180, height: 58 },
+  authTitle:     { color: colors.textPrimary, fontSize: 22, lineHeight: 27, fontWeight: '900', textAlign: 'center', marginTop: 2 },
+  webAuthTitle:  { fontSize: 24, lineHeight: 30 },
   tagline:       { fontSize: 15, color: colors.textSecondary, marginTop: 14, textAlign: 'center', fontWeight: '500', letterSpacing: 0.2 },
   featureRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14, justifyContent: 'center' },
   featureChip:   { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.border },
@@ -726,8 +1279,22 @@ const styles = StyleSheet.create({
   subtag: { fontSize: 13, color: colors.textMuted, marginTop: 12, fontWeight: '500' },
 
   divider: { height: 1, backgroundColor: colors.border, marginBottom: 24 },
+  webDivider: { opacity: 0, marginBottom: 0 },
 
   formCard: { gap: 12 },
+  webFormCard: {
+    gap: 10,
+    padding: 16,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface + 'F2',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.18,
+    shadowRadius: 28,
+    elevation: 8,
+  },
   socialBlock: { gap: 10, marginBottom: 2 },
   socialRow: { flexDirection: 'row', gap: 10 },
   socialProviderButton: {
@@ -783,9 +1350,110 @@ const styles = StyleSheet.create({
   },
   toggleTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
 
+  trialBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: colors.primary + '55',
+    backgroundColor: colors.primary + '14',
+    borderRadius: radius.md,
+    padding: 12,
+  },
+  trialIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.primary + '44',
+  },
+  trialTitle: { fontSize: 13, fontWeight: '900', color: colors.textPrimary, marginBottom: 2 },
+  trialText: { fontSize: 11, lineHeight: 15, color: colors.textSecondary },
+
+  signupFeaturePanel: {
+    gap: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface + 'E6',
+    borderRadius: radius.md,
+    padding: 12,
+    overflow: 'hidden',
+  },
+  signupFeatureHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  signupFeatureEyebrow: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: colors.primary,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  signupFeatureTitle: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  signupFeatureScroller: {
+    marginHorizontal: -12,
+  },
+  signupFeatureScrollerContent: {
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingBottom: 1,
+  },
+  signupFeatureCard: {
+    width: 158,
+    height: 138,
+    overflow: 'hidden',
+    borderRadius: radius.md,
+    justifyContent: 'space-between',
+    padding: 10,
+    backgroundColor: colors.surfaceRaised,
+  },
+  signupFeatureImage: {
+    borderRadius: radius.md,
+  },
+  signupFeatureIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  signupFeatureCopy: {
+    gap: 3,
+  },
+  signupFeatureCardTitle: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 5,
+  },
+  signupFeatureCardBody: {
+    color: 'rgba(255,255,255,0.86)',
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '700',
+  },
+
   input: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
     padding: 16, fontSize: 16, backgroundColor: colors.surface, color: colors.textPrimary,
+    letterSpacing: 0, fontWeight: '400',
   },
 
   passwordRow: { flexDirection: 'row', alignItems: 'center' },
@@ -847,4 +1515,6 @@ const styles = StyleSheet.create({
   },
   questionLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.8, marginBottom: 4, textTransform: 'uppercase' },
   questionText: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+  bottomSpacer: { height: 40 },
+  webBottomSpacer: { height: 12 },
 });

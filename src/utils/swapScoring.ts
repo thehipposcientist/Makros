@@ -15,12 +15,15 @@ export interface ExerciseLibraryItem {
   primary_muscle?: string | null;
   secondary_muscles?: string[] | null;
   equipment?: string | null;
-  gear?: Array<{ slug: string; name: string; category?: string; required?: boolean }> | null;
+  gear?: Array<{ slug: string; name: string; category?: string; required?: boolean; role?: string | null }> | null;
   movement_pattern?: string | null;
   is_compound?: boolean | null;
   description?: string | null;
   image_url?: string | null;
   video_id?: string | null;
+  /** free-exercise-db identifier — drives the 2-frame demo card in
+   *  FormVideoModal / ExerciseDemoCard. Null when no upstream match. */
+  demo_exercise_db_id?: string | null;
   is_custom?: boolean;
   aliases?: string[] | null;
 }
@@ -36,6 +39,8 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
     dumbbells: ['dumbbell'],
     adjustabledumbbells: ['adjustable dumbbells', 'adjustable_dumbbells', 'dumbbell', 'dumbbells'],
     adjustable_dumbbells: ['adjustable dumbbells', 'adjustabledumbbells', 'dumbbell', 'dumbbells'],
+    curlbar: ['curl bar', 'curling bar', 'ez curl bar', 'ez_curl_bar'],
+    curlingbar: ['curling bar', 'curl bar', 'ez curl bar', 'ez_curl_bar'],
     kb: ['kettlebell'],
     band: ['bands', 'resistance band', 'resistance bands', 'resistance bands tube', 'resistance_bands'],
     bands: ['band', 'resistance band', 'resistance bands', 'resistance bands tube', 'resistance_bands'],
@@ -48,7 +53,8 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
     assistedpullupdipmachine: ['assisted pull up dip machine', 'assisted pull-up / dip machine', 'assisted_pullup_machine'],
     assisteddipmachine: ['assisted dip machine', 'dip assist machine', 'assisted_pullup_machine'],
     ezbar: ['ez curl bar', 'ez_curl_bar'],
-    ezcurlbar: ['ez bar', 'ez_curl_bar'],
+    ezcurlbar: ['ez bar', 'curl bar', 'curling bar', 'ez_curl_bar'],
+    ez_curl_bar: ['ez bar', 'curl bar', 'curling bar', 'ezcurlbar'],
     adjustablebench: ['adjustable bench', 'adjustable_bench', 'flat bench', 'flat_bench', 'incline bench', 'incline_bench', 'decline bench', 'decline_bench'],
     adjustable_bench: ['adjustable bench', 'adjustablebench', 'flat bench', 'flat_bench', 'incline bench', 'incline_bench', 'decline bench', 'decline_bench'],
     flatbench: ['flat bench', 'flat_bench', 'adjustable bench', 'adjustable_bench'],
@@ -61,6 +67,9 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
     power_rack: ['power rack', 'powerrack', 'squat rack', 'squat_rack'],
     squatrack: ['squat rack', 'squat_rack', 'power rack', 'power_rack'],
     squat_rack: ['squat rack', 'squatrack', 'power rack', 'power_rack'],
+    preacherbench: ['preacher bench', 'preacher curl bench', 'preacher_bench'],
+    preachercurlbench: ['preacher curl bench', 'preacher bench', 'preacher_bench'],
+    preacher_bench: ['preacher bench', 'preacherbench', 'preacher curl bench', 'preachercurlbench'],
     sturdychair: ['sturdy chair', 'sturdy_chair', 'sturdy chair low surface', 'low surface'],
     sturdy_chair: ['sturdy chair', 'sturdychair', 'sturdy chair low surface', 'low surface'],
     lowsurface: ['low surface', 'sturdy chair', 'sturdy_chair'],
@@ -75,8 +84,48 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
     rowingmachine: ['rower', 'rowing_machine'],
     bike: ['stationary bike', 'stationary_bike'],
     stationarybike: ['bike', 'stationary_bike'],
-    cablemachine: ['cable machine', 'cable_machine'],
-    cable_machine: ['cable machine', 'cablemachine'],
+    cablemachine: [
+      'cable machine',
+      'cable_machine',
+      'cable d handle',
+      'd_handle',
+      'single cable handle',
+      'rope attachment',
+      'rope_attachment',
+      'straight bar attachment',
+      'straight_bar_attachment',
+      'v bar attachment',
+      'v_bar_attachment',
+    ],
+    cable_machine: [
+      'cable machine',
+      'cablemachine',
+      'cable d handle',
+      'd_handle',
+      'single cable handle',
+      'rope attachment',
+      'rope_attachment',
+      'straight bar attachment',
+      'straight_bar_attachment',
+      'v bar attachment',
+      'v_bar_attachment',
+    ],
+    singlecablestation: ['single cable station', 'single_cable_station', 'single cable machine', 'cable column', 'single pulley station'],
+    single_cable_station: ['single cable station', 'singlecablestation', 'single cable machine', 'cable column', 'single pulley station'],
+    dualcablestation: ['dual cable station', 'dual_cable_station', 'dual cable machine', 'functional trainer', 'cable crossover', 'dual adjustable pulley'],
+    dual_cable_station: ['dual cable station', 'dualcablestation', 'dual cable machine', 'functional trainer', 'cable crossover', 'dual adjustable pulley'],
+    cabledhandle: ['cable d-handle', 'cable d handle', 'd_handle', 'd handle', 'single cable handle'],
+    dhandle: ['cable d-handle', 'cable d handle', 'd_handle', 'single cable handle'],
+    d_handle: ['cable d-handle', 'cable d handle', 'dhandle', 'single cable handle'],
+    ropeattachment: ['cable rope attachment', 'rope attachment', 'rope_attachment'],
+    rope_attachment: ['cable rope attachment', 'ropeattachment', 'rope attachment'],
+    straightbarattachment: ['cable straight bar', 'straight bar attachment', 'straight_bar_attachment'],
+    straight_bar_attachment: ['cable straight bar', 'straightbarattachment', 'straight bar attachment'],
+    vbarattachment: ['cable v-bar', 'cable v bar', 'triangle row handle', 'v_bar_attachment'],
+    v_bar_attachment: ['cable v-bar', 'cable v bar', 'triangle row handle', 'vbarattachment'],
+    latpulldown: ['lat pulldown machine', 'lat_pulldown_machine', 'straight_bar_attachment', 'v_bar_attachment'],
+    latpulldownmachine: ['lat pulldown machine', 'lat_pulldown_machine', 'straight_bar_attachment', 'v_bar_attachment'],
+    lat_pulldown_machine: ['lat pulldown machine', 'latpulldownmachine', 'straight_bar_attachment', 'v_bar_attachment'],
     pectoralflypecdeckmachine: ['pectoral fly machine', 'pec deck machine', 'chest fly machine', 'pec_deck_machine'],
     pectoralflymachine: ['pectoral fly / pec deck machine', 'pec deck machine', 'chest fly machine', 'pec_deck_machine'],
     pecdeckmachine: ['pectoral fly machine', 'chest fly machine', 'pec_deck_machine'],
@@ -114,7 +163,30 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
 function ownedEquipmentKeySet(ownedEquipment: string[] | undefined): Set<string> {
   const owned = new Set<string>();
   for (const item of ownedEquipment ?? []) {
-    for (const key of normalizedEquipmentKeys(item)) owned.add(key);
+    const itemKeys = normalizedEquipmentKeys(item);
+    for (const key of itemKeys) owned.add(key);
+    const hasKey = (...needles: string[]) => itemKeys.some(k => needles.includes(k));
+    const addCableAttachments = () => {
+      for (const label of ['Cable D-handle', 'Cable rope attachment', 'Cable straight bar', 'Cable V-bar / triangle']) {
+        for (const key of normalizedEquipmentKeys(label)) owned.add(key);
+      }
+    };
+    if (hasKey('cable machine', 'cablemachine', 'cable_machine')) {
+      for (const label of ['Single cable station', 'Dual cable station']) {
+        for (const key of normalizedEquipmentKeys(label)) owned.add(key);
+      }
+      addCableAttachments();
+    } else if (hasKey('dual cable station', 'dualcablestation', 'dual_cable_station', 'functional trainer', 'cable crossover')) {
+      for (const label of ['Cable machine', 'Single cable station']) {
+        for (const key of normalizedEquipmentKeys(label)) owned.add(key);
+      }
+      addCableAttachments();
+    } else if (hasKey('single cable station', 'singlecablestation', 'single_cable_station', 'cable column')) {
+      for (const label of ['Cable machine']) {
+        for (const key of normalizedEquipmentKeys(label)) owned.add(key);
+      }
+      addCableAttachments();
+    }
   }
   for (const key of normalizedEquipmentKeys('bodyweight')) owned.add(key);
   for (const key of normalizedEquipmentKeys('none')) owned.add(key);
@@ -126,13 +198,49 @@ function equipmentMatchesOwned(raw: string | null | undefined, owned: Set<string
   return keys.length > 0 && keys.some(k => owned.has(k));
 }
 
-export function exerciseEquipmentLabel(ex: ExerciseLibraryItem): string | null {
+function gearRole(gear: { role?: string | null }): string {
+  return String(gear.role ?? 'primary').toLowerCase();
+}
+
+function gearMatchesOwned(
+  gear: { slug?: string | null; name?: string | null },
+  owned: Set<string>,
+): boolean {
+  return equipmentMatchesOwned(gear.slug, owned) || equipmentMatchesOwned(gear.name, owned);
+}
+
+function isBodyweightEquipmentBucket(equipment?: string | null): boolean {
+  const keys = normalizedEquipmentKeys(equipment);
+  return keys.some(k => k.includes('bodyweight') || k === 'none' || k === 'bw');
+}
+
+export function exerciseEquipmentLabel(
+  ex: ExerciseLibraryItem,
+  ownedEquipment?: string[],
+): string | null {
   const gear = ex.gear ?? [];
   if (gear.length > 0) {
-    const required = gear.filter(g => g.required !== false);
-    const display = (required.length > 0 ? required : gear)
+    const owned = ownedEquipment ? ownedEquipmentKeySet(ownedEquipment) : null;
+    const primary = gear.filter(g => gearRole(g) === 'primary');
+    const requiredPrimary = primary.filter(g => g.required !== false);
+    const requiredSupport = gear.filter(g => gearRole(g) !== 'primary' && g.required !== false);
+    const selectedPrimary = requiredPrimary.length > 0
+      ? requiredPrimary
+      : owned
+        ? primary.filter(g => gearMatchesOwned(g, owned)).slice(0, 1)
+        : isBodyweightEquipmentBucket(ex.equipment)
+          ? []
+          : primary;
+    const seen = new Set<string>();
+    const display = [...selectedPrimary, ...requiredSupport]
       .map(g => g.name || g.slug)
-      .filter(Boolean);
+      .filter((label): label is string => {
+        if (!label) return false;
+        const key = label.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
     if (display.length > 0) return display.join(', ');
   }
   return ex.equipment ?? null;
@@ -154,13 +262,16 @@ export function isExerciseUsableWithEquipment(
   ex: ExerciseLibraryItem,
   ownedEquipment: string[] | undefined,
 ): boolean {
+  if (ex.is_custom) return true;
   const owned = ownedEquipmentKeySet(ownedEquipment);
   if (ex.gear && ex.gear.length > 0) {
     const required = ex.gear.filter(g => g.required !== false);
-    if (required.length === 0) return true;
-    return required.every(g =>
-      equipmentMatchesOwned(g.slug, owned) || equipmentMatchesOwned(g.name, owned),
-    );
+    if (!required.every(g => gearMatchesOwned(g, owned))) return false;
+    const primary = ex.gear.filter(g => gearRole(g) === 'primary');
+    if (primary.length === 0) return true;
+    if (primary.some(g => g.required !== false)) return true;
+    if (isBodyweightEquipmentBucket(ex.equipment)) return true;
+    return primary.some(g => gearMatchesOwned(g, owned));
   }
   const eq = ex.equipment ?? '';
   const keys = normalizedEquipmentKeys(eq);
@@ -177,14 +288,16 @@ export function scoreSwapCandidate(base: ExerciseLibraryItem, cand: ExerciseLibr
   const cp = (cand.primary_muscle ?? '').toLowerCase();
   const bs = (base.secondary_muscles ?? []).map(m => m.toLowerCase());
   const cs = (cand.secondary_muscles ?? []).map(m => m.toLowerCase());
-  if (!bp || !cp) return -1;
-  if (bp === cp) score += 12;
+  const bpat = (base.movement_pattern ?? '').toLowerCase();
+  const cpat = (cand.movement_pattern ?? '').toLowerCase();
+  if (!bp || !cp) {
+    if (bpat && cpat && bpat === cpat) score += 6;
+    else return -1;
+  } else if (bp === cp) score += 12;
   else if (bs.includes(cp) || cs.includes(bp)) score += 6;
   else if (bs.some(m => cs.includes(m))) score += 3;
   else return -1;
   if (base.is_compound === cand.is_compound) score += 5;
-  const bpat = (base.movement_pattern ?? '').toLowerCase();
-  const cpat = (cand.movement_pattern ?? '').toLowerCase();
   if (bpat && bpat === cpat) score += 6;
   const be = equipmentClass(base);
   const ce = equipmentClass(cand);

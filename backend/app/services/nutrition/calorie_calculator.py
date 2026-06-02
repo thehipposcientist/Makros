@@ -30,7 +30,9 @@ from .goal_params import (
     CALORIES_PER_LB,
     GoalBucketParams,
     MAX_GAIN_RATE_LBS_PER_WEEK,
+    MAX_GAIN_RATE_PCT_BW_PER_WEEK,
     MAX_LOSS_RATE_LBS_PER_WEEK,
+    MAX_LOSS_RATE_PCT_BW_PER_WEEK,
     get_bucket_for_goal,
 )
 
@@ -92,6 +94,15 @@ class CalorieInputs:
     training_days_per_week: int       # 0-7
     session_minutes: int = 60         # avg minutes per session; nudges multiplier
 
+    # Lifestyle activity outside of planned training. Drives the
+    # `step_2b_apply_lifestyle_modifier` nudge on top of the training-
+    # schedule-derived multiplier. None = "not asked yet" → the
+    # modifier is a no-op (preserves legacy TDEE for users who
+    # onboarded before the question was added). Valid values are the
+    # five canonical levels: sedentary / light / moderate / active /
+    # very_active.
+    lifestyle_activity: str | None = None
+
     # Goal context
     goal_id: str | None = None        # looked up in GOAL_BUCKET_MAP
     pace: str = "moderate"            # "conservative" | "moderate" | "aggressive"
@@ -101,6 +112,7 @@ class CalorieInputs:
     # user's desired weight change over their desired timeline.
     target_weight_lbs: float | None = None
     timeline_weeks: int | None = None
+    body_fat_pct: float | None = None
 
     # Optional manual overrides — see `CustomMacroOverrides`.
     custom_overrides: CustomMacroOverrides | None = None
@@ -133,6 +145,15 @@ class CalorieTargets:
     rate_summary: str                 # Human-readable "what pace are we on"
     override_applied: bool            # True if user custom macros were used
     min_calories_enforced: bool       # True if we clamped up to MIN_SAFE_CALORIES
+    goal_adjustment_pct: float | None = None
+    goal_pace_label: str | None = None
+    protein_basis_lbs: float | None = None
+    protein_basis_kind: str | None = None
+    protein_factor: float | None = None
+    fat_percent: float | None = None
+    fat_floor_g: int | None = None
+    min_carbs_g: int | None = None
+    warnings: list[str] = field(default_factory=list)
 
     # Extra diagnostics populated after step 8 (partial-override recalc).
     # Default values preserve backward compat for any construction site
@@ -172,6 +193,93 @@ def macro_consistency_delta(calories: int, protein_g: int, carbs_g: int, fat_g: 
         + fat_g * CALORIES_PER_GRAM_FAT
     )
     return int(calories) - int(macro_kcal)
+
+
+def _clamp_int(value: float, low: int, high: int) -> int:
+    return int(round(max(low, min(high, value))))
+
+
+def _pace_path_daily_kcal_caps(weight_lbs: float) -> tuple[int, int]:
+    """Daily kcal caps for the pace path: (max_surplus, max_deficit_magnitude).
+
+    Honors both the absolute weekly-rate ceilings and the %-bodyweight rates,
+    taking whichever is smaller, so the pace path can never imply a faster
+    weekly change than the target-weight path allows. Both returned values are
+    positive integers.
+    """
+    gain_lbs = min(MAX_GAIN_RATE_LBS_PER_WEEK, MAX_GAIN_RATE_PCT_BW_PER_WEEK * weight_lbs)
+    loss_lbs = min(MAX_LOSS_RATE_LBS_PER_WEEK, MAX_LOSS_RATE_PCT_BW_PER_WEEK * weight_lbs)
+    return (
+        round(gain_lbs * CALORIES_PER_LB / 7),
+        round(loss_lbs * CALORIES_PER_LB / 7),
+    )
+
+
+def _pace_key(pace: str | None) -> str:
+    return (pace or "moderate").lower()
+
+
+def _pace_label(bucket: GoalBucketParams, pace: str | None) -> str:
+    key = _pace_key(pace)
+    return (bucket.pace_labels or {}).get(key, key)
+
+
+def _total_height_inches(inputs: CalorieInputs) -> int:
+    return inputs.height_feet * INCHES_PER_FOOT + inputs.height_inches
+
+
+def _weight_for_bmi(height_inches: int, bmi: float) -> float | None:
+    if height_inches <= 0:
+        return None
+    height_m = height_inches * CM_PER_INCH / 100.0
+    return bmi * height_m * height_m * LBS_PER_KG
+
+
+def _protein_factor(bucket: GoalBucketParams, pace: str | None) -> float:
+    key = _pace_key(pace)
+    if bucket.protein_per_lb_by_pace and key in bucket.protein_per_lb_by_pace:
+        return float(bucket.protein_per_lb_by_pace[key])
+    return float(bucket.protein_per_lb)
+
+
+def _fat_percent(bucket: GoalBucketParams, pace: str | None) -> float:
+    key = _pace_key(pace)
+    if bucket.fat_percent_by_pace and key in bucket.fat_percent_by_pace:
+        return float(bucket.fat_percent_by_pace[key])
+    return float(bucket.fat_percent_of_calories)
+
+
+def _fat_floor_g(protein_basis_lbs: float) -> int:
+    return max(math.ceil(protein_basis_lbs * FAT_FLOOR_G_PER_LB), 40)
+
+
+def _protein_weight_basis(inputs: CalorieInputs, bucket: GoalBucketParams) -> tuple[float, str]:
+    """Choose the bodyweight basis for protein targets.
+
+    Most users use current weight. Fat-loss users with a much lower target
+    weight or a high BMI use a conservative adjusted basis so a 300 lb user is
+    not blindly prescribed 300 g protein/day.
+    """
+    current = float(inputs.weight_lbs)
+    if bucket.name != "fat_loss":
+        return current, "current_weight"
+
+    target = inputs.target_weight_lbs
+    if target is not None and 0 < target < current * 0.98:
+        return max(float(target), current * 0.65), "target_weight"
+
+    height_inches = _total_height_inches(inputs)
+    if height_inches <= 0:
+        return current, "current_weight"
+    bmi = current / (height_inches * height_inches) * 703.0
+    if bmi < 30:
+        return current, "current_weight"
+
+    bmi_cap_weight = _weight_for_bmi(height_inches, 27.5)
+    if bmi_cap_weight is None:
+        return current, "current_weight"
+    adjusted = min(current, max(bmi_cap_weight, current * 0.75))
+    return adjusted, "adjusted_weight"
 
 
 # ─── Step 1 — BMR (Mifflin-St Jeor) ──────────────────────────────────────────
@@ -256,6 +364,48 @@ def step_2_calculate_activity_multiplier(training_days_per_week: int, session_mi
     return max(1.2, min(1.725, round(base, 3)))
 
 
+# Lifestyle activity nudges applied ON TOP of the training-schedule
+# multiplier. The intuition: a user lifting 4×/wk with a desk job and a
+# user lifting 4×/wk on a construction site burn very different amounts
+# of energy outside the gym. The training-schedule multiplier captures
+# only the gym side; this captures the rest. Values are deliberately
+# modest because the training multiplier already absorbs SOME NEAT — we
+# don't want to double-count moderate office walking.
+#
+# When the user is HealthKit-connected the `rolling_health_activity_*`
+# add-back in `compute_activity_target_adjustment` already corrects for
+# real-world activity, which is more accurate. For those users this
+# nudge gets them closer on day 1 before the rolling signal catches up.
+_LIFESTYLE_NUDGES: dict[str, float] = {
+    "sedentary":    0.00,  # desk job, mostly sitting outside training
+    "light":        0.10,  # on feet sometimes (teacher, retail floor)
+    "moderate":     0.20,  # active job (nurse, warehouse picker)
+    "active":       0.25,  # mostly on feet + lifting/carrying
+    "very_active":  0.30,  # heavy labor (construction, mover, athlete)
+}
+
+
+def step_2b_apply_lifestyle_modifier(multiplier: float, lifestyle_activity: str | None) -> float:
+    """Bump the activity multiplier based on the user's reported
+    out-of-gym lifestyle activity.
+
+    No-op when `lifestyle_activity` is None (the user hasn't been asked
+    yet — preserves legacy TDEE for accounts that onboarded before this
+    question landed) or when the value isn't one of the canonical
+    levels.
+
+    The result is still clamped to the same [1.2, 2.05] range — a
+    sedentary lifter can't go below 1.2 and even a construction worker
+    who trains 6×/wk caps at 1.725 + 0.30 = ~2.025. Past 2.0 the BMR
+    + activity model breaks down anyway (you need TEF and per-meal
+    digestion estimates).
+    """
+    nudge = _LIFESTYLE_NUDGES.get((lifestyle_activity or "").strip().lower(), 0.0)
+    if nudge <= 0:
+        return multiplier
+    return round(min(2.05, multiplier + nudge), 3)
+
+
 # ─── Step 3 — TDEE (maintenance calories) ────────────────────────────────────
 
 def step_3_calculate_tdee(bmr: int, activity_multiplier: float) -> int:
@@ -272,7 +422,7 @@ def step_3_calculate_tdee(bmr: int, activity_multiplier: float) -> int:
 
 # ─── Step 4 — Goal adjustment (deficit / surplus from TDEE) ──────────────────
 
-def step_4_calculate_goal_adjustment(inputs: CalorieInputs, bucket: GoalBucketParams, tdee: int) -> tuple[int, str]:
+def step_4_calculate_goal_adjustment(inputs: CalorieInputs, bucket: GoalBucketParams, tdee: int) -> tuple[int, str, float | None, str]:
     """Compute the daily calorie delta from TDEE based on the user's goal.
 
     Two paths, in priority order:
@@ -286,9 +436,9 @@ def step_4_calculate_goal_adjustment(inputs: CalorieInputs, bucket: GoalBucketPa
           `calorie_adjustment_by_pace` dict and pick the value matching
           the user's pace setting.
 
-    Returns (daily_kcal_delta, human_readable_summary). The summary is
-    included in CalorieTargets.rate_summary so debug logs and the AI
-    prompt can explain to the user WHY the target is what it is.
+    Returns (daily_kcal_delta, human_readable_summary, pct, pace_label). The
+    summary is included in CalorieTargets.rate_summary so debug logs and the
+    AI prompt can explain to the user WHY the target is what it is.
     """
     pace = (inputs.pace or "moderate").lower()
 
@@ -335,30 +485,84 @@ def step_4_calculate_goal_adjustment(inputs: CalorieInputs, bucket: GoalBucketPa
                 f"Targeting {clamped:.2f} lb/week gain "
                 f"({timeline} weeks to reach {target:.0f} lb)."
             )
-        return daily_delta, summary
+        return daily_delta, summary, None, _pace_label(bucket, pace)
 
-    # ── Path (b): pace-based table ──────────────────────────────────────────
+    # ── Path (b): percentage-of-maintenance table ───────────────────────────
+    if bucket.calorie_adjustment_pct_by_pace:
+        pct = float(bucket.calorie_adjustment_pct_by_pace.get(pace, 0.0))
+        raw_delta = tdee * pct
+        if bucket.calorie_adjustment_clamp:
+            low, high = bucket.calorie_adjustment_clamp
+            # A zero adjustment should stay zero for maintenance/recomp
+            # balanced, even when the bucket's positive clamp starts at 150.
+            daily_delta = 0 if abs(raw_delta) < 1 else _clamp_int(raw_delta, low, high)
+        else:
+            daily_delta = int(round(raw_delta))
+
+        # Bring the pace path under the same weekly-rate safety ceilings the
+        # target-weight path enforces, so "aggressive" can't imply an unsafe
+        # weekly rate at high TDEE (or for a light user).
+        surplus_cap, deficit_cap = _pace_path_daily_kcal_caps(inputs.weight_lbs)
+        rate_capped = False
+        if daily_delta > surplus_cap:
+            daily_delta, rate_capped = surplus_cap, True
+        elif daily_delta < -deficit_cap:
+            daily_delta, rate_capped = -deficit_cap, True
+
+        label = _pace_label(bucket, pace)
+        summary = (
+            f"{label.replace('_', ' ').capitalize()} "
+            f"({pct * 100:+.0f}% / {daily_delta:+d} cal/day vs maintenance"
+            f"{', rate-capped' if rate_capped else ''})."
+        )
+        return daily_delta, summary, pct, label
+
+    # ── Path (c): legacy fixed table fallback ───────────────────────────────
     daily_delta = bucket.calorie_adjustment_by_pace.get(pace, 0)
     pace_label = {"conservative": "slow", "moderate": "moderate", "aggressive": "fast"}.get(pace, pace)
     summary = f"{pace_label.capitalize()} pace ({daily_delta:+d} cal/day vs maintenance)."
-    return daily_delta, summary
+    return daily_delta, summary, None, pace_label
 
 
 # ─── Step 5 — Protein ────────────────────────────────────────────────────────
 
-def step_5_calculate_protein_g(weight_lbs: float, bucket: GoalBucketParams) -> int:
-    """Protein target in grams — bucket.protein_per_lb × bodyweight.
+def step_5_calculate_protein_g(
+    weight_lbs: float,
+    bucket: GoalBucketParams,
+    *,
+    age: int | None = None,
+    pace: str | None = None,
+) -> int:
+    """Protein target in grams — bucket.protein_per_lb × bodyweight,
+    plus an age modifier.
 
-    That's it. Exists as its own function for consistency with the other
-    steps and so future changes (e.g. scale protein with training volume
-    or lean mass) have a single obvious place to land.
+    Age modifier mirrors the ISSN 2017 position stand: older adults
+    have reduced muscle-protein-synthesis sensitivity and benefit from
+    higher protein intake to preserve lean mass against sarcopenia.
+      - 50–64: +0.10 g/lb (about +15 g for a 150 lb adult)
+      - 65+:   +0.20 g/lb (about +30 g for a 150 lb adult)
+    The bump is added to bodyweight × bucket factor, not a percentage,
+    so it scales naturally with body size and respects the goal-bucket
+    target as the floor.
     """
-    return round(weight_lbs * bucket.protein_per_lb)
+    base = weight_lbs * _protein_factor(bucket, pace)
+    if age and age >= 65:
+        base += weight_lbs * 0.20
+    elif age and age >= 50:
+        base += weight_lbs * 0.10
+    return round(base)
 
 
 # ─── Step 6 — Fat ────────────────────────────────────────────────────────────
 
-def step_6_calculate_fat_g(calories: int, weight_lbs: float, bucket: GoalBucketParams) -> int:
+def step_6_calculate_fat_g(
+    calories: int,
+    weight_lbs: float,
+    bucket: GoalBucketParams,
+    *,
+    pace: str | None = None,
+    protein_basis_lbs: float | None = None,
+) -> int:
     """Fat target in grams.
 
     Two candidates, take the higher:
@@ -373,12 +577,12 @@ def step_6_calculate_fat_g(calories: int, weight_lbs: float, bucket: GoalBucketP
     the floor and let carbs absorb the difference.
     """
     # Percent-of-calories target.
-    fat_from_percent = round(bucket.fat_percent_of_calories * calories / CALORIES_PER_GRAM_FAT)
+    fat_from_percent = round(_fat_percent(bucket, pace) * calories / CALORIES_PER_GRAM_FAT)
 
-    # Safety floor. `math.ceil` so we err on the side of sufficient fat
-    # rather than sufficient carbs — you'd rather have one extra gram of
-    # fat than dip below the floor.
-    fat_floor = math.ceil(weight_lbs * FAT_FLOOR_G_PER_LB)
+    # Safety floor. We use protein basis rather than blindly using current
+    # bodyweight, so high-BMI fat-loss users do not get excessive protein but
+    # still keep enough dietary fat.
+    fat_floor = _fat_floor_g(protein_basis_lbs if protein_basis_lbs is not None else weight_lbs)
 
     return max(fat_from_percent, fat_floor)
 
@@ -391,6 +595,8 @@ def step_7_calculate_carbs_g(
     fat_g: int,
     weight_lbs: float,
     bucket: GoalBucketParams,
+    *,
+    protein_basis_lbs: float | None = None,
 ) -> tuple[int, int]:
     """Carbs = whatever calories are left after protein + fat.
 
@@ -411,7 +617,7 @@ def step_7_calculate_carbs_g(
 
     # If we're short on carbs vs bucket minimum, take from fat.
     if carbs_g < bucket.min_carbs_g:
-        fat_floor = math.ceil(weight_lbs * FAT_FLOOR_G_PER_LB)
+        fat_floor = _fat_floor_g(protein_basis_lbs if protein_basis_lbs is not None else weight_lbs)
         deficit_cals = (bucket.min_carbs_g - carbs_g) * CALORIES_PER_GRAM_CARB
         transferable_cals = max(0, (fat_g - fat_floor) * CALORIES_PER_GRAM_FAT)
         transfer = min(deficit_cals, transferable_cals)
@@ -430,6 +636,8 @@ def step_8_apply_custom_overrides(
     *,
     bucket: GoalBucketParams | None = None,
     weight_lbs: float | None = None,
+    pace: str | None = None,
+    protein_basis_lbs: float | None = None,
 ) -> CalorieTargets:
     """Apply any fields the user manually pinned and recompute the rest.
 
@@ -495,7 +703,13 @@ def step_8_apply_custom_overrides(
         if pinned_fat is not None:
             final_fat = pinned_fat
         else:
-            final_fat = step_6_calculate_fat_g(final_cal, weight_lbs, bucket)  # type: ignore[arg-type]
+            final_fat = step_6_calculate_fat_g(
+                final_cal,
+                weight_lbs,
+                bucket,  # type: ignore[arg-type]
+                pace=pace,
+                protein_basis_lbs=protein_basis_lbs,
+            )
 
         # Carbs: pinned wins, else whatever calories are left after P + F,
         # with the bucket's carb floor / fat floor honored (step 7 handles
@@ -510,7 +724,12 @@ def step_8_apply_custom_overrides(
             # user's call. Debug flag below will surface it.
         else:
             recomputed_carb, recomputed_fat = step_7_calculate_carbs_g(
-                final_cal, final_prot, final_fat, weight_lbs, bucket,  # type: ignore[arg-type]
+                final_cal,
+                final_prot,
+                final_fat,
+                weight_lbs,
+                bucket,  # type: ignore[arg-type]
+                protein_basis_lbs=protein_basis_lbs,
             )
             final_carb = recomputed_carb
             # Only let step 7 move fat if the user didn't pin it.
@@ -532,7 +751,7 @@ def step_8_apply_custom_overrides(
 
     below_floor = False
     if weight_lbs is not None:
-        fat_floor = math.ceil(weight_lbs * FAT_FLOOR_G_PER_LB)
+        fat_floor = _fat_floor_g(protein_basis_lbs if protein_basis_lbs is not None else weight_lbs)
         if final_fat < fat_floor:
             below_floor = True
 
@@ -551,6 +770,19 @@ def step_8_apply_custom_overrides(
         ),
         override_applied=True,
         min_calories_enforced=targets.min_calories_enforced,
+        goal_adjustment_pct=targets.goal_adjustment_pct,
+        goal_pace_label=targets.goal_pace_label,
+        protein_basis_lbs=targets.protein_basis_lbs,
+        protein_basis_kind=targets.protein_basis_kind,
+        protein_factor=targets.protein_factor,
+        fat_percent=targets.fat_percent,
+        fat_floor_g=targets.fat_floor_g,
+        min_carbs_g=targets.min_carbs_g,
+        warnings=[
+            *targets.warnings,
+            *(["manual_macro_override_inconsistent"] if inconsistent else []),
+            *(["manual_fat_below_floor"] if below_floor else []),
+        ],
         consistency_kcal_delta=drift,
         override_inconsistent=inconsistent,
         override_fat_below_floor=below_floor,
@@ -573,15 +805,21 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
     """
     bucket = get_bucket_for_goal(inputs.goal_id)
 
-    # Step 1-3: BMR → activity multiplier → TDEE (maintenance calories)
+    # Step 1-3: BMR → activity multiplier → lifestyle nudge → TDEE.
+    # The lifestyle nudge sits between Mifflin and TDEE so a user who
+    # marks themselves as `active` on a desk-job onboarding wizard
+    # sees a meaningful TDEE bump on day one, before the HealthKit
+    # rolling signal has had time to accumulate enough days to feed
+    # the rolling_health_activity_adjustment path.
     bmr = step_1_calculate_bmr(inputs)
     multiplier = step_2_calculate_activity_multiplier(
         inputs.training_days_per_week, inputs.session_minutes,
     )
+    multiplier = step_2b_apply_lifestyle_modifier(multiplier, inputs.lifestyle_activity)
     tdee = step_3_calculate_tdee(bmr, multiplier)
 
     # Step 4: apply goal-specific calorie adjustment
-    goal_adjustment, rate_summary = step_4_calculate_goal_adjustment(inputs, bucket, tdee)
+    goal_adjustment, rate_summary, goal_pct, goal_pace_label = step_4_calculate_goal_adjustment(inputs, bucket, tdee)
     calories_raw = tdee + goal_adjustment
 
     # Per-day calorie safety floor: prevent dangerously low targets.
@@ -595,9 +833,36 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
         min_enforced = False
 
     # Step 5-7: protein → fat → carbs
-    protein_g = step_5_calculate_protein_g(inputs.weight_lbs, bucket)
-    fat_g = step_6_calculate_fat_g(calories, inputs.weight_lbs, bucket)
-    carbs_g, fat_g = step_7_calculate_carbs_g(calories, protein_g, fat_g, inputs.weight_lbs, bucket)
+    protein_basis_lbs, protein_basis_kind = _protein_weight_basis(inputs, bucket)
+    protein_factor = _protein_factor(bucket, inputs.pace)
+    fat_percent = _fat_percent(bucket, inputs.pace)
+    fat_floor_g = _fat_floor_g(protein_basis_lbs)
+    protein_g = step_5_calculate_protein_g(
+        protein_basis_lbs,
+        bucket,
+        age=inputs.age,
+        pace=inputs.pace,
+    )
+    fat_g = step_6_calculate_fat_g(
+        calories,
+        inputs.weight_lbs,
+        bucket,
+        pace=inputs.pace,
+        protein_basis_lbs=protein_basis_lbs,
+    )
+    carbs_g, fat_g = step_7_calculate_carbs_g(
+        calories,
+        protein_g,
+        fat_g,
+        inputs.weight_lbs,
+        bucket,
+        protein_basis_lbs=protein_basis_lbs,
+    )
+    warnings: list[str] = []
+    if carbs_g < bucket.min_carbs_g:
+        warnings.append("carbs_below_goal_floor")
+    if abs(macro_consistency_delta(calories, protein_g, carbs_g, fat_g)) > 10:
+        warnings.append("macro_calories_below_minimum_structure")
 
     calculated = CalorieTargets(
         calories=calories,
@@ -612,6 +877,15 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
         rate_summary=rate_summary,
         override_applied=False,
         min_calories_enforced=min_enforced,
+        goal_adjustment_pct=goal_pct,
+        goal_pace_label=goal_pace_label,
+        protein_basis_lbs=round(protein_basis_lbs, 1),
+        protein_basis_kind=protein_basis_kind,
+        protein_factor=protein_factor,
+        fat_percent=fat_percent,
+        fat_floor_g=fat_floor_g,
+        min_carbs_g=bucket.min_carbs_g,
+        warnings=warnings,
         consistency_kcal_delta=macro_consistency_delta(calories, protein_g, carbs_g, fat_g),
     )
 
@@ -625,6 +899,8 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
         inputs.custom_overrides,
         bucket=bucket,
         weight_lbs=inputs.weight_lbs,
+        pace=inputs.pace,
+        protein_basis_lbs=protein_basis_lbs,
     )
 
 
@@ -690,6 +966,7 @@ def calculate_reference_ranges(inputs: CalorieInputs) -> CalorieRangeCard:
             gender=inputs.gender,
             training_days_per_week=inputs.training_days_per_week,
             session_minutes=inputs.session_minutes,
+            lifestyle_activity=inputs.lifestyle_activity,
             goal_id=goal_id,
             pace="moderate",
         )

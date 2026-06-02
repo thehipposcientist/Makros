@@ -19,6 +19,8 @@ interface Props {
   themeName?: AppThemeName;
   thyroidOptIn?: boolean;
   variant?: 'card' | 'note' | 'button';
+  overPhoto?: boolean;
+  photoTone?: 'dark' | 'light';
 }
 
 /** 8px alert dot with a soft, looping pulse — opacity 1.0 → 0.55 → 1.0
@@ -66,7 +68,7 @@ function PulsingDot({ color }: { color: string }) {
   );
 }
 
-export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn, variant = 'card' }: Props) {
+export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn, variant = 'card', overPhoto = false, photoTone = 'dark' }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
 
@@ -96,6 +98,13 @@ export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn
   const badgeColor = worst.state === 'red' ? tc.error : tc.warning;
   const isNote = variant === 'note';
   const isButton = variant === 'button';
+  const lightPhoto = overPhoto && photoTone === 'light';
+  const photoButtonBackground = lightPhoto ? tc.surface + 'E6' : 'rgba(255,255,255,0.16)';
+  const photoButtonBorder = lightPhoto ? tc.border + 'B8' : 'rgba(255,255,255,0.34)';
+  const buttonBackground = isButton && overPhoto ? photoButtonBackground : isButton ? badgeColor : isNote ? badgeColor + '10' : tc.surface;
+  const buttonBorder = isButton && overPhoto ? photoButtonBorder : isButton ? badgeColor : isNote ? badgeColor + '2E' : badgeColor + '44';
+  const buttonTextColor = isButton ? (lightPhoto ? tc.textPrimary : '#fff') : tc.textPrimary;
+  const buttonIconColor = isButton ? (lightPhoto ? badgeColor : '#fff') : badgeColor;
 
   return (
     <>
@@ -105,32 +114,32 @@ export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn
         style={{
           flexDirection: 'row', alignItems: 'center', gap: 10,
           alignSelf: isButton ? 'flex-start' : undefined,
-          backgroundColor: isButton ? badgeColor : isNote ? badgeColor + '10' : tc.surface,
+          backgroundColor: buttonBackground,
           borderRadius: isButton ? 999 : isNote ? radius.md : radius.lg,
           paddingVertical: isButton ? 5 : isNote ? 8 : 10,
           paddingHorizontal: isButton ? 8 : isNote ? 10 : 12,
           marginTop: isNote ? 8 : 0,
           marginBottom: isNote || isButton ? 0 : 12,
           borderWidth: 1,
-          borderColor: isButton ? badgeColor : isNote ? badgeColor + '2E' : badgeColor + '44',
+          borderColor: buttonBorder,
         }}
       >
         {isButton ? (
-          <Ionicons name="alert" size={10} color="#fff" />
+          <Ionicons name="alert" size={10} color={buttonIconColor} />
         ) : isNote ? (
           <View style={{
             width: 18, height: 18, borderRadius: 9,
             backgroundColor: badgeColor + '18',
             alignItems: 'center', justifyContent: 'center',
           }}>
-            <Ionicons name="alert" size={12} color={badgeColor} />
+            <Ionicons name="alert" size={12} color={buttonIconColor} />
           </View>
         ) : (
           <PulsingDot color={badgeColor} />
         )}
         <View style={{ flex: isButton ? 0 : 1 }}>
           <Text
-            style={{ fontSize: isButton ? 10 : isNote ? 11 : 12, fontWeight: '800', color: isButton ? '#fff' : tc.textPrimary }}
+            style={{ fontSize: isButton ? 10 : isNote ? 11 : 12, fontWeight: '800', color: buttonTextColor }}
             numberOfLines={1}
           >
             {actionable.length === 1

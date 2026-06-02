@@ -37,6 +37,19 @@ _EQUIPMENT_NAME_ALIASES = {
     "ski erg": "skierg",
     "ski_erg": "skierg",
     "versa climber": "versaclimber",
+    "machine": "leverage_machines",
+    "machines": "leverage_machines",
+    "selectorized machine": "leverage_machines",
+    "selectorized machines": "leverage_machines",
+    "plate loaded machine": "leverage_machines",
+    "plate-loaded machine": "leverage_machines",
+    "plate loaded machines": "leverage_machines",
+    "plate-loaded machines": "leverage_machines",
+    "row machine": "machine_row_station",
+    "machine row": "machine_row_station",
+    "plate loaded row": "machine_row_station",
+    "plate-loaded row": "machine_row_station",
+    "row station": "machine_row_station",
 }
 
 
@@ -75,6 +88,21 @@ def resolve_equipment_entry(raw: str, name_to_slug: dict[str, str], valid_slugs:
     )
 
 
+def custom_equipment_slug(raw: str) -> str | None:
+    """Stable private-equipment key for user-entered equipment names.
+
+    Seed equipment resolves to public slugs. Anything else can still be
+    matched deterministically between a user's equipment profile and a
+    user-created exercise without adding it to the global equipment table.
+    """
+    import re
+
+    key = re.sub(r"[^a-z0-9]+", "_", str(raw or "").lower()).strip("_")
+    if not key:
+        return None
+    return f"custom_equipment__{key[:80]}"
+
+
 def expand_owned_equipment_aliases(owned: set[str]) -> set[str]:
     if "adjustable_dumbbells" in owned:
         owned.add("dumbbells")
@@ -84,6 +112,25 @@ def expand_owned_equipment_aliases(owned: set[str]) -> set[str]:
         owned.add("adjustable_bench")
     if "power_rack" in owned:
         owned.add("squat_rack")
+    cable_attachments = {
+        "d_handle",
+        "rope_attachment",
+        "straight_bar_attachment",
+        "v_bar_attachment",
+    }
+    has_specific_cable_station = "single_cable_station" in owned or "dual_cable_station" in owned
+    if "cable_machine" in owned and not has_specific_cable_station:
+        owned.update({
+            "single_cable_station",
+            "dual_cable_station",
+            *cable_attachments,
+        })
+    if "single_cable_station" in owned:
+        owned.update({"cable_machine", *cable_attachments})
+    if "dual_cable_station" in owned:
+        owned.update({"cable_machine", "single_cable_station", *cable_attachments})
+    if "lat_pulldown_machine" in owned:
+        owned.update({"straight_bar_attachment", "v_bar_attachment"})
     return owned
 
 
@@ -97,6 +144,10 @@ def resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
         slug = resolve_equipment_entry(str(raw), name_to_slug, valid_slugs)
         if slug:
             owned.add(slug)
+        else:
+            custom_slug = custom_equipment_slug(str(raw))
+            if custom_slug:
+                owned.add(custom_slug)
     expand_owned_equipment_aliases(owned)
     for bucket in ("bodyweight", "home", "dumbbells", "gym", "other"):
         if bucket in (equipment or []):

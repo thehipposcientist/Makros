@@ -6,6 +6,7 @@ export interface ExerciseSearchable {
   secondary_muscles?: string[] | null;
   equipment?: string | null;
   aliases?: string[] | null;
+  programming_tags?: string[] | null;
   gear?: Array<{ slug?: string | null; name?: string | null; category?: string | null }> | null;
 }
 
@@ -41,6 +42,8 @@ export function exerciseSearchHaystack(item: ExerciseSearchable): string {
     ...(item.secondary_muscles ?? []),
     ...(item.secondary_muscles ?? []).map(humanizeSearchToken),
     ...(item.aliases ?? []),
+    ...(item.programming_tags ?? []),
+    ...(item.programming_tags ?? []).map(humanizeSearchToken),
     ...((item.gear ?? []).flatMap(g => [g.slug, g.name, g.category])),
   ];
   return normalizeSearchText(values.filter(Boolean).join(' '));

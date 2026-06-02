@@ -9,7 +9,12 @@
 import { Platform } from 'react-native';
 
 export interface RestActivityState {
-  mode?: 'rest' | 'elapsed';
+  /** Mode drives which lock-screen layout the widget renders:
+   *  - "rest"    : original rest-timer ring + set counter (lifts)
+   *  - "elapsed" : free-timer with no countdown (lifts mid-set)
+   *  - "cardio"  : big elapsed time + distance + pace + calories
+   *                (outdoor/indoor cardio; either GPS or watch-fed) */
+  mode?: 'rest' | 'elapsed' | 'cardio';
   exerciseName: string;
   setNumber: number;       // 0-indexed current set
   totalSets: number;
@@ -27,6 +32,17 @@ export interface RestActivityState {
   hrZoneLow?: number | null;
   hrZoneHigh?: number | null;
   hrZoneColorHex?: string | null;
+  // ── Cardio mode fields (mode === 'cardio') ──────────────────────
+  /** Cumulative distance in meters since the activity started. The
+   *  widget converts to mi or km based on `distanceUnit`. */
+  distanceMeters?: number | null;
+  /** Average pace in seconds per kilometer. The widget converts to
+   *  per-mi when `distanceUnit === 'mi'`. */
+  paceSecPerKm?: number | null;
+  /** Active calories from the live HK builder (or 0 from GPS-only). */
+  activeCalories?: number | null;
+  /** User's preferred display unit. Defaults to "mi" in the widget. */
+  distanceUnit?: 'mi' | 'km' | null;
 }
 
 // Lazy-load the native module so non-iOS platforms never touch it.
@@ -102,6 +118,10 @@ export async function startRestActivity(state: RestActivityState): Promise<strin
       hrZoneLow: state.hrZoneLow ?? null,
       hrZoneHigh: state.hrZoneHigh ?? null,
       hrZoneColorHex: state.hrZoneColorHex ?? null,
+      distanceMeters: state.distanceMeters ?? null,
+      paceSecPerKm: state.paceSecPerKm ?? null,
+      activeCalories: state.activeCalories ?? null,
+      distanceUnit: state.distanceUnit ?? null,
     });
     if (!id) {
       _lastStartDiagnostic = 'native startActivity returned null — Activity.request failed in Swift (check device logs for NSLog entries starting with [ThalloLiveActivity])';

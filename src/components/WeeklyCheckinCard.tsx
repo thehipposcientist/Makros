@@ -1,10 +1,10 @@
-// WeeklyCheckinCard — end-of-week coaching entry point.
+// WeeklyCheckinCard - end-of-week review entry point.
 //
 // Three states:
-//   pending   → "Weekly check-in ready" + dates + Start / Skip; next week already exists
-//   completed → read-only recap with AI message + "View recap"
-//   skipped   → saved deterministic summary + "View summary"
-//   none      → renders nothing
+//   pending   -> "Weekly review ready" + dates + Review / Hide
+//   completed -> read-only recap with AI message + "View recap"
+//   skipped   -> saved deterministic summary + "View summary"
+//   none      -> renders nothing
 //
 // Self-contained: fetches its own status on mount. No parent state needed.
 
@@ -12,7 +12,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import {
   getCheckinStatus,
@@ -31,8 +31,10 @@ interface Props {
   /** Allows completed/skipped recaps to be hidden on transient surfaces.
    *  Progress leaves this off so the recap remains available there. */
   dismissibleRecap?: boolean;
-  /** Called after a successful check-in submission or skip so parent can
-   *  reload check-in status and any day-state overlays. */
+  /** Plan surfaces can request only the actionable pending review. */
+  hideRecap?: boolean;
+  /** Called after a review dismissal, recap completion, or skip
+   *  so parent surfaces can reload any day-state overlays. */
   onCheckinCompleted?: () => void;
 }
 
@@ -41,6 +43,14 @@ function formatDateRange(start: string | null, end: string | null): string {
   const fmt = (s: string) =>
     new Date(s + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   return `${fmt(start)} – ${fmt(end)}`;
+}
+
+function isBeforeToday(iso: string | null): boolean {
+  if (!iso) return false;
+  const target = new Date(`${iso.slice(0, 10)}T00:00:00`).getTime();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Number.isFinite(target) && target < today;
 }
 
 function recapChangePreview(checkin: PlanWeekCheckinRecord | null): string | null {
@@ -62,18 +72,10 @@ function recapChangePreview(checkin: PlanWeekCheckinRecord | null): string | nul
   return titles.length ? `Recommended: ${titles.join(' · ')}` : null;
 }
 
-function recapGoalForecast(checkin: PlanWeekCheckinRecord | null): { headline: string; reason: string } | null {
-  const forecast = checkin?.review_snapshot_json?.goal_forecast;
-  if (!forecast || typeof forecast !== 'object') return null;
-  const headline = String(forecast.headline ?? '').trim();
-  const reason = String(forecast.update_reason ?? '').trim();
-  if (!headline && !reason) return null;
-  return { headline, reason };
-}
-
-export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRecap = false, onCheckinCompleted }: Props) {
+export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRecap = false, hideRecap = false, onCheckinCompleted }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const primaryTextColor = getContrastingTextColor(tc.primary);
 
   const [status, setStatus] = useState<CheckinStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -81,6 +83,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
   const [modalVisible, setModalVisible] = useState(false);
   const [recapMode, setRecapMode] = useState(false);
   const [recapDismissed, setRecapDismissed] = useState(false);
+  const [pendingReviewDismissed, setPendingReviewDismissed] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     setLoading(true);
@@ -98,14 +101,28 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
     fetchStatus();
   }, [fetchStatus]);
 
+  const pendingDismissKey = status?.status === 'pending' && status.plan_week_id
+    ? `weeklyReviewInfoDismissed_${status.plan_week_id}`
+    : null;
+
   useEffect(() => {
-    if (status?.status !== 'pending' || !status.plan_week_id) return;
+    let alive = true;
+    setPendingReviewDismissed(false);
+    if (!pendingDismissKey) return () => { alive = false; };
+    AsyncStorage.getItem(pendingDismissKey)
+      .then(value => { if (alive) setPendingReviewDismissed(value === '1'); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [pendingDismissKey]);
+
+  useEffect(() => {
+    if (pendingReviewDismissed || status?.status !== 'pending' || !status.plan_week_id) return;
     maybeNotifyWeeklyCheckinDue({
       planWeekId: status.plan_week_id,
       weekStart: status.week_start,
       weekEnd: status.week_end,
     }).catch(() => {});
-  }, [status?.status, status?.plan_week_id, status?.week_start, status?.week_end]);
+  }, [pendingReviewDismissed, status?.status, status?.plan_week_id, status?.week_start, status?.week_end]);
 
   const recapDismissKey = dismissibleRecap
     && status?.plan_week_id
@@ -140,14 +157,80 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
   const dateRange = formatDateRange(status.week_start, status.week_end);
   const checkin: PlanWeekCheckinRecord | null = status.checkin ?? null;
   const changePreview = recapChangePreview(checkin);
-  const goalForecast = recapGoalForecast(checkin);
   const isPending = status.status === 'pending';
   const isCompleted = status.status === 'completed';
   const isSkipped = status.status === 'skipped';
+  const pendingIsAfterWeekEnd = isPending && isBeforeToday(status.week_end);
+  const pendingHint = pendingIsAfterWeekEnd
+    ? 'Your new week is already generated. Review last week, then choose whether setup changes wait for future weeks or rebuild remaining unlocked days.'
+    : 'Review this week and optionally adjust the setup for the next generated week.';
   const hasRecap = isCompleted || (isSkipped && !!checkin?.review_snapshot_json);
+  const snap = checkin?.review_snapshot_json && typeof checkin.review_snapshot_json === 'object'
+    ? checkin.review_snapshot_json as any
+    : null;
+  const pctColor = (pct: number | null, fallback: string) => (
+    pct == null ? fallback
+      : pct >= 80 ? (tc.success ?? '#22C55E')
+        : pct >= 55 ? (tc.warning ?? '#F59E0B')
+          : (tc.error ?? '#EF4444')
+  );
+  const recapMetrics: Array<{ key: string; label: string; value: string; icon: any; color: string; pct?: number }> = [];
+  if (hasRecap && snap) {
+    const sessionsCompleted = Number(snap.sessions_completed);
+    const sessionsPlanned = Number(snap.sessions_planned);
+    if (Number.isFinite(sessionsCompleted) && Number.isFinite(sessionsPlanned) && sessionsPlanned > 0) {
+      const pct = Math.max(0, Math.min(100, Math.round((sessionsCompleted / sessionsPlanned) * 100)));
+      recapMetrics.push({
+        key: 'sessions',
+        label: 'Sessions',
+        value: `${sessionsCompleted}/${sessionsPlanned}`,
+        icon: 'calendar-outline',
+        color: pctColor(pct, tc.primary),
+        pct,
+      });
+    }
+
+    const workoutPct = Number(snap.workout_adherence_pct ?? snap.adherence_pct);
+    if (Number.isFinite(workoutPct) && !recapMetrics.some(metric => metric.key === 'sessions')) {
+      recapMetrics.push({
+        key: 'workouts',
+        label: 'Workouts',
+        value: `${Math.round(workoutPct)}%`,
+        icon: 'barbell-outline',
+        color: pctColor(workoutPct, tc.primary),
+        pct: Math.max(0, Math.min(100, Math.round(workoutPct))),
+      });
+    }
+
+    const foodPct = Number(snap.nutrition_logging_pct ?? snap.nutrition_adherence_pct);
+    if (Number.isFinite(foodPct)) {
+      recapMetrics.push({
+        key: 'food',
+        label: 'Food logs',
+        value: `${Math.round(foodPct)}%`,
+        icon: 'nutrition-outline',
+        color: pctColor(foodPct, '#14B8A6'),
+        pct: Math.max(0, Math.min(100, Math.round(foodPct))),
+      });
+    }
+
+    const protein = Number(snap.avg_protein_g);
+    const daysLogged = Number(snap.days_logged);
+    if (recapMetrics.length < 3 && Number.isFinite(protein) && Number.isFinite(daysLogged) && daysLogged > 0) {
+      recapMetrics.push({
+        key: 'protein',
+        label: 'Protein',
+        value: `${Math.round(protein)}g`,
+        icon: 'restaurant-outline',
+        color: '#14B8A6',
+      });
+    }
+  }
 
   if (isSkipped && !hasRecap) return null;
+  if (hideRecap && hasRecap) return null;
   if (hasRecap && recapDismissed) return null;
+  if (isPending && pendingReviewDismissed) return null;
 
   const handleDismissRecap = async () => {
     setRecapDismissed(true);
@@ -156,15 +239,22 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
     }
   };
 
+  const dismissPendingReview = async () => {
+    setPendingReviewDismissed(true);
+    if (pendingDismissKey) {
+      try { await AsyncStorage.setItem(pendingDismissKey, '1'); } catch {}
+    }
+  };
+
   const handleSkip = async () => {
     if (!status.plan_week_id) return;
     Alert.alert(
-      'Skip check-in?',
-      'Your current generated week will stay as it is. The summary remains available in Progress.',
+      'Hide weekly review?',
+      'Your generated week will stay as it is. You can still review the summary from Progress.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Skip',
+          text: 'Hide',
           style: 'destructive',
           onPress: async () => {
             setSkipping(true);
@@ -173,7 +263,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
               setStatus(prev => prev ? { ...prev, status: 'skipped' } : prev);
               onCheckinCompleted?.();
             } catch {
-              Alert.alert('Error', 'Could not skip check-in. Try again.');
+              Alert.alert('Error', 'Could not hide the weekly review. Try again.');
             } finally {
               setSkipping(false);
             }
@@ -183,9 +273,13 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
     );
   };
 
-  const handleCheckinSubmitted = () => {
+  const handleCheckinSubmitted = async () => {
     setModalVisible(false);
-    fetchStatus();
+    if (isPending) {
+      await dismissPendingReview();
+    } else {
+      fetchStatus();
+    }
     onCheckinCompleted?.();
   };
 
@@ -214,11 +308,11 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
           </View>
           <View style={{ flex: 1 }}>
             <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.8, color: tc.primary }}>
-              {isPending ? 'WEEKLY CHECK-IN READY' : isSkipped ? 'LAST WEEK SUMMARY' : 'LAST WEEKLY REVIEW'}
+              {isPending ? 'WEEKLY REVIEW' : 'LAST WEEK SUMMARY'}
             </Text>
             {dateRange ? (
               <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginTop: 1 }}>
-                {isPending ? `Review ${dateRange} and save guidance for future weeks.` : dateRange}
+                {isPending ? `Review ${dateRange}` : dateRange}
               </Text>
             ) : null}
           </View>
@@ -235,73 +329,62 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
           )}
         </View>
 
+        {isPending ? (
+          <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 9 }}>
+            {pendingHint}
+          </Text>
+        ) : null}
+
         {/* Completed recap preview */}
         {hasRecap && (checkin?.ai_message || checkin?.review_snapshot_json?.headline) ? (
           <Text
-            style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}
-            numberOfLines={3}
+            style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 9 }}
+            numberOfLines={2}
           >
             {checkin?.ai_message || checkin?.review_snapshot_json?.headline}
           </Text>
         ) : null}
 
-        {/* Completed: stats row */}
-        {hasRecap && checkin?.review_snapshot_json ? (
-          <View style={{ flexDirection: 'row', gap: 16, flexWrap: 'wrap', marginBottom: 10 }}>
-            {checkin.review_snapshot_json.sessions_completed != null && (
-              <View>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>SESSIONS</Text>
-                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 1 }}>
-                  {checkin.review_snapshot_json.sessions_completed}/{checkin.review_snapshot_json.sessions_planned}
+        {hasRecap && recapMetrics.length > 0 ? (
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+            {recapMetrics.slice(0, 3).map(metric => (
+              <View
+                key={metric.key}
+                style={{
+                  flex: 1,
+                  minHeight: 82,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: tc.border,
+                  backgroundColor: tc.surfaceRaised,
+                  padding: 9,
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                  <Ionicons name={metric.icon} size={14} color={metric.color} />
+                  <Text style={{ flex: 1, fontSize: 8, fontWeight: '900', color: tc.textMuted, letterSpacing: 0.3, textTransform: 'uppercase' }} numberOfLines={1}>
+                    {metric.label}
+                  </Text>
+                </View>
+                <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary, marginTop: 6 }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                  {metric.value}
                 </Text>
+                {metric.pct != null && (
+                  <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border, overflow: 'hidden', marginTop: 7 }}>
+                    <View style={{ width: `${metric.pct}%` as any, height: '100%', borderRadius: 3, backgroundColor: metric.color }} />
+                  </View>
+                )}
               </View>
-            )}
-            {checkin.review_snapshot_json.adherence_pct != null && (
-              <View>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>WORKOUT ADH.</Text>
-                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 1 }}>
-                  {Math.round(checkin.review_snapshot_json.workout_adherence_pct ?? checkin.review_snapshot_json.adherence_pct)}%
-                </Text>
-              </View>
-            )}
-            {(checkin.review_snapshot_json.nutrition_logging_pct ?? checkin.review_snapshot_json.nutrition_adherence_pct) != null && (
-              <View>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>FOOD LOGS</Text>
-                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 1 }}>
-                  {Math.round(checkin.review_snapshot_json.nutrition_logging_pct ?? checkin.review_snapshot_json.nutrition_adherence_pct)}%
-                </Text>
-              </View>
-            )}
-            {checkin.review_snapshot_json.avg_protein_g != null && checkin.review_snapshot_json.days_logged > 0 && (
-              <View>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>PROTEIN</Text>
-                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 1 }}>
-                  {Math.round(checkin.review_snapshot_json.avg_protein_g)}g
-                </Text>
-              </View>
-            )}
+            ))}
           </View>
         ) : null}
 
         {hasRecap && changePreview ? (
-          <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 16, marginBottom: 10 }}>
-            {changePreview}
-          </Text>
-        ) : null}
-
-        {hasRecap && goalForecast ? (
-          <View style={{ padding: 10, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border, marginBottom: 10 }}>
-            <Text style={{ fontSize: 9, fontWeight: '900', color: tc.textMuted, letterSpacing: 0.5 }}>GOAL ESTIMATE</Text>
-            {goalForecast.headline ? (
-              <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary, marginTop: 4, lineHeight: 17 }}>
-                {goalForecast.headline}
-              </Text>
-            ) : null}
-            {goalForecast.reason ? (
-              <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 3, lineHeight: 15 }}>
-                {goalForecast.reason}
-              </Text>
-            ) : null}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 10 }}>
+            <Ionicons name="sparkles-outline" size={13} color={tc.primary} />
+            <Text style={{ flex: 1, fontSize: 11, color: tc.textSecondary, lineHeight: 15 }} numberOfLines={1}>
+              {changePreview}
+            </Text>
           </View>
         ) : null}
 
@@ -322,9 +405,9 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
           >
             <Text style={{
               fontSize: 13, fontWeight: '700',
-              color: isPending ? '#fff' : tc.textPrimary,
+              color: isPending ? primaryTextColor : tc.textPrimary,
             }}>
-              {isPending ? 'Start check-in' : isSkipped ? 'View summary' : 'View recap'}
+              {isPending ? 'Review week' : isSkipped ? 'View summary' : 'View recap'}
             </Text>
           </TouchableOpacity>
 
@@ -336,7 +419,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
             >
               {skipping
                 ? <ActivityIndicator size="small" color={tc.textMuted} />
-                : <Text style={{ fontSize: 13, color: tc.textMuted, fontWeight: '600' }}>Skip</Text>
+                : <Text style={{ fontSize: 13, color: tc.textMuted, fontWeight: '600' }}>Hide</Text>
               }
             </TouchableOpacity>
           )}

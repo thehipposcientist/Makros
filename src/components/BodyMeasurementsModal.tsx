@@ -8,6 +8,7 @@ import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { submitWeeklyCheckin } from '../services/api';
 import {
+  bloodPressureInputError,
   buildBodyMeasurementsCheckinPayload,
   EMPTY_MEASUREMENT_FIELDS,
 } from '../utils/bodyMeasurements';
@@ -41,6 +42,11 @@ export default function BodyMeasurementsModal({ visible, authToken, currentWeigh
     setFields(f => ({ ...f, [key]: val }));
 
   const handleSave = async () => {
+    const bpError = bloodPressureInputError(fields);
+    if (bpError) {
+      Alert.alert('Check blood pressure', bpError);
+      return;
+    }
     const payload = buildBodyMeasurementsCheckinPayload({ currentWeight, fields });
     if (!payload) {
       Alert.alert('Weight required', 'Update your Body weight before saving measurements.');
@@ -110,6 +116,40 @@ export default function BodyMeasurementsModal({ visible, authToken, currentWeigh
                   </View>
                 </View>
               ))}
+              <View style={{ marginTop: 2, marginBottom: 14 }}>
+                <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginBottom: 8 }}>Blood Pressure</Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  {[
+                    { key: 'bpSystolic' as const, label: 'Systolic' },
+                    { key: 'bpDiastolic' as const, label: 'Diastolic' },
+                  ].map(({ key, label }) => (
+                    <View key={key} style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, marginBottom: 6 }}>{label}</Text>
+                      <TextInput
+                        style={{
+                          borderWidth: 1,
+                          borderColor: tc.border,
+                          borderRadius: radius.md,
+                          padding: 12,
+                          fontSize: 16,
+                          color: tc.textPrimary,
+                          backgroundColor: tc.background,
+                          fontWeight: '600',
+                        }}
+                        value={fields[key]}
+                        onChangeText={v => set(key, v)}
+                        keyboardType="number-pad"
+                        placeholder="Optional"
+                        placeholderTextColor={tc.textMuted}
+                      />
+                    </View>
+                  ))}
+                  <Text style={{ alignSelf: 'flex-end', fontSize: 14, color: tc.textMuted, minWidth: 44, paddingBottom: 13 }}>mmHg</Text>
+                </View>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 7, lineHeight: 15 }}>
+                  Used as wellness context for health insights. Not medical advice.
+                </Text>
+              </View>
               <View style={{ height: 16 }} />
             </ScrollView>
 

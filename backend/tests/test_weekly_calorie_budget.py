@@ -1,15 +1,13 @@
-"""Tests for weekly calorie budget smoothing.
+"""Tests for weekly calorie behavior smoothing.
 
 Covers:
-  - Fat loss: over-budget → cut spread across remaining days (capped at 200/day)
-  - Body recomp: over-budget → cut capped at 150/day
-  - Muscle gain: over-budget → no downward cut (cap_down=0)
-  - Strength: no aggressive cuts
-  - Under-budget → adds calories back
-  - Days remaining = 0 → base target returned unchanged
-  - Days remaining = 1 → full delta on today only
-  - compute_adjusted_macros: protein stable, carbs/fat adjust
-  - Conservative caps enforced
+  - Small under-target days disappear inside the calorie deadband
+  - Fat loss lightly penalizes meaningful overages and does not bank deficits
+  - Recomp / maintain clamps weekly behavior to +/-75 kcal/day
+  - Muscle gain adds for meaningful under-budget behavior, capped at +150
+  - Partial logging days below 50% of target are ignored
+  - Weekly smoothing does not use prior weekly-smoothed targets
+  - compute_adjusted_macros keeps protein stable while carbs/fat adjust
 """
 from __future__ import annotations
 
@@ -17,201 +15,248 @@ import sys
 import traceback
 
 from app.services.nutrition.weekly_calorie_budget import (
-    compute_adjusted_daily_target, compute_adjusted_macros,
+    CalorieDay,
+    compute_adjusted_daily_target,
+    compute_adjusted_macros,
+    compute_weekly_behavior_delta,
+    effective_calorie_error,
+    is_valid_calorie_day,
 )
 
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
+def _days(logged: list[int], target: int) -> list[CalorieDay]:
+    return [CalorieDay(logged_calories=v, comparison_target=target) for v in logged]
 
-def _run(goal: str, base: int, logged_so_far: int, days_remaining: int):
+
+def _run(goal: str, base: int, logged: list[int], days_remaining: int):
     return compute_adjusted_daily_target(
         base_daily_target=base,
-        calories_logged_so_far=logged_so_far,
+        calories_logged_so_far=sum(logged),
         days_remaining=days_remaining,
         goal=goal,
+        prior_days=_days(logged, base),
     )
 
 
-# ─── tests ────────────────────────────────────────────────────────────────────
-
-def test_fat_loss_over_budget_spread():
-    """Fat loss: 200 cal over budget with 5 days left → ~40 cal/day cut."""
-    # base = 1800/day, weekly = 12600
-    # logged 3 days: 1800+1800+1800 + 200 over = 5600
-    # remaining = 12600 - 5600 = 7000, 5 days → 1400/day, delta = -400
-    # but cap_down for fat_loss is 200, so adjustment = -200
-    r = _run("fat_loss", base=1800, logged_so_far=5600, days_remaining=5)
-    assert r.adjustment_applied <= 0, f"Over-budget should cut, got {r.adjustment_applied}"
-    assert r.adjustment_applied >= -200, f"Fat loss cap is 200, got {r.adjustment_applied}"
-    assert r.adjusted_calories < r.base_daily_target
-    assert r.at_cap is True, "Should be at cap when raw delta exceeds 200"
-    print(f"  ✓ fat_loss over-budget: adj={r.adjusted_calories}, delta={r.adjustment_applied}")
+def test_small_under_target_days_are_deadband_noise():
+    """Four 2100 kcal days against a 2200 target should not raise targets."""
+    r = _run("maintain", base=2200, logged=[2100, 2100, 2100, 2100], days_remaining=3)
+    assert r.valid_days == 4
+    assert r.under_budget == 0
+    assert r.adjustment_applied == 0
+    assert r.adjusted_calories == 2200
+    assert effective_calorie_error(logged_calories=2100, comparison_target=2200) == 0
+    print("  ✓ small under-target days stay at base target")
 
 
-def test_fat_loss_small_over_no_cap():
-    """Fat loss: small overage → adjustment within cap, at_cap=False."""
-    # base = 2000/day, weekly = 14000
-    # logged 3 days: 6100 (100 over), 4 days remaining
-    # remaining = 14000 - 6100 = 7900, /4 = 1975, delta = -25
-    r = _run("fat_loss", base=2000, logged_so_far=6100, days_remaining=4)
-    assert r.adjustment_applied < 0
-    assert abs(r.adjustment_applied) <= 200
-    assert r.at_cap is False, "Small delta should NOT be at cap"
-    print(f"  ✓ fat_loss small over: adj={r.adjusted_calories}, at_cap={r.at_cap}")
+def test_fat_loss_over_budget_creates_small_capped_negative_delta():
+    """Meaningful fat-loss overages trim target lightly and cap at -100."""
+    r = _run("fat_loss", base=2000, logged=[2600, 2600, 2600, 2600], days_remaining=3)
+    assert r.over_budget > 0
+    assert r.adjustment_applied == -100
+    assert r.adjusted_calories == 1900
+    assert r.at_cap is True
+    print("  ✓ fat-loss over-budget delta capped at -100")
 
 
-def test_fat_loss_under_budget_adds_back():
-    """Fat loss: under budget → adjusted target is higher than base."""
-    # base = 1800/day, logged 2 days at 1500 each → 300 under
-    # remaining = (1800*7 - 3000) / 5 = (12600-3000)/5 = 9600/5 = 1920
-    r = _run("fat_loss", base=1800, logged_so_far=3000, days_remaining=5)
-    assert r.adjustment_applied > 0, f"Under-budget should add back, got {r.adjustment_applied}"
-    assert r.adjusted_calories > r.base_daily_target
-    print(f"  ✓ fat_loss under-budget adds back: adj={r.adjusted_calories}")
+def test_fat_loss_under_budget_does_not_add_without_recovery_flag():
+    """Fat loss should not repay under-budget days as future calories."""
+    r = _run("fat_loss", base=2000, logged=[1600, 1600, 1600, 1600], days_remaining=3)
+    assert r.under_budget > 0
+    assert r.adjustment_applied == 0
+    assert r.adjusted_calories == 2000
+    print("  ✓ fat-loss under-budget does not add calories by default")
 
 
-def test_body_recomp_cap_150():
-    """Body recomp: over-budget cut capped at 150/day."""
-    # large overage, 2 days remaining
-    r = _run("body_recomp", base=2200, logged_so_far=13000, days_remaining=2)
-    assert r.adjustment_applied >= -150, f"Recomp cap is 150, got {r.adjustment_applied}"
-    if r.at_cap:
-        print(f"  ✓ body_recomp: at cap 150, adj={r.adjusted_calories}")
-    else:
-        print(f"  ✓ body_recomp: within cap, adj={r.adjusted_calories}")
+def test_fat_loss_under_budget_can_add_when_recovery_flag_exists():
+    """Explicit recovery risk allows a small positive correction, capped."""
+    r = compute_adjusted_daily_target(
+        base_daily_target=2000,
+        calories_logged_so_far=6400,
+        days_remaining=3,
+        goal="fat_loss",
+        prior_days=_days([1600, 1600, 1600, 1600], 2000),
+        allow_fat_loss_under_budget_correction=True,
+    )
+    assert r.under_budget > 0
+    assert 0 < r.adjustment_applied <= 100
+    print("  ✓ fat-loss recovery risk can allow a small positive correction")
 
 
-def test_muscle_gain_no_downward_cut():
-    """Muscle gain: over-budget → NO downward cut (cap_down=0)."""
-    # Eating 500 over/day for 4 days, 3 days remaining
-    base = 2500
-    r = _run("muscle_gain", base=base, logged_so_far=base*4 + 2000, days_remaining=3)
-    assert r.adjustment_applied >= 0, \
-        f"Muscle gain must NEVER cut calories, got adjustment={r.adjustment_applied}"
-    print(f"  ✓ muscle_gain no downward cut: adj={r.adjusted_calories}")
+def test_recomp_maintain_clamps_under_and_over_budget():
+    """Maintain/recomp use a conservative +/-75 kcal/day clamp."""
+    under = _run("body_recomp", base=2200, logged=[1600, 1600, 1600, 1600], days_remaining=3)
+    over = _run("maintain", base=2200, logged=[3000, 3000, 3000, 3000], days_remaining=3)
+    assert under.adjustment_applied == 75
+    assert under.at_cap is True
+    assert over.adjustment_applied == -75
+    assert over.at_cap is True
+    print("  ✓ recomp/maintain clamp weekly deltas to +/-75")
 
 
-def test_strength_no_downward_cut():
-    """Strength goal: over-budget → NO downward cut (cap_down=0)."""
-    base = 2800
-    r = _run("strength", base=base, logged_so_far=base*4 + 1500, days_remaining=3)
-    assert r.adjustment_applied >= 0, \
-        f"Strength must NEVER cut calories, got adjustment={r.adjustment_applied}"
-    print(f"  ✓ strength no downward cut: adj={r.adjusted_calories}")
+def test_muscle_gain_under_budget_adds_capped_positive_delta():
+    """Meaningful under-budget days matter for muscle gain, capped at +150."""
+    r = _run("muscle_gain", base=2600, logged=[2100, 2100, 2100, 2100], days_remaining=3)
+    assert r.under_budget > 0
+    assert r.adjustment_applied == 150
+    assert r.adjusted_calories == 2750
+    assert r.at_cap is True
+    print("  ✓ muscle gain under-budget delta capped at +150")
 
 
-def test_zero_days_remaining():
-    """Zero days remaining → base target unchanged."""
-    r = _run("fat_loss", base=1800, logged_so_far=5000, days_remaining=0)
+def test_muscle_gain_over_budget_does_not_cut():
+    r = _run("muscle_gain", base=2600, logged=[3200, 3200, 3200, 3200], days_remaining=3)
+    assert r.over_budget > 0
+    assert r.adjustment_applied == 0
+    assert r.adjusted_calories == 2600
+    print("  ✓ muscle gain does not cut for over-budget days")
+
+
+def test_invalid_partial_logging_days_are_ignored():
+    """A day under 50% of target is treated as incomplete logging."""
+    r = _run("maintain", base=2200, logged=[900], days_remaining=6)
+    assert is_valid_calorie_day(logged_calories=900, comparison_target=2200) is False
+    assert r.valid_days == 0
+    assert r.adjustment_applied == 0
+    print("  ✓ partial logging days below 50% are ignored")
+
+
+def test_marked_complete_allows_low_logged_day_to_count():
+    """Future explicit day-complete flag can opt a low-calorie day into smoothing."""
+    delta = compute_weekly_behavior_delta(
+        prior_days=[CalorieDay(logged_calories=900, comparison_target=2200, marked_complete=True)],
+        days_remaining=6,
+        goal="maintain",
+    )
+    assert delta.valid_days == 1
+    assert delta.under_budget > 0
+    assert delta.adjustment_applied > 0
+    print("  ✓ marked-complete low day can count")
+
+
+def test_days_remaining_zero_returns_no_weekly_delta():
+    r = _run("fat_loss", base=1800, logged=[2600, 2600], days_remaining=0)
     assert r.adjusted_calories == 1800
     assert r.adjustment_applied == 0
-    print("  ✓ zero days remaining → base target unchanged")
+    assert r.days_remaining == 0
+    print("  ✓ zero days remaining returns base target")
 
 
-def test_one_day_remaining():
-    """One day remaining — entire remaining budget goes on today."""
-    # base 2000/day, logged 6 days at 1800 → under by 200/day → 1200 total under
-    # remaining = (2000*7 - 10800) / 1 = (14000-10800)/1 = 3200
-    # raw delta = +1200, cap_up for fat_loss is 150
-    r = _run("fat_loss", base=2000, logged_so_far=10800, days_remaining=1)
-    assert r.days_remaining == 1
-    assert r.adjustment_applied <= 150, f"cap_up for fat_loss is 150, got {r.adjustment_applied}"
-    print(f"  ✓ one day remaining, at_cap={r.at_cap}, adj={r.adjusted_calories}")
+def test_weekly_smoothing_excludes_prior_smoothed_targets():
+    """Only comparison_target is used; prior weekly-smoothed target fields are ignored."""
+    delta = compute_weekly_behavior_delta(
+        prior_days=[{
+            "logged_calories": 2550,
+            "comparison_target": 2200,
+            "target_with_weekly_smoothing": 2550,
+        }],
+        days_remaining=3,
+        goal="body_recomp",
+    )
+    assert delta.over_budget == 240
+    assert delta.adjustment_applied == -30
+    print("  ✓ weekly smoothing excludes itself from comparison targets")
 
 
-def test_formula_basic():
-    """Basic formula check: weekly_budget_remaining = base*7 - logged_so_far."""
-    base = 2000; logged = 4000; days = 3
-    r = _run("general_health", base=base, logged_so_far=logged, days_remaining=days)
-    expected_budget = base * 7 - logged   # 14000 - 4000 = 10000
-    assert r.weekly_budget_remaining == expected_budget, \
-        f"Budget remaining {r.weekly_budget_remaining} != {expected_budget}"
-    print(f"  ✓ weekly_budget_remaining formula: {r.weekly_budget_remaining}")
+def test_unknown_goal_uses_conservative_caps():
+    r = _run("general_health", base=2200, logged=[3000, 3000, 3000, 3000], days_remaining=3)
+    assert r.adjustment_applied == -50
+    assert r.at_cap is True
+    print("  ✓ unknown/default goals use conservative +/-50 behavior")
 
-
-def test_rounded_to_nearest_5():
-    """adjusted_calories is rounded to the nearest 5."""
-    r = _run("general_health", base=2000, logged_so_far=5983, days_remaining=4)
-    assert r.adjusted_calories % 5 == 0, \
-        f"adjusted_calories={r.adjusted_calories} is not divisible by 5"
-    print(f"  ✓ rounded to nearest 5: {r.adjusted_calories}")
-
-
-# ─── macro redistribution ─────────────────────────────────────────────────────
 
 def test_adjusted_macros_protein_stable():
-    """Protein must always stay stable when redistributing macros."""
     macros = compute_adjusted_macros(
         base_protein_g=180, base_carbs_g=200, base_fat_g=70,
         adjusted_calories=1800, base_calories=2000,
     )
-    assert macros["protein_g"] == 180, \
-        f"Protein changed from 180 → {macros['protein_g']}"
-    print(f"  ✓ protein stable: protein={macros['protein_g']}")
+    assert macros["protein_g"] == 180
+    print("  ✓ protein stable")
 
 
 def test_adjusted_macros_cut_reduces_carbs_and_fat():
-    """When cutting calories, carbs and fat should both decrease."""
     macros = compute_adjusted_macros(
         base_protein_g=180, base_carbs_g=250, base_fat_g=80,
         adjusted_calories=1700, base_calories=2000,
     )
-    assert macros["carbs_g"] < 250, f"Carbs should decrease on a cut"
-    assert macros["fat_g"]   < 80,  f"Fat should decrease on a cut"
+    assert macros["carbs_g"] < 250
+    assert macros["fat_g"] < 80
     assert macros["protein_g"] == 180
-    print(f"  ✓ cut reduces carbs ({macros['carbs_g']}) and fat ({macros['fat_g']})")
+    print("  ✓ cut reduces carbs and fat")
 
 
 def test_adjusted_macros_carb_floor_40g():
-    """Carbs must never drop below 40 g even on aggressive cut."""
     macros = compute_adjusted_macros(
         base_protein_g=200, base_carbs_g=60, base_fat_g=50,
         adjusted_calories=1000, base_calories=2000,
     )
-    assert macros["carbs_g"] >= 40, f"Carbs floor violated: {macros['carbs_g']}"
-    print(f"  ✓ carb floor 40g: carbs={macros['carbs_g']}")
+    assert macros["carbs_g"] >= 40
+    print("  ✓ carb floor 40g")
 
 
 def test_adjusted_macros_fat_floor_30g():
-    """Fat must never drop below 30 g even on aggressive cut."""
     macros = compute_adjusted_macros(
         base_protein_g=200, base_carbs_g=60, base_fat_g=35,
         adjusted_calories=1000, base_calories=2000,
     )
-    assert macros["fat_g"] >= 30, f"Fat floor violated: {macros['fat_g']}"
-    print(f"  ✓ fat floor 30g: fat={macros['fat_g']}")
+    assert macros["fat_g"] >= 30
+    print("  ✓ fat floor 30g")
+
+
+def test_adjusted_macros_custom_fat_floor():
+    macros = compute_adjusted_macros(
+        base_protein_g=180, base_carbs_g=220, base_fat_g=60,
+        adjusted_calories=1900, base_calories=2300,
+        fat_floor_g=54,
+    )
+    assert macros["fat_g"] >= 54
+    total = macros["protein_g"] * 4 + macros["carbs_g"] * 4 + macros["fat_g"] * 9
+    assert abs(total - macros["calories"]) <= 10
+    print("  ✓ custom fat floor respected while calories stay close")
 
 
 def test_adjusted_macros_no_change_when_on_target():
-    """Zero delta → macros unchanged."""
     macros = compute_adjusted_macros(
         base_protein_g=180, base_carbs_g=220, base_fat_g=70,
         adjusted_calories=2000, base_calories=2000,
     )
-    assert macros["carbs_g"]   == 220
-    assert macros["fat_g"]     == 70
+    assert macros["carbs_g"] == 220
+    assert macros["fat_g"] == 70
     assert macros["protein_g"] == 180
-    print("  ✓ zero delta → macros unchanged")
+    print("  ✓ zero delta leaves macros unchanged")
 
 
-# ─── runner ──────────────────────────────────────────────────────────────────
+def test_adjusted_macros_carb_bias_skews_to_carbs_on_heavy_days():
+    base = dict(base_protein_g=180, base_carbs_g=200, base_fat_g=70,
+                base_calories=2000, adjusted_calories=2400)
+    default_split = compute_adjusted_macros(**base)
+    heavy_split = compute_adjusted_macros(**base, carb_bias_pct=0.80)
+    assert heavy_split["carbs_g"] > default_split["carbs_g"]
+    assert heavy_split["fat_g"] < default_split["fat_g"]
+    assert heavy_split["protein_g"] == 180
+    print("  ✓ heavy-day bias sends more calories to carbs")
+
 
 TESTS = [
-    test_fat_loss_over_budget_spread,
-    test_fat_loss_small_over_no_cap,
-    test_fat_loss_under_budget_adds_back,
-    test_body_recomp_cap_150,
-    test_muscle_gain_no_downward_cut,
-    test_strength_no_downward_cut,
-    test_zero_days_remaining,
-    test_one_day_remaining,
-    test_formula_basic,
-    test_rounded_to_nearest_5,
+    test_small_under_target_days_are_deadband_noise,
+    test_fat_loss_over_budget_creates_small_capped_negative_delta,
+    test_fat_loss_under_budget_does_not_add_without_recovery_flag,
+    test_fat_loss_under_budget_can_add_when_recovery_flag_exists,
+    test_recomp_maintain_clamps_under_and_over_budget,
+    test_muscle_gain_under_budget_adds_capped_positive_delta,
+    test_muscle_gain_over_budget_does_not_cut,
+    test_invalid_partial_logging_days_are_ignored,
+    test_marked_complete_allows_low_logged_day_to_count,
+    test_days_remaining_zero_returns_no_weekly_delta,
+    test_weekly_smoothing_excludes_prior_smoothed_targets,
+    test_unknown_goal_uses_conservative_caps,
     test_adjusted_macros_protein_stable,
     test_adjusted_macros_cut_reduces_carbs_and_fat,
     test_adjusted_macros_carb_floor_40g,
     test_adjusted_macros_fat_floor_30g,
+    test_adjusted_macros_custom_fat_floor,
     test_adjusted_macros_no_change_when_on_target,
+    test_adjusted_macros_carb_bias_skews_to_carbs_on_heavy_days,
 ]
 
 
@@ -223,7 +268,7 @@ def run_all():
             test_fn()
             passed += 1
         except Exception:
-            print(f"  ✗ FAILED")
+            print("  ✗ FAILED")
             traceback.print_exc()
             failed += 1
     print(f"\n{'='*55}")

@@ -1,0 +1,71 @@
+diff --git a/src/screens/ProgressScreen.tsx b/src/screens/ProgressScreen.tsx
+--- a/src/screens/ProgressScreen.tsx
++++ b/src/screens/ProgressScreen.tsx
+@@
+-    candidates.sort((a, b) => {
+-      const aPri = a.source === 'primary' ? 1 : 0;
+-      const bPri = b.source === 'primary' ? 1 : 0;
+-      if (aPri !== bPri) return bPri - aPri;
+-      return b.score - a.score;
+-    });
+-    const top = candidates[0];
+-    const primaries = candidates.filter(c => c.source === 'primary');
+-    // Track distinct exercises so a user doing bench press over five
+-    // separate sessions doesn't count as five "primary" inputs.
+-    const distinctPrimary = new Set(primaries.map(c => c.exercise.toLowerCase().trim())).size;
+-    let blendedScore = top.score;
+-    if (distinctPrimary >= 2 && primaries.length >= 2) {
+-      const second = primaries[1];
+-      // Closeness ∈ [0, 1] — secondary lifts that approach the top
+-      // earn the most bonus.
+-      const closeness = top.score > 0 ? Math.min(1, second.score / top.score) : 0;
+-      const bonus = Math.round(closeness * 5);
+-      blendedScore = Math.min(100, top.score + bonus);
+-    }
+-    out.push({
+-      ...top,
+-      score: blendedScore,
+-      contributingExercises: distinctPrimary,
+-    } as RelativeStrengthProfile);
++    // 2026-05 follow-up fix: was source-first tiebreaking (any 'primary'
++    // beat any 'secondary' regardless of score). That meant a 40-lb glute
++    // kickback tagged primary→glutes outranked a 315-lb back squat tagged
++    // secondary→glutes, even though squat scored ~7× higher. Result: the
++    // glute axis displayed kickback as the representative exercise, which
++    // is the "be smarter about these" issue the user reported.
++    //
++    // Score-only sort with a 1-point stability band: when two candidates
++    // are functionally tied (within 1 score point), prefer the primary
++    // for confidence; otherwise let magnitude win. The existing secondary
++    // cap at 82 already prevents indirect estimates from claiming elite
++    // scores, which was the original protection we wanted.
++    candidates.sort((a, b) => {
++      const scoreDelta = b.score - a.score;
++      if (Math.abs(scoreDelta) > 1) return scoreDelta;
++      const aPri = a.source === 'primary' ? 1 : 0;
++      const bPri = b.source === 'primary' ? 1 : 0;
++      return bPri - aPri;
++    });
++    const top = candidates[0];
++    // Diversity bonus now counts distinct contributing exercises from
++    // ANY source — squat + RDL + hip thrust for glutes all earn credit,
++    // whether they're tagged as primary or secondary for that muscle.
++    const distinctContributors = new Set(
++      candidates.map(c => c.exercise.toLowerCase().trim()),
++    ).size;
++    let blendedScore = top.score;
++    if (distinctContributors >= 2 && candidates.length >= 2) {
++      const second = candidates[1];
++      // Closeness ∈ [0, 1] — supporting lifts that approach the top
++      // earn the most bonus. Capped at +5 so multi-lift training never
++      // pushes a score past 100.
++      const closeness = top.score > 0 ? Math.min(1, second.score / top.score) : 0;
++      const bonus = Math.round(closeness * 5);
++      blendedScore = Math.min(100, top.score + bonus);
++    }
++    out.push({
++      ...top,
++      score: blendedScore,
++      contributingExercises: distinctContributors,
++    } as RelativeStrengthProfile);
+</content>

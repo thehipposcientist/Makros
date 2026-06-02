@@ -1,5 +1,9 @@
 import {
+  exerciseEquipmentLabel,
+  isExerciseUsableWithEquipment,
+  rankSwapCandidates,
   rankWorkoutAddCandidates,
+  scoreSwapCandidate,
   scoreWorkoutAddCandidate,
   workoutAddAlignmentPercent,
 } from '../swapScoring.ts';
@@ -158,5 +162,108 @@ describe('workout add-exercise ranking', () => {
     const score = scoreWorkoutAddCandidate(library[2], pushWorkout, 'Push');
     expect(workoutAddAlignmentPercent(score)).toBe(79);
     expect(workoutAddAlignmentPercent(-1)).toBe(0);
+  });
+});
+
+describe('exercise swap ranking', () => {
+  it('can rank a planned exercise that is not present in the library', () => {
+    const ranked = rankSwapCandidates(
+      {
+        name: 'AI Incline Press',
+        equipment: 'dumbbells',
+        primary_muscle: 'chest',
+        secondary_muscles: ['shoulders', 'triceps'],
+        movement_pattern: 'horizontal_push',
+        is_compound: true,
+      },
+      library,
+      ['dumbbells', 'cable'],
+      5,
+    );
+
+    expect(ranked.length).toBeGreaterThan(0);
+    expect(ranked.map(item => item.name)).toContain('Dumbbell Bench Press');
+  });
+
+  it('falls back to movement-pattern scoring when the planned row has no muscle tag', () => {
+    const score = scoreSwapCandidate(
+      {
+        name: 'Mystery Press',
+        equipment: 'dumbbells',
+        primary_muscle: '',
+        secondary_muscles: [],
+        movement_pattern: 'horizontal_push',
+        is_compound: true,
+      },
+      library[0],
+    );
+
+    expect(score).toBeGreaterThan(0);
+  });
+});
+
+describe('exercise equipment alternatives', () => {
+  const preacherCurl = {
+    name: 'Preacher Curl',
+    equipment: 'gym',
+    primary_muscle: 'biceps',
+    secondary_muscles: [],
+    movement_pattern: 'isolation',
+    is_compound: false,
+    gear: [
+      { slug: 'preacher_bench', name: 'Preacher curl bench', role: 'support', required: true },
+      { slug: 'ez_curl_bar', name: 'EZ curl bar', role: 'primary', required: false },
+      { slug: 'barbell', name: 'Barbell', role: 'primary', required: false },
+      { slug: 'dumbbells', name: 'Dumbbells', role: 'primary', required: false },
+    ],
+  };
+
+  it('requires support gear plus one primary implement', () => {
+    expect(isExerciseUsableWithEquipment(preacherCurl, ['Preacher curl bench'])).toBe(false);
+    expect(isExerciseUsableWithEquipment(preacherCurl, ['Dumbbells'])).toBe(false);
+    expect(isExerciseUsableWithEquipment(preacherCurl, ['Preacher curl bench', 'Dumbbells'])).toBe(true);
+    expect(isExerciseUsableWithEquipment(preacherCurl, ['Preacher bench', 'Curling bar'])).toBe(true);
+  });
+
+  it('labels the owned implement before the support surface', () => {
+    expect(exerciseEquipmentLabel(preacherCurl, ['Preacher curl bench', 'Dumbbells'])).toBe(
+      'Dumbbells, Preacher curl bench',
+    );
+    expect(exerciseEquipmentLabel(preacherCurl, ['Preacher bench', 'Curling bar'])).toBe(
+      'EZ curl bar, Preacher curl bench',
+    );
+  });
+
+  it('does not let a single cable station satisfy dual-cable exercises', () => {
+    const singleArmCableRow = {
+      name: 'Single Arm Cable Row',
+      equipment: 'cable',
+      primary_muscle: 'back',
+      secondary_muscles: ['biceps'],
+      movement_pattern: 'horizontal_pull',
+      is_compound: true,
+      gear: [
+        { slug: 'single_cable_station', name: 'Single cable station', role: 'primary', required: true },
+        { slug: 'd_handle', name: 'Cable D-handle', role: 'support', required: true },
+      ],
+    };
+    const bilateralCablePress = {
+      name: 'Bilateral Cable Chest Press',
+      equipment: 'cable',
+      primary_muscle: 'chest',
+      secondary_muscles: ['triceps'],
+      movement_pattern: 'horizontal_push',
+      is_compound: true,
+      gear: [
+        { slug: 'dual_cable_station', name: 'Dual cable station', role: 'primary', required: true },
+        { slug: 'd_handle', name: 'Cable D-handle', role: 'support', required: true },
+      ],
+    };
+
+    expect(isExerciseUsableWithEquipment(singleArmCableRow, ['Single cable station'])).toBe(true);
+    expect(isExerciseUsableWithEquipment(bilateralCablePress, ['Single cable station'])).toBe(false);
+    expect(isExerciseUsableWithEquipment(singleArmCableRow, ['Dual cable station'])).toBe(true);
+    expect(isExerciseUsableWithEquipment(bilateralCablePress, ['Dual cable station'])).toBe(true);
+    expect(isExerciseUsableWithEquipment(bilateralCablePress, ['Cable machine'])).toBe(true);
   });
 });

@@ -35,9 +35,13 @@ export function resolveApiBaseUrl(input: ApiBaseUrlInput): string {
 
   const hostUri = input.hostUri ?? '';
   const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct');
-  const host = !isTunnel ? hostUri.split(':')[0] : '';
+  let host = !isTunnel ? hostUri.split(':')[0] : '';
+  if (input.platform === 'android' && (host === 'localhost' || host === '127.0.0.1')) {
+    host = input.isDevice ? '' : '10.0.2.2';
+  }
   if (host) return `http://${host}:8000`;
 
+  if (!input.isDevice && input.platform === 'android') return 'http://10.0.2.2:8000';
   if (input.platform === 'web' || !input.isDevice) return 'http://localhost:8000';
 
   throw new Error(

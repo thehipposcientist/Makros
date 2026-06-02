@@ -1,0 +1,34 @@
+8418|   const activityTrendCards = useMemo(
+8422|   const visibleHighValueTrendCards = useMemo(
+8423|     () => highValueTrendCards.filter(card => !hiddenHighValueTrendCards.has(card
+8426|   const highValueTrendEditSections = useMemo(
+8430|   const visibleActivityTrendCards = useMemo(
+8431|     () => activityTrendCards.filter(card => !hiddenActivityHighlightCards.has(ca
+8434|   const activityHighlightEditSections = useMemo(
+8438|   const trendMetricSuggestions = useMemo(
+8470|       const points = group.points.slice().sort((a, b) => parseDateKeyMs(a.date) 
+8471|       const distancePoints = points.filter(p => p.distance != null && p.distance
+8472|       const pacePoints = points.filter(p => paceSeconds(p.pace) != null);
+8473|       const durationPoints = points.filter(p => p.duration_seconds != null && p.
+8486|     }).sort((a, b) => b.points.length - a.points.length || a.name.localeCompare(
+8488|   const cardioBestsMemo = useMemo(() => paceExerciseGroups.map(({ name, points }
+8489|     const bestDist = points.reduce((best, p) => p.distance != null && p.distance
+8490|     const ptsWithPace = points.filter(p => p.pace);
+8492|     const bestDur = points.reduce((best, p) => p.duration_seconds != null && p.d
+8496|       const vals = points.map(p => Number(p.metrics?.[k])).filter(v => Number.is
+8500|   }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != nu
+8529|       .filter((lift): lift is import('../services/api').OneRepMaxLift => lift !=
+8530|       .sort((a, b) => b.oneRepMaxLbs - a.oneRepMaxLbs)
+8534|   const progressMilestones = useMemo(
+8546|   const comprehensiveHealthScore = useMemo(() => {
+8596|         const sets = (exercise.sets ?? []).filter(
+8616|       const valid = xs.filter(v => Number.isFinite(v) && v > 0).slice().sort((a,
+8650|       appWorkouts14d: history.filter(s => {
+8677|   const progressAnalytics = useMemo(
+8681|   const coachInsightVisuals = useMemo(
+8685|   const thisWeekOverview = useMemo(
+8689|   const liveGoalForecast = useMemo(
+8690|     () => showMixedGoalProgress ? buildGoalForecast({
+8713|   const recompForecastNutritionSignal = useMemo(() => {
+8720|         .filter(key => /^\d{4}-\d{2}-\d{2}$/.test(key)),
+8726|   const recompForecastScopeKey = useMemo(() => {

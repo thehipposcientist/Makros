@@ -44,11 +44,18 @@ def _captured_messages_handler(captured: list[dict]):
     return fake_chat_create
 
 
-def _setup_client(captured: list[dict], *, subscription_tier: str = "pro"):
+def _setup_client(
+    captured: list[dict],
+    *,
+    subscription_tier: str = "pro",
+    db_override=None,
+    server_context=None,
+):
     """Spin up FastAPI test client with auth + chat_create mocked.
     Returns (client, auth_dependency_override)."""
     from app.main import app
     from app.auth import get_current_user
+    from app.database import get_session
     from app.models import User
     from app.routers.ai import chat as chat_mod
 
@@ -64,6 +71,10 @@ def _setup_client(captured: list[dict], *, subscription_tier: str = "pro"):
     # Force the API-key gate to pass.
     chat_mod.get_openai_api_key = lambda: "test-key-not-real"  # type: ignore
     chat_mod._chat_create = _captured_messages_handler(captured)  # type: ignore
+    if db_override is not None:
+        app.dependency_overrides[get_session] = lambda: db_override
+    if server_context is not None:
+        chat_mod._workout_coach_server_context = server_context  # type: ignore
 
     return TestClient(app)
 
@@ -143,6 +154,26 @@ def test_photo_question_uses_multipart_content():
     img_part = next(p for p in last_user["content"] if p["type"] == "image_url")
     assert img_part["image_url"]["url"].startswith("data:image/")
     _ok("photo question → multipart user content with image_url")
+
+
+def test_photo_allergen_question_does_not_certify_from_image():
+    print("\n[test] coach: food allergen photo question gets safety fallback")
+    captured: list[dict] = []
+    client = _setup_client(captured)
+
+    r = client.post("/ai/workout-question", json={
+        "question": "Is this food gluten free?",
+        "workout": {"name": "Push"},
+        "activeExerciseName": "Bench Press",
+        "image_base64": "not-needed-for-short-circuit",
+        "mime_type": "image/jpeg",
+    })
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert "can't confirm" in payload["answer"].lower()
+    assert "gluten-free" in payload["answer"].lower()
+    assert captured == []
+    _ok("gluten/allergen status is not hallucinated from photo")
 
 
 # ─── Multi-turn ───────────────────────────────────────────────────────────────
@@ -233,13 +264,53 @@ def test_invalid_history_entries_filtered():
     _ok("malformed history entries filtered before LLM call")
 
 
+def test_coach_workout_question_does_not_write_planweek():
+    print("\n[test] coach: /coach/workout-question is display-only for active PlanWeek")
+    captured: list[dict] = []
+
+    class NoPlanWriteDB:
+        def __init__(self):
+            self.added = []
+            self.commits = 0
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        def commit(self):
+            self.commits += 1
+
+    db = NoPlanWriteDB()
+    client = _setup_client(
+        captured,
+        db_override=db,
+        server_context=lambda *args, **kwargs: {
+            "activePlanWeek": {"id": 123, "status": "active"},
+            "recentExerciseHistory": [],
+        },
+    )
+
+    r = client.post("/coach/workout-question", json={
+        "question": "Should I lower the weight after that set?",
+        "workout": {"name": "Push"},
+        "activeExerciseName": "Bench Press",
+        "loggedSets": [{"setNumber": 1, "reps": 5, "weightLbs": 185, "rir": 0}],
+    })
+    assert r.status_code == 200, r.text
+    assert captured, "expected mocked coach call"
+    assert db.added == [], "coach Q&A must not add PlanWeek/PlanDay writes"
+    assert db.commits == 0, "coach Q&A must not commit active PlanWeek mutations"
+    _ok("coach alias answered without DB writes")
+
+
 cases = [
     test_workout_question_requires_pro,
     test_text_only_question_uses_string_content,
     test_photo_question_uses_multipart_content,
+    test_photo_allergen_question_does_not_certify_from_image,
     test_conversation_history_passed_through,
     test_conversation_history_capped_at_six,
     test_invalid_history_entries_filtered,
+    test_coach_workout_question_does_not_write_planweek,
 ]
 
 

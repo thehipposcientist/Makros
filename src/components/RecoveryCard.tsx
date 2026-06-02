@@ -99,10 +99,9 @@ interface Props {
 }
 
 /**
- * Shared recovery / readiness card. Single source of truth for every
- * readiness-related surface in the app — the workout tab header, the
- * Progress tab, and future placements all render the same component so
- * the data stays consistent.
+ * Shared muscle-recovery card. The headline training-readiness answer lives in
+ * TrainingReadinessCard; this component only visualizes the muscle-load signal
+ * that feeds that readiness engine.
  *
  * `data` comes from `GET /workouts/fatigue` (via `getFatigueScore`). The
  * caller is responsible for fetching and passing it down.
@@ -114,24 +113,59 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
 
   if (!data) return null;
 
+  // Per-muscle map drives the heat map fill colors, the exact-number
+  // panel below the figure, AND the headline above. Deriving the
+  // headline from the SAME values the bars show guarantees the summary
+  // can never read "high load" while every visible muscle is green.
+  // (The backend readiness_score also folds in systemic + training-
+  // density load that isn't shown per-muscle — that was the source of
+  // the green-bars-but-fatigued-headline contradiction, so the card
+  // intentionally ignores it.)
+  const fatigueMap = data.muscleFatigue ?? {};
+  const recoveryFor = (muscle: string): number =>
+    Math.max(0, Math.min(100, 100 - Math.round((fatigueMap[muscle] ?? 0) * 100)));
+
+  // A muscle only counts as "loaded" once its bar renders non-green —
+  // recovery < 60% (fatigue > 0.40). Anything greener is effectively
+  // fresh, so it never gets flagged in the summary line.
+  const LOADED_FATIGUE_CUTOFF = 0.4;
+  const loadedMuscles = Object.entries(fatigueMap)
+    .filter(([key, value]) => key !== 'systemic' && Number(value) > LOADED_FATIGUE_CUTOFF)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([key]) => key);
+
+  // Headline recovery = blend of average + worst displayed muscle,
+  // mirroring the backend's avg·0.7 + peak·0.3 fatigue blend but on the
+  // visible bars only. Falls back to the server score if no per-muscle
+  // data arrived.
+  const headlineRecoveries = RECOVERY_NUMBER_ROWS
+    .map(r => r.key)
+    .filter(k => k in fatigueMap)
+    .map(recoveryFor);
+  const headlineScore = headlineRecoveries.length
+    ? Math.round(
+        (headlineRecoveries.reduce((s, v) => s + v, 0) / headlineRecoveries.length) * 0.7
+        + Math.min(...headlineRecoveries) * 0.3,
+      )
+    : data.score;
+  const headlineLabel =
+    headlineScore >= 85 ? 'Fresh' :
+    headlineScore >= 65 ? 'Ready' :
+    headlineScore >= 40 ? 'Moderate' :
+    headlineScore >= 20 ? 'Fatigued' : 'Overtrained';
+
   // Score tier colors pulled from theme semantics so the card matches
   // whatever palette the user has active (midnight/ocean/sandstone/…).
-  const scoreColor = data.score >= 65 ? tc.success : data.score >= 40 ? tc.warning : tc.error;
+  const scoreColor = headlineScore >= 65 ? tc.success : headlineScore >= 40 ? tc.warning : tc.error;
   // Fitness-themed iconography instead of battery. Flash = energized,
   // pulse = steady, hourglass = depleted (needs time).
   const iconName: any =
-    data.score >= 65 ? 'flash' : data.score >= 40 ? 'pulse' : 'hourglass-outline';
+    headlineScore >= 65 ? 'flash' : headlineScore >= 40 ? 'pulse' : 'hourglass-outline';
 
   const iconSize = compact ? 20 : 22;
   const pad = compact ? 10 : 16;
   const titleSize = compact ? 13 : 17;
   const titleWeight: '700' | '800' = compact ? '700' : '800';
-
-  // Per-muscle map drives the heat map fill colors and the optional
-  // exact-number panel below the figure.
-  const fatigueMap = data.muscleFatigue ?? {};
-  const recoveryFor = (muscle: string): number =>
-    Math.max(0, Math.min(100, 100 - Math.round((fatigueMap[muscle] ?? 0) * 100)));
   const recoveryColor = (recovery: number): string =>
     recovery >= 80 ? tc.primary :
     recovery >= 60 ? tc.success :
@@ -168,14 +202,14 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
         <Ionicons name={iconName} size={iconSize} color={scoreColor} />
         <View style={{ flex: 1 }}>
           <Text style={{ fontSize: titleSize, fontWeight: titleWeight, color: tc.textPrimary }}>
-            Recovery: {data.label} ({data.score}%)
+            Muscle recovery: {headlineLabel} ({headlineScore}%)
           </Text>
-          {!expanded && (data.topFatigued?.length ?? 0) > 0 && (
+          {!expanded && loadedMuscles.length > 0 && (
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
-              Most fatigued: {data.topFatigued!.slice(0, 3).map(t => t.muscle.replace('_', ' ')).join(', ')}
+              Highest load: {loadedMuscles.slice(0, 3).map(m => m.replace('_', ' ')).join(', ')}
             </Text>
           )}
-          {!expanded && (data.topFatigued?.length ?? 0) === 0 && (
+          {!expanded && loadedMuscles.length === 0 && (
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>All muscle groups fresh</Text>
           )}
         </View>
@@ -287,7 +321,7 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
           {false && <AnimatedRecoveryBar recovery={0} color={tc.primary} borderColor={tc.border} delay={0} />}
           {/* Overall Load / systemic bar removed per request — the per-muscle
               bars above cover the useful signal. Users found the aggregate
-              redundant with the headline readiness score. */}
+              redundant with the headline training-readiness score. */}
           {(() => {
             const acts = data.activities ?? [];
             if (acts.length === 0) return null;

@@ -13,6 +13,8 @@ const ACTIVE_COMMANDS = new Set([
   'log_set',
   'skip_rest',
   'swap_exercise',
+  'add_exercise',
+  'add_circuit',
   'end_workout',
   'cancel_workout',
 ]);
@@ -67,8 +69,19 @@ async function saveActiveWatchCommands(events: QueuedWatchCommand[]): Promise<vo
   await AsyncStorage.setItem(ACTIVE_BACKLOG_KEY, JSON.stringify(compacted)).catch(() => undefined);
 }
 
+/** Pure normalizer used by both load + save: drops events older than the
+ *  4h TTL, dedupes by `commandId`, and orders by ascending `tsMs`. Exported
+ *  so the dedupe / TTL invariants can be exercised directly from tests
+ *  without an AsyncStorage shim. */
+export function normalizeWatchCommands(events: any[], nowMs: number = Date.now()): QueuedWatchCommand[] {
+  return normalizeCommandsAt(events, nowMs);
+}
+
 function normalizeCommands(events: any[]): QueuedWatchCommand[] {
-  const now = Date.now();
+  return normalizeCommandsAt(events, Date.now());
+}
+
+function normalizeCommandsAt(events: any[], nowMs: number): QueuedWatchCommand[] {
   const seen = new Set<string>();
   return events
     .map((event): QueuedWatchCommand | null => {
@@ -76,7 +89,7 @@ function normalizeCommands(events: any[]): QueuedWatchCommand[] {
       if (!isActiveWorkoutWatchCommand(command)) return null;
       const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
       const tsMs = Number(payload?.tsMs);
-      if (Number.isFinite(tsMs) && tsMs > 0 && now - tsMs > ACTIVE_COMMAND_TTL_MS) return null;
+      if (Number.isFinite(tsMs) && tsMs > 0 && nowMs - tsMs > ACTIVE_COMMAND_TTL_MS) return null;
       return { command, payload };
     })
     .filter((event): event is QueuedWatchCommand => !!event)

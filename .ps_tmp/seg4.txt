@@ -1,0 +1,361 @@
+      if (!ref?.capture) return;
+      const uri = await ref.capture();
+      setSharingScore(false);
+      const Sharing = await import('expo-sharing');
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Fitness Score' });
+      } else {
+        Alert.alert('Saved', 'Screenshot saved to your device.');
+      }
+    } catch {
+      Alert.alert('Error', 'Could not share the fitness score.');
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const handleBodyScan = async (source: 'camera' | 'library') => {
+    // Pro gate — body-fat estimation runs through OpenAI vision and is
+    // a paid feature. Surface the upgrade prompt before opening the
+    // camera/library so free users don't even take a throwaway photo.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(userProfile, 'ai_body_scan')) return;
+    try {
+      // Permission gate — without an explicit request iOS silently
+      // returns `{canceled: true}` on a previously-denied prompt
+      // (library "does nothing") and the auto-prompt path can crash
+      // launchCameraAsync under SDK 54. Mirrors the gear / profile
+      // photo flows.
+      if (source === 'camera') {
+        const cam = await ImagePicker.requestCameraPermissionsAsync();
+        if (!cam.granted) {
+          Alert.alert(
+            'Camera permission needed',
+            'Allow camera access in Settings to take a body scan photo.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => {}) },
+            ],
+          );
+          return;
+        }
+      } else {
+        const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!lib.granted) {
+          Alert.alert(
+            'Photo access needed',
+            'Allow photo library access in Settings to choose a body scan photo.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => {}) },
+            ],
+          );
+          return;
+        }
+      }
+      // Quality choice — the prior 0.7 + the (silently-ignored)
+      // maxWidth/maxHeight props produced 4–8 MB base64 strings on
+      // recent iPhones. JSON.stringify on those + the RN bridge
+      // marshalling crashed the app (OOM) on lower-RAM devices.
+      // 0.4 lands the encoded image around 800 KB – 1.5 MB which the
+      // bridge handles cleanly. Vision quality stays good enough for
+      // body-fat estimation; the model is forgiving on JPEG artifacts.
+      const opts = {
+        mediaTypes: 'images' as any,
+        base64: true,
+        quality: 0.4,
+      };
+      const result = source === 'camera'
+        ? await ImagePicker.launchCameraAsync(opts)
+        : await ImagePicker.launchImageLibraryAsync(opts);
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset || !asset.base64) {
+        // Library path occasionally returns assets with a URI but no
+        // base64 (Photos privacy mode, iCloud-only items not yet
+        // downloaded, certain HEIC sources). The picker doesn't error
+        // — it just hands back an unusable asset — so we have to
+        // surface this ourselves rather than firing a malformed
+        // upload that the backend then rejects with a 400.
+        Alert.alert(
+          'Couldn’t read that photo',
+          source === 'library'
+            ? 'That photo couldn’t be loaded. It may still be syncing from iCloud, or it’s in a format we can’t read. Try a different photo, or take a new one with the camera.'
+            : 'The camera didn’t return a usable photo. Please try again.',
+        );
+        return;
+      }
+
+      // Sanitize the base64 before upload. Two real-world failure modes
+      // we've seen on the library path:
+      //   • Some sources include a data URL prefix
+      //     ("data:image/jpeg;base64,/9j/...") which the backend's
+      //     magic-byte sniff in `_fix_image_mime` can't decode.
+      //   • Some HEIC re-encodes inject whitespace / newlines into the
+      //     base64 stream during the bridge marshalling, which Python
+      //     base64 also rejects.
+      // Both crash the backend at decode-time and bubble up as a
+      // generic 400/500 on the client. Strip them defensively here.
+      let base64 = asset.base64;
+      const prefixMatch = base64.match(/^data:image\/[a-z+.-]+;base64,/i);
+      if (prefixMatch) base64 = base64.slice(prefixMatch[0].length);
+      base64 = base64.replace(/\s+/g, '');
+
+      // Defensive guard — if even after quality=0.4 the base64 is over
+      // ~3 MB (4 million chars), bail with a friendly message rather
+      // than letting JSON.stringify + the native bridge crash. This
+      // can happen with very high-resolution source images from photo
+      // library (the camera path tops out lower).
+      const MAX_BASE64_CHARS = 4_000_000;
+      if (base64.length > MAX_BASE64_CHARS) {
+        Alert.alert(
+          'Photo too large',
+          'That image is bigger than we can upload safely. Take a fresh photo with the camera, or pick a different photo from your library.',
+        );
+        return;
+      }
+      if (base64.length < 100) {
+        // Could happen if the picker returns a corrupt empty asset —
+        // catch it before it round-trips to a useless 400.
+        Alert.alert(
+          'Couldn’t read that photo',
+          'The photo data appears to be empty. Try a different photo, or take a new one with the camera.',
+        );
+        return;
+      }
+
+      setBodyScanLoading(true);
+      setBodyScanResult(null);
+      const stats = userProfile.physicalStats;
+      const heightInches = (stats.heightFeet ?? 0) * 12 + (stats.heightInches ?? 0);
+
+      const scanResult = await scanBody(authToken, {
+        image_base64: base64,
+        mime_type: 'image/jpeg',
+        gender: stats.gender,
+        weight_lbs: stats.weightLbs,
+        height_inches: heightInches > 0 ? heightInches : undefined,
+        age: stats.age,
+      });
+      if (!scanResult.id) {
+        throw new Error('The scan was analyzed but was not saved to your account. Please try again.');
+      }
+      setBodyScanResult(scanResult);
+
+      // Save to history
+      const entry: BodyScanEntry = {
+        id: String(scanResult.id),
+        date: scanResult.date ?? scanResult.scan_date ?? new Date().toISOString(),
+        photoUri: asset.uri,
+        bodyFatPct: scanResult.bodyFatPct,
+        bodyFatRange: scanResult.bodyFatRange,
+        muscleMass: scanResult.muscleMass,
+        category: scanResult.category,
+        strengths: scanResult.strengths,
+        improvements: scanResult.improvements,
+        assessment: scanResult.assessment,
+        confidence: scanResult.confidence,
+        photoQuality: scanResult.photoQuality,
+        qualityFlags: scanResult.qualityFlags ?? [],
+        needsRetake: scanResult.needsRetake,
+        sensitivePhoto: Boolean(scanResult.sensitivePhoto),
+        photoHidden: Boolean(scanResult.photoHidden || scanResult.sensitivePhoto),
+        method: scanResult.method,
+        visualEstimatePct: scanResult.visualEstimatePct ?? null,
+        measurementEstimatePct: scanResult.measurementEstimatePct ?? null,
+        weightLbs: stats.weightLbs,
+      };
+      const updated = [entry, ...onlyServerBackedBodyScans(bodyScanHistory).filter(existing => String(existing.id) !== String(entry.id))].slice(0, 20);
+      setBodyScanHistory(updated);
+      await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(updated));
+    } catch (e: any) {
+      const detail: string = e?.message || 'Could not complete the body scan.';
+      // Most common failure mode is a server-side rejection of the
+      // image (4xx) — surface the actual detail so the user can act on
+      // it, and give a one-tap fallback to the alternative source.
+      const altSource: 'camera' | 'library' = source === 'library' ? 'camera' : 'library';
+      Alert.alert(
+        'Scan failed',
+        detail,
+        [
+          { text: 'OK', style: 'cancel' },
+          {
+            text: altSource === 'camera' ? 'Try camera' : 'Try library',
+            onPress: () => handleBodyScan(altSource),
+          },
+        ],
+      );
+    } finally {
+      setBodyScanLoading(false);
+    }
+  };
+
+  const renderBodyScanHistoryTile = (entry: BodyScanEntry, idx: number) => {
+    const d = new Date(entry.date);
+    const dateLabel = Number.isNaN(d.getTime()) ? 'SCAN' : `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`;
+    const showPhoto = bodyScanPhotoVisibleInHistory(entry);
+    return (
+      <View key={`${entry.id}-${idx}`} style={{
+        width: 76,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: idx === 0 ? tc.primary + '88' : tc.border,
+        backgroundColor: idx === 0 ? tc.primary + '0F' : tc.surfaceRaised,
+        padding: 5,
+      }}>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Delete body scan"
+          onPress={() => handleDeleteBodyScan(entry)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{
+            position: 'absolute',
+            right: 2,
+            top: 2,
+            zIndex: 2,
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: tc.surface,
+            borderWidth: 1,
+            borderColor: tc.border,
+          }}>
+          <Ionicons name="trash-outline" size={12} color={tc.textMuted} />
+        </TouchableOpacity>
+        <View style={{
+          height: 58,
+          borderRadius: 7,
+          overflow: 'hidden',
+          backgroundColor: tc.surface,
+          alignItems: 'center',
+          justifyContent: 'center',
+          marginBottom: 5,
+        }}>
+          {showPhoto ? (
+            <Image source={{ uri: entry.photoUri! }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+          ) : (
+            <Ionicons name={entry.photoHidden || entry.sensitivePhoto ? 'eye-off-outline' : 'body-outline'} size={20} color={tc.textMuted} />
+          )}
+        </View>
+        <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary, textAlign: 'center' }}>{entry.bodyFatPct}%</Text>
+        <Text style={{ fontSize: 9, color: idx === 0 ? tc.primary : tc.textMuted, fontWeight: '700', textAlign: 'center', marginTop: 1 }}>
+          {idx === 0 ? 'LATEST' : dateLabel}
+        </Text>
+      </View>
+    );
+  };
+
+  // Legacy per-session top-set aggregation left behind for any
+  // remaining references. New strength tracking is the pillar on the
+  // main fitness score card (backed by `build_performance_profile`
+  // Epley 1RMs and relative-to-bodyweight thresholds).
+  const strengthTrend: StrengthPoint[] = [];
+  const overallStrength = strengthTrend.length
+    ? Math.round(strengthTrend.reduce((sum, p) => sum + p.score, 0) / strengthTrend.length)
+    : 0;
+
+  // ── 4-pillar composite fitness score ─────────────────────────────────────
+  // Deterministic score computed server-side from the user's
+  // performance profile + recent completions + bodyweight + sleep/RPE.
+  // See `backend/app/services/workout/fitness_score.py`. The old
+  // ad-hoc 5-component score (consistency/trend/volume/variety/duration)
+  // was removed because its pillars weren't grounded in anything — a
+  // user could hit "100" by logging 20 random exercises without ever
+  // getting stronger or doing cardio.
+  const [compositeFitness, setCompositeFitness] = useState<import('../services/api').FitnessCompositeScore | null>(null);
+  // Track the composite-fitness fetch state so the Records tab can
+  // show a skeleton while it's in flight instead of an empty flash.
+  const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || tab !== 'health' || !showWorkoutProgress) {
+      setCompositeFitness(null);
+      setCompositeFitnessLoading(false);
+      return;
+    }
+    setCompositeFitnessLoading(true);
+    import('../services/api').then(({ getFitnessCompositeScore }) =>
+      getFitnessCompositeScore(authToken, {
+        daysPerWeek: userProfile.daysPerWeek,
+        bodyweightLbs: userProfile.physicalStats?.weightLbs,
+        recentSleepHours: healthSummary?.lastNightSleepHours ?? undefined,
+        avgSessionRpe: undefined,  // TODO wire DayState.session_rpe_avg once plumbed
+      })
+        .then(setCompositeFitness)
+        .catch(() => setCompositeFitness(null))
+        .finally(() => setCompositeFitnessLoading(false))
+    );
+  }, [authToken, isActive, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length, showWorkoutProgress]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !selectedExercise || !showWorkoutProgress) { setE1rmHistory([]); return; }
+    let cancelled = false;
+    setE1rmHistory([]);
+    import('../services/api').then(({ getE1RMHistory }) =>
+      getE1RMHistory(authToken, selectedExercise)
+        .then(res => { if (!cancelled) setE1rmHistory(res.history ?? []); })
+        .catch(() => { if (!cancelled) setE1rmHistory([]); })
+    );
+    return () => { cancelled = true; };
+  }, [authToken, isActive, selectedExercise, showWorkoutProgress]);
+
+  const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
+  const latestTrackedWeight = weightEntries.length > 0 ? weightEntries[weightEntries.length - 1]?.weightLbs : null;
+  const currentWeight = latestTrackedWeight ?? userProfile.physicalStats.weightLbs;
+  const targetWeight = userProfile.goalDetails.targetWeightLbs;
+  const goalProgressProfile: UserProfile = {
+    ...userProfile,
+    physicalStats: { ...userProfile.physicalStats, weightLbs: currentWeight },
+    weightEntries: weightEntries.map(entry => ({
+      date: entry.date,
+      weight_lbs: entry.weightLbs,
+      source: entry.source,
+      logged_at: entry.loggedAt,
+    })),
+  };
+  const estimate = getGoalEstimate(goalProgressProfile, meta.goalConfig);
+  const recompProjection = getRecompProjection(goalProgressProfile, meta.goalConfig);
+  const goalProgressBar = computeGoalProgressBar(goalProgressProfile, meta.goalConfig);
+  const recompTrajectory = computeRecompTrajectory(goalProgressProfile, meta.goalConfig, bodyScanHistory);
+  const latestBodyScanEntry = bodyScanHistory.length > 0
+    ? [...bodyScanHistory].sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')))[0]
+    : null;
+  const goalBucket = resolveGoalBucket(userProfile.goal);
+  const fatMassProgress = computeFatMassProgress({
+    startWeightLbs: userProfile.goalDetails.startWeightLbs,
+    startBodyFatPct: userProfile.goalDetails.startBodyFatPct,
+    currentWeightLbs: currentWeight,
+    currentBodyFatPct: latestBodyScanEntry?.bodyFatPct,
+    goalBucket,
+  });
+  const latestLoggedWeightForStrength = weightEntries.length > 0
+    ? weightEntries[weightEntries.length - 1]?.weightLbs
+    : null;
+  const strengthScoreWeightLbs = (Number.isFinite(latestLoggedWeightForStrength) && (latestLoggedWeightForStrength ?? 0) > 0
+    ? latestLoggedWeightForStrength
+    : null)
+    ?? userProfile.physicalStats?.weightLbs
+    ?? null;
+  const strengthScoreSummary = computeStrengthScore({
+    bulkE1RMMap,
+    showcase: oneRepMaxLifts,
+    bodyweightLbs: strengthScoreWeightLbs,
+  });
+  const strengthScoreEmpty = strengthScoreSummary.band === 'unknown' || strengthScoreSummary.liftsCovered === 0;
+  const strengthScoreColor =
+    strengthScoreSummary.band === 'elite' ? '#22C55E'
+    : strengthScoreSummary.band === 'advanced' ? '#84CC16'
+    : strengthScoreSummary.band === 'intermediate' ? tc.primary
+    : strengthScoreSummary.band === 'developing' ? '#F59E0B'
+    : strengthScoreSummary.band === 'novice' ? tc.textMuted
+    : tc.textMuted;
+  const strengthScoreDetail = strengthScoreEmpty
+    ? (strengthScoreWeightLbs && strengthScoreWeightLbs > 0
+      ? 'Strength trends need set-level data — log lifts in-app or import a Strong CSV.'
+      : 'Set bodyweight to score strength.')
+    : `${strengthScoreSummary.loggedLiftCount}/${strengthScoreSummary.totalLiftCount} lifts · ${strengthConfidenceLabel(strengthScoreSummary.confidence).toLowerCase()}`;
+  const cardioScoreColor = cardioTrendSummary.score == null ? tc.textMuted
+    : cardioTrendSummary.score >= 85 ? tc.success
+      : cardioTrendSummary.score >= 65 ? tc.primary

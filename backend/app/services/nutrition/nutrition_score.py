@@ -21,9 +21,10 @@ cached scores.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
-SCORE_VERSION = 4   # v4 scores projected plans instead of logged meal totals
+SCORE_VERSION = 6   # v6 tightens calorie adherence: ±5 on-target, ±10 close
 
 
 # ─── RDA targets (adults, general) ───────────────────────────────────────────
@@ -43,6 +44,11 @@ RDA = {
     # Kept for display only — not in priority-6
     "vitamin_c_mg": 90,
     "vitamin_a_mcg": 900,
+    "copper_mg": 0.9,
+    "manganese_mg": 2.3,        # adequate intake — male; female AI=1.8
+    # Boron has no RDA — informational only, surfaced against a 20 mg/day
+    # tolerable upper limit on the client. Deliberately omitted here so no
+    # RDA-ratio consumer treats it as a scored micro.
 }
 
 # Priority-6 micros checked for the coverage score. Vitamin C dropped because
@@ -54,7 +60,7 @@ KEY_MICROS = [
 
 # Resilience-flag micros — surfaced via the recovery_flags service, not the
 # main Nutrition Score. Listed here so RDA lookups stay in one place.
-RESILIENCE_MICROS = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg"]
+RESILIENCE_MICROS = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg", "copper_mg"]
 
 
 # ─── Daily nutrition indicators ──────────────────────────────────────────────
@@ -85,7 +91,7 @@ class NutritionIndicators:
     seafood_servings_weekly: float = 0      # rolled in from 7d window
     # Logging + micro coverage
     meals_logged: int = 0
-    meals_expected: int = 3
+    meals_expected: int = 0
     micronutrients: dict[str, float] = field(default_factory=dict)
     food_count: int = 0
     foods_with_micros: int = 0
@@ -99,14 +105,16 @@ class NutritionIndicators:
 
     @property
     def calorie_alignment(self) -> float:
-        """0.0 to 1.0. Within +/-10% = perfect, degrades to 0 at +/-40%."""
+        """0.0 to 1.0. Within +/-5% = perfect, +/-10% = close."""
         if self.calories_target <= 0:
             return 0.5
         ratio = self.calories_logged / self.calories_target
         deviation = abs(1.0 - ratio)
-        if deviation <= 0.10:
+        if deviation <= 0.05:
             return 1.0
-        return max(0.0, 1.0 - ((deviation - 0.10) / 0.30))
+        if deviation <= 0.10:
+            return 0.75 + ((0.10 - deviation) / 0.05) * 0.25
+        return max(0.0, 0.75 * (1.0 - ((deviation - 0.10) / 0.30)))
 
     @property
     def protein_alignment(self) -> float:
@@ -208,8 +216,41 @@ _GOAL_WEIGHTS: dict[str, tuple[float, float, float]] = {
 _DEFAULT_WEIGHTS = (0.40, 0.35, 0.25)
 
 
-def _bd(label: str, value_pct: int, raw: float, target: float | None, unit: str, on_track: bool) -> dict:
-    return {
+def _target_range(kind: str, target: float | int | None) -> tuple[int, int] | None:
+    try:
+        t = float(target or 0)
+    except (TypeError, ValueError):
+        t = 0.0
+    if t <= 0:
+        return None
+    if kind == "calories_green":
+        low_pct, high_pct = 0.95, 1.05
+    elif kind == "calories":
+        low_pct, high_pct = 0.90, 1.10
+    elif kind == "protein":
+        low_pct, high_pct = 0.95, 1.00
+    elif kind == "fat":
+        low_pct, high_pct = 1.00, 1.00
+    else:
+        low_pct, high_pct = 0.75, 1.25
+    midpoint = int(round(t))
+    low = int(max(0, min(midpoint, math.ceil(t * low_pct))))
+    high = int(max(midpoint, math.floor(t * high_pct)))
+    return low, high
+
+
+def _bd(
+    label: str,
+    value_pct: int,
+    raw: float,
+    target: float | None,
+    unit: str,
+    on_track: bool,
+    *,
+    target_min: float | None = None,
+    target_max: float | None = None,
+) -> dict:
+    out = {
         "label": label,
         "value_pct": int(max(0, min(100, round(value_pct)))),
         "raw": round(raw, 1),
@@ -217,6 +258,10 @@ def _bd(label: str, value_pct: int, raw: float, target: float | None, unit: str,
         "unit": unit,
         "on_track": on_track,
     }
+    if target_min is not None and target_max is not None:
+        out["target_min"] = target_min
+        out["target_max"] = target_max
+    return out
 
 
 def compute_nutrition_score(
@@ -238,8 +283,24 @@ def compute_nutrition_score(
     # ── Adherence (0-100) ────────────────────────────────────────────
     cal_align = indicators.calorie_alignment
     pro_align = indicators.protein_alignment
-    cal_pts = cal_align * 50
-    pro_pts = pro_align * 50
+    calorie_range = _target_range("calories", indicators.calories_target)
+    calorie_green_range = _target_range("calories_green", indicators.calories_target)
+    protein_range = _target_range("protein", indicators.protein_target)
+    calorie_deviation = (
+        abs(1.0 - (indicators.calories_logged / indicators.calories_target))
+        if indicators.calories_target > 0
+        else None
+    )
+    calories_on_target = calorie_deviation is not None and calorie_deviation <= 0.05
+    calories_close = calorie_deviation is not None and calorie_deviation <= 0.10
+    protein_ratio = (
+        indicators.protein_logged / indicators.protein_target
+        if indicators.protein_target > 0
+        else 0.0
+    )
+    protein_min_hit = protein_ratio >= 0.95
+    cal_pts = cal_align * 40
+    pro_pts = pro_align * 60
     adherence = round(min(100, cal_pts + pro_pts))
 
     adherence_breakdown = [
@@ -249,7 +310,9 @@ def compute_nutrition_score(
             indicators.calories_logged,
             indicators.calories_target,
             "kcal",
-            cal_align >= 0.9,
+            calories_on_target,
+            target_min=calorie_range[0] if calorie_range else None,
+            target_max=calorie_range[1] if calorie_range else None,
         ),
         _bd(
             "Protein",
@@ -257,7 +320,9 @@ def compute_nutrition_score(
             indicators.protein_logged,
             indicators.protein_target,
             "g",
-            pro_align >= 0.95,
+            protein_min_hit,
+            target_min=protein_range[0] if protein_range else None,
+            target_max=protein_range[1] if protein_range else None,
         ),
     ]
 
@@ -416,8 +481,9 @@ def compute_nutrition_score(
 
     # ── Structured flags ─────────────────────────────────────────────
     flags = {
-        "calorie_on_track": cal_align >= 0.75,
-        "protein_on_track": pro_align >= 0.85,
+        "calorie_on_track": calories_on_target,
+        "calorie_close": calories_close,
+        "protein_on_track": protein_min_hit,
         "fiber_on_track": fiber_pts >= 14,
         "added_sugar_on_track": added_sugar_pts >= 12,
         "sat_fat_on_track": sat_fat_pts >= 12,
@@ -435,12 +501,14 @@ def compute_nutrition_score(
     improvements: list[str] = []
 
     if flags["calorie_on_track"]:
-        tags.append("Calories on track"); wins.append("Calories on track")
+        tags.append("Calories on target"); wins.append("Calories on target")
+    elif flags["calorie_close"]:
+        tags.append("Calories close")
     elif has_calories:
         improvements.append("Calories off target")
 
     if flags["protein_on_track"]:
-        tags.append("Protein on track"); wins.append("Protein on track")
+        tags.append("Protein target met"); wins.append("Protein target met")
     elif indicators.protein_logged > 0:
         gap = int(round(indicators.protein_target - indicators.protein_logged))
         if gap > 0:
@@ -504,6 +572,12 @@ def compute_nutrition_score(
         indicators={
             "calories_alignment": round(cal_align, 2),
             "protein_alignment": round(pro_align, 2),
+            "target_calories_green_min": calorie_green_range[0] if calorie_green_range else None,
+            "target_calories_green_max": calorie_green_range[1] if calorie_green_range else None,
+            "target_calories_min": calorie_range[0] if calorie_range else None,
+            "target_calories_max": calorie_range[1] if calorie_range else None,
+            "target_protein_min": protein_range[0] if protein_range else None,
+            "target_protein_max": protein_range[1] if protein_range else None,
             "fiber_density": round(fiber_density, 1),
             "added_sugar_pct_cals": round(added_sugar_pct, 1),
             "sat_fat_pct_cals": round(sat_fat_pct, 1),
@@ -543,6 +617,9 @@ _MICRO_DISPLAY_NAMES = {
     "vitamin_b12_mcg": "Vitamin B12",
     "zinc_mg": "Zinc",
     "selenium_mcg": "Selenium",
+    "copper_mg": "Copper",
+    "manganese_mg": "Manganese",
+    "boron_mg": "Boron",
     "folate_mcg": "Folate",
     "fiber_g": "Fiber",
 }

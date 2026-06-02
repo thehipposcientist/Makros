@@ -22,6 +22,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from './ScoreInfoModal';
 import {
   getWeeklyReview, applyRecommendationAction,
   WeeklyReviewResponse, PlanRecommendation, MuscleVolumeRow,
@@ -75,6 +76,7 @@ export default function WeeklyCoachingCard({
   const [review, setReview] = useState<WeeklyReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
   // Hydrate the dismissed set from AsyncStorage so nudges the user
@@ -190,6 +192,13 @@ export default function WeeklyCoachingCard({
             {review.headline || `${review.sessions_completed}/${review.sessions_planned} sessions`}
           </Text>
         </View>
+        <TouchableOpacity
+          accessibilityLabel="How weekly coaching is calculated"
+          onPress={(e) => { e.stopPropagation(); setInfoOpen(true); }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ padding: 2 }}>
+          <Ionicons name="information-circle-outline" size={16} color={tc.textMuted} />
+        </TouchableOpacity>
         <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
       </TouchableOpacity>
 
@@ -403,6 +412,37 @@ export default function WeeklyCoachingCard({
           )}
         </View>
       )}
+      <ScoreInfoModal
+        visible={infoOpen}
+        onClose={() => setInfoOpen(false)}
+        eyebrow="WEEKLY COACHING"
+        title="How this review works"
+        iconName="sparkles-outline"
+        iconColor={tc.primary}
+        themeName={themeName}>
+        <ScoreInfoBody themeName={themeName}>
+          A rolling weekly look at training volume, cardio time, and
+          recovery signals. The headline calls out the most actionable
+          thing — the strip below it is the raw weekly totals.
+        </ScoreInfoBody>
+        <ScoreInfoSection title="What goes in" themeName={themeName}>
+          <ScoreInfoRow label="Sessions" value="completed ÷ planned this week" themeName={themeName} />
+          <ScoreInfoRow label="Cardio" value="total cardio minutes (any zone)" themeName={themeName} />
+          <ScoreInfoRow label="Zone 2" value="minutes spent in Z2 heart-rate" themeName={themeName} />
+          <ScoreInfoRow label="Hard sets" value="working sets at RPE ≥ 7" themeName={themeName} />
+          <ScoreInfoRow label="Per-muscle volume" value="hard sets vs evidence-based ranges" themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoSection title="Muscle status colors" themeName={themeName}>
+          <ScoreInfoRow label="In range" value="adequate weekly volume" valueColor={tc.success} themeName={themeName} />
+          <ScoreInfoRow label="Undertrained" value="below minimum for growth" valueColor={tc.warning} themeName={themeName} />
+          <ScoreInfoRow label="High / spike" value="above ceiling or sharp jump" valueColor={tc.warning} themeName={themeName} />
+          <ScoreInfoRow label="Excessive" value="injury-risk territory" valueColor={tc.error} themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoBody themeName={themeName} muted>
+          Recommendations are suggestions — dismissing one hides it for
+          this week but doesn't change your plan.
+        </ScoreInfoBody>
+      </ScoreInfoModal>
     </View>
   );
 }

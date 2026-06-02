@@ -9,7 +9,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from tests.conftest import (
     make_completion_history,
@@ -28,6 +28,49 @@ from app.services.workout.activity_impact import (
 def _mf(snap: FatigueSnapshot, muscle: str) -> float:
     """Shorthand: read a muscle fatigue value from the snapshot."""
     return snap.muscle_fatigue.get(muscle)
+
+
+def _completed_at_hours_ago(hours: float) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(hours=hours)
+
+
+def _completion_from_focus(focus: str, hours_ago: float, **overrides) -> dict:
+    today = date.today()
+    days_ago = int(hours_ago // 24)
+    fatigue = overrides.pop("resolved_muscle_fatigue", None)
+    if fatigue is None:
+        fatigue = resolve_exercise_fatigue(make_exercises_for_focus(focus.lower().replace(" ", "_")))
+    return make_completion(
+        focus=focus,
+        days_ago=days_ago,
+        today=today,
+        completed_at=_completed_at_hours_ago(hours_ago),
+        resolved_muscle_fatigue=fatigue,
+        **overrides,
+    )
+
+
+def _heavy_leg_completion(hours_ago: float = 48, *, prs: bool = True, load_spike: bool = False) -> dict:
+    fatigue = resolve_exercise_fatigue(make_exercises_for_focus("legs"), intensity="hard")
+    ctx = {
+        "dominant_pattern": "heavy_squat_pattern",
+        "hard_set_count": 6,
+    }
+    if prs:
+        ctx.update({
+            "pr_count": 3,
+            "pr_kinds": ["estimated_1rm", "heaviest_weight"],
+        })
+    if load_spike:
+        ctx["load_spike_ratio"] = 1.55
+    return _completion_from_focus(
+        "Heavy Squat Day",
+        hours_ago,
+        resolved_muscle_fatigue=fatigue,
+        stimulus="strength",
+        activity_intensity="hard",
+        activity_details={"fatigue_context": ctx},
+    )
 
 
 # ─── 1. Full PPL week ────────────────────────────────────────────────────────
@@ -251,8 +294,8 @@ def test_heavy_week_low_readiness():
     assert snap.readiness_score < 85, (
         f"After 6 straight training days, readiness should be <85, got {snap.readiness_score}"
     )
-    assert snap.readiness_label in ("Moderate", "Fatigued", "Overtrained"), (
-        f"Expected Moderate/Fatigued/Overtrained, got {snap.readiness_label}"
+    assert snap.readiness_label in ("Moderate", "High load", "Recovery needed"), (
+        f"Expected Moderate/High load/Recovery needed, got {snap.readiness_label}"
     )
 
     # Should have multiple muscles in the top_fatigued list
@@ -278,9 +321,9 @@ def test_light_week_high_readiness():
     assert snap.readiness_score >= 40, (
         f"With light schedule, readiness should be >=40, got {snap.readiness_score}"
     )
-    # It won't be "Overtrained"
-    assert snap.readiness_label != "Overtrained", (
-        f"Light week should not be Overtrained, got {snap.readiness_label}"
+    # It won't be a recovery-needed muscle-load state.
+    assert snap.readiness_label != "Recovery needed", (
+        f"Light week should not need recovery, got {snap.readiness_label}"
     )
 
 
@@ -377,6 +420,258 @@ def test_mixed_activity_types():
     assert snap.days_analyzed >= 3, (
         f"Should have analyzed at least 3 activity days, got {snap.days_analyzed}"
     )
+
+
+# ─── 13. Readiness nuance: ordinary push vs lower body ────────────────────────
+
+def test_ordinary_push_day_48h_reasonable_recovery():
+    snap = compute_rolling_fatigue([_completion_from_focus("Push", 48)])
+
+    assert 0.65 <= snap.focus_readiness["push"] <= 0.90, snap.focus_readiness
+    assert snap.readiness_score >= 80, snap.readiness_score
+
+
+def test_ordinary_leg_day_48h_recovers_slower_than_push():
+    push = compute_rolling_fatigue([_completion_from_focus("Push", 48)])
+    legs = compute_rolling_fatigue([_completion_from_focus("Legs", 48)])
+
+    assert legs.focus_readiness["legs"] < push.focus_readiness["push"], (
+        legs.focus_readiness,
+        push.focus_readiness,
+    )
+    assert _mf(legs, "quads") > _mf(push, "quads")
+
+
+# ─── 14. Delayed damage + PR/load spike behavior ─────────────────────────────
+
+def test_heavy_lower_pr_48h_lower_than_ordinary_leg():
+    ordinary = compute_rolling_fatigue([_completion_from_focus("Legs", 48)])
+    heavy = compute_rolling_fatigue([
+        _heavy_leg_completion(48, prs=True, load_spike=True)
+    ], recovery_context={
+        "sleep": {"score": 90},
+        "nutrition": {"protein_status": "excellent"},
+    })
+
+    assert heavy.focus_readiness["lower"] < ordinary.focus_readiness["lower"], (
+        heavy.focus_readiness,
+        ordinary.focus_readiness,
+    )
+    assert 0.40 <= heavy.focus_readiness["lower"] <= 0.60, heavy.focus_readiness
+    assert any(r["type"] == "multiple_prs" for r in heavy.explanations), heavy.explanations
+    assert any(r["type"] == "load_spike" for r in heavy.explanations), heavy.explanations
+    assert any(r["type"] == "avoid_heavy_lower" for r in heavy.recommendations), heavy.recommendations
+
+
+def test_multiple_prs_increase_raw_fatigue():
+    no_pr = compute_rolling_fatigue([_heavy_leg_completion(48, prs=False)])
+    with_pr = compute_rolling_fatigue([_heavy_leg_completion(48, prs=True)])
+
+    assert _mf(with_pr, "hamstrings") > _mf(no_pr, "hamstrings")
+    assert with_pr.focus_readiness["lower"] < no_pr.focus_readiness["lower"]
+
+
+def test_recent_load_spike_increases_fatigue_without_explicit_prs():
+    base = compute_rolling_fatigue([_heavy_leg_completion(48, prs=False, load_spike=False)])
+    spike = compute_rolling_fatigue([_heavy_leg_completion(48, prs=False, load_spike=True)])
+
+    assert _mf(spike, "quads") > _mf(base, "quads")
+    assert any(r["type"] == "load_spike" for r in spike.explanations), spike.explanations
+
+
+def test_damage_component_peaks_later_than_immediate_for_heavy_lower():
+    immediate = compute_rolling_fatigue([_heavy_leg_completion(0, prs=True)])
+    delayed = compute_rolling_fatigue([_heavy_leg_completion(24, prs=True)])
+    later = compute_rolling_fatigue([_heavy_leg_completion(96, prs=True)])
+
+    assert _mf(delayed, "quads") > _mf(immediate, "quads"), (
+        immediate.muscle_fatigue.to_raw_dict(),
+        delayed.muscle_fatigue.to_raw_dict(),
+    )
+    assert _mf(later, "quads") < _mf(delayed, "quads")
+
+
+def test_raw_fatigue_exceeds_one_while_display_stays_bounded():
+    snap = compute_rolling_fatigue([_heavy_leg_completion(48, prs=True)])
+
+    assert snap.raw_muscle_fatigue["hamstrings"] > 1.0, snap.raw_muscle_fatigue
+    assert 0.0 <= snap.muscle_fatigue.to_dict()["hamstrings"] <= 1.0
+    assert 0 <= round(snap.focus_readiness["lower"] * 100) <= 100
+
+
+# ─── 15. Recovery context: activities, sleep, nutrition, HR ──────────────────
+
+def test_recovery_activity_reduces_fatigue_not_below_zero():
+    leg = _heavy_leg_completion(48, prs=True)
+    mobility = make_completion(
+        focus="Mobility",
+        days_ago=1,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(24),
+        resolved_muscle_fatigue=None,
+        activity_category="recovery",
+        activity_subtype="mobility",
+    )
+    baseline = compute_rolling_fatigue([leg])
+    recovered = compute_rolling_fatigue([leg, mobility])
+
+    assert recovered.muscle_fatigue.get("quads") < baseline.muscle_fatigue.get("quads")
+    assert all(v >= 0 for v in recovered.muscle_fatigue.to_raw_dict().values())
+
+
+def test_sauna_modest_and_limited_by_hydration():
+    leg = _heavy_leg_completion(48, prs=True)
+    sauna = make_completion(
+        focus="Sauna",
+        days_ago=1,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(24),
+        resolved_muscle_fatigue=None,
+        activity_category="recovery",
+        activity_subtype="sauna",
+    )
+    baseline = compute_rolling_fatigue([leg])
+    sauna_ok = compute_rolling_fatigue([leg, sauna])
+    sauna_dry = compute_rolling_fatigue([leg, sauna], recovery_context={"hydration_low": True})
+
+    assert sauna_ok.muscle_fatigue.get("quads") < baseline.muscle_fatigue.get("quads")
+    assert sauna_ok.muscle_fatigue.get("quads") > baseline.muscle_fatigue.get("quads") - 0.05
+    assert sauna_dry.muscle_fatigue.get("quads") > sauna_ok.muscle_fatigue.get("quads")
+    assert any(r["type"] == "sauna_limited" for r in sauna_dry.explanations)
+
+
+def test_manual_sauna_subtypes_use_sauna_limits():
+    leg = _heavy_leg_completion(48, prs=True)
+    finnish_sauna = make_completion(
+        focus="Recovery",
+        days_ago=1,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(24),
+        resolved_muscle_fatigue=None,
+        activity_category="recovery",
+        activity_subtype="finnish_sauna",
+    )
+    baseline = compute_rolling_fatigue([leg])
+    sauna_ok = compute_rolling_fatigue([leg, finnish_sauna])
+    sauna_dry = compute_rolling_fatigue([leg, finnish_sauna], recovery_context={"hydration_low": True})
+
+    assert sauna_ok.muscle_fatigue.get("quads") < baseline.muscle_fatigue.get("quads")
+    assert sauna_ok.muscle_fatigue.get("quads") > baseline.muscle_fatigue.get("quads") - 0.05
+    assert sauna_dry.muscle_fatigue.get("quads") > sauna_ok.muscle_fatigue.get("quads")
+    assert any(r["type"] == "sauna_limited" for r in sauna_dry.explanations)
+
+
+def test_sleep_modifies_recovery_without_erasing_local_fatigue():
+    leg = _completion_from_focus("Legs", 48)
+    neutral = compute_rolling_fatigue([leg])
+    good = compute_rolling_fatigue([leg], recovery_context={"sleep": {"score": 90}})
+    poor = compute_rolling_fatigue([leg], recovery_context={"sleep": {"score": 45, "consecutive_poor_sleep_nights": 2}})
+
+    assert good.muscle_fatigue.get("systemic") < neutral.muscle_fatigue.get("systemic")
+    assert poor.muscle_fatigue.get("systemic") > neutral.muscle_fatigue.get("systemic")
+    assert good.muscle_fatigue.get("quads") > 0.0
+
+
+def test_nutrition_channels_affect_expected_fatigue():
+    leg = _completion_from_focus("Legs", 48)
+    protein_met = compute_rolling_fatigue([leg], recovery_context={"nutrition": {"protein_status": "excellent"}})
+    low_fuel = compute_rolling_fatigue([leg], recovery_context={
+        "nutrition": {"protein_status": "low", "carbs_low": True, "hydration_low": True}
+    })
+
+    assert low_fuel.muscle_fatigue.get("hamstrings") >= protein_met.muscle_fatigue.get("hamstrings")
+    assert low_fuel.muscle_fatigue.get("systemic") > protein_met.muscle_fatigue.get("systemic")
+    assert any(r["type"] == "protein_low" for r in low_fuel.explanations)
+
+
+def test_hrv_rhr_affect_systemic_not_quad_fatigue():
+    leg = _completion_from_focus("Legs", 48)
+    neutral = compute_rolling_fatigue([leg])
+    stressed = compute_rolling_fatigue([leg], recovery_context={
+        "hr": {"current_rhr": 68, "baseline_rhr": 60, "current_hrv": 45, "baseline_hrv": 60}
+    })
+
+    assert stressed.muscle_fatigue.get("systemic") > neutral.muscle_fatigue.get("systemic")
+    assert abs(stressed.muscle_fatigue.get("quads") - neutral.muscle_fatigue.get("quads")) < 1e-6
+    assert any(r["type"] == "systemic_stress" for r in stressed.explanations)
+
+
+# ─── 16. User feedback + fallback behavior ───────────────────────────────────
+
+def test_soreness_caps_relevant_muscle_readiness_only():
+    feedback = make_completion(
+        focus="Readiness feedback",
+        days_ago=0,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(0),
+        resolved_muscle_fatigue={},
+        activity_category="feedback",
+        activity_details={"fatigue_context": {
+            "readiness_feedback": {"soreness": [{"body_part": "quads", "severity": 6}]}
+        }},
+    )
+    snap = compute_rolling_fatigue([feedback])
+
+    assert snap.muscle_fatigue.to_dict()["quads"] >= 0.40
+    assert snap.muscle_fatigue.to_dict()["chest"] == 0.0
+    assert any(r["type"] == "soreness_reported" for r in snap.explanations)
+
+
+def test_joint_pain_triggers_avoid_heavy_loading():
+    feedback = make_completion(
+        focus="Readiness feedback",
+        days_ago=0,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(0),
+        resolved_muscle_fatigue={},
+        activity_category="feedback",
+        activity_details={"fatigue_context": {
+            "readiness_feedback": {"joint_pain": [{"body_part": "knee", "severity": 5}]}
+        }},
+    )
+    snap = compute_rolling_fatigue([feedback])
+
+    assert any(r["type"] == "joint_pain_reported" for r in snap.explanations)
+    assert any(r["type"] == "avoid_heavy_loading" for r in snap.recommendations)
+
+
+def test_missing_optional_context_is_neutral_and_focus_fallback_still_works():
+    fallback = make_completion(
+        focus="Push",
+        days_ago=2,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(48),
+        resolved_muscle_fatigue=None,
+        activity_details=None,
+    )
+    neutral = compute_rolling_fatigue([fallback])
+    explicit_empty = compute_rolling_fatigue([fallback], recovery_context={})
+
+    assert neutral.focus_readiness == explicit_empty.focus_readiness
+    assert neutral.muscle_fatigue.get("chest") > 0
+
+
+def test_heavy_pr_leg_day_good_recovery_still_local_limited():
+    leg = _heavy_leg_completion(48, prs=True, load_spike=True)
+    sauna = make_completion(
+        focus="Sauna",
+        days_ago=1,
+        today=date.today(),
+        completed_at=_completed_at_hours_ago(24),
+        resolved_muscle_fatigue=None,
+        activity_category="recovery",
+        activity_subtype="sauna",
+    )
+    snap = compute_rolling_fatigue([leg, sauna], recovery_context={
+        "sleep": {"score": 92},
+        "nutrition": {"protein_status": "excellent"},
+        "hr": {"current_rhr": 58, "baseline_rhr": 58, "current_hrv": 62, "baseline_hrv": 60},
+    })
+
+    assert snap.readiness_score >= 70
+    assert snap.focus_readiness["lower"] < (snap.readiness_score / 100.0)
+    assert snap.focus_readiness["lower"] < 0.60
+    assert any(r["type"] == "avoid_heavy_lower" for r in snap.recommendations)
 
 
 # ─── Runner ──────────────────────────────────────────────────────────────────

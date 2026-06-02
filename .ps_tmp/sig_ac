@@ -1,0 +1,23 @@
+10045| const canShare = await Sharing.isAvailableAsync();
+10047| await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Body Scan' });
+10069| await quarantineLegacyBodyScans([entry], 'bodyScanHistory local-only delete ignored by DB');
+10072| const { deleteBodyScan } = await import('../services/api');
+10073| await deleteBodyScan(authToken, entry.id);
+10079| await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(onlyServerBackedBodyScans(updated)));
+10098| await new Promise(r => setTimeout(r, 100)); // let logo render
+10101| const uri = await ref.capture();
+10103| const Sharing = await import('expo-sharing');
+10104| const canShare = await Sharing.isAvailableAsync();
+10106| await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Fitness Score' });
+10121| const { requirePro } = await import('../utils/subscription');
+10130| const cam = await ImagePicker.requestCameraPermissionsAsync();
+10143| const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+10169| ? await ImagePicker.launchCameraAsync(opts)
+10170| : await ImagePicker.launchImageLibraryAsync(opts);
+10232| const scanResult = await scanBody(authToken, {
+10270| await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(updated));
+10371| useEffect(() => {
+10372| if (!isActive || !authToken || !isProTier || tab !== 'health' || !showWorkoutProgress) {
+10389| }, [authToken, isActive, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length, showWorkoutProgress]);
+10391| useEffect(() => {
+10401| }, [authToken, isActive, selectedExercise, showWorkoutProgress]);

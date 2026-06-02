@@ -24,8 +24,8 @@
 ### Nutrition Score (0-100)
 
 **Adherence Bucket (35-40% weight)**
-- Calorie alignment (0-40 pts): 1.0 at ±10%, drops to 0 at ±40% of target
-- Protein alignment (0-35 pts): 1.0 at ≥85% of target
+- Calorie alignment (0-40 pts): 1.0 inside ±5%, "close" through ±10%, then degrades outside that zone
+- Protein alignment (0-60 pts inside adherence): 1.0 at ≥95% of target
 - Projected meal coverage for confidence: planned meals / expected meals
 
 **Food Quality Bucket (35-40% weight)**

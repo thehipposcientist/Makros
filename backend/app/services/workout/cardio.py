@@ -111,37 +111,141 @@ def is_easy_cardio(exercise: dict) -> bool:
     return classify_cardio(exercise) == "easy"
 
 
+# ── Heart-rate zone constants ─────────────────────────────────────────────
+#
+# This block is the BACKEND HALF of a contract with the frontend canonical
+# module at `src/utils/hrZones.ts`. The constants below — zone bands,
+# fallback values, Tanaka coefficients — must stay byte-for-byte
+# equivalent. A parity test on the frontend hardcodes representative
+# inputs and verifies the resulting zones match these bands.
+#
+# Method: % of Maximum Heart Rate (MHR).
+#   zoneBpm(p) = max_hr * p
+#
+# Zones (Z1..Z5):
+#   Z1  50-60% MHR  Warm Up
+#   Z2  60-70% MHR  Easy
+#   Z3  70-80% MHR  Aerobic
+#   Z4  80-90% MHR  Threshold
+#   Z5  90-100% MHR Maximum
+#
+# %MHR matches what Apple Fitness, Garmin (default), Whoop, Strava, and
+# Polar all show. Karvonen / %HRR was the previous method but produced
+# zone numbers that disagreed with every consumer platform — a heart
+# rate reading as Zone 3 on Apple Watch read as Zone 1 in this app.
+
+HR_ZONE_BANDS = [
+    {"zone": 1, "label": "Warm Up",   "low_pct": 0.50, "high_pct": 0.60},
+    {"zone": 2, "label": "Easy",      "low_pct": 0.60, "high_pct": 0.70},
+    {"zone": 3, "label": "Aerobic",   "low_pct": 0.70, "high_pct": 0.80},
+    {"zone": 4, "label": "Threshold", "low_pct": 0.80, "high_pct": 0.90},
+    {"zone": 5, "label": "Maximum",   "low_pct": 0.90, "high_pct": 1.00},
+]
+FALLBACK_RESTING_HR = 60
+FALLBACK_MAX_HR = 190
+
+
+def _js_round(x: float) -> int:
+    """Round-half-up to match JavaScript's Math.round, which the
+    canonical frontend module uses. Python's built-in round() does
+    banker's rounding (round half to even), which would produce
+    1-bpm divergences at boundaries like 142.5 (JS → 143, Python →
+    142). Always positive in this module so the simple form is
+    enough."""
+    return int(x + 0.5) if x >= 0 else -int(-x + 0.5)
+
+
+def _estimate_max_hr_tanaka(age: int) -> int:
+    """Tanaka 2001: more accurate across age ranges than the legacy
+    `220 - age`. Used when no user-entered or observed max HR is
+    available."""
+    return _js_round(208 - 0.7 * age)
+
+
+def _resolve_max_hr(
+    age: int | None,
+    user_max_hr: int | None,
+    observed_max_hr: int | None,
+) -> tuple[int, str]:
+    """Priority: user-entered → observed → Tanaka estimate → 190 fallback.
+    Returns (max_hr, source) where source is one of:
+    'user_entered', 'observed', 'estimated_tanaka'."""
+    if user_max_hr and user_max_hr > 0:
+        return _js_round(user_max_hr), "user_entered"
+    if observed_max_hr and observed_max_hr > 0:
+        return _js_round(observed_max_hr), "observed"
+    if age and age > 0:
+        return _estimate_max_hr_tanaka(age), "estimated_tanaka"
+    return FALLBACK_MAX_HR, "estimated_tanaka"
+
+
+def _resolve_resting_hr(
+    rhr_7d: int | None,
+    rhr_30d: int | None,
+    profile_rhr: int | None,
+) -> tuple[int, str]:
+    """Priority: 7-day Apple Health avg → 30-day avg → profile → 60 fallback.
+    Returns (resting_hr, source) where source is one of:
+    'apple_health_7d', 'apple_health_30d', 'user_profile', 'fallback'."""
+    if rhr_7d and rhr_7d > 0:
+        return _js_round(rhr_7d), "apple_health_7d"
+    if rhr_30d and rhr_30d > 0:
+        return _js_round(rhr_30d), "apple_health_30d"
+    if profile_rhr and profile_rhr > 0:
+        return _js_round(profile_rhr), "user_profile"
+    return FALLBACK_RESTING_HR, "fallback"
+
+
 def compute_hr_zones(
     age: int,
     resting_hr: int | None = None,
     vo2_max: float | None = None,
+    *,
+    user_max_hr: int | None = None,
+    observed_max_hr: int | None = None,
+    rhr_7d: int | None = None,
+    rhr_30d: int | None = None,
 ) -> dict:
-    """Compute 5 HR training zones using Karvonen formula when resting HR
-    is available, or simple %MHR fallback. Returns zone boundaries + labels.
+    """Compute the 5-zone %MHR ladder.
 
-    Zone model:
-      Z1  50-60% HRR  Recovery / Warm-up
-      Z2  60-70% HRR  Aerobic base / Fat burn
-      Z3  70-80% HRR  Tempo / Threshold
-      Z4  80-90% HRR  Lactate threshold
-      Z5  90-100% HRR Max effort / VO2 Max intervals
-    """
-    max_hr = 220 - age
-    rhr = resting_hr or 60
+    Backwards compatibility: callers may pass `resting_hr` positionally
+    (used as the lowest-priority profile RHR fallback). New keyword
+    arguments — `user_max_hr`, `observed_max_hr`, `rhr_7d`, `rhr_30d` —
+    drive the priority chain documented in `_resolve_max_hr` /
+    `_resolve_resting_hr`.
 
-    def hrr_pct(pct: float) -> int:
-        return round(rhr + (max_hr - rhr) * pct)
+    Resting HR is no longer used by the zone math but is still resolved
+    and surfaced for display (recovery score, HR summary cards).
 
-    zones = [
-        {"zone": 1, "label": "Recovery",  "low": hrr_pct(0.50), "high": hrr_pct(0.60)},
-        {"zone": 2, "label": "Aerobic",   "low": hrr_pct(0.60), "high": hrr_pct(0.70)},
-        {"zone": 3, "label": "Tempo",     "low": hrr_pct(0.70), "high": hrr_pct(0.80)},
-        {"zone": 4, "label": "Threshold", "low": hrr_pct(0.80), "high": hrr_pct(0.90)},
-        {"zone": 5, "label": "VO2 Max",   "low": hrr_pct(0.90), "high": max_hr},
-    ]
+    Returns a dict shape that mirrors the frontend `HRZonesResult` plus
+    legacy `max_hr` / `resting_hr` / `vo2_max` keys for back-compat with
+    pre-existing consumers."""
+    max_hr, max_hr_source = _resolve_max_hr(age, user_max_hr, observed_max_hr)
+    rhr, rhr_source = _resolve_resting_hr(rhr_7d, rhr_30d, resting_hr)
+
+    def mhr_bpm(pct: float) -> int:
+        return _js_round(max_hr * pct)
+
+    zones = []
+    for band in HR_ZONE_BANDS:
+        z = band["zone"]
+        # Z5 is closed at the actual max HR so a max-effort reading
+        # still maps to Z5. Interior zones use the %MHR table directly.
+        low = mhr_bpm(band["low_pct"])
+        high = max_hr if z == 5 else mhr_bpm(band["high_pct"])
+        zones.append({
+            "zone": z,
+            "label": band["label"],
+            "low": low,
+            "high": high,
+        })
+
     return {
+        "method": "pct_max_hr",
         "max_hr": max_hr,
         "resting_hr": rhr,
+        "max_hr_source": max_hr_source,
+        "resting_hr_source": rhr_source,
         "vo2_max": vo2_max,
         "zones": zones,
     }
@@ -152,15 +256,16 @@ def prescribe_cardio_zone(
     zones: list[dict],
 ) -> dict | None:
     """Given the classified intensity and computed zones, return the
-    target zone dict the user should train in."""
+    target zone dict the user should train in. `zones` is a 5-element
+    list ordered Z1..Z5 (indices 0..4)."""
     if not zones:
         return None
     if cardio_intensity == "easy":
-        return zones[0]  # Z1
+        return zones[1]      # Z2 "Easy" — 60-70% MHR
     if cardio_intensity == "steady":
-        return zones[1]  # Z2
+        return zones[2]      # Z3 "Aerobic" — 70-80% MHR (classic zone-2 training band)
     if cardio_intensity == "intervals":
-        return zones[3]  # Z4
+        return zones[3]      # Z4 "Threshold" — 80-90% MHR
     return None
 
 
@@ -378,22 +483,26 @@ def build_cardio_guidance(
 
     guidance: dict = {"duration_min": main_min, "is_intervals": is_intervals}
 
-    # HR zone (computed when age is known, otherwise just zone number)
+    # HR zone (computed when age is known, otherwise just zone number).
+    # Mapping under %MHR: easy → Z2 "Easy" (60-70%), steady → Z3
+    # "Aerobic" (70-80%, the classic zone-2 training band), intervals
+    # → Z4 "Threshold" (80-90%).
     if user_age:
         zdata = compute_hr_zones(user_age, resting_hr)
-        z = zdata["zones"]
-        target_zone = z[3] if is_intervals else (z[0] if intensity == "easy" else z[1])
-        guidance["hr_zone"]        = target_zone["zone"]
-        guidance["hr_zone_label"]  = target_zone["label"]
-        guidance["hr_low_bpm"]     = target_zone["low"]
-        guidance["hr_high_bpm"]    = target_zone["high"]
+        cardio_intensity_label = "intervals" if is_intervals else ("easy" if intensity == "easy" else "steady")
+        target_zone = prescribe_cardio_zone(cardio_intensity_label, zdata["zones"])
+        if target_zone:
+            guidance["hr_zone"]        = target_zone["zone"]
+            guidance["hr_zone_label"]  = target_zone["label"]
+            guidance["hr_low_bpm"]     = target_zone["low"]
+            guidance["hr_high_bpm"]    = target_zone["high"]
     else:
         if is_intervals:
             guidance["hr_zone"] = 4; guidance["hr_zone_label"] = "Threshold"
         elif intensity == "easy":
-            guidance["hr_zone"] = 1; guidance["hr_zone_label"] = "Recovery"
+            guidance["hr_zone"] = 2; guidance["hr_zone_label"] = "Easy"
         else:
-            guidance["hr_zone"] = 2; guidance["hr_zone_label"] = "Aerobic"
+            guidance["hr_zone"] = 3; guidance["hr_zone_label"] = "Aerobic"
 
     # ── Modality-specific tiers ──────────────────────────────────────────────
     if modality == MODALITY_TREADMILL:

@@ -12,12 +12,17 @@ export interface ExerciseLibraryItem {
   primary_muscle?: string;
   secondary_muscles?: string[];
   equipment?: string;
-  gear?: Array<{ slug?: string | null; name?: string | null; category?: string | null; required?: boolean | null }> | null;
+  gear?: Array<{ slug?: string | null; name?: string | null; category?: string | null; required?: boolean | null; role?: string | null }> | null;
   aliases?: string[] | null;
   is_compound?: boolean;
   exercise_type?: string | null;
   movement_pattern?: string | null;
   cardio_intensity?: string | null;
+  /** free-exercise-db identifier (e.g. "Barbell_Bench_Press_-_Medium_Grip").
+   *  Resolved server-side at seed time. When present the client renders
+   *  the bundled photo demo via `demoFrameSource()`; when null the form
+   *  preview falls back to the YouTube thumbnail. */
+  demo_exercise_db_id?: string | null;
 }
 
 export interface ExerciseGuide {
@@ -108,7 +113,7 @@ function isCardioExercise(ex: ExerciseLibraryItem): boolean {
     String(ex.exercise_type ?? '').toLowerCase() === 'cardio'
     || String(ex.movement_pattern ?? '').toLowerCase() === 'cardio'
     || String(ex.primary_muscle ?? '').toLowerCase() === 'cardio'
-    || /sprint|interval|zone ?2|treadmill|bike|cycling|rowing|rower|skierg|elliptical|stair climber|walk|jog|run|jump rope|boxing|burpee|mountain climber|jumping jack|high knees|butt kick|fast feet|plank jack|squat thrust|skater|line hop|battle rope|shuffle|shadow boxing|cardio/.test(name)
+    || /sprint|interval|zone ?2|treadmill|bike|cycling|rowing|rower|skierg|elliptical|stair climber|walk|jog|run|jump rope|boxing|kickboxing|martial.?arts|mma|burpee|mountain climber|jumping jack|high knees|butt kick|fast feet|plank jack|squat thrust|skater|line hop|battle rope|shuffle|shadow boxing|cardio/.test(name)
   );
 }
 
@@ -117,7 +122,7 @@ function buildCardioExerciseGuide(ex: ExerciseLibraryItem): ExerciseGuide {
   const secondary = (ex.secondary_muscles ?? []).map(humanizeToken).filter(Boolean);
   const supportText = secondary.length ? ` Secondary demand: ${joinParts(secondary).toLowerCase()}.` : '';
   const has = (pattern: RegExp) => pattern.test(name);
-  const isIntervals = has(/interval|sprint|hiit|tabata|burpee|jump rope|jumping jack|high knees|butt kicks|fast feet|plank jack|squat thrust|skater|line hop|shadow boxing|boxing|battle rope|shuttle|shuffle/);
+  const isIntervals = has(/interval|sprint|hiit|tabata|burpee|jump rope|jumping jack|high knees|butt kicks|fast feet|plank jack|squat thrust|skater|line hop|shadow boxing|boxing|kickboxing|martial.?arts|mma|battle rope|shuttle|shuffle/);
   const phaseTitle = isIntervals ? 'Interval Breakdown' : 'Cardio Execution';
 
   if (has(/sprint|hill sprint|shuttle/)) {
@@ -363,7 +368,7 @@ function buildCardioExerciseGuide(ex: ExerciseLibraryItem): ExerciseGuide {
     };
   }
 
-  if (has(/boxing|shadow boxing|heavy bag/)) {
+  if (has(/boxing|kickboxing|martial.?arts|mma|shadow boxing|heavy bag/)) {
     return {
       howTo: 'Work in boxing rounds: move your feet, keep your guard up, and throw crisp combinations for the prescribed interval.',
       hits: `Primarily trains cardio, shoulders, trunk rotation, coordination, and footwork.${supportText}`,
@@ -599,6 +604,9 @@ export function buildExerciseGuide(ex: ExerciseLibraryItem): ExerciseGuide {
   };
 }
 
-export function getExerciseVideoUrl(exerciseName: string): string {
-  return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${exerciseName} proper form`)}`;
+export function getExerciseVideoUrl(exerciseName: string, equipment?: string | null): string {
+  const concreteEquipment = String(equipment ?? '').trim();
+  const broad = /^(gym|home|full|minimal|other|cardio)$/i.test(concreteEquipment);
+  const query = `${broad || !concreteEquipment ? '' : `${concreteEquipment} `}${exerciseName} proper form tutorial`;
+  return `https://m.youtube.com/results?search_query=${encodeURIComponent(query)}`;
 }

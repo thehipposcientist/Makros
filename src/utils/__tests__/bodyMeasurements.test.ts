@@ -1,6 +1,8 @@
 import {
+  bloodPressureInputError,
   buildBodyMeasurementsCheckinPayload,
   EMPTY_MEASUREMENT_FIELDS,
+  optionalPositiveInteger,
   optionalPositiveNumber,
   profileWeightForMeasurements,
 } from '../bodyMeasurements.ts';
@@ -14,6 +16,8 @@ describe('body measurement check-in payload', () => {
         ...EMPTY_MEASUREMENT_FIELDS,
         waist: '32.5',
         bodyFat: '17',
+        bpSystolic: '118',
+        bpDiastolic: '76',
       },
     });
 
@@ -26,6 +30,8 @@ describe('body measurement check-in payload', () => {
       adherence: 3,
       waist_in: 32.5,
       body_fat_pct: 17,
+      bp_systolic: 118,
+      bp_diastolic: 76,
     });
   });
 
@@ -58,6 +64,8 @@ describe('body measurement check-in payload', () => {
         thigh: '0',
         calf: '15',
         bodyFat: 'Infinity',
+        bpSystolic: '120.5',
+        bpDiastolic: '80',
       },
     });
 
@@ -77,5 +85,19 @@ describe('body measurement check-in payload', () => {
     expect(optionalPositiveNumber(' 12.25 ')).toBe(12.25);
     expect(optionalPositiveNumber('12abc')).toBe(undefined);
     expect(optionalPositiveNumber('')).toBe(undefined);
+  });
+
+  it('parses blood pressure whole numbers conservatively', () => {
+    expect(optionalPositiveInteger('118')).toBe(118);
+    expect(optionalPositiveInteger('118.5')).toBe(undefined);
+    expect(optionalPositiveInteger('abc')).toBe(undefined);
+  });
+
+  it('validates blood pressure pairs before saving', () => {
+    expect(bloodPressureInputError({ bpSystolic: '', bpDiastolic: '' })).toBe(null);
+    expect(bloodPressureInputError({ bpSystolic: '120', bpDiastolic: '' })).toContain('both');
+    expect(bloodPressureInputError({ bpSystolic: '120.5', bpDiastolic: '80' })).toContain('whole');
+    expect(bloodPressureInputError({ bpSystolic: '80', bpDiastolic: '120' })).toContain('higher');
+    expect(bloodPressureInputError({ bpSystolic: '120', bpDiastolic: '80' })).toBe(null);
   });
 });

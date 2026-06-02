@@ -108,6 +108,7 @@ def _metrics_recent_block(db: Session, user_id: int, as_of: date, raw_days: int,
             if r.meals_logged:
                 day_dict["kcal"] = round(r.kcal)
                 day_dict["protein_g"] = round(r.protein_g)
+                day_dict["nutrition_log_status"] = getattr(r, "nutrition_log_status", "unknown")
             if r.sleep_h is not None:
                 day_dict["sleep_h"] = r.sleep_h
             if r.weight_lbs is not None:

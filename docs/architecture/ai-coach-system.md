@@ -19,20 +19,28 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - **Endpoint**: `POST /ai/trainer-question` → `routers/ai/chat.py::ask_trainer_question`.
 - **Model**: `MODEL_CHAT` (env var, default gpt-4o-mini).
 - **Single-phase**: deterministic quick-intent classification OR full LLM. Chat never generates replacement workout or nutrition plans.
-- **Context**: slimProfile + full workoutPlan + nutritionPlan + scheduleMapping + progress (sessionsLast30d, recentDays, last-6 workoutHistory) + foodsAvailable + injuries + last-6 chat turns + optional photo + userContext (last 10 activity-log entries).
+- **Context**: slimProfile + full workoutPlan + nutritionPlan + scheduleMapping + progress (sessionsLast30d, recentDays, last-6 workoutHistory) + foodsAvailable + injuries + last-6 chat turns + optional photo + userContext (last 10 activity-log entries) + server `coachContext`; digestive symptom questions additionally include compact today/yesterday logged meal items and GI food-pattern hints.
 - **Response shape**: `{answer, action_items, needs_plan_update, safety_note, updated_goal?, updated_macros?, updated_workout_plan=null, updated_nutrition_plan=null, updated_injuries?, logged_workouts?, injury_clarification_needed?}`.
 - **Persistence**: no active PlanWeek mutation. Any legacy `updated_workout_plan` / `updated_nutrition_plan` payload is stripped server-side and client-side. Goal/macro proposals are server-sanitized, persisted as unaccepted `AIDecision(checkin_type="trainer_chat")` rows for audit/cooldown context, then held in `PendingPlanUpdate` until user taps Apply. Injury proposals are held for explicit confirmation; once confirmed they update the user's injury profile for future generated weeks and the current week must be changed through deterministic Change Focus / Swap / Skip controls.
 
 ## 2. In-Workout Coach
 
 - **Trigger**: chat drawer on ActiveWorkoutScreen (Pro-gated).
-- **Endpoint**: `POST /ai/workout-question`.
+- **Endpoint**: `POST /coach/workout-question` (`POST /ai/workout-question` is a compatibility alias).
 - **Model**: `MODEL_CHAT` (default `gpt-4o-mini`).
 - **Context**: current workout + activeExerciseName + currentSetNumber + loggedSets + serverContext (active injuries, recent completed workouts, last 3 matching exercise histories when available).
 - **Scope**: form cues, load/rep adjustment, pain caution, immediate substitutions. Redirects nutrition/lifestyle to Home Trainer.
 - **Response**: `{answer, quick_cues, adjustment, safety_note}`.
 - **Persistence**: none — display-only.
 - **Nuance**: this endpoint can accept an attached image, but it still uses `MODEL_CHAT` today rather than `MODEL_IMAGE`.
+
+## Live Workout Recommendations
+
+- **Endpoints**: `POST /recommendations/pre-set` and `POST /recommendations/next-set` (`/ai/pre-set-recommendation` and `/ai/recommend-weight` remain compatibility aliases).
+- **Model**: none. Load, reps, set intent, progression, fatigue downshifts, and traces are deterministic and auditable.
+- **Scope**: ephemeral execution guidance for the active set/session. Responses may include `algorithmSource`, `dataSource`, `reasonTags`, and `trace`.
+- **Persistence**: none. Logged sets, RIR, fatigue, and completed workouts feed future deterministic planning/reviews; they do not rewrite the active PlanWeek mid-session.
+- **Boundary**: AI may explain or coach in the chat surface above, but it must not choose or persist next-set load/reps.
 
 ## 3. Check-in Coach (daily/weekly)
 
@@ -69,6 +77,8 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - `swap_to_recovery` → tomorrow's `UserDayState.skipped_focus = "recovery"`
 - `shorten_workout` / `set_workout_duration` → `UserPreferences.workout_duration_minutes`
 - `schedule_deload` → `UserCoachingState.deload_until_date` + volume adjustment
+- `reduce_muscle_volume` / `add_muscle_volume` / `hold_muscle_volume` → `UserCoachingState.muscle_volume_adjustments`, read by future PlanWeek generation
+- `reduce_intensity` → `UserCoachingState.intensity_adjustment_pct`, read by future PlanWeek prescriptions
 - `set_core_frequency` → `UserPreferences.core_frequency_per_week`
 - `carb_bump_today` → today's `UserDayState.macro_overrides`
 - `travel_mode` / `pause_week` → dated `UserDayState.skipped_focus`
@@ -76,7 +86,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 
 `add_cardio_session` / `add_zone2_session` may increment `days_per_week` by one when the user is below the 7-day cap; otherwise they are descriptive.
 
-**Descriptive-only (CoachMemory record, no state mutation):** `reduce_muscle_volume`, `add_muscle_volume`, `hold_muscle_volume`, `reduce_cardio`, `reduce_intensity`, `raise_protein_target`, `raise_fiber_target`, `rebalance_week`, `strength_preservation`, `swap_to_recovery_or_reduce`, plus any state action missing required parameters.
+**Descriptive-only (CoachMemory record, no state mutation):** `reduce_cardio`, `raise_protein_target`, `raise_fiber_target`, `rebalance_week`, `strength_preservation`, `swap_to_recovery_or_reduce`, plus any state action missing required parameters.
 
 **Wired by**: `WeeklyCoachingCard` (Progress → Health), `CoachCheckinModal` (inline pills), trainer chat (Apply button on assistant messages).
 

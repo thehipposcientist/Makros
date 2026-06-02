@@ -32,6 +32,21 @@ class CustomMacrosIn(BaseModel):
     fat: int | None = None
 
 
+class InjuryStructuredIn(BaseModel):
+    """Structured injury record for severity-aware planner gating.
+
+    Sent alongside the legacy `injuriesOrLimitations: list[str]` so
+    older clients (and other callers that only have free-text) still
+    work — the planner unions both paths. See
+    `planner._injury_blocked_patterns_combined` for the merge rule.
+    """
+    bodyPart: str                          # e.g. "Lower back", matched into _INJURY_MAP
+    status: str = "active"                 # "active" | "recovering" | "resolved"
+    severity: str | None = "moderate"      # "mild" | "moderate" | "severe"
+    muscleGroups: list[str] = []           # optional explicit muscle list
+    estimatedRecoveryDate: str | None = None  # ISO YYYY-MM-DD; planner doesn't use yet
+
+
 class PlanRequest(BaseModel):
     """Full plan generation — both workout and nutrition."""
     goal: str
@@ -64,12 +79,16 @@ class PlanRequest(BaseModel):
     preferredExercises: list[str] = []
     dislikedExercises: list[str] = []
     injuriesOrLimitations: list[str] = []
+    # Optional severity-aware structured payload. When present, planner
+    # uses these (with severity rules) instead of substring-matching
+    # the flat strings; legacy callers can keep sending only the
+    # strings and behavior is unchanged.
+    injuriesStructured: list[InjuryStructuredIn] = []
     exerciseLibrary: list[dict] = []
 
     # Nutrition context (optional)
     dietaryPreference: str | None = None
     allergies: list[str] = []
-    mealsPerDay: int = 3
     # How many distinct daily meal templates to generate (1-7). Client
     # rotates these across 7 days. Fewer templates = faster generation.
     mealVariety: int = 3
@@ -107,6 +126,8 @@ class WorkoutOnlyRequest(BaseModel):
     strengthBaselines: dict | None = None
     cardioBaseline: dict | None = None
     injuriesOrLimitations: list[str] = []
+    # Severity-aware structured payload, optional. See PlanRequest.
+    injuriesStructured: list[InjuryStructuredIn] = []
     userContext: str | None = None
 
 
@@ -122,7 +143,6 @@ class NutritionOnlyRequest(BaseModel):
     supplementsAvailable: list[str] = []
     dietaryPreference: str | None = None
     allergies: list[str] = []
-    mealsPerDay: int = 3
     # Number of distinct daily meal templates (1-7). variety=1 takes the
     # deterministic non-AI path in the assembler so regens land on the
     # same template every time.
@@ -142,6 +162,11 @@ class CompletedSetIn(BaseModel):
 
 
 class WeightRecommendRequest(BaseModel):
+    """Request body for deterministic `/recommendations/next-set`.
+
+    `/ai/recommend-weight` remains a compatibility alias, but live load/reps
+    selection is rules-based and does not call an LLM.
+    """
     exerciseName: str
     goal: str
     lastSets: list[CompletedSetIn]
@@ -162,12 +187,13 @@ class WeightRecommendRequest(BaseModel):
     caloriesOnTargetRecently: bool | None = None
     allTimeBestWeightLbs: float | None = None
     allTimeBestReps: int | None = None
+    allTimeBestDate: str | None = None
     lastSessionBestWeightLbs: float | None = None
     lastSessionBestReps: int | None = None
+    lastSessionBestDate: str | None = None
     # Propagated next-session target from the deterministic workout
-    # planner. When present, this is the preferred anchor for the first
-    # set of the session — it already reflects the user's history + the
-    # goal-specific progression rules.
+    # planner. Used as a first-set fallback when fresher exact-history
+    # anchors are unavailable.
     plannedTargetWeightLbs: float | None = None
     # Optional canonical slug for the active exercise. When the client
     # knows the slug (from the generated plan), passing it here lets the
@@ -224,6 +250,7 @@ class WorkoutCoachQuestionRequest(BaseModel):
 class FoodPhotoRequest(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"
+    context: str | None = None
 
 
 class EquipmentScanRequest(BaseModel):
@@ -245,6 +272,10 @@ class ScanFoodsImageItem(BaseModel):
 class ScanFoodsRequest(BaseModel):
     images: list[ScanFoodsImageItem]
     context: str | None = None
+    # Trusted server-side context (improves identification/disambiguation).
+    meal_slot: str | None = None
+    dietary_preference: str | None = None
+    allergies: list[str] | None = None
 
 
 class FormPhotoRequest(BaseModel):
@@ -265,9 +296,25 @@ class ExerciseSearchRequest(BaseModel):
     injuries: list[str] | None = None     # list of injuries to avoid
     exclude: list[str] | None = None      # exercise names the user already has — do not return these
 
+class ExercisePhotoRequest(BaseModel):
+    """Identify an exercise from a single photo of someone performing it.
+    The library_names hint biases the model toward returning a name from
+    the user's existing exercise list when the lift matches one of them
+    — avoiding spurious "new" entries for exercises they already have.
+    """
+    image_base64: str
+    mime_type: str = "image/jpeg"
+    library_names: list[str] | None = None
+    equipment: list[str] | None = None
+    injuries: list[str] | None = None
+
+
 class WorkoutSuggestRequest(BaseModel):
     workout_focus: str                     # e.g. "Push", "Legs", "Pull"
     current_exercises: list[str] = []      # exercises already in the session
+    completed_exercises: list[str] | None = None
+    scheduled_exercises: list[str] | None = None
+    exclude: list[str] | None = None
     equipment: list[str] | None = None
     injuries: list[str] | None = None
 
@@ -277,6 +324,12 @@ class SupplementLookupRequest(BaseModel):
 class SupplementPhotoRequest(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"
+
+class LabReportScanRequest(BaseModel):
+    image_base64: str | None = None
+    file_base64: str | None = None
+    mime_type: str = "image/jpeg"
+    filename: str | None = None
 
 class BodyScanRequest(BaseModel):
     image_base64: str
@@ -308,6 +361,13 @@ class ParseWorkoutsRequest(BaseModel):
     currentDate: str | None = None   # ISO date, defaults to today on server
     photo_base64: str | None = None  # Optional workout screenshot/photo for review-first import
     photo_mime_type: str | None = None
+    photo_base64_list: list[str] = []  # Optional multi-screenshot import batch
+    photo_mime_types: list[str] = []
+    file_base64: str | None = None   # Optional PDF/image file for template/session extraction
+    file_mime_type: str | None = None
+    filename: str | None = None
+    user_context: str | None = None  # User notes to help disambiguate the import
+    template_mode: bool = False      # True when building saved templates, not workout history
 
 
 class WorkoutSummaryRequest(BaseModel):
@@ -343,11 +403,12 @@ class ValidateFoodMacrosRequest(BaseModel):
 
 
 class PreSetRecommendRequest(BaseModel):
-    """Request body for `/ai/pre-set-recommendation`.
+    """Request body for deterministic `/recommendations/pre-set`.
 
     Sent when the user opens a set card BEFORE logging — no actual reps
     yet. We return a structured SetRecommendation so the UI can show the
     recommended weight/reps + the set's intent + a one-sentence rationale.
+    `/ai/pre-set-recommendation` remains a compatibility alias.
     """
     exerciseName: str
     exerciseSlug: str | None = None

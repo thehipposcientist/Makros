@@ -2,11 +2,13 @@
 
 ## Current State
 
-**Apple Health**: Implemented through the local `thallo-healthkit` module and `src/services/appleHealth.ts` / `healthDataSummary.ts`. Reads sleep, heart-rate signals, steps, workouts, active energy, weight, VO2, respiratory/O2/mindful/stand signals, and menstrual-flow samples when permissioned. Writes completed Thallo workouts. Detected Apple Health workouts can be imported into Thallo history and then feed progress/fatigue through the normal completion pipeline. Requires a development/native build; Expo Go cannot load this module.
+**Apple Health**: Implemented through the local `thallo-healthkit` module and `src/services/appleHealth.ts` / `healthDataSummary.ts`, with high-level callers moving through `src/services/platformHealth.ts`. Reads sleep, heart-rate signals, steps, workouts, active energy, weight, VO2, respiratory/O2/mindful/stand signals, menstrual-flow samples, and dietary calories/protein/carbs/fat when permissioned. Writes completed Thallo workouts, including outdoor-cardio route data when Thallo captured `routeCoords`. Detected Apple Health workouts can be imported into Thallo history and then feed progress/fatigue through the normal completion pipeline. Requires a development/native build; Expo Go cannot load this module.
 
 **WHOOP**: Not integrated. WHOOP exposes data through Apple Health on iOS — so Apple Health integration covers most WHOOP data automatically.
 
-**Garmin**: Not integrated. Requires Garmin Connect API (OAuth2, webhook-based).
+**Health Connect**: Not yet implemented natively. `platformHealth.ts` now gives Android a Health Connect slot, but the Kotlin module, manifest permissions, Play Console declarations, and readers/writers still need to be built before Android tracker data reaches readiness, sleep, import, or calorie-adjustment paths.
+
+**Garmin**: Direct API not integrated. Garmin Connect can share selected data to Apple Health on iOS, but direct Garmin Health API is still required for richer proprietary signals such as Body Battery, detailed stress, and training readiness.
 
 ---
 
@@ -20,6 +22,7 @@
 - `healthDataSummary.ts` pushes daily snapshots and sleep rows to the backend
 - `workoutAutoImport.ts` / `DetectedWorkoutsCard` import detected Health workouts
 - `saveWorkoutToHealth()` writes completed Thallo workouts back to Apple Health
+- Outdoor-cardio sessions can include route coordinates from phone/Watch GPS; `saveWorkout` writes those through HealthKit's route builder when present
 
 ### What's Missing
 1. **Background delivery** — get notified when new health data arrives without the user opening Thallo.
@@ -126,7 +129,7 @@ WHOOP doesn't have a public API for third-party apps. Instead, it syncs data TO 
 | Sleep stages | SleepAnalysis | Yes |
 | Strain (as workouts) | Workout | Yes (if auto-import wired) |
 | Calories burned | ActiveEnergyBurned | Yes |
-| HRV | HeartRateVariabilitySDNN | Not yet |
+| HRV | HeartRateVariabilitySDNN | Yes |
 | Recovery score | Not synced | No — WHOOP proprietary |
 
 ### What This Means
@@ -135,10 +138,11 @@ WHOOP doesn't have a public API for third-party apps. Instead, it syncs data TO 
 ### What You Can't Get
 - **WHOOP Recovery Score** — proprietary, not in Apple Health
 - **WHOOP Strain Score** — proprietary, not in Apple Health
-- **HRV** — available in Apple Health but Thallo doesn't read it yet
+- **WHOOP journal entries** — proprietary, not in Apple Health
 
-### To Add HRV Reading
-Add to `HEALTH_PERMISSIONS.read`:
+### HRV Reading
+
+HRV is already part of the current HealthKit read set and `healthDataSummary` shape. The historical sketch below is retained as implementation context only. The permission token is:
 ```typescript
 'HeartRateVariabilitySDNN',
 ```
@@ -173,15 +177,17 @@ HRV is a strong recovery signal — higher = more recovered. WHOOP users typical
 ## Garmin
 
 ### How Garmin Works
-Garmin uses a different approach — no Apple Health sync by default (Garmin Connect is a walled garden). Integration requires:
+Garmin Connect can share selected data to Apple Health when the user enables it. That covers useful basics like steps, sleep, heart rate, energy, weight, and workouts, but it does not make Garmin a full HealthKit peer: GPS routes are not written to Apple Health and timed-activity heart-rate detail may be reduced.
 
-1. **Garmin Connect API** — OAuth2 server-to-server integration
-2. **Garmin Health API** — requires a business partnership application
+Full Garmin integration requires:
 
-### Option A: Garmin → Apple Health Bridge (Easy)
-Users can install **"Health Sync"** (third-party app, ~$3) that syncs Garmin Connect data to Apple Health. Once that's running, Thallo reads it through Apple Health — no custom Garmin integration needed.
+1. **Garmin Health API** — partnership-gated OAuth flow
+2. **Garmin webhook ingestion** — Garmin pushes dailies, sleeps, activities, stress, HRV, and related summaries after approval
 
-**Recommendation:** Document this as a setup step for Garmin users rather than building a Garmin API integration.
+### Option A: Garmin → Apple Health Sharing (Easy)
+Users can enable Garmin Connect sharing to Apple Health. Once that is running, Thallo reads the supported Garmin data through Apple Health — no custom Garmin integration needed for baseline readiness/activity signals.
+
+**Recommendation:** Document this as the first setup step for Garmin users rather than building a Garmin API integration.
 
 ### Option B: Direct Garmin API (Complex)
 
@@ -229,10 +235,10 @@ def garmin_webhook(body):
 **Timeline:** 2-4 weeks for API approval + 1-2 weeks implementation.
 
 ### Testing Garmin (Option A — via Apple Health)
-1. User installs "Health Sync" app on iPhone
-2. Configure it to sync Garmin → Apple Health
-3. Thallo reads the synced data through Apple Health
-4. No additional code needed in Thallo
+1. User enables Garmin Connect sharing to Apple Health.
+2. User syncs their Garmin device in Garmin Connect.
+3. Thallo reads the supported synced data through Apple Health.
+4. Verify workout route/detailed activity-HR gaps separately; those are expected limitations.
 
 ### Testing Garmin (Option B — Direct API)
 1. Apply for Garmin Health API access
@@ -248,7 +254,7 @@ def garmin_webhook(body):
 |----------|------------|--------|--------|
 | 1 | Apple Health auto-import | 1-2 days | High — covers Apple Watch, WHOOP, and bridged Garmin users |
 | 2 | Write workouts to Apple Health | 2 hours | Medium — Thallo workouts appear in Health app |
-| 3 | HRV reading | 1 hour | Medium — better recovery signal for WHOOP/Watch users |
+| 3 | HRV trend surfacing | 1 day | Medium — the reader exists; the remaining work is clearer trend UI and coaching context |
 | 4 | Garmin via Apple Health bridge | 0 hours (docs only) | Medium — tell Garmin users to install Health Sync |
 | 5 | Direct Garmin API | 2-4 weeks | Low — only needed if you want Garmin users without iOS |
 
@@ -271,7 +277,7 @@ Build Apple Health well and you cover 90% of wearable users without any device-s
 - [ ] Create EAS development build (`eas build --platform ios --profile development`)
 - [ ] Install on physical iPhone
 - [ ] Grant HealthKit permissions during onboarding
-- [ ] Verify resting HR, steps, sleep, HRV, active energy, workout minutes, weight, and cycle-aware signals populate where permissioned
+- [ ] Verify resting HR, steps, sleep, HRV, active energy, workout minutes, weight, nutrition summaries, and cycle-aware signals populate where permissioned
 - [ ] Complete a workout in Thallo → verify it appears in Apple Health
 - [ ] Complete a workout in Apple Health / Watch / another app → verify Thallo detects and can import it
 - [ ] If WHOOP user: verify WHOOP data flows through Apple Health to Thallo

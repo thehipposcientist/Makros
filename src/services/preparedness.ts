@@ -140,22 +140,22 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   } else {
     present.nutrition = true;
     let pts = 0;
-    // Protein (8 pts): hit at least 85% of target.
+    // Protein (8 pts): target is 95%+; 90-95% is close.
     if (hasProtein) {
       const pRatio = input.proteinGrams! / input.proteinTargetGrams!;
       if (pRatio >= 0.95) pts += 8;
-      else if (pRatio >= 0.85) pts += 6;
+      else if (pRatio >= 0.90) pts += 5;
       else if (pRatio >= 0.70) pts += 3;
       else { pts += 1; insights.push('Protein well below target'); }
     } else {
       pts += 5; // neutral partial
     }
-    // Calories (7 pts): stay within ±15% of target.
+    // Calories (7 pts): on target within +/-5%; close within +/-10%.
     if (hasCalories) {
       const cRatio = input.calorieIntake! / input.calorieTarget!;
       const dev = Math.abs(cRatio - 1);
-      if (dev <= 0.10) pts += 7;
-      else if (dev <= 0.20) pts += 5;
+      if (dev <= 0.05) pts += 7;
+      else if (dev <= 0.10) pts += 5;
       else if (dev <= 0.30) pts += 3;
       else { pts += 1; insights.push('Calories far from target'); }
     } else {
@@ -229,9 +229,19 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
   // and replace with a "Connect Apple Health to see readiness" empty
   // state. 5/100 (just strain credit) would be misleading otherwise.
   const signalsPresent = Object.values(present).filter(Boolean).length;
-  const total = signalsPresent === 0
+  let total = signalsPresent === 0
     ? 0
     : clamp((raw / maxPossible) * 100, 0, 100);
+  if (present.sleep && present.hrv && (sleep / 30) * 100 < 55 && (hrv / 20) * 100 < 50) {
+    total = Math.min(total, 55);
+    insights.push('Sleep and HRV are both suppressed today');
+  } else if (present.sleep && (sleep / 30) * 100 < 45) {
+    total = Math.min(total, 60);
+    insights.push('Sleep is capping readiness today');
+  } else if (present.hrv && present.restingHr && (hrv / 20) * 100 < 45 && (restingHr / 10) * 100 < 50) {
+    total = Math.min(total, 60);
+    insights.push('HRV and resting HR point to stress');
+  }
 
   const label: PreparednessResult['label'] =
     total >= 85 ? 'Primed' :

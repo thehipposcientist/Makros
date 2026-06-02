@@ -13,6 +13,8 @@ private struct ThalloComplicationPayload: Codable {
     let sleepLabel: String?
     let hydrationOunces: Double?
     let hydrationTargetOunces: Double?
+    let stepsToday: Int?
+    let stepGoal: Int?
     let dateISO: String
     let updatedAtMs: Double
 }
@@ -24,27 +26,56 @@ enum ThalloComplicationSync {
     static func update(
         workout: WatchWorkout?,
         hydration: WatchHydrationDay?,
+        activity: WatchActivityDay?,
         readiness: WatchReadinessSnapshot?,
         sleep: WatchSleepSnapshot?
     ) {
+        // Merge incoming values with whatever is already cached so a
+        // partial update (e.g. only hydration changed) doesn't blank
+        // the other complications. Without this, the next sleep-only
+        // sync would write nil hydration on top of the good cached
+        // value, causing the Hydration complication to flash to "--".
+        let cached = loadCachedPayload()
+        // Workout-derived fields collapse to nil when no workout was
+        // pushed in this update; we then fall back to the cached value
+        // so sleep/hydration-only updates don't blank the workout tile.
+        let workoutFocusOrCached: String = {
+            if let w = workout { return displayFocus(w) }
+            return cached?.focus ?? "Open Thallo"
+        }()
+        let stepsTodayOrCached = activity != nil ? activity?.stepsToday : cached?.stepsToday
+        let stepGoalOrCached = activity != nil ? activity?.stepGoal : cached?.stepGoal
         let payload = ThalloComplicationPayload(
-            focus: displayFocus(workout),
-            workoutStatus: workout?.status.rawValue,
-            durationMinutes: workout?.durationMinutes,
-            exerciseCount: workout?.exercises.count,
-            readiness: nil,
-            readinessLabel: nil,
-            sleepScore: nil,
-            sleepHours: nil,
-            sleepLabel: nil,
-            hydrationOunces: nil,
-            hydrationTargetOunces: nil,
-            dateISO: workout?.dateISO ?? hydration?.dateISO ?? localDateISO(),
+            focus: workoutFocusOrCached,
+            workoutStatus: workout?.status.rawValue ?? cached?.workoutStatus,
+            durationMinutes: workout?.durationMinutes ?? cached?.durationMinutes,
+            exerciseCount: workout?.exercises.count ?? cached?.exerciseCount,
+            readiness: readiness?.score ?? cached?.readiness,
+            readinessLabel: readiness?.label ?? cached?.readinessLabel,
+            sleepScore: sleep?.score ?? cached?.sleepScore,
+            sleepHours: sleep?.hoursLastNight ?? cached?.sleepHours,
+            sleepLabel: sleep?.label ?? cached?.sleepLabel,
+            hydrationOunces: hydration?.ounces ?? cached?.hydrationOunces,
+            hydrationTargetOunces: hydration?.targetOunces ?? cached?.hydrationTargetOunces,
+            stepsToday: stepsTodayOrCached,
+            stepGoal: stepGoalOrCached,
+            dateISO: workout?.dateISO
+                ?? hydration?.dateISO
+                ?? activity?.dateISO
+                ?? cached?.dateISO
+                ?? localDateISO(),
             updatedAtMs: Date().timeIntervalSince1970 * 1000
         )
         guard let data = try? JSONEncoder().encode(payload) else { return }
         sharedDefaults().set(data, forKey: payloadKey)
         WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    /// Read the last-written payload back so partial updates can merge
+    /// rather than overwrite. Returns nil on first launch / after clear.
+    private static func loadCachedPayload() -> ThalloComplicationPayload? {
+        guard let data = sharedDefaults().data(forKey: payloadKey) else { return nil }
+        return try? JSONDecoder().decode(ThalloComplicationPayload.self, from: data)
     }
 
     static func clear() {

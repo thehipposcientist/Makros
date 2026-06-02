@@ -22,6 +22,8 @@ from app.services.nutrition.meal_assembler import (
     _solver_accepts,
     assemble_meal,
     assemble_template,
+    build_food_lookup,
+    build_food_quality_scores,
     _get_macros,
     solve_portions,
 )
@@ -197,6 +199,67 @@ def test_added_sugar_flows_into_meal_micronutrients() -> None:
     _ok("added_sugar_g present on item + day-summed meal micros")
 
 
+def test_quality_metadata_flows_into_assembled_items() -> None:
+    print("\n[test] quality metadata flows into assembled meal items")
+    food_lookup = build_food_lookup({
+        "foods": [{
+            "name": "Salmon",
+            "serving": "6 oz",
+            "calories": 280,
+            "protein": 35,
+            "carbs": 0,
+            "fat": 15,
+            "omega_3": 1.5,
+            "processing_bucket": "minimally_processed",
+            "omega3_flag": True,
+            "seafood_flag": True,
+        }],
+    })
+    skeleton = MealSkeleton(
+        name="Salmon plate",
+        index=0,
+        food_refs=["Salmon"],
+        target_fraction=1.0,
+    )
+    meal = assemble_meal(skeleton, food_lookup, 280, 35, 0, 15)
+    item = meal["items"][0]
+    assert item["processing_bucket"] == "minimally_processed", item
+    assert item["omega3_flag"] is True, item
+    assert item["seafood_flag"] is True, item
+    _ok("plan items carry processing + omega-3 + seafood flags for /meals/score")
+
+
+def test_food_quality_scores_penalize_added_sugar() -> None:
+    print("\n[test] food quality ranking penalizes added sugar")
+    scores = build_food_quality_scores({
+        "foods": [
+            {
+                "name": "Plain oats",
+                "calories": 300,
+                "protein": 10,
+                "carbs": 54,
+                "fat": 5,
+                "fiber": 8,
+                "added_sugar_g": 0,
+                "processing_bucket": "minimally_processed",
+                "plant_count": 1,
+            },
+            {
+                "name": "Candy cereal",
+                "calories": 300,
+                "protein": 4,
+                "carbs": 58,
+                "fat": 4,
+                "fiber": 1,
+                "added_sugar_g": 24,
+                "processing_bucket": "ultra_processed",
+            },
+        ],
+    })
+    assert scores["plain oats"] > scores["candy cereal"], scores
+    _ok(f"plain oats {scores['plain oats']} > candy cereal {scores['candy cereal']}")
+
+
 # ─── 5. Solver residual accept/reject ────────────────────────────────────────
 
 def test_solver_accept_tight_residual() -> None:
@@ -278,6 +341,8 @@ if __name__ == "__main__":
         test_validate_cleans_out_of_list_foods,
         test_stub_food_marked_low_confidence,
         test_added_sugar_flows_into_meal_micronutrients,
+        test_quality_metadata_flows_into_assembled_items,
+        test_food_quality_scores_penalize_added_sugar,
         test_solver_accept_tight_residual,
         test_solver_rejects_infeasible_target,
         test_assemble_template_response_shape,

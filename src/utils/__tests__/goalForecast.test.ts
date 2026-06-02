@@ -1,4 +1,10 @@
-import { buildGoalForecast } from '../goalForecast.ts';
+import {
+  buildGoalForecast,
+  computeExecutionScore,
+  computeNutritionExecution,
+  computeRecoveryExecution,
+  computeTrainingExecution,
+} from '../goalForecast.ts';
 
 const today = new Date('2026-05-05T12:00:00');
 
@@ -131,5 +137,96 @@ describe('goalForecast', () => {
     expect(result.headline).toContain('5 weeks');
     expect(result.metricLabel).toBe('VO2 estimate');
     expect(result.metricDetail).toContain('42.4');
+  });
+
+  it('keeps displayed execution below 35 when adherence is genuinely low', () => {
+    const result = buildGoalForecast({
+      today,
+      profile: {
+        goal: 'build_strength',
+        goalSelection: { category: 'strength' },
+        physicalStats: { weightLbs: 185 },
+        daysPerWeek: 3,
+      },
+      avgSleepHours: 5.0,
+    });
+
+    expect(result.executionPct < 35).toBe(true);
+    expect(Math.round(result.forecastMultiplier * 100)).toBe(35);
+    expect(result.executionPct === Math.round(result.forecastMultiplier * 100)).toBe(false);
+  });
+
+  it('allows over-execution up to the 108% display cap', () => {
+    const result = computeExecutionScore({
+      bucket: 'strength',
+      trainingExecution: 2,
+      nutritionExecution: 2,
+      recoveryExecution: 2,
+    });
+
+    expect(result.executionPct).toBe(108);
+    expect(Math.round(result.forecastMultiplier * 100)).toBe(108);
+  });
+
+  it('does not add a free execution baseline before scoring', () => {
+    const result = computeExecutionScore({
+      bucket: 'body_recomp',
+      trainingExecution: 0,
+      nutritionExecution: 0,
+      recoveryExecution: 0,
+    });
+
+    expect(result.executionPct).toBe(0);
+    expect(Math.round(result.rawExecution * 100)).toBe(0);
+    expect(Math.round(result.forecastMultiplier * 100)).toBe(35);
+  });
+
+  it('does not let nutrition tracking alone become near-perfect execution', () => {
+    const result = computeNutritionExecution({
+      meals: { days: 7, windowDays: 7, trackingPct: 100 },
+      mealAverages: null,
+      nutritionScoreWeekly: null,
+      currentWeightLbs: null,
+    });
+
+    expect(Math.round(result.score * 100)).toBe(70);
+  });
+
+  it('lets lifting attendance stand alone without cardio volume', () => {
+    const result = computeTrainingExecution({
+      workoutDays: 4,
+      plannedDays: 4,
+      totalTrainingMinutes: 0,
+    });
+
+    expect(Math.round(result.score * 100)).toBe(100);
+  });
+
+  it('lets extra activity lift training execution without exceeding caps', () => {
+    const base = computeTrainingExecution({
+      workoutDays: 2,
+      plannedDays: 4,
+      totalTrainingMinutes: 0,
+    });
+    const lifted = computeTrainingExecution({
+      workoutDays: 2,
+      plannedDays: 4,
+      totalTrainingMinutes: 180,
+    });
+    const capped = computeTrainingExecution({
+      workoutDays: 10,
+      plannedDays: 4,
+      totalTrainingMinutes: 1000,
+    });
+
+    expect(lifted.score > base.score).toBe(true);
+    expect(capped.score <= 1.08).toBe(true);
+  });
+
+  it('assumes recovery is neutral when sleep data is missing', () => {
+    const result = computeRecoveryExecution(null);
+
+    expect(result.score).toBe(1);
+    expect(result.assumedNeutral).toBe(true);
   });
 });

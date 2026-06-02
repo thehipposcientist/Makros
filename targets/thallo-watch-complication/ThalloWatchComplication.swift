@@ -6,8 +6,8 @@
 //
 // Data source: SharedDefaults — the main watch app writes a JSON blob
 // into UserDefaults on every WCSession update. The payload intentionally
-// omits health-adjacent sleep, readiness, and hydration values so the
-// complication extension only persists workout-facing display state.
+// includes only compact, display-safe daily values so the complication
+// extension does not need its own WCSession.
 // The complication timeline can read it without its own WCSession (extensions can't
 // reliably keep WCSession alive). Provider refreshes on a 30-min
 // timeline + on every workout / meal push from the phone (the
@@ -31,6 +31,8 @@ private struct ComplicationPayload: Codable {
     let sleepLabel: String?
     let hydrationOunces: Double?
     let hydrationTargetOunces: Double?
+    let stepsToday: Int?
+    let stepGoal: Int?
     let dateISO: String?
     let updatedAtMs: Double
 }
@@ -40,6 +42,21 @@ private let kPayloadKey = "thallo.complication.payload"
 private let kOpenURL = URL(string: "thallowatch://open")!
 private let kStartWorkoutURL = URL(string: "thallowatch://start-workout")!
 private let kHydrationURL = URL(string: "thallowatch://hydration")!
+private let kSleepURL = URL(string: "thallowatch://sleep")!
+private let kReadinessURL = URL(string: "thallowatch://readiness")!
+
+/// Per-mode deep-link target — tapping the complication opens the
+/// matching tab on the watch instead of dropping the user on Today.
+/// Drives `widgetURL` below; routed by ContentView.handleWidgetURL.
+private func deepLinkURL(for mode: ComplicationMode) -> URL {
+    switch mode {
+    case .hydration: return kHydrationURL
+    case .sleep:     return kSleepURL
+    case .readiness: return kReadinessURL
+    case .workout:   return kStartWorkoutURL
+    case .daily:     return kOpenURL
+    }
+}
 
 private func loadPayload() -> ComplicationPayload {
     let defaults = UserDefaults(suiteName: kSuiteName) ?? .standard
@@ -62,6 +79,8 @@ private func loadPayload() -> ComplicationPayload {
         sleepLabel: nil,
         hydrationOunces: nil,
         hydrationTargetOunces: nil,
+        stepsToday: nil,
+        stepGoal: nil,
         dateISO: nil,
         updatedAtMs: 0,
     )
@@ -196,6 +215,9 @@ private struct DailyRectangularView: View {
             HStack(spacing: 6) {
                 actionLink(title: startTitle(p), systemImage: "figure.strengthtraining.traditional", url: kStartWorkoutURL)
                 actionLink(title: "Water", systemImage: "drop.fill", url: kHydrationURL)
+                if let steps = p.stepsToday {
+                    stepPill(steps: steps)
+                }
             }
             .padding(.top, 1)
         }
@@ -228,6 +250,19 @@ private struct DailyRectangularView: View {
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
         }
+    }
+
+    private func stepPill(steps: Int) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: "figure.walk")
+                .font(.system(size: 8, weight: .heavy))
+            Text(compactSteps(steps))
+                .font(.system(size: 9, weight: .heavy))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(.quaternary, in: Capsule())
     }
 }
 
@@ -402,6 +437,17 @@ private func percentText(_ value: Int?) -> String? {
     return "\(value)%"
 }
 
+private func compactSteps(_ value: Int) -> String {
+    let steps = max(0, value)
+    if steps >= 10_000 {
+        return "\(Int((Double(steps) / 1000).rounded()))K"
+    }
+    if steps >= 1_000 {
+        return String(format: "%.1fK", Double(steps) / 1000)
+    }
+    return "\(steps)"
+}
+
 private func sleepHoursText(_ p: ComplicationPayload) -> String? {
     guard let hours = p.sleepHours else { return nil }
     return String(format: "%.1fh", hours)
@@ -443,7 +489,7 @@ private struct ThalloComplicationView: View {
             default: InlineView(p: entry.payload, mode: mode)
             }
         }
-        .widgetURL(kOpenURL)
+        .widgetURL(deepLinkURL(for: mode))
     }
 }
 

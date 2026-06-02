@@ -191,6 +191,9 @@ export async function cancelMealReminder(): Promise<void> {
  */
 export async function maybeCancelTodayReminder(allTodayChecked: boolean): Promise<void> {
   if (!allTodayChecked) return;
+  import('./coachingNotifications')
+    .then(({ cancelPostWorkoutMealReminder }) => cancelPostWorkoutMealReminder())
+    .catch(() => undefined);
   const settings = await loadMealReminderSettings();
   if (!settings.enabled) return;
   if (settings.skipIfAllLogged === false) return;  // user opted out of auto-skip

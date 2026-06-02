@@ -1,8 +1,6 @@
-// Hydration target formula. Mirrored on the backend in
-// `_compute_hydration_target_oz` (backend/app/routers/meals.py) — keep both
-// in sync. The backend value is what the UI actually renders via
-// `/meals/hydration`; this client copy exists so client-only previews
-// (onboarding, settings) compute the same number.
+// Hydration target helpers. The backend value from `/meals/hydration` is
+// authoritative; this client copy keeps local-only previews and reminders
+// close to the same shape when the API is unavailable.
 
 export type GenderInput = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say' | string | null | undefined;
 
@@ -22,9 +20,97 @@ export interface HydrationInputs {
 }
 
 export const HYDRATION_QUICK_ADD_OUNCES = [8, 16, 24, 32, 40] as const;
+// Reminder cadences in hours. 0.5 = every 30 minutes — the slot builder
+// works in minutes so sub-hour intervals are first-class.
+export const HYDRATION_REMINDER_INTERVAL_HOURS = [0.5, 1, 2, 3, 4] as const;
+
+export type HydrationReminderIntervalHours = typeof HYDRATION_REMINDER_INTERVAL_HOURS[number];
+
+export interface HydrationReminderWindowInput {
+  startHour: number;
+  endHour: number;
+  intervalHours?: number;
+}
 
 export function formatHydrationQuickAddLabel(ounces: number): string {
   return `+${Math.round(ounces)} oz`;
+}
+
+function finitePositiveNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function roundDownTo(value: number, step: number): number {
+  return Math.floor(value / step) * step;
+}
+
+function roundUpTo(value: number, step: number): number {
+  return Math.ceil(value / step) * step;
+}
+
+export function hydrationTargetRangeOz(targetOz: number | null | undefined): { min: number; max: number } | null {
+  const target = finitePositiveNumber(targetOz);
+  if (target == null) return null;
+  const midpoint = Math.round(target);
+  return {
+    min: Math.max(1, Math.min(midpoint, roundDownTo(target * 0.9, 4))),
+    max: Math.max(midpoint, roundUpTo(target * 1.1, 4)),
+  };
+}
+
+export function formatHydrationTargetRange(targetOz: number | null | undefined): string {
+  const range = hydrationTargetRangeOz(targetOz);
+  if (!range) return '';
+  return `${range.min}-${range.max}`;
+}
+
+export function normalizeHydrationReminderHour(hour: number, fallback: number = 10): number {
+  if (!Number.isFinite(hour)) return fallback;
+  return Math.max(0, Math.min(23, Math.round(hour)));
+}
+
+export function normalizeHydrationReminderInterval(hours: number | undefined): HydrationReminderIntervalHours {
+  const n = Number(hours);
+  return (HYDRATION_REMINDER_INTERVAL_HOURS as readonly number[]).includes(n)
+    ? (n as HydrationReminderIntervalHours)
+    : 2;
+}
+
+/** Compact label for a hydration reminder interval — "30m" for the
+ *  sub-hour cadence, "2h" for whole hours. */
+export function formatHydrationReminderInterval(hours: number): string {
+  return hours < 1 ? `${Math.round(hours * 60)}m` : `${hours}h`;
+}
+
+export function isHourInHydrationReminderWindow(hour: number, startHour: number, endHour: number): boolean {
+  const h = normalizeHydrationReminderHour(hour, 0);
+  const start = normalizeHydrationReminderHour(startHour, 10);
+  const end = normalizeHydrationReminderHour(endHour, 20);
+  if (start === end) return h === start;
+  if (start < end) return h >= start && h <= end;
+  return h >= start || h <= end;
+}
+
+/** Reminder fire times as minutes-since-local-midnight (0–1439). The
+ *  daily window (start/end) is hour-granular, but the interval can be
+ *  sub-hourly — `intervalHours` 0.5 fires every 30 minutes. Handles a
+ *  window that wraps past midnight (start 22:00 → end 06:00). */
+export function buildHydrationReminderSlots(input: HydrationReminderWindowInput): number[] {
+  const startHour = normalizeHydrationReminderHour(input.startHour, 10);
+  const endHour = normalizeHydrationReminderHour(input.endHour, 20);
+  const interval = normalizeHydrationReminderInterval(input.intervalHours);
+  const stepMin = Math.max(1, Math.round(interval * 60));
+  const startMin = startHour * 60;
+  const endMin = endHour * 60;
+  // Window length in minutes — when start > end the window spans midnight.
+  const spanMin = startMin <= endMin ? endMin - startMin : (24 * 60 - startMin) + endMin;
+  const slots: number[] = [];
+  for (let offset = 0; offset <= spanMin; offset += stepMin) {
+    const minute = (startMin + offset) % (24 * 60);
+    if (!slots.includes(minute)) slots.push(minute);
+  }
+  return slots;
 }
 
 export function dailyWaterOz(input: HydrationInputs | number, legacyWorkoutMinutes?: number, legacyHot?: boolean, legacyGender?: GenderInput): number {

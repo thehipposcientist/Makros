@@ -13,10 +13,15 @@
 
 import {
   HYDRATION_QUICK_ADD_OUNCES,
+  buildHydrationReminderSlots,
   dailyWaterOz,
   dailyWaterLiters,
   formatHydrationQuickAddLabel,
+  formatHydrationTargetRange,
   formatWaterTarget,
+  hydrationTargetRangeOz,
+  isHourInHydrationReminderWindow,
+  normalizeHydrationReminderInterval,
 } from '../hydration.ts';
 
 describe('hydration target', () => {
@@ -90,6 +95,13 @@ describe('hydration target', () => {
     });
   });
 
+  describe('hydrationTargetRangeOz', () => {
+    it('wraps the adapted water target in a daily range', () => {
+      expect(hydrationTargetRangeOz(90)).toEqual({ min: 80, max: 100 });
+      expect(formatHydrationTargetRange(106)).toBe('92-120');
+    });
+  });
+
   describe('hydration quick-add display', () => {
     it('keeps quick-add amounts in fluid ounces', () => {
       expect([...HYDRATION_QUICK_ADD_OUNCES]).toEqual([8, 16, 24, 32, 40]);
@@ -100,6 +112,48 @@ describe('hydration target', () => {
         '+32 oz',
         '+40 oz',
       ]);
+    });
+  });
+
+  describe('hydration reminder slots', () => {
+    // Slots are minutes-since-midnight: 10:00 → 600, 12:00 → 720, etc.
+    it('builds daytime reminders using the configured interval', () => {
+      expect(buildHydrationReminderSlots({ startHour: 10, endHour: 20, intervalHours: 2 })).toEqual([
+        600,  // 10:00
+        720,  // 12:00
+        840,  // 14:00
+        960,  // 16:00
+        1080, // 18:00
+        1200, // 20:00
+      ]);
+    });
+
+    it('supports a sub-hour (30-minute) interval', () => {
+      expect(buildHydrationReminderSlots({ startHour: 10, endHour: 12, intervalHours: 0.5 })).toEqual([
+        600, // 10:00
+        630, // 10:30
+        660, // 11:00
+        690, // 11:30
+        720, // 12:00
+      ]);
+    });
+
+    it('supports overnight windows without looping forever', () => {
+      expect(buildHydrationReminderSlots({ startHour: 22, endHour: 6, intervalHours: 2 })).toEqual([
+        1320, // 22:00
+        0,    // 00:00
+        120,  // 02:00
+        240,  // 04:00
+        360,  // 06:00
+      ]);
+      expect(isHourInHydrationReminderWindow(1, 22, 6)).toBe(true);
+      expect(isHourInHydrationReminderWindow(12, 22, 6)).toBe(false);
+    });
+
+    it('normalizes unsupported intervals to the default cadence', () => {
+      expect(normalizeHydrationReminderInterval(7)).toBe(2);
+      expect(normalizeHydrationReminderInterval(3)).toBe(3);
+      expect(normalizeHydrationReminderInterval(0.5)).toBe(0.5);
     });
   });
 });

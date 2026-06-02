@@ -24,7 +24,7 @@ import {
   StyleSheet, ActivityIndicator, Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getTheme, getContrastingTextColor, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanEquipmentPhoto } from '../services/api';
 
@@ -45,6 +45,9 @@ interface Props {
 
 export default function EquipmentScanModal({ visible, authToken, themeName, alreadySelected, onClose, onAdd }: Props) {
   const tc = getTheme(themeName).colors;
+  // Text/icon color that stays readable on the primary CTA — primary is white
+  // on the monochrome (onyx) theme, so a hardcoded white would be invisible.
+  const onPrimary = getContrastingTextColor(tc.primary);
   const [photos, setPhotos] = useState<string[]>([]); // data URIs for preview
   const [scanning, setScanning] = useState(false);
   const [results, setResults] = useState<{ name: string; selected: boolean; alreadyIn: boolean }[]>([]);
@@ -195,10 +198,10 @@ export default function EquipmentScanModal({ visible, authToken, themeName, alre
                   style={[s.primaryBtn, { backgroundColor: tc.primary }]}
                   activeOpacity={0.85}>
                   {scanning
-                    ? <ActivityIndicator size="small" color="#fff" />
+                    ? <ActivityIndicator size="small" color={onPrimary} />
                     : <>
-                        <Ionicons name="sparkles-outline" size={16} color="#fff" />
-                        <Text style={{ fontSize: 14, fontWeight: '800', color: '#fff' }}>
+                        <Ionicons name="sparkles-outline" size={16} color={onPrimary} />
+                        <Text style={{ fontSize: 14, fontWeight: '800', color: onPrimary }}>
                           Identify equipment ({photos.length} photo{photos.length === 1 ? '' : 's'})
                         </Text>
                       </>}
@@ -238,7 +241,7 @@ export default function EquipmentScanModal({ visible, authToken, themeName, alre
                         backgroundColor: r.selected ? tc.primary : 'transparent',
                       },
                     ]}>
-                      {r.selected && <Ionicons name="checkmark" size={14} color="#fff" />}
+                      {r.selected && <Ionicons name="checkmark" size={14} color={onPrimary} />}
                     </View>
                     <Text style={[s.resultName, { color: tc.textPrimary, flex: 1 }]}>{r.name}</Text>
                     {r.alreadyIn && (

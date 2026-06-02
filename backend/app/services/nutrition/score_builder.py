@@ -24,13 +24,15 @@ from sqlmodel import select
 from app.models import (
     Meal, MealItem, FoodNutrition, DailyNutritionMetrics,
     UserProfile, UserGoal, UserDayState, PlanDay, PlanWeek,
+    DailyHealthSnapshot, WorkoutCompletion,
 )
 from app.services.nutrition.gut_health import compute_daily_metrics, compute_weekly_rollup
 from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 from app.services.nutrition.nutrition_score import (
-    NutritionIndicators, compute_nutrition_score,
+    NutritionIndicators, SCORE_VERSION, compute_nutrition_score,
 )
-from app.services.nutrition.targets import resolve_targets_for_user
+from app.services.nutrition.day_completeness import classify_nutrition_day
+from app.services.nutrition.targets import ResolvedNutritionTargets, resolve_targets_for_user
 
 
 def _get_profile_and_goal(db: Any, user_id: int) -> tuple[UserProfile | None, UserGoal | None]:
@@ -41,19 +43,85 @@ def _get_profile_and_goal(db: Any, user_id: int) -> tuple[UserProfile | None, Us
     return profile, goal
 
 
-def _compute_targets(db: Any, user_id: int, profile: UserProfile | None, goal: UserGoal | None) -> tuple[int, int, str, str | None]:
-    """Return (calorie_target, protein_target_g, goal_id, sex)."""
+def _compute_targets(
+    db: Any,
+    user_id: int,
+    profile: UserProfile | None,
+    goal: UserGoal | None,
+    target_date: date,
+) -> tuple[int, int, str, str | None, ResolvedNutritionTargets | None]:
+    """Return (calorie_target, protein_target_g, goal_id, sex, resolved)."""
     if not profile:
-        return 2000, 120, "body_recomp", None
+        return 2000, 120, "body_recomp", None, None
     goal_id = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else str(goal.goal_type) if goal else "body_recomp")
     sex = (profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender) if profile.gender else None)
     try:
-        targets = resolve_targets_for_user(db, user_id)
+        targets = resolve_targets_for_user(
+            db,
+            user_id,
+            as_of=target_date,
+            health_activity_as_of=target_date - timedelta(days=1),
+        )
         if not targets:
-            return 2000, 120, goal_id, sex
-        return targets.calories, targets.protein_g, goal_id, sex
+            return 2000, 120, goal_id, sex, None
+        return targets.calories, targets.protein_g, goal_id, sex, targets
     except Exception:
-        return 2000, 120, goal_id, sex
+        return 2000, 120, goal_id, sex, None
+
+
+def _activity_adjusted_calorie_target(
+    db: Any,
+    user_id: int,
+    target_date: date,
+    calorie_target: float,
+    *,
+    goal_id: str | None,
+    resolved: ResolvedNutritionTargets | None,
+) -> float:
+    if target_date > date.today():
+        return calorie_target
+    try:
+        rows = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == user_id)
+            .where(WorkoutCompletion.workout_date == target_date)
+        ).all()
+        snapshot = db.exec(
+            select(DailyHealthSnapshot)
+            .where(DailyHealthSnapshot.user_id == user_id)
+            .where(DailyHealthSnapshot.snapshot_date == target_date)
+        ).first()
+        same_day_active = (
+            float(snapshot.active_energy_kcal)
+            if snapshot and snapshot.active_energy_kcal is not None and float(snapshot.active_energy_kcal) > 0
+            else None
+        )
+        signal_expected = (
+            getattr(resolved.health_signal, "expected_active_energy_kcal", None)
+            if resolved is not None and getattr(resolved, "health_signal", None) is not None
+            else None
+        )
+        expected_active = (
+            float(signal_expected)
+            if same_day_active is not None and signal_expected is not None
+            else (
+                float(max(150, int(round(resolved.tdee - (resolved.bmr * 1.2)))))
+                if same_day_active is not None and resolved is not None
+                else None
+            )
+        )
+        if not rows and same_day_active is None:
+            return calorie_target
+        from app.services.nutrition.activity_adjustment import compute_activity_target_adjustment
+        adjustment = compute_activity_target_adjustment(
+            rows,
+            goal_bucket=(resolved.bucket_name if resolved else goal_id),
+            same_day_active_energy_kcal=same_day_active,
+            same_day_expected_active_energy_kcal=expected_active,
+        )
+        return float(calorie_target) + float(adjustment.adjustment_kcal)
+    except Exception:
+        return calorie_target
 
 
 _LEGACY_MEAL_KEYS = ("breakfast", "lunch", "dinner", "snack")
@@ -96,6 +164,12 @@ _MICRO_ALIASES: dict[str, str] = {
     "zinc_mg": "zinc_mg",
     "selenium": "selenium_mcg",
     "selenium_mcg": "selenium_mcg",
+    "copper": "copper_mg",
+    "copper_mg": "copper_mg",
+    "manganese": "manganese_mg",
+    "manganese_mg": "manganese_mg",
+    "boron": "boron_mg",
+    "boron_mg": "boron_mg",
     "folate": "folate_mcg",
     "folate_b9": "folate_mcg",
     "folate_mcg": "folate_mcg",
@@ -343,6 +417,8 @@ def _build_projected_indicators(
     *,
     calorie_target: int,
     protein_target: int,
+    goal_id: str | None,
+    resolved_targets: ResolvedNutritionTargets | None,
 ) -> NutritionIndicators | None:
     plan = _get_projected_plan(db, user_id, target_date)
     if not plan:
@@ -353,6 +429,14 @@ def _build_projected_indicators(
 
     targets = plan.get("targets") if isinstance(plan.get("targets"), dict) else {}
     plan_calorie_target = _num(targets.get("calories"), calorie_target) or calorie_target
+    plan_calorie_target = _activity_adjusted_calorie_target(
+        db,
+        user_id,
+        target_date,
+        plan_calorie_target,
+        goal_id=goal_id,
+        resolved=resolved_targets,
+    )
     plan_protein_target = (
         _num(targets.get("protein"), 0.0)
         or _num(targets.get("protein_g"), 0.0)
@@ -380,7 +464,7 @@ def _build_projected_indicators(
         omega3_servings=quality["omega3_servings"],
         seafood_servings_weekly=seafood_week,
         meals_logged=len(meals),
-        meals_expected=max(3, len(meals)),
+        meals_expected=len(meals),
         micronutrients=micros,
         food_count=food_count,
         foods_with_micros=foods_with_micros,
@@ -421,22 +505,62 @@ def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float],
         ("vitamin_a_mcg", ("vitamin_a_mcg", "vitamin_a")),
         ("zinc_mg", ("zinc_mg", "zinc")),
         ("selenium_mcg", ("selenium_mcg", "selenium")),
+        ("copper_mg", ("copper_mg", "copper")),
+        ("manganese_mg", ("manganese_mg", "manganese")),
+        ("boron_mg", ("boron_mg", "boron")),
         ("folate_mcg", ("folate_mcg", "folate_b9", "folate")),
+        ("omega_3_g", ("omega_3_g", "omega_3")),
+    )
+    snapshot_fields: tuple[tuple[str, str], ...] = (
+        ("fiber_g", "fiber_g"),
+        ("added_sugar_g", "added_sugar_g"),
+        ("sodium_mg", "sodium_mg"),
+        ("saturated_fat_g", "saturated_fat_g"),
+        ("cholesterol_mg", "cholesterol_mg"),
+        ("sugar_g", "sugar_g"),
+        ("caffeine_mg", "caffeine_mg"),
+        ("potassium_mg", "potassium_mg"),
+        ("calcium_mg", "calcium_mg"),
+        ("magnesium_mg", "magnesium_mg"),
+        ("iron_mg", "iron_mg"),
+        ("vitamin_d_mcg", "vitamin_d_mcg"),
+        ("vitamin_b12_mcg", "vitamin_b12_mcg"),
+        ("folate_mcg", "folate_mcg"),
+        ("zinc_mg", "zinc_mg"),
+        ("omega_3_g", "omega_3_g"),
     )
 
     micros: dict[str, float] = {}
     with_micros = 0
     for item in items:
+        snapshot_any = False
+        snapshot_keys: set[str] = set()
+        for attr, key in snapshot_fields:
+            try:
+                snapshot = getattr(item, attr, None)
+                if snapshot is None:
+                    continue
+                micros[key] = micros.get(key, 0) + float(snapshot)
+                snapshot_keys.add(key)
+                snapshot_any = True
+            except Exception:
+                continue
         nut = nut_by_food.get(item.food_id) if item.food_id else None
         if not nut:
+            if snapshot_any:
+                with_micros += 1
             continue
         grams_consumed = _grams_consumed(item, nut)
         if grams_consumed <= 0 or nut.reference_grams <= 0:
+            if snapshot_any:
+                with_micros += 1
             continue
         scale = grams_consumed / float(nut.reference_grams)
         extras = nut.extra_nutrients or {}
-        had_any = False
+        had_any = snapshot_any
         for store_key, aliases in micro_aliases:
+            if store_key in snapshot_keys:
+                continue
             for key in aliases:
                 if key not in extras:
                     continue
@@ -448,7 +572,7 @@ def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float],
                 had_any = True
                 break
         # fiber is a top-level column
-        if nut.fiber is not None:
+        if getattr(item, "fiber_g", None) is None and nut.fiber is not None:
             micros["fiber_g"] = micros.get("fiber_g", 0) + float(nut.fiber) * scale
             had_any = True
         if had_any:
@@ -464,7 +588,8 @@ def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float],
 # default_unit) to the RDA key's unit.
 #
 # e.g. vitamin_d3 is logged in IU, but the RDA key is vitamin_d_mcg —
-# 40 IU = 1 mcg for D3, so the converter divides by 40.
+# 40 IU = 1 mcg for D3, so the converter divides by 40. Omega-3 stack
+# rows are seeded/logged in mg, while the score vocabulary is grams.
 _SUPPLEMENT_MICRO_MAP: dict[str, tuple[str, float]] = {
     "vitamin_d3":      ("vitamin_d_mcg", 1.0 / 40.0),   # IU → mcg
     "vitamin_d":       ("vitamin_d_mcg", 1.0 / 40.0),   # alias
@@ -473,8 +598,8 @@ _SUPPLEMENT_MICRO_MAP: dict[str, tuple[str, float]] = {
     "magnesium_glycinate": ("magnesium_mg", 1.0),
     "magnesium_citrate": ("magnesium_mg", 1.0),
     "iron":            ("iron_mg", 1.0),
-    "omega_3":         ("omega_3_mg", 1.0),
-    "fish_oil":        ("omega_3_mg", 1.0),
+    "omega_3":         ("omega_3_g", 1.0 / 1000.0),     # mg → g
+    "fish_oil":        ("omega_3_g", 1.0 / 1000.0),     # mg → g
     "calcium":         ("calcium_mg", 1.0),
     "zinc":            ("zinc_mg", 1.0),
     "selenium":        ("selenium_mcg", 1.0),
@@ -485,11 +610,33 @@ _SUPPLEMENT_MICRO_MAP: dict[str, tuple[str, float]] = {
 }
 
 
+def _normalized_unit(value: Any) -> str:
+    return str(value or "").strip().lower().replace("µ", "u").replace("μ", "u")
+
+
+def _unit_adjusted_converter(slug: str, micro_key: str, unit: Any, fallback: float) -> float:
+    unit_normalized = _normalized_unit(unit)
+    if slug in ("vitamin_d3", "vitamin_d") and unit_normalized in ("mcg", "ug"):
+        return 1.0
+    if micro_key == "omega_3_g":
+        if unit_normalized in ("g", "gram", "grams"):
+            return 1.0
+        if unit_normalized in ("mg", "milligram", "milligrams"):
+            return 1.0 / 1000.0
+        if unit_normalized in ("mcg", "ug", "microgram", "micrograms"):
+            return 1.0 / 1_000_000.0
+    return fallback
+
+
 def _add_supplement_micros(db: Any, user_id: int, target_date: date, micros: dict) -> None:
     """Credit today's non-skipped supplement logs toward micronutrient
     coverage. Mutates `micros` in place. Doses are added on top of food
     micros — the RDA ratio used by the score already handles over-
     coverage correctly (capped at 100% per nutrient).
+
+    A stack row with a scanned `nutrient_content` panel credits every
+    nutrient on its label; rows without one fall back to the single-
+    ingredient `_SUPPLEMENT_MICRO_MAP`.
 
     Macros (protein from whey, for example) are NOT credited here —
     that would let the user "hit protein" without actually eating food,
@@ -529,21 +676,110 @@ def _add_supplement_micros(db: Any, user_id: int, target_date: date, micros: dic
     )
     ing_by_id = {i.id: i for i in ingredients}
 
+    from app.services.supplement_name_match import infer_slug_from_name
+    from app.services.nutrition.supplement_facts import credited_micros_from_content
+
     for log in logs:
         stack = stack_by_id.get(log.stack_item_id)
-        if not stack or not stack.supplement_ingredient_id:
+        if not stack:
             continue
-        ing = ing_by_id.get(stack.supplement_ingredient_id)
-        if not ing:
+
+        # Preferred path: a scanned Supplement Facts panel credits every
+        # nutrient on the label — multivitamins, ZMA, electrolyte blends —
+        # including trace minerals (boron, copper, manganese) the single-
+        # ingredient slug map can't express.
+        content = getattr(stack, "nutrient_content", None)
+        if content:
+            dose_amount = log.dose_amount if log.dose_amount is not None else stack.dose_amount
+            credited = credited_micros_from_content(
+                content, dose_amount, log.dose_unit or stack.dose_unit
+            )
+            if credited:
+                for micro_key, amount in credited.items():
+                    micros[micro_key] = micros.get(micro_key, 0.0) + amount
+                continue
+
+        # Fallback: single-ingredient supplements resolve to a catalog
+        # slug, then through the static micro map. If the stack row is
+        # linked to a seeded ingredient, use that. Otherwise fall back to
+        # stable stack metadata before the editable display name — covers
+        # brand-product entries like "Nutricost D3 5000 IU" without losing
+        # identity when the user later renames the row.
+        slug: str | None = None
+        if stack.supplement_ingredient_id:
+            ing = ing_by_id.get(stack.supplement_ingredient_id)
+            slug = ing.slug if ing else None
+        if not slug:
+            slug = _infer_supplement_slug_from_stack_metadata(stack)
+        if not slug:
+            slug = infer_slug_from_name(getattr(log, "name", None))
+        if not slug:
             continue
-        mapping = _SUPPLEMENT_MICRO_MAP.get(ing.slug)
+        mapping = _SUPPLEMENT_MICRO_MAP.get(slug)
         if not mapping:
             continue
         micro_key, converter = mapping
         dose = float(log.dose_amount if log.dose_amount is not None else stack.dose_amount or 0)
         if dose <= 0:
             continue
+        converter = _unit_adjusted_converter(slug, micro_key, log.dose_unit or stack.dose_unit, converter)
         micros[micro_key] = micros.get(micro_key, 0.0) + dose * converter
+
+
+_OMEGA3_SUPPLEMENT_SLUGS = {"omega_3", "fish_oil", "epa_dha", "algae_oil"}
+_SUPPLEMENT_SOURCE_TERM_SLUGS = {
+    "fish": "omega_3",
+    "sunlight": "vitamin_d3",
+    "citrus": "vitamin_c",
+    "banana": "potassium",
+}
+
+
+def _infer_supplement_slug_from_stack_metadata(stack: Any) -> str | None:
+    from app.services.supplement_name_match import infer_slug_from_name
+
+    for value in (
+        getattr(stack, "custom_name", None),
+        getattr(stack, "category", None),
+        getattr(stack, "description", None),
+    ):
+        slug = infer_slug_from_name(value)
+        if slug:
+            return slug
+
+    source_terms = getattr(stack, "source_terms", None)
+    if isinstance(source_terms, list):
+        for term in source_terms:
+            normalized = str(term or "").strip().lower().replace("_", " ")
+            slug = infer_slug_from_name(normalized)
+            if slug:
+                return slug
+            if normalized in _SUPPLEMENT_SOURCE_TERM_SLUGS:
+                return _SUPPLEMENT_SOURCE_TERM_SLUGS[normalized]
+
+    food_sources = getattr(stack, "food_sources", None)
+    if isinstance(food_sources, list):
+        for source in food_sources:
+            slug = infer_slug_from_name(source)
+            if slug:
+                return slug
+    return None
+
+
+def _supplement_slug_for_stack(stack: Any, ingredients_by_id: dict[int, Any]) -> str | None:
+    if getattr(stack, "supplement_ingredient_id", None):
+        ing = ingredients_by_id.get(stack.supplement_ingredient_id)
+        if ing is not None and getattr(ing, "slug", None):
+            return str(ing.slug)
+    return _infer_supplement_slug_from_stack_metadata(stack)
+
+
+def _supplement_slug_matches(requested: str, actual: str | None) -> bool:
+    if not actual:
+        return False
+    if requested == "omega_3":
+        return actual in _OMEGA3_SUPPLEMENT_SLUGS
+    return actual == requested
 
 
 def _count_supplement_logs(db: Any, user_id: int, target_date: date, ingredient_slug: str) -> float:
@@ -554,33 +790,49 @@ def _count_supplement_logs(db: Any, user_id: int, target_date: date, ingredient_
     from sqlmodel import select
     from app.models import SupplementLog, UserSupplementStack, SupplementIngredient
     try:
-        ing = db.exec(
-            select(SupplementIngredient).where(SupplementIngredient.slug == ingredient_slug)
-        ).first()
-        if not ing:
-            return 0.0
-        stack_ids = [
-            s.id for s in db.exec(
-                select(UserSupplementStack).where(
-                    UserSupplementStack.user_id == user_id,
-                    UserSupplementStack.supplement_ingredient_id == ing.id,
-                )
-            ).all()
-        ]
-        if not stack_ids:
-            return 0.0
         start = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
         end = datetime.combine(target_date, time.max, tzinfo=timezone.utc)
         logs = db.exec(
             select(SupplementLog).where(
                 SupplementLog.user_id == user_id,
-                SupplementLog.stack_item_id.in_(stack_ids),
                 SupplementLog.taken_at >= start,
                 SupplementLog.taken_at <= end,
                 SupplementLog.skipped == False,  # noqa: E712
             )
         ).all()
-        return float(len(logs))
+        if not logs:
+            return 0.0
+
+        stack_ids = list({log.stack_item_id for log in logs})
+        stacks = (
+            db.exec(
+                select(UserSupplementStack).where(
+                    UserSupplementStack.user_id == user_id,
+                    UserSupplementStack.id.in_(stack_ids),
+                )
+            ).all()
+            if stack_ids else []
+        )
+        stack_by_id = {s.id: s for s in stacks}
+        ingredient_ids = [s.supplement_ingredient_id for s in stacks if s.supplement_ingredient_id]
+        ingredients = (
+            db.exec(select(SupplementIngredient).where(SupplementIngredient.id.in_(ingredient_ids))).all()
+            if ingredient_ids else []
+        )
+        ing_by_id = {i.id: i for i in ingredients}
+
+        count = 0
+        from app.services.supplement_name_match import infer_slug_from_name
+        for log in logs:
+            stack = stack_by_id.get(log.stack_item_id)
+            if not stack:
+                continue
+            slug = _supplement_slug_for_stack(stack, ing_by_id)
+            if not slug:
+                slug = infer_slug_from_name(getattr(log, "name", None))
+            if _supplement_slug_matches(ingredient_slug, slug):
+                count += 1
+        return float(count)
     except Exception:
         return 0.0
 
@@ -590,17 +842,35 @@ def build_indicators(
 ) -> tuple[NutritionIndicators, str, str | None]:
     """Assemble today's NutritionIndicators. Returns (indicators, goal_id, sex)."""
     profile, goal = _get_profile_and_goal(db, user_id)
-    cal_target, pro_target, goal_id, sex = _compute_targets(db, user_id, profile, goal)
+    cal_target, pro_target, goal_id, sex, resolved_targets = _compute_targets(
+        db,
+        user_id,
+        profile,
+        goal,
+        target_date,
+    )
+    base_cal_target = cal_target
 
     projected = _build_projected_indicators(
         db,
         user_id,
         target_date,
-        calorie_target=cal_target,
+        calorie_target=base_cal_target,
         protein_target=pro_target,
+        goal_id=goal_id,
+        resolved_targets=resolved_targets,
     )
     if projected is not None:
         return projected, goal_id, sex
+
+    cal_target = int(round(_activity_adjusted_calorie_target(
+        db,
+        user_id,
+        target_date,
+        base_cal_target,
+        goal_id=goal_id,
+        resolved=resolved_targets,
+    )))
 
     # Ensure today's metrics row is fresh. Keep score reads deterministic:
     # collagen/probiotic facts come from rule-based metadata, not OpenAI.
@@ -687,7 +957,7 @@ def build_indicators(
         omega3_servings=omega3_servings_today,
         seafood_servings_weekly=seafood_week,
         meals_logged=len(meals),
-        meals_expected=max(3, len(meals)),
+        meals_expected=len(meals),
         micronutrients=micros,
         food_count=food_count,
         foods_with_micros=foods_with_micros,
@@ -702,6 +972,42 @@ def compute_today_score(db: Any, user_id: int, target_date: date | None = None) 
     if target_date is None:
         target_date = date.today()
     indicators, goal_id, sex = build_indicators(db, user_id, target_date)
+    completeness = classify_nutrition_day(
+        db,
+        user_id,
+        target_date,
+        calorie_target=indicators.calories_target,
+    )
+    if indicators.calories_logged <= 0 and indicators.meals_logged == 0:
+        return {
+            "date": str(target_date),
+            "score": 0,
+            "source": "empty",
+            "adherence": 0,
+            "quality": 0,
+            "micro": 0,
+            "confidence": "low",
+            "wins": [],
+            "improvements": ["Add meals to your day to calculate a nutrition score."],
+            "tags": [],
+            "likely_gaps": [],
+            "flags": {},
+            "indicators": {},
+            "completeness": completeness.to_dict(),
+            "adherence_breakdown": [],
+            "quality_breakdown": [],
+            "micro_breakdown": [],
+            "targets": {
+                "calories": indicators.calories_target,
+                "protein_g": indicators.protein_target,
+            },
+            "totals": {
+                "calories": 0,
+                "protein_g": 0,
+            },
+            "goal": goal_id,
+            "score_version": SCORE_VERSION,
+        }
     score = compute_nutrition_score(indicators, goal=goal_id, sex=sex)
 
     return {
@@ -718,6 +1024,7 @@ def compute_today_score(db: Any, user_id: int, target_date: date | None = None) 
         "likely_gaps": score.likely_gaps,
         "flags": score.flags,
         "indicators": score.indicators,
+        "completeness": completeness.to_dict(),
         "adherence_breakdown": score.adherence_breakdown,
         "quality_breakdown": score.quality_breakdown,
         "micro_breakdown": score.micro_breakdown,
@@ -749,8 +1056,19 @@ def compute_weekly_score(db: Any, user_id: int, end_date: date | None = None, da
     for offset in range(days - 1, -1, -1):
         d = end_date - timedelta(days=offset)
         indicators, goal_id, sex = build_indicators(db, user_id, d)
+        completeness = classify_nutrition_day(
+            db,
+            user_id,
+            d,
+            calorie_target=indicators.calories_target,
+        )
         if indicators.calories_logged <= 0 and indicators.meals_logged == 0:
-            daily.append({"date": str(d), "score": None, "logged": False})
+            daily.append({
+                "date": str(d),
+                "score": None,
+                "logged": False,
+                "completeness": completeness.to_dict(),
+            })
             continue
         score = compute_nutrition_score(indicators, goal=goal_id, sex=sex)
         days_with_data += 1
@@ -769,6 +1087,7 @@ def compute_weekly_score(db: Any, user_id: int, end_date: date | None = None, da
             "quality": score.quality_score,
             "micro": score.micro_score,
             "logged": True,
+            "completeness": completeness.to_dict(),
         })
 
     avg_score = round(sum(score_values) / len(score_values)) if score_values else 0

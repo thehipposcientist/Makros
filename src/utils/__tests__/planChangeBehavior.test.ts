@@ -8,8 +8,9 @@
 //      (sign-up cadence) — NOT a hard-coded Monday and NOT today.
 //   3. Goal/workout/mealplan changes detect "willRegen" only when
 //      meaningful fields have actually changed.
-//   4. Injury edits are the one workout-setting exception that may repair
-//      the current week immediately.
+//   4. Injury edits, removed equipment, and session-duration edits are the
+//      workout-setting exceptions that may update current-week workouts
+//      immediately. Adding equipment waits for the next generated week.
 //   5. The fallback when no PlanWeek exists is today + 7, not today +
 //      "days until Monday".
 //
@@ -34,12 +35,21 @@ function willRegen(
       || (before.goalDetails?.pace ?? null) !== (after.goalDetails?.pace ?? null);
   }
   if (mode === 'mealplan') {
-    return (before.mealsPerDay ?? null) !== (after.mealsPerDay ?? null)
-      || (before.mealVariety ?? null) !== (after.mealVariety ?? null)
+    return (before.mealVariety ?? null) !== (after.mealVariety ?? null)
       || JSON.stringify(before.allergies ?? []) !== JSON.stringify(after.allergies ?? []);
   }
-  // workout: any save in this mode counts as a regen-trigger
-  return true;
+  return JSON.stringify(planWorkoutSnapshot(before)) !== JSON.stringify(planWorkoutSnapshot(after));
+}
+
+function planWorkoutSnapshot(profile: any): Record<string, unknown> {
+  return {
+    daysPerWeek: profile?.daysPerWeek ?? null,
+    workoutDurationMinutes: profile?.workoutDurationMinutes ?? null,
+    preferredSplit: profile?.preferredSplit ?? null,
+    equipment: [...(profile?.equipment ?? [])].sort(),
+    equipmentSettings: profile?.equipmentSettings ?? null,
+    injuryEntries: profile?.injuryEntries ?? [],
+  };
 }
 
 function normalizedInjuryToken(value: unknown): string {
@@ -72,12 +82,55 @@ function activeInjuriesChanged(before: any, after: any): boolean {
   return activeInjurySignature(before) !== activeInjurySignature(after);
 }
 
+function normalizedEquipmentItems(profile: any): string[] {
+  return (profile?.equipment ?? [])
+    .map((item: unknown) => String(item ?? '').trim().toLowerCase())
+    .filter(Boolean)
+    .sort();
+}
+
+function equipmentWasRemoved(before: any, after: any): boolean {
+  const beforeItems = new Set(normalizedEquipmentItems(before));
+  const afterItems = new Set(normalizedEquipmentItems(after));
+  for (const item of beforeItems) {
+    if (!afterItems.has(item)) return true;
+  }
+  return false;
+}
+
+function equipmentWasAdded(before: any, after: any): boolean {
+  const beforeItems = new Set(normalizedEquipmentItems(before));
+  const afterItems = new Set(normalizedEquipmentItems(after));
+  for (const item of afterItems) {
+    if (!beforeItems.has(item)) return true;
+  }
+  return false;
+}
+
+function workoutDurationChanged(before: any, after: any): boolean {
+  const beforeMinutes = Number(before?.workoutDurationMinutes ?? 60);
+  const afterMinutes = Number(after?.workoutDurationMinutes ?? 60);
+  return Number.isFinite(beforeMinutes)
+    && Number.isFinite(afterMinutes)
+    && beforeMinutes !== afterMinutes;
+}
+
+function workoutSettingsUnchangedExcept(before: any, after: any, coveredKeys: string[]): boolean {
+  const beforeSnap = { ...planWorkoutSnapshot(before) } as Record<string, unknown>;
+  const afterSnap = { ...planWorkoutSnapshot(after) } as Record<string, unknown>;
+  for (const key of coveredKeys) {
+    delete beforeSnap[key];
+    delete afterSnap[key];
+  }
+  return JSON.stringify(beforeSnap) === JSON.stringify(afterSnap);
+}
+
 const baseProfile = {
   goal: 'muscle_gain',
   goalDetails: { pace: 'moderate' },
   daysPerWeek: 4,
   workoutDurationMinutes: 60,
-  mealsPerDay: 3,
+  equipment: ['Dumbbells', 'Barbell'],
   mealVariety: 5,
   allergies: [],
 };
@@ -114,10 +167,6 @@ describe('willRegen predicate', () => {
   });
 
   describe('mealplan mode', () => {
-    it('fires when mealsPerDay changes', () => {
-      expect(willRegen('mealplan', baseProfile, { ...baseProfile, mealsPerDay: 4 })).toBe(true);
-    });
-
     it('fires when mealVariety changes', () => {
       expect(willRegen('mealplan', baseProfile, { ...baseProfile, mealVariety: 7 })).toBe(true);
     });
@@ -132,8 +181,15 @@ describe('willRegen predicate', () => {
   });
 
   describe('workout mode', () => {
-    it('always fires (any workout-tab save is treated as a regen trigger)', () => {
-      expect(willRegen('workout', baseProfile, baseProfile)).toBe(true);
+    it('does NOT fire when workout fields are unchanged', () => {
+      expect(willRegen('workout', baseProfile, baseProfile)).toBe(false);
+    });
+
+    it('fires when equipment changes', () => {
+      expect(willRegen('workout', baseProfile, {
+        ...baseProfile,
+        equipment: ['Dumbbells'],
+      })).toBe(true);
     });
 
     it('detects active injury changes for immediate current-week repair', () => {
@@ -149,6 +205,67 @@ describe('willRegen predicate', () => {
       };
 
       expect(activeInjuriesChanged(baseProfile, after)).toBe(true);
+    });
+
+    it('detects removed equipment for immediate current-week repair', () => {
+      const after = {
+        ...baseProfile,
+        equipment: ['Dumbbells'],
+      };
+
+      expect(equipmentWasRemoved(baseProfile, after)).toBe(true);
+    });
+
+    it('does NOT treat added equipment as a current-week repair', () => {
+      const after = {
+        ...baseProfile,
+        equipment: ['Dumbbells', 'Barbell', 'Cable Machine'],
+      };
+
+      expect(equipmentWasRemoved(baseProfile, after)).toBe(false);
+      expect(equipmentWasAdded(baseProfile, after)).toBe(true);
+    });
+
+    it('detects session duration changes for immediate current-week update', () => {
+      const after = {
+        ...baseProfile,
+        workoutDurationMinutes: 75,
+      };
+
+      expect(workoutDurationChanged(baseProfile, after)).toBe(true);
+      expect(workoutSettingsUnchangedExcept(baseProfile, after, ['workoutDurationMinutes'])).toBe(true);
+    });
+
+    it('does not fold unrelated workout changes into a duration update', () => {
+      const after = {
+        ...baseProfile,
+        workoutDurationMinutes: 75,
+        preferredSplit: 'upper_lower',
+      };
+      const canUpdateDurationNow =
+        workoutDurationChanged(baseProfile, after)
+        && !equipmentWasAdded(baseProfile, after)
+        && workoutSettingsUnchangedExcept(baseProfile, after, ['workoutDurationMinutes']);
+
+      expect(canUpdateDurationNow).toBe(false);
+    });
+
+    it('allows duration update alongside active injury repair', () => {
+      const after = {
+        ...baseProfile,
+        workoutDurationMinutes: 75,
+        injuryEntries: [{
+          id: 'inj-3',
+          bodyPart: 'Elbow',
+          description: 'Elbow pain on curls',
+          status: 'active',
+          muscleGroups: ['biceps'],
+        }],
+      };
+      const coveredKeys = ['workoutDurationMinutes', 'injuries', 'injuryEntries'];
+
+      expect(activeInjuriesChanged(baseProfile, after)).toBe(true);
+      expect(workoutSettingsUnchangedExcept(baseProfile, after, coveredKeys)).toBe(true);
     });
 
     it('ignores resolved injuries when deciding current-week repair', () => {
@@ -216,15 +333,19 @@ describe('regen behavior contract', () => {
     // Hard-coded contract — the actual `_doSaveProfile` sets these to
     // false by default. Mealplan saves may opt into a nutrition-only
     // remaining-week refresh. Workout saves stay fixed until renewal unless
-    // the user opts into the injury-specific repair path.
+    // the user opts into injury, removed-equipment, or duration updates.
     const regenWorkout = false;
     const regenNutritionByDefault = false;
     const regenNutritionWhenUserOptsIn = true;
     const repairInjuryConflictsWhenUserOptsIn = true;
+    const repairEquipmentConflictsWhenUserOptsIn = true;
+    const updateSessionDurationWhenUserOptsIn = true;
     expect(regenWorkout).toBe(false);
     expect(regenNutritionByDefault).toBe(false);
     expect(regenNutritionWhenUserOptsIn).toBe(true);
     expect(repairInjuryConflictsWhenUserOptsIn).toBe(true);
+    expect(repairEquipmentConflictsWhenUserOptsIn).toBe(true);
+    expect(updateSessionDurationWhenUserOptsIn).toBe(true);
   });
 
   it('willRegen=true triggers the confirmation modal, not an immediate plan rebuild', () => {
@@ -240,6 +361,7 @@ describe('regen behavior contract', () => {
     // Confirmation flow does NOT regenerate the active week — it only
     // persists settings. The active PlanWeek keeps its current shape
     // until auto_renew_week fires at the natural week boundary, except
-    // for injury repair which only updates today/future unlocked workouts.
+    // for injury/equipment/duration current-week updates which only touch
+    // today/future unlocked workouts.
   });
 });

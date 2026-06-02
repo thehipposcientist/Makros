@@ -1,0 +1,351 @@
+      return true;
+    });
+  }, [prFocusFilter, prSearch, prs]);
+  const visiblePrsForTab = useMemo(
+    () => filteredPrsForTab.slice(0, visiblePrCount),
+    [filteredPrsForTab, visiblePrCount],
+  );
+
+  useEffect(() => {
+    setVisiblePrCount(40);
+  }, [prFocusFilter, prSearch]);
+
+  useEffect(() => {
+    if (!visibleProgressTabs.some(([key]) => key === tab)) {
+      selectProgressTab('today');
+    }
+  }, [selectProgressTab, tab, visibleProgressTabs]);
+
+  useEffect(() => {
+    if (!showWorkoutProgress || tab !== 'trends') return;
+    if (filteredChartExercises.length === 0) {
+      if (selectedExercise) setSelectedExercise(null);
+      return;
+    }
+    const stillVisible = selectedExercise
+      ? filteredChartExercises.some(option => option.name === selectedExercise)
+      : false;
+    if (!stillVisible) setSelectedExercise(filteredChartExercises[0].name);
+  }, [filteredChartExercises, selectedExercise, showWorkoutProgress, tab]);
+
+  useEffect(() => {
+    if (!showWorkoutProgress || tab !== 'trends') return;
+    if (paceExerciseGroups.length === 0) {
+      if (selectedCardioExercise) setSelectedCardioExercise(null);
+      return;
+    }
+    const stillVisible = selectedCardioExercise
+      ? paceExerciseGroups.some(group => group.key === selectedCardioExercise)
+      : false;
+    if (!stillVisible) setSelectedCardioExercise(paceExerciseGroups[0].key);
+  }, [paceExerciseGroups, selectedCardioExercise, showWorkoutProgress, tab]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    if (!showWorkoutProgress) return;
+    if (tab === 'trends' && authToken && !paceLoadedRef.current) {
+      paceLoadedRef.current = true;
+      getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
+    }
+  }, [tab, authToken, isActive, showWorkoutProgress]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      const localProgressPromise = Promise.allSettled([
+        loadWorkoutHistory(),
+        loadWorkoutSummaries(),
+        loadGoalHistory(),
+        loadPlanChanges(),
+      ]);
+      const serverProgressPromise = authToken
+        ? Promise.allSettled([
+            listWorkoutSessions(authToken, {
+              limit: PROGRESS_SERVER_SESSION_LIMIT,
+              skip: 0,
+              fresh: true,
+              timeoutMs: PROGRESS_SERVER_HYDRATE_TIMEOUT_MS,
+              noRetry: true,
+            }),
+            listWorkoutCompletions(authToken, {
+              limit: PROGRESS_SERVER_COMPLETION_LIMIT,
+              skip: 0,
+              fresh: true,
+              timeoutMs: PROGRESS_SERVER_HYDRATE_TIMEOUT_MS,
+              noRetry: true,
+            }),
+          ])
+        : null;
+      const [historyResult, summaryResult, goalResult, planChangeResult] = await localProgressPromise;
+      if (cancelled) return;
+
+      const localHistory = historyResult.status === 'fulfilled' ? historyResult.value : [];
+      const localSummaries = summaryResult.status === 'fulfilled' ? summaryResult.value : [];
+      const localGoals = goalResult.status === 'fulfilled' ? goalResult.value : [];
+      const localPlanChanges = planChangeResult.status === 'fulfilled' ? planChangeResult.value : [];
+
+      setGoalHistory(localGoals);
+      setPlanChanges(localPlanChanges);
+
+      if (!serverProgressPromise) {
+        setPrs(derivePersonalRecords(localHistory));
+        setHistory(localHistory);
+        setSummaries(localSummaries);
+        setLoading(false);
+        return;
+      }
+
+      const [serverSessionsResult, completionsResult] = await serverProgressPromise;
+      if (cancelled) return;
+      const serverSessions = serverSessionsResult.status === 'fulfilled' ? serverSessionsResult.value : null;
+      const completions = completionsResult.status === 'fulfilled' ? completionsResult.value : null;
+      if (!serverSessions && !completions) {
+        setPrs(derivePersonalRecords(localHistory));
+        setHistory(localHistory);
+        setSummaries(localSummaries);
+        setLoading(false);
+        return;
+      }
+
+      const historyWithServerSets = mergeWorkoutSessionSources(localHistory, serverSessions);
+      const scoped = reconcileWorkoutProgressData(historyWithServerSets, localSummaries, completions);
+      setPrs(derivePersonalRecords(scoped.history));
+      setHistory(scoped.history);
+      setSummaries(scoped.summaries);
+      setLoading(false);
+      if (completions) {
+        AsyncStorage.setItem('workoutHistory', JSON.stringify(scoped.history.slice(0, 100))).catch(() => {});
+        AsyncStorage.setItem('workoutSummaries', JSON.stringify(scoped.summaries.slice(0, 100))).catch(() => {});
+      }
+    })().catch(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authToken, isActive]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isActive || !authToken || !showMixedGoalProgress) {
+      setGoalScore(null);
+      return () => { cancelled = true; };
+    }
+    getGoalScores(authToken, { window: 'rolling_7d' })
+      .then(response => {
+        if (!cancelled) setGoalScore(response.scores?.[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setGoalScore(null);
+      });
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    isActive,
+    showMixedGoalProgress,
+    userProfile.goal,
+    nutritionLogRefreshKey,
+    history.length,
+    summaries.length,
+    bodyScanHistory.length,
+    healthSummary?.avgSleepHours7d,
+  ]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    let cancelled = false;
+    import('../utils/weightHistory').then(({ loadWeightHistory }) =>
+      loadWeightHistory()
+        .then((history) => {
+          if (cancelled) return;
+          setWeightEntries(history);
+        })
+        .catch(() => null)
+        .finally(() => {
+          if (!cancelled) setWeightEntriesLoaded(true);
+        })
+    );
+    return () => { cancelled = true; };
+  }, [authToken, isActive]);
+
+  useEffect(() => {
+    if (!isActive || !authToken) {
+      setInsights(null);
+      setGuardrails([]);
+      setCoachMemory([]);
+      return;
+    }
+    getInsights(authToken).then(setInsights).catch(() => null);
+    getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
+    if (isProTier) {
+      getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+    } else {
+      setCoachMemory([]);
+    }
+  }, [authToken, isActive, isProTier]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || !showWorkoutProgress || prs.length === 0 || tab !== 'trends') {
+      setProgressionHint('');
+      return;
+    }
+    getProgressionInsights(authToken, prs[0].exerciseName)
+      .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
+      .catch(() => null);
+  }, [authToken, isActive, isProTier, prs, showWorkoutProgress, tab]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || !showWorkoutProgress) {
+      setMuscleFatigue(null);
+      return;
+    }
+    import('../services/api').then(({ getFatigueScore }) => {
+      getFatigueScore(authToken).then(fs => setMuscleFatigue({
+        score: fs.muscle_recovery_score ?? fs.readiness_score,
+        label: fs.muscle_recovery_label ?? fs.readiness_label,
+        topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {},
+      })).catch(() => null);
+    });
+  }, [authToken, isActive, isProTier, showWorkoutProgress]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || !showWorkoutProgress) {
+      setOneRepMaxLifts([]);
+      setTopLiftHistory(null);
+      setPlateaus([]);
+      setPlateauDismissed(true);
+      setBulkE1RMMap({});
+      setMuscleBalance(null);
+      return;
+    }
+    if (tab !== 'trends' && tab !== 'insights') return;
+    import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
+      getOneRepMaxShowcase(authToken)
+        .then(async (lifts) => {
+          setOneRepMaxLifts(lifts);
+          // After the bar list resolves, fetch history for the top lift only.
+          const top = lifts.length > 0
+            ? lifts.reduce((best, lift) => (lift.oneRepMaxLbs > best.oneRepMaxLbs ? lift : best), lifts[0])
+            : null;
+          if (top && top.sessionCount >= 3) {
+            try {
+              const resp = await getE1RMHistory(authToken, top.name);
+              if (resp?.history && resp.history.length >= 3) {
+                setTopLiftHistory({ name: top.name, points: resp.history });
+              } else {
+                setTopLiftHistory(null);
+              }
+            } catch { setTopLiftHistory(null); }
+          } else {
+            setTopLiftHistory(null);
+          }
+        })
+        .catch(() => setOneRepMaxLifts([]))
+    );
+    import('../services/api').then(({ getAllE1RM }) =>
+      getAllE1RM(authToken)
+        .then(r => setBulkE1RMMap(r?.exercises ?? {}))
+        .catch(() => setBulkE1RMMap({}))
+    );
+    import('../services/api').then(({ getPlateaus }) =>
+      getPlateaus(authToken, 4)
+        .then(r => {
+          setPlateaus(r.plateaus || []);
+          AsyncStorage.getItem('plateauDismissedAt').then(raw => {
+            if (raw) {
+              const dismissed = Date.now() - parseInt(raw, 10) < 7 * 24 * 60 * 60 * 1000;
+              setPlateauDismissed(dismissed);
+            } else {
+              setPlateauDismissed(false);
+            }
+          }).catch(() => setPlateauDismissed(false));
+        })
+        .catch(() => setPlateaus([]))
+    );
+    import('../services/api').then(({ getMuscleBalance }) =>
+      getMuscleBalance(authToken, MUSCLE_DISTRIBUTION_WINDOW_DAYS).then(setMuscleBalance).catch(() => null)
+    );
+  }, [authToken, isActive, isProTier, showWorkoutProgress, tab]);
+
+  useEffect(() => {
+    const shouldLoadMealData =
+      isActive && !!authToken && showMealProgress && (tab === 'today' || tab === 'health' || tab === 'insights');
+    if (!shouldLoadMealData) {
+      if (!showMealProgress || !authToken) {
+        setMealAverages(null);
+        setMealHistory(null);
+        setNutritionScoreWeekly(null);
+        setGutHealthWindow(null);
+      }
+      return;
+    }
+    import('../services/api').then(({ getMealAverages }) =>
+      getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
+    );
+    // Pull the same meal history the meal tab uses; the Facts card's
+    // dailyRows will re-aggregate from this so both surfaces agree.
+    import('../services/api').then(({ getMealHistory }) =>
+      getMealHistory(authToken, 14)
+        .then(r => setMealHistory(r.meals ?? []))
+        .catch(() => setMealHistory(null))
+    );
+    if (isProTier) {
+      import('../services/api').then(({ getNutritionScore }) =>
+        getNutritionScore(authToken, 14)
+          .then(r => setNutritionScoreWeekly(r.weekly ?? null))
+          .catch(() => setNutritionScoreWeekly(null))
+      );
+      import('../services/api').then(({ getGutHealth }) =>
+        getGutHealth(authToken, 14).then(r => {
+          setGutHealthWindow(r.window);
+        }).catch(() => null)
+      );
+    } else {
+      setNutritionScoreWeekly(null);
+      setGutHealthWindow(null);
+    }
+  }, [authToken, isActive, isProTier, showMealProgress, tab]);
+
+  useEffect(() => {
+    if (isProTier) return;
+    setBodyScanHistory([]);
+    bodyScanHistoryLoadedRef.current = false;
+    healthLiveLoadedRef.current = false;
+    setHealthEnabled(false);
+    setHealthSummary(null);
+    setHealthScore(null);
+    setNutritionScoreWeekly(null);
+    setMuscleBalance(null);
+    setGutHealthWindow(null);
+  }, [isProTier]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'health' || !isProTier || !showMealProgress) {
+      setGutInsights(null);
+      return;
+    }
+    let cancelled = false;
+    // ── Gut / longevity insights — compute from existing meal data ──
+    (async () => {
+      try {
+        const today = new Date();
+        const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        const plansByDate: Record<string, import('../types').DailyNutritionPlan> = {};
+        const checksByDate: Record<string, Record<string, boolean>> = {};
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(today.getTime() - i * 86400000);
+          const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          const raw = await AsyncStorage.getItem(`mealPlan_${k}`);
+          if (raw) { try { plansByDate[k] = JSON.parse(raw); } catch {} }
+          checksByDate[k] = await getMealChecks(k).catch(() => ({}));
+        }
+        if (!plansByDate[todayKey] && nutritionPlan) plansByDate[todayKey] = nutritionPlan;
+
+        const diversity = computePlantDiversity(plansByDate, checksByDate, 7);
+        const fiberTarget = recommendedFiberTarget(
+          userProfile.physicalStats?.gender,
+          userProfile.physicalStats?.age,
+          userProfile.goal,
+        );
+        const fiber = computeFiberToday(plansByDate[todayKey] ?? null, checksByDate[todayKey] ?? null, fiberTarget);
+

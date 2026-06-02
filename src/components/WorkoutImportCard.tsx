@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName, HealthSummary } from '../types';
 import { detectUnloggedWorkouts, dismissHkImports, importCandidate, ImportCandidate } from '../utils/workoutAutoImport';
 
@@ -17,6 +17,7 @@ interface Props {
 export default function WorkoutImportCard({ healthSummary, themeName, onImported }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const onPrimary = getContrastingTextColor(tc.primary);
 
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [loading, setLoading] = useState(false);
@@ -126,7 +127,7 @@ export default function WorkoutImportCard({ healthSummary, themeName, onImported
               opacity: loading ? 0.6 : 1,
             }}
           >
-            <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Import</Text>
+            <Text style={{ fontSize: 12, fontWeight: '700', color: onPrimary }}>Import</Text>
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => {

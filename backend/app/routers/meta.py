@@ -66,6 +66,7 @@ def list_exercises(
                 "name": eq.name,
                 "category": eq.category,
                 "required": link.required,
+                "role": link.role,
             })
 
     seed_aliases_by_slug = {
@@ -137,7 +138,8 @@ def list_foods(category: str | None = None, db: Session = Depends(get_session)):
     Now joins `FoodServing` and returns the default serving's precomputed
     macros plus its human-readable label as `unit`.
     """
-    from app.models import FoodServing
+    from app.models import FoodMetadata, FoodNutrition, FoodServing
+    from app.services.nutrition.food_classifier import CLASSIFIER_VERSION, normalize_name
     query = select(Food).where(Food.source == FoodSource.SEED, Food.owner_user_id == None)  # noqa: E711
     if category:
         query = query.where(Food.category == category)
@@ -154,6 +156,64 @@ def list_foods(category: str | None = None, db: Session = Depends(get_session)):
     by_food: dict[int, list[FoodServing]] = {}
     for s in servings:
         by_food.setdefault(s.food_id, []).append(s)
+    nutrition_rows = db.exec(
+        select(FoodNutrition).where(FoodNutrition.food_id.in_(food_ids))
+    ).all()
+    nutrition_by_food = {n.food_id: n for n in nutrition_rows}
+    normalized_names = [normalize_name(f.name) for f in foods if f.name]
+    metadata_rows = db.exec(
+        select(FoodMetadata)
+        .where(FoodMetadata.classifier_version == CLASSIFIER_VERSION)
+        .where(FoodMetadata.normalized_name.in_(normalized_names))
+    ).all() if normalized_names else []
+    metadata_by_name = {m.normalized_name: m for m in metadata_rows}
+
+    def scaled_nutrients(food_id: int | None, grams: float | None) -> dict:
+        nutrition = nutrition_by_food.get(food_id or -1)
+        if nutrition is None:
+            return {}
+        ratio = (
+            float(grams) / float(nutrition.reference_grams)
+            if grams and nutrition.reference_grams and nutrition.reference_grams > 0
+            else 1.0
+        )
+        out = {
+            "fiber": round(float(nutrition.fiber or 0) * ratio, 2),
+            "sugar": round(float(nutrition.sugar or 0) * ratio, 2),
+            "added_sugar_g": round(float(getattr(nutrition, "added_sugar_g", 0) or 0) * ratio, 2),
+            "sodium": round(float(nutrition.sodium_mg or 0) * ratio, 2),
+            "sodium_mg": round(float(nutrition.sodium_mg or 0) * ratio, 2),
+        }
+        extras = nutrition.extra_nutrients or {}
+        if isinstance(extras, dict):
+            for key in (
+                "saturated_fat", "omega_3", "calcium", "iron", "potassium",
+                "magnesium", "vitamin_d", "vitamin_b12",
+            ):
+                try:
+                    out[key] = round(float(extras.get(key) or 0) * ratio, 2)
+                except (TypeError, ValueError):
+                    out[key] = 0
+        return out
+
+    def classification_fields(food: Food) -> dict:
+        meta = metadata_by_name.get(normalize_name(food.name))
+        if meta is None:
+            return {}
+        bucket = meta.processing_bucket
+        return {
+            "processing_bucket": bucket,
+            "food_quality": (
+                "whole" if bucket == "minimally_processed"
+                else "processed" if bucket in ("processed", "ultra_processed")
+                else "unknown"
+            ),
+            "plant_count": meta.plant_count_value,
+            "omega3_rich": meta.omega3_flag,
+            "omega3_flag": meta.omega3_flag,
+            "seafood": meta.seafood_flag,
+            "seafood_flag": meta.seafood_flag,
+        }
 
     result = []
     for f in foods:
@@ -176,6 +236,11 @@ def list_foods(category: str | None = None, db: Session = Depends(get_session)):
             entry["protein"] = default_row.protein
             entry["carbs"] = default_row.carbs
             entry["fat"] = default_row.fat
+            entry["serving_grams"] = default_row.grams
+            entry.update(scaled_nutrients(f.id, default_row.grams))
+        else:
+            entry.update(scaled_nutrients(f.id, f.serving_grams))
+        entry.update(classification_fields(f))
         result.append(entry)
     return result
 

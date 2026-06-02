@@ -12,6 +12,7 @@ export type FoodLike = {
   protein?: number | null;
   carbs?: number | null;
   fat?: number | null;
+  serving_grams?: number | null;
   micronutrients?: Record<string, number> | null;
   id?: string | null;
 };
@@ -30,6 +31,7 @@ export type CustomFoodLike = {
   protein?: number | null;
   carbs?: number | null;
   fat?: number | null;
+  serving_grams?: number | null;
   micronutrients?: Record<string, number> | null;
 };
 
@@ -43,7 +45,7 @@ export type FoodSearchResultLike = {
   source: 'seed' | 'user';
   food_id: string | null;
   serving_id: null;
-  serving_grams: null;
+  serving_grams: number | null;
   is_verified: boolean;
   is_preferred: boolean;
   micronutrients?: Record<string, number>;
@@ -76,6 +78,7 @@ export function buildUserFoodCategories(args: {
     foods: customFoods.map(cf => ({
       name: cf.name,
       unit: cf.unit ?? '1 serving',
+      serving_grams: cf.serving_grams ?? null,
       calories: cf.calories ?? 0,
       protein: cf.protein ?? 0,
       carbs: cf.carbs ?? 0,
@@ -88,8 +91,7 @@ export function buildUserFoodCategories(args: {
 
 /** Token-AND substring search across categories, returning up to
  * `limit` results. Custom-category foods get `source: 'user'`,
- * everything else gets `source: 'seed'`. Both render under the
- * same THALLO badge in the UI — the source split exists so
+ * everything else gets `source: 'seed'`. The source split exists so
  * downstream code can still tell them apart for things like
  * "edit my custom food" actions. */
 export function searchUserFoodCategories(
@@ -120,7 +122,7 @@ export function searchUserFoodCategories(
         source: category.key === 'custom' ? 'user' : 'seed',
         food_id: food.id ?? null,
         serving_id: null,
-        serving_grams: null,
+        serving_grams: food.serving_grams ?? null,
         is_verified: category.key !== 'custom',
         is_preferred: true,
         ...(food.micronutrients ? { micronutrients: food.micronutrients } : {}),
@@ -130,18 +132,45 @@ export function searchUserFoodCategories(
   return results.slice(0, limit);
 }
 
-/** Maps a search result's source onto the visible badge label.
- * Both seed and user-stored foods are surfaced as THALLO since
- * users perceive both as "stored Thallo data". USDA / barcode /
- * AI keep their own labels because those represent external data
- * sources the user should still see called out. */
+/** Maps a search result's source onto a user-facing trust label.
+ * Provider names stay in the payload for audit/details, but the
+ * picker reads better when it speaks in confidence, not vendors. */
 export function badgeLabelForSource(source: string | null | undefined): string {
   switch (source) {
-    case 'seed': return 'THALLO';
-    case 'user': return 'THALLO';
-    case 'barcode': return 'BARCODE';
-    case 'usda': return 'USDA';
-    case 'ai': return 'AI';
-    default: return String(source ?? '').toUpperCase();
+    case 'seed':
+    case 'usda':
+    case 'fatsecret':
+      return 'Verified';
+    case 'barcode':
+    case 'openfoodfacts':
+      return 'Label';
+    case 'user':
+      return 'Custom';
+    case 'ai':
+    case 'vision_estimate':
+      return 'Estimate';
+    default:
+      return '';
+  }
+}
+
+export type FoodTrustBadgeTone = 'verified' | 'label' | 'custom' | 'estimate';
+
+export function badgeToneForSource(source: string | null | undefined): FoodTrustBadgeTone | null {
+  switch (source) {
+    case 'seed':
+    case 'usda':
+    case 'fatsecret':
+      return 'verified';
+    case 'barcode':
+    case 'openfoodfacts':
+      return 'label';
+    case 'user':
+      return 'custom';
+    case 'ai':
+    case 'vision_estimate':
+      return 'estimate';
+    default:
+      return null;
   }
 }

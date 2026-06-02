@@ -1,28 +1,33 @@
 import json
 import secrets
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
-from sqlalchemy import delete, or_
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field as PydanticField, field_validator
+from sqlalchemy import delete, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 from datetime import datetime, timezone, date, timedelta
 
 from app.database import get_session
-from app.entitlements import require_pro_feature
+from app.entitlements import entitlement_payload, refresh_user_entitlement, require_pro_feature, is_pro
 from app.models import (
-    User, ClientTelemetryEvent, AIUsageEvent, UserProfile, UserGoal, UserPreferences,
+    User, LegalAcceptanceEvent, ClientTelemetryEvent, AIUsageEvent, BillingEvent, UserProfile, UserGoal, UserPreferences,
     ProfileUpsert, GoalUpsert, PreferencesUpsert, OnboardingSync,
-    UserDayState, DayStateUpsert, WeeklyCheckIn, WeeklyCheckInCreate,
-    SupplementAICache, CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
+    UserDayState, DayStateUpsert, WeeklyCheckIn, WeeklyCheckInCreate, HealthLabResult, CycleLog, FitnessScoreSnapshot,
+    CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
     RecoveryActivity, DailyRollup, UserRollup, UserFlag, PlanJob,
     WorkoutPlan, NutritionPlan,
-    WeightEntry, UserEquipmentProfile,
+    WeightEntry, UserCustomExercise, UserCustomExerciseCreate, UserCustomExerciseRead, UserEquipmentProfile,
     UserEquipmentProfileCreate, UserEquipmentProfileRead,
     WorkoutSession, WorkoutExercise, ExerciseSet, Meal, MealItem, BodyScan,
-    SavedMeal, SleepLog, DailyHealthSnapshot, UserSupplementStack,
+    SavedMeal, SleepLog, DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, IntegrationCredential, ImportBatch, UserSupplementStack,
     SupplementLog, DailyNutritionMetrics, Food, FoodNutrition, FoodServing,
-    FoodAlias, UserRecentFood, UserSocialProfile, Friendship, UserReport,
-    WeeklyDigestCache, ActivityFeedItem, FeedLike, SocialNotification,
+    FoodAlias, UserRecentFood, FoodSubmission, UserSocialProfile, Friendship, UserReport,
+    WeeklyDigestCache, ActivityFeedItem, FeedLike, FeedComment, SocialNotification,
+    TrainerProfile, TrainerClientRelationship, TrainerClientNote,
     PlanWeek, PlanDay, PlanWeekCheckin, AIDecision, GearItem,
+    SunExposureSegment, SunExposureCorrection,
+    UserInsightPreferences, ContextInsight, ContextSegment, DailyFeatureSet,
+    WorkoutTemplate, WorkoutTemplateBundle, WorkoutTemplateBundleItem,
 )
 from app.auth import get_current_user, hash_password
 from app.field_encryption import FieldEncryptionError, decrypt_json, encrypt_json
@@ -70,6 +75,13 @@ def _dump_rows(rows):
     return [_dump_model(row) for row in rows]
 
 
+def _field_was_set(model: object, field_name: str) -> bool:
+    fields_set = getattr(model, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(model, "__fields_set__", set())
+    return field_name in (fields_set or set())
+
+
 def _dump_user_state_rows(rows):
     dumped = []
     for row in rows:
@@ -84,6 +96,131 @@ def _dump_user_state_rows(rows):
 
 def _ids(rows) -> list[int]:
     return [r.id for r in rows if getattr(r, "id", None) is not None]
+
+
+def _custom_exercise_name_key(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+CUSTOM_EXERCISE_PROGRAMMING_TAGS = {
+    "favorite",
+    "warmup",
+    "finisher",
+    "pump",
+    "heavy_friendly",
+    "volume_friendly",
+    "joint_friendly",
+    "unilateral",
+    "machine",
+}
+
+
+def _custom_exercise_programming_tags(value) -> list[str]:
+    tags: list[str] = []
+    for item in _string_list(value):
+        tag = item.strip().lower().replace("-", "_").replace(" ", "_")
+        if tag not in CUSTOM_EXERCISE_PROGRAMMING_TAGS or tag in tags:
+            continue
+        tags.append(tag)
+    return tags
+
+
+def _bounded_int(value, fallback: int, *, min_value: int = 0, max_value: int = 9999) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return fallback
+    return max(min_value, min(max_value, parsed))
+
+
+def _apply_custom_exercise_body(row: UserCustomExercise, body: UserCustomExerciseCreate) -> UserCustomExercise:
+    from app.services.workout.custom_catalog import (
+        custom_exercise_equipment_bucket,
+        custom_exercise_equipment_slugs,
+        custom_exercise_plan_status,
+        normalize_custom_muscle,
+        normalize_custom_pattern,
+    )
+
+    name = str(body.name or "").strip()
+    normalized_name = _custom_exercise_name_key(name)
+    if not normalized_name:
+        raise HTTPException(status_code=422, detail="Exercise name is required")
+
+    row.name = name
+    row.normalized_name = normalized_name
+    row.primary_muscle = normalize_custom_muscle(body.primary_muscle)
+    row.secondary_muscles = [
+        m for m in (
+            normalize_custom_muscle(item, "")
+            for item in _string_list(body.secondary_muscles)
+        )
+        if m and m != row.primary_muscle
+    ]
+    row.equipment = str(body.equipment or "").strip()
+    incoming_slugs = _string_list(getattr(body, "equipment_slugs", []) or [])
+    row.equipment_slugs = incoming_slugs
+    row.movement_pattern = normalize_custom_pattern(body.movement_pattern, name, row.primary_muscle)
+    exercise_type = str(getattr(body, "exercise_type", None) or "").strip().lower()
+    if exercise_type not in {"strength", "cardio", "mobility"}:
+        exercise_type = "cardio" if row.movement_pattern == "cardio" else "mobility" if row.movement_pattern == "mobility" else "strength"
+    row.exercise_type = exercise_type
+    tracking = str(getattr(body, "default_tracking_mode", None) or "").strip().lower()
+    row.default_tracking_mode = tracking if tracking in {"reps", "time", "distance", "calories"} else (
+        "time" if exercise_type in {"cardio", "mobility"} else "reps"
+    )
+    row.is_compound = body.is_compound
+    row.image_url = str(body.image_url).strip() if body.image_url else None
+    row.video_id = str(body.video_id).strip() if body.video_id else None
+    row.demo_exercise_db_id = str(body.demo_exercise_db_id).strip() if body.demo_exercise_db_id else None
+    row.sets = _bounded_int(body.sets, 3, min_value=1, max_value=20)
+    row.reps = str(body.reps or "8-12").strip()[:40] or "8-12"
+    row.rest_seconds = _bounded_int(body.rest_seconds, 60, min_value=0, max_value=1200)
+    row.description = str(body.description).strip() if body.description else None
+    row.form_cues = _string_list(body.form_cues)[:8]
+    row.aliases = _string_list(body.aliases)[:8]
+    row.programming_tags = _custom_exercise_programming_tags(getattr(body, "programming_tags", []) or [])[:12]
+    source = str(body.source or "manual").strip().lower()
+    row.source = source if source in {"manual", "ai", "ai_photo", "scan"} else "manual"
+    inferred_slugs = custom_exercise_equipment_slugs(row)
+    row.equipment_slugs = inferred_slugs
+    row.equipment_bucket = (
+        str(getattr(body, "equipment_bucket", "") or "").strip().lower()
+        or custom_exercise_equipment_bucket(inferred_slugs, row.equipment)
+    )
+    requested_plan_eligible = (
+        bool(body.plan_eligible)
+        if body.plan_eligible is not None
+        else bool(row.movement_pattern and row.equipment and row.source in {"ai", "ai_photo", "scan"})
+    )
+    row.plan_eligible = requested_plan_eligible
+    confidence = str(getattr(body, "ai_confidence", "") or "").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium" if row.source in {"ai", "ai_photo", "scan"} else "user_confirmed"
+    row.ai_confidence = confidence
+    ready, status, _reason = custom_exercise_plan_status(row)
+    row.validation_status = status if requested_plan_eligible or ready else "needs_review"
+    row.updated_at = datetime.now(timezone.utc)
+    return row
+
+
+class CustomExerciseSyncBody(BaseModel):
+    exercises: list[UserCustomExerciseCreate] = PydanticField(default_factory=list)
 
 
 def _delete_account_owned_rows(session: Session, user_id: int) -> None:
@@ -108,6 +245,7 @@ def _delete_account_owned_rows(session: Session, user_id: int) -> None:
 
     private_foods = session.exec(select(Food).where(Food.owner_user_id == user_id)).all()
     private_food_ids = _ids(private_foods)
+    session.exec(delete(FoodSubmission).where(FoodSubmission.user_id == user_id))
     session.exec(delete(UserRecentFood).where(UserRecentFood.user_id == user_id))
     if private_food_ids:
         session.exec(delete(UserRecentFood).where(UserRecentFood.food_id.in_(private_food_ids)))
@@ -115,6 +253,7 @@ def _delete_account_owned_rows(session: Session, user_id: int) -> None:
         session.exec(delete(FoodServing).where(FoodServing.food_id.in_(private_food_ids)))
         session.exec(delete(FoodNutrition).where(FoodNutrition.food_id.in_(private_food_ids)))
         session.exec(delete(Food).where(Food.id.in_(private_food_ids)))
+    session.exec(delete(UserCustomExercise).where(UserCustomExercise.user_id == user_id))
 
     feed_items = session.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == user_id)).all()
     feed_item_ids = _ids(feed_items)
@@ -123,6 +262,7 @@ def _delete_account_owned_rows(session: Session, user_id: int) -> None:
     ).all()
     friendship_ids = _ids(friendships)
     if feed_item_ids:
+        session.exec(delete(FeedComment).where(FeedComment.feed_item_id.in_(feed_item_ids)))
         session.exec(delete(FeedLike).where(FeedLike.feed_item_id.in_(feed_item_ids)))
         session.exec(
             delete(SocialNotification)
@@ -136,12 +276,46 @@ def _delete_account_owned_rows(session: Session, user_id: int) -> None:
             .where(SocialNotification.subject_id.in_(friendship_ids))
         )
     session.exec(delete(FeedLike).where(FeedLike.user_id == user_id))
+    session.exec(delete(FeedComment).where(FeedComment.user_id == user_id))
     session.exec(delete(ActivityFeedItem).where(ActivityFeedItem.user_id == user_id))
     session.exec(delete(SocialNotification).where(or_(SocialNotification.user_id == user_id, SocialNotification.actor_user_id == user_id)))
     session.exec(delete(Friendship).where(or_(Friendship.user_a_id == user_id, Friendship.user_b_id == user_id)))
-    session.exec(delete(UserReport).where(UserReport.reporter_id == user_id))
+    session.exec(delete(UserReport).where(or_(UserReport.reporter_id == user_id, UserReport.reported_user_id == user_id)))
     session.exec(delete(UserSocialProfile).where(UserSocialProfile.user_id == user_id))
     session.exec(delete(WeeklyDigestCache))
+    trainer_relationships = session.exec(
+        select(TrainerClientRelationship).where(
+            or_(
+                TrainerClientRelationship.trainer_user_id == user_id,
+                TrainerClientRelationship.client_user_id == user_id,
+            )
+        )
+    ).all()
+    trainer_relationship_ids = _ids(trainer_relationships)
+    if trainer_relationship_ids:
+        session.exec(
+            delete(TrainerClientNote).where(
+                TrainerClientNote.relationship_id.in_(trainer_relationship_ids)
+            )
+        )
+    session.exec(
+        delete(TrainerClientNote).where(
+            or_(
+                TrainerClientNote.trainer_user_id == user_id,
+                TrainerClientNote.client_user_id == user_id,
+                TrainerClientNote.author_user_id == user_id,
+            )
+        )
+    )
+    session.exec(
+        delete(TrainerClientRelationship).where(
+            or_(
+                TrainerClientRelationship.trainer_user_id == user_id,
+                TrainerClientRelationship.client_user_id == user_id,
+            )
+        )
+    )
+    session.exec(delete(TrainerProfile).where(TrainerProfile.user_id == user_id))
 
     plan_weeks = session.exec(select(PlanWeek).where(PlanWeek.user_id == user_id)).all()
     plan_week_ids = _ids(plan_weeks)
@@ -151,14 +325,28 @@ def _delete_account_owned_rows(session: Session, user_id: int) -> None:
     session.exec(delete(PlanDay).where(PlanDay.user_id == user_id))
     session.exec(delete(PlanWeek).where(PlanWeek.user_id == user_id))
 
+    bundles = session.exec(select(WorkoutTemplateBundle).where(WorkoutTemplateBundle.user_id == user_id)).all()
+    bundle_ids = _ids(bundles)
+    if bundle_ids:
+        session.exec(delete(WorkoutTemplateBundleItem).where(WorkoutTemplateBundleItem.bundle_id.in_(bundle_ids)))
+    session.exec(delete(WorkoutTemplateBundle).where(WorkoutTemplateBundle.user_id == user_id))
+    session.exec(delete(WorkoutTemplate).where(WorkoutTemplate.user_id == user_id))
+    session.exec(
+        update(FoodSubmission)
+        .where(FoodSubmission.reviewed_by_user_id == user_id)
+        .values(reviewed_by_user_id=None)
+    )
+
     for model in (
-        ClientTelemetryEvent, AIUsageEvent, UserProfile, UserGoal, UserPreferences,
-        UserCoachingState, UserDayState, SupplementAICache, SleepLog,
-        DailyHealthSnapshot, WeeklyCheckIn, CoachMemory, RecoveryActivity,
+        LegalAcceptanceEvent, ClientTelemetryEvent, AIUsageEvent, BillingEvent,
+        UserProfile, UserGoal, UserPreferences,
+        UserCoachingState, UserDayState, SleepLog, HealthLabResult, CycleLog,
+        DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, FitnessScoreSnapshot, WeeklyCheckIn, CoachMemory, RecoveryActivity,
         DailyRollup, UserRollup, UserFlag, UserState, PlanJob, WorkoutPlan,
         NutritionPlan, BodyScan, WeightEntry, AIDecision, WorkoutCompletion,
-        SavedMeal, DailyNutritionMetrics, UserEquipmentProfile, GearItem,
-        UserSupplementStack, SupplementLog,
+        SavedMeal, IntegrationCredential, ImportBatch, DailyNutritionMetrics, UserEquipmentProfile, GearItem,
+        UserSupplementStack, SupplementLog, SunExposureSegment, SunExposureCorrection,
+        UserInsightPreferences, ContextInsight, ContextSegment, DailyFeatureSet,
     ):
         session.exec(delete(model).where(model.user_id == user_id))
 
@@ -247,10 +435,10 @@ def get_calorie_ranges(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    """Return the cut / maintain / bulk calorie + protein ranges for the
+    """Return the cut / maintain / bulk calorie + protein reference targets for the
     signed-in user, calculated from their profile body stats and training
     volume. Used by the EditProfileScreen macros card to show users what
-    their three reference ranges look like at a glance.
+    their three reference targets look like at a glance.
 
     Returns 404 if the user hasn't completed onboarding yet (no profile).
     """
@@ -258,6 +446,7 @@ def get_calorie_ranges(
         CalorieInputs,
         calculate_reference_ranges,
     )
+    from app.services.nutrition.targets import resolve_targets_for_user
 
     profile = session.exec(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
@@ -324,14 +513,45 @@ def get_calorie_ranges(
         gender=gender_value,
         training_days_per_week=prefs.days_per_week if prefs else 3,
         session_minutes=prefs.workout_duration_minutes if prefs else 60,
+        lifestyle_activity=getattr(prefs, "lifestyle_activity", None) if prefs else None,
     )
     card = calculate_reference_ranges(inputs)
+    formula_maintenance_calories = card.maintenance_calories
+    maintenance_calories = card.maintenance_calories
+    cut_calories = card.cut_calories
+    bulk_calories = card.bulk_calories
+    bmr = card.bmr
+    activity_multiplier = card.activity_multiplier
+    source_tdee_kind = "formula"
+    source_tdee_kcal = None
+    apple_tdee_kcal = None
+    apple_valid_days = 0
+    maintenance_blend = None
+    health_energy_adjustment_kcal = 0
+    health_basal_adjustment_kcal = 0
+    resolved = resolve_targets_for_user(session, current_user.id, as_of=today, include_health=True)
+    if resolved is not None:
+        source_tdee_kind = getattr(resolved, "source_tdee_kind", "formula")
+        source_tdee_kcal = getattr(resolved, "source_tdee_kcal", None)
+        apple_tdee_kcal = getattr(resolved, "apple_tdee_kcal", None)
+        apple_valid_days = int(getattr(resolved, "apple_valid_days", 0) or 0)
+        maintenance_blend = getattr(resolved, "maintenance_blend", None)
+        health_energy_adjustment_kcal = int(getattr(resolved, "health_energy_adjustment_kcal", 0) or 0)
+        health_basal_adjustment_kcal = int(getattr(resolved, "health_basal_adjustment_kcal", 0) or 0)
+        health_delta = int(resolved.tdee) - int(card.maintenance_calories)
+        if health_delta != 0:
+            maintenance_calories += health_delta
+            cut_calories += health_delta
+            bulk_calories += health_delta
+            bmr = int(resolved.bmr)
+            activity_multiplier = float(resolved.activity_multiplier)
     return {
-        "bmr": card.bmr,
-        "activity_multiplier": card.activity_multiplier,
-        "maintenance_calories": card.maintenance_calories,
-        "cut_calories": card.cut_calories,
-        "bulk_calories": card.bulk_calories,
+        "bmr": bmr,
+        "activity_multiplier": activity_multiplier,
+        "maintenance_calories": maintenance_calories,
+        "formula_maintenance_calories": formula_maintenance_calories,
+        "cut_calories": cut_calories,
+        "bulk_calories": bulk_calories,
         "cut_protein_g": card.cut_protein_g,
         "maintain_protein_g": card.maintain_protein_g,
         "bulk_protein_g": card.bulk_protein_g,
@@ -349,6 +569,13 @@ def get_calorie_ranges(
         "cut_adjustment_kcal": card.cut_adjustment_kcal,
         "maintenance_adjustment_kcal": card.maintenance_adjustment_kcal,
         "bulk_adjustment_kcal": card.bulk_adjustment_kcal,
+        "source_tdee_kind": source_tdee_kind,
+        "source_tdee_kcal": source_tdee_kcal,
+        "apple_tdee_kcal": apple_tdee_kcal,
+        "apple_valid_days": apple_valid_days,
+        "maintenance_blend": maintenance_blend,
+        "health_energy_adjustment_kcal": health_energy_adjustment_kcal,
+        "health_basal_adjustment_kcal": health_basal_adjustment_kcal,
     }
 
 
@@ -370,6 +597,41 @@ def _goal_matches(goal: UserGoal, incoming: GoalUpsert) -> bool:
         and goal.target_weight_lbs == incoming.target_weight_lbs
         and goal.timeline_weeks == incoming.timeline_weeks
     )
+
+
+def _snapshot_goal_baselines(
+    session: Session,
+    goal: UserGoal,
+    *,
+    profile: UserProfile | None,
+) -> None:
+    """Populate start_weight_lbs / start_body_fat_pct / start_scan_id on
+    a freshly-created UserGoal. Prefers a recent WeightEntry (≤14d) over
+    the cached profile weight; pulls body-fat % only from a BodyScan
+    within the last 30d so stale scans don't anchor a new goal."""
+    today = date.today()
+
+    latest_weight = session.exec(
+        select(WeightEntry)
+        .where(WeightEntry.user_id == goal.user_id)
+        .where(WeightEntry.entry_date >= today - timedelta(days=14))
+        .order_by(WeightEntry.entry_date.desc(), WeightEntry.created_at.desc())
+    ).first()
+    if latest_weight and latest_weight.weight_lbs and latest_weight.weight_lbs > 0:
+        goal.start_weight_lbs = float(latest_weight.weight_lbs)
+    elif profile and profile.weight_lbs and profile.weight_lbs > 0:
+        goal.start_weight_lbs = float(profile.weight_lbs)
+
+    latest_scan = session.exec(
+        select(BodyScan)
+        .where(BodyScan.user_id == goal.user_id)
+        .where(BodyScan.body_fat_pct.is_not(None))
+        .where(BodyScan.created_at >= datetime.now(timezone.utc) - timedelta(days=30))
+        .order_by(BodyScan.created_at.desc())
+    ).first()
+    if latest_scan and latest_scan.body_fat_pct and latest_scan.body_fat_pct > 0:
+        goal.start_body_fat_pct = float(latest_scan.body_fat_pct)
+        goal.start_scan_id = latest_scan.id
 
 
 def _coaching_state(session: Session, user_id: int) -> UserCoachingState:
@@ -468,6 +730,12 @@ def sync_onboarding(
         profile.age           = derived_age
         profile.birthdate     = incoming_birthdate
         profile.gender        = body.profile.gender
+        if body.profile.weight_unit is not None:
+            profile.weight_unit = body.profile.weight_unit
+        if body.profile.distance_unit is not None:
+            profile.distance_unit = body.profile.distance_unit
+        if body.profile.height_unit is not None:
+            profile.height_unit = body.profile.height_unit
         profile.updated_at    = now
     else:
         profile = UserProfile(
@@ -478,6 +746,9 @@ def sync_onboarding(
             age=derived_age,
             birthdate=incoming_birthdate,
             gender=body.profile.gender,
+            weight_unit=body.profile.weight_unit,
+            distance_unit=body.profile.distance_unit,
+            height_unit=body.profile.height_unit,
         )
     session.add(profile)
 
@@ -493,8 +764,34 @@ def sync_onboarding(
         if prev_goals:
             session.flush()
 
-        new_goal = UserGoal(user_id=current_user.id, **body.goal.model_dump())
-        session.add(new_goal)
+        # Before creating a brand-new UserGoal row, see if the user has an
+        # archived row that matches the incoming payload (goal_type +
+        # goal_track). When they do, REACTIVATE it instead of creating a new
+        # one — this preserves the original `created_at`, which the client
+        # reads as `goalStartedAt` for the Day X/42 label. Without this, a
+        # goal-change round-trip ("switch goal, then switch back") resets the
+        # user's day count to Day 1 every time.
+        archived = session.exec(
+            select(UserGoal)
+            .where(UserGoal.user_id == current_user.id)
+            .where(UserGoal.is_active == False)  # noqa: E712
+            .order_by(UserGoal.created_at.desc())
+        ).all()
+        matched = next((g for g in archived if _goal_matches(g, body.goal)), None)
+        if matched is not None:
+            matched.is_active = True
+            # Allow pace / target / timeline updates without touching the
+            # original created_at — _goal_matches only checks identity fields
+            # (goal_type + goal_track), so these may legitimately differ.
+            for attr in ('pace', 'target_weight_lbs', 'timeline_weeks'):
+                incoming = getattr(body.goal, attr, None)
+                if incoming is not None:
+                    setattr(matched, attr, incoming)
+            session.add(matched)
+        else:
+            new_goal = UserGoal(user_id=current_user.id, **body.goal.model_dump())
+            _snapshot_goal_baselines(session, new_goal, profile=profile)
+            session.add(new_goal)
 
     # Upsert preferences
     prefs = session.exec(
@@ -505,6 +802,14 @@ def sync_onboarding(
         prefs.workout_duration_minutes = body.preferences.workout_duration_minutes
         prefs.core_frequency_per_week = body.preferences.core_frequency_per_week
         prefs.preferred_split  = body.preferences.preferred_split
+        # Lifestyle activity — leave alone when the client omits it
+        # (older app versions that don't send the field). Empty string
+        # is treated as "unset" so a user can clear the value via
+        # EditProfile without leaving an orphan empty string.
+        incoming_lifestyle = getattr(body.preferences, "lifestyle_activity", None)
+        if incoming_lifestyle is not None:
+            normalized = str(incoming_lifestyle).strip().lower() or None
+            prefs.lifestyle_activity = normalized
         prefs.equipment        = body.preferences.equipment
         prefs.equipment_settings = body.preferences.equipment_settings
         prefs.training_day_pattern = body.preferences.training_day_pattern
@@ -513,9 +818,56 @@ def sync_onboarding(
         prefs.cardio_baseline = body.preferences.cardio_baseline
         prefs.foods_available  = body.preferences.foods_available
         prefs.injuries         = body.preferences.injuries
+        if body.preferences.workout_manual_mode is not None:
+            prefs.workout_manual_mode = bool(body.preferences.workout_manual_mode) if is_pro(current_user) else False
+        if body.preferences.meal_manual_mode is not None:
+            prefs.meal_manual_mode = bool(body.preferences.meal_manual_mode) if is_pro(current_user) else False
+        # Structured injury records — optional. Older clients that only
+        # send `injuries` will pass an empty list here, leaving any
+        # previously-stored structured data alone.
+        if body.preferences.injuries_structured:
+            prefs.injuries_structured = body.preferences.injuries_structured
+        # Pending imports — same preserve-on-empty semantics. The
+        # frontend manages this list (add on onboarding tap, set
+        # completed_at when the import finishes, etc.) and may not echo
+        # it back on every preferences sync. Empty payload means
+        # "leave alone", not "clear."
+        if body.preferences.pending_imports:
+            prefs.pending_imports = body.preferences.pending_imports
+        if body.preferences.kidney_stone_history is not None:
+            prefs.kidney_stone_history = body.preferences.kidney_stone_history or "unknown"
+            prefs.stone_history_updated_at = now
+        if body.preferences.stone_type is not None:
+            prefs.stone_type = body.preferences.stone_type or None
+            prefs.stone_history_updated_at = now
+        if body.preferences.stone_history_source is not None:
+            prefs.stone_history_source = body.preferences.stone_history_source or None
+            prefs.stone_history_updated_at = now
+        for field_name in (
+            "reproductive_health_opt_in",
+            "cycle_tracking_enabled",
+            "trying_to_conceive",
+            "pregnancy_status",
+            "known_pcos",
+            "known_endometriosis",
+            "gestational_diabetes_history",
+            "glp1_support",
+            "sun_exposure_preferences",
+        ):
+            value = getattr(body.preferences, field_name)
+            if value is not None:
+                setattr(prefs, field_name, value)
+        if _field_was_set(body.preferences, "custom_macros"):
+            prefs.custom_macros = body.preferences.custom_macros
         prefs.updated_at       = now
     else:
-        prefs = UserPreferences(user_id=current_user.id, **body.preferences.model_dump())
+        preferences_data = body.preferences.model_dump(exclude_none=True)
+        if not is_pro(current_user):
+            preferences_data.pop("workout_manual_mode", None)
+            preferences_data.pop("meal_manual_mode", None)
+        if _field_was_set(body.preferences, "custom_macros"):
+            preferences_data["custom_macros"] = body.preferences.custom_macros
+        prefs = UserPreferences(user_id=current_user.id, **preferences_data)
     session.add(prefs)
 
     session.commit()
@@ -544,6 +896,12 @@ def update_physical_stats(
     profile.age           = derived_age
     profile.birthdate     = body.birthdate if body.birthdate is not None else profile.birthdate
     profile.gender        = body.gender
+    if body.weight_unit is not None:
+        profile.weight_unit = body.weight_unit
+    if body.distance_unit is not None:
+        profile.distance_unit = body.distance_unit
+    if body.height_unit is not None:
+        profile.height_unit = body.height_unit
     profile.updated_at    = now
     session.add(profile)
     session.commit()
@@ -581,6 +939,7 @@ def get_my_profile(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
+    current_user = refresh_user_entitlement(current_user, session)
     profile = session.exec(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
     ).first()
@@ -617,6 +976,11 @@ def get_my_profile(
     social_profile = session.exec(
         select(UserSocialProfile).where(UserSocialProfile.user_id == current_user.id)
     ).first()
+    custom_exercises = session.exec(
+        select(UserCustomExercise)
+        .where(UserCustomExercise.user_id == current_user.id)
+        .order_by(UserCustomExercise.created_at.desc())
+    ).all()
     payload = {
         "profile": _dump_model(profile),
         "goal": _dump_model(goal),
@@ -624,8 +988,9 @@ def get_my_profile(
         "coaching": _dump_model(coaching),
         "first_name": current_user.first_name,
         "last_name": current_user.last_name,
-        "subscription_tier": current_user.subscription_tier or "free",
+        **entitlement_payload(current_user),
         "weight_entries": _recent_weight_entries(session, current_user.id),
+        "custom_exercises": _dump_rows(custom_exercises),
         "social_profile": _dump_model(social_profile) if social_profile else None,
     }
     session.commit()
@@ -700,11 +1065,19 @@ def export_account_data(
             "health_disclaimer_version": current_user.health_disclaimer_version,
             "ai_disclaimer_accepted_at": current_user.ai_disclaimer_accepted_at.isoformat() if current_user.ai_disclaimer_accepted_at else None,
             "ai_disclaimer_version": current_user.ai_disclaimer_version,
-            "subscription_tier": current_user.subscription_tier or "free",
+            **entitlement_payload(current_user),
         },
+        "legal_acceptance_events": _dump_rows(
+            session.exec(
+                select(LegalAcceptanceEvent)
+                .where(LegalAcceptanceEvent.user_id == uid)
+                .order_by(LegalAcceptanceEvent.accepted_at)
+            ).all()
+        ),
         "profile": _dump_rows(session.exec(select(UserProfile).where(UserProfile.user_id == uid)).all()),
         "goals": _dump_rows(session.exec(select(UserGoal).where(UserGoal.user_id == uid)).all()),
         "preferences": _dump_rows(session.exec(select(UserPreferences).where(UserPreferences.user_id == uid)).all()),
+        "custom_exercises": _dump_rows(session.exec(select(UserCustomExercise).where(UserCustomExercise.user_id == uid)).all()),
         "state": _dump_user_state_rows(session.exec(select(UserState).where(UserState.user_id == uid)).all()),
         "plan_weeks": _dump_rows(session.exec(select(PlanWeek).where(PlanWeek.user_id == uid)).all()),
         "plan_days": _dump_rows(session.exec(select(PlanDay).where(PlanDay.user_id == uid)).all()),
@@ -727,6 +1100,12 @@ def export_account_data(
         "health": {
             "sleep_logs": _dump_rows(session.exec(select(SleepLog).where(SleepLog.user_id == uid)).all()),
             "daily_health_snapshots": _dump_rows(session.exec(select(DailyHealthSnapshot).where(DailyHealthSnapshot.user_id == uid)).all()),
+            "daily_stress_summaries": _dump_rows(session.exec(select(DailyStressSummary).where(DailyStressSummary.user_id == uid)).all()),
+            "daily_lifestyle_logs": _dump_rows(session.exec(select(DailyLifestyleLog).where(DailyLifestyleLog.user_id == uid)).all()),
+            "context_insight_preferences": _dump_rows(session.exec(select(UserInsightPreferences).where(UserInsightPreferences.user_id == uid)).all()),
+            "context_insights": _dump_rows(session.exec(select(ContextInsight).where(ContextInsight.user_id == uid)).all()),
+            "context_segments": _dump_rows(session.exec(select(ContextSegment).where(ContextSegment.user_id == uid)).all()),
+            "daily_feature_sets": _dump_rows(session.exec(select(DailyFeatureSet).where(DailyFeatureSet.user_id == uid)).all()),
         },
         "supplements": {
             "stack": _dump_rows(session.exec(select(UserSupplementStack).where(UserSupplementStack.user_id == uid)).all()),
@@ -745,6 +1124,30 @@ def export_account_data(
             "friendships": _dump_rows(session.exec(select(Friendship).where(or_(Friendship.user_a_id == uid, Friendship.user_b_id == uid))).all()),
             "activity_feed_items": _dump_rows(session.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == uid)).all()),
             "feed_likes": _dump_rows(session.exec(select(FeedLike).where(FeedLike.user_id == uid)).all()),
+        },
+        "trainer": {
+            "profile": _dump_rows(session.exec(select(TrainerProfile).where(TrainerProfile.user_id == uid)).all()),
+            "relationships": _dump_rows(
+                session.exec(
+                    select(TrainerClientRelationship).where(
+                        or_(
+                            TrainerClientRelationship.trainer_user_id == uid,
+                            TrainerClientRelationship.client_user_id == uid,
+                        )
+                    )
+                ).all()
+            ),
+            "notes": _dump_rows(
+                session.exec(
+                    select(TrainerClientNote).where(
+                        or_(
+                            TrainerClientNote.trainer_user_id == uid,
+                            TrainerClientNote.client_user_id == uid,
+                            TrainerClientNote.author_user_id == uid,
+                        )
+                    )
+                ).all()
+            ),
         },
     }
 
@@ -772,10 +1175,30 @@ def delete_account(
     current_user.hashed_password = hash_password(secrets.token_urlsafe(32))
     current_user.recovery_question = None
     current_user.recovery_answer_hash = None
+    current_user.apple_sub = None
+    current_user.google_sub = None
+    current_user.email_verified_at = None
     current_user.email_verification_token_hash = None
     current_user.email_verification_expires_at = None
     current_user.password_reset_token_hash = None
     current_user.password_reset_expires_at = None
+    current_user.plan_cadence_anchor = None
+    current_user.subscription_tier = "free"
+    # NULL — not "deleted": the ck_user_subscription_status_values CHECK
+    # constraint only permits the known lifecycle values (free/trialing/
+    # active/cancelled/…) or NULL. A deleted account has no subscription
+    # status, and every other subscription_* field is cleared below.
+    current_user.subscription_status = None
+    current_user.subscription_source = None
+    current_user.subscription_product_id = None
+    current_user.subscription_entitlement_id = None
+    current_user.subscription_store = None
+    current_user.subscription_environment = None
+    current_user.subscription_expires_at = None
+    current_user.trial_started_at = None
+    current_user.trial_ends_at = None
+    current_user.revenuecat_original_app_user_id = None
+    current_user.revenuecat_original_transaction_id = None
 
     session.add(current_user)
     session.commit()
@@ -799,7 +1222,18 @@ def get_day_state(
             "skip_reason": None,
             "meal_checks": {},
             "nutrition_plan": None,
+            "nutrition_log_status": None,
+            "nutrition_log_status_source": None,
+            "nutrition_log_status_updated_at": None,
             "macro_overrides": None,
+            "pain_present": None,
+            "pain_body_part": None,
+            "pain_side": None,
+            "pain_severity_0_10": None,
+            "soreness_body_part": None,
+            "soreness_severity_0_10": None,
+            "pain_note": None,
+            "onset_context": None,
         }
     return state
 
@@ -834,8 +1268,34 @@ def upsert_day_state(
             state.meal_checks = body.meal_checks
         if body.nutrition_plan is not None:
             state.nutrition_plan = _merge_day_nutrition_plan(state.nutrition_plan, body.nutrition_plan)
+        if body.clear_nutrition_log_status:
+            from app.services.nutrition.day_completeness import set_user_day_nutrition_status
+            set_user_day_nutrition_status(state, None)
+        elif body.nutrition_log_status is not None:
+            from app.services.nutrition.day_completeness import (
+                VALID_NUTRITION_LOG_STATUSES,
+                normalize_nutrition_log_status,
+                set_user_day_nutrition_status,
+            )
+            normalized = normalize_nutrition_log_status(body.nutrition_log_status)
+            if normalized not in VALID_NUTRITION_LOG_STATUSES:
+                raise HTTPException(status_code=422, detail="Invalid nutrition_log_status")
+            set_user_day_nutrition_status(state, normalized, source=body.nutrition_log_status_source)
         if body.macro_overrides is not None:
             state.macro_overrides = body.macro_overrides
+        for field_name in (
+            "pain_present",
+            "pain_body_part",
+            "pain_side",
+            "pain_severity_0_10",
+            "soreness_body_part",
+            "soreness_severity_0_10",
+            "pain_note",
+            "onset_context",
+        ):
+            value = getattr(body, field_name)
+            if value is not None:
+                setattr(state, field_name, value)
         state.updated_at = now
     else:
         state = UserDayState(
@@ -846,8 +1306,26 @@ def upsert_day_state(
             meal_checks=body.meal_checks or {},
             nutrition_plan=body.nutrition_plan,
             macro_overrides=body.macro_overrides,
+            pain_present=body.pain_present,
+            pain_body_part=body.pain_body_part,
+            pain_side=body.pain_side,
+            pain_severity_0_10=body.pain_severity_0_10,
+            soreness_body_part=body.soreness_body_part,
+            soreness_severity_0_10=body.soreness_severity_0_10,
+            pain_note=body.pain_note,
+            onset_context=body.onset_context,
             updated_at=now,
         )
+        if not body.clear_nutrition_log_status and body.nutrition_log_status is not None:
+            from app.services.nutrition.day_completeness import (
+                VALID_NUTRITION_LOG_STATUSES,
+                normalize_nutrition_log_status,
+                set_user_day_nutrition_status,
+            )
+            normalized = normalize_nutrition_log_status(body.nutrition_log_status)
+            if normalized not in VALID_NUTRITION_LOG_STATUSES:
+                raise HTTPException(status_code=422, detail="Invalid nutrition_log_status")
+            set_user_day_nutrition_status(state, normalized, source=body.nutrition_log_status_source)
     session.add(state)
     session.commit()
     try:
@@ -1171,7 +1649,23 @@ def put_user_state(
         row = UserState(user_id=current_user.id, state_json=encrypted_state, updated_at=now)
     session.add(row)
     _backfill_preferred_split_from_state(session, current_user.id, body.state)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        if row.id is not None:
+            session.rollback()
+            raise
+        session.rollback()
+        row = session.exec(
+            select(UserState).where(UserState.user_id == current_user.id)
+        ).first()
+        if row is None:
+            raise
+        row.state_json = encrypted_state
+        row.updated_at = now
+        session.add(row)
+        _backfill_preferred_split_from_state(session, current_user.id, body.state)
+        session.commit()
     return {"ok": True, "updated_at": now.isoformat()}
 
 
@@ -1280,17 +1774,175 @@ class WeightEntryBody(BaseModel):
     logged_at: datetime | None = None
 
 
-@router.get("/weight-entries")
-def list_weight_entries(
+class CycleSymptomLogBody(BaseModel):
+    date: str
+    cycleStartDate: str | None = None
+    phase: str = "unknown"
+    dayOfCycle: int | None = None
+    cycleLengthDays: int | None = None
+    flow: str = "unspecified"
+    cramps: str = "mild"
+    energy: str = "normal"
+    action: str | None = None
+    updatedAt: datetime | None = None
+
+
+_CYCLE_PHASES = {"menses", "follicular", "ovulation", "luteal", "unknown"}
+_CYCLE_FLOWS = {"unspecified", "light", "moderate", "heavy"}
+_CYCLE_CRAMPS = {"none", "mild", "moderate", "severe"}
+_CYCLE_ENERGY = {"low", "normal", "high"}
+_CYCLE_ACTIONS = {"keep", "lighter", "recovery"}
+
+
+def _parse_cycle_date(value: str | None, field_name: str) -> date:
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be YYYY-MM-DD")
+
+
+def _cycle_log_payload(row: CycleLog) -> dict:
+    log_date = row.log_date or row.period_start_date
+    return {
+        "id": str(row.id),
+        "date": log_date.isoformat(),
+        "cycleStartDate": row.period_start_date.isoformat(),
+        "phase": row.phase or "unknown",
+        "dayOfCycle": row.cycle_day,
+        "cycleLengthDays": row.cycle_length,
+        "flow": row.flow_level or "unspecified",
+        "cramps": row.cramps or "mild",
+        "energy": row.energy or "normal",
+        "action": row.training_action,
+        "updatedAt": (row.updated_at or row.created_at or datetime.now(timezone.utc)).isoformat(),
+    }
+
+
+def _apply_cycle_symptom_body(row: CycleLog, body: CycleSymptomLogBody, log_date: date, cycle_start_date: date) -> CycleLog:
+    phase = (body.phase or "unknown").strip().lower()
+    flow = (body.flow or "unspecified").strip().lower()
+    cramps = (body.cramps or "mild").strip().lower()
+    energy = (body.energy or "normal").strip().lower()
+    action = (body.action.strip().lower() if isinstance(body.action, str) and body.action.strip() else None)
+    if phase not in _CYCLE_PHASES:
+        raise HTTPException(status_code=422, detail="Invalid cycle phase")
+    if flow not in _CYCLE_FLOWS:
+        raise HTTPException(status_code=422, detail="Invalid cycle flow")
+    if cramps not in _CYCLE_CRAMPS:
+        raise HTTPException(status_code=422, detail="Invalid cycle cramps")
+    if energy not in _CYCLE_ENERGY:
+        raise HTTPException(status_code=422, detail="Invalid cycle energy")
+    if action is not None and action not in _CYCLE_ACTIONS:
+        raise HTTPException(status_code=422, detail="Invalid cycle action")
+    if body.dayOfCycle is not None and body.dayOfCycle <= 0:
+        raise HTTPException(status_code=422, detail="dayOfCycle must be positive")
+    if body.cycleLengthDays is not None and body.cycleLengthDays <= 0:
+        raise HTTPException(status_code=422, detail="cycleLengthDays must be positive")
+
+    row.log_date = log_date
+    row.period_start_date = cycle_start_date
+    row.phase = phase
+    row.cycle_day = body.dayOfCycle
+    row.cycle_length = body.cycleLengthDays
+    row.flow_level = flow
+    row.cramps = cramps
+    row.energy = energy
+    row.training_action = action
+    row.symptoms = [
+        f"flow:{flow}",
+        f"cramps:{cramps}",
+        f"energy:{energy}",
+        *( [f"action:{action}"] if action else [] ),
+    ]
+    row.updated_at = body.updatedAt or datetime.now(timezone.utc)
+    return row
+
+
+@router.get("/cycle-logs")
+def list_cycle_symptom_logs(
+    limit: int = Query(default=120, ge=1, le=500),
+    since: date | None = Query(default=None),
+    before: date | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    query = select(CycleLog).where(CycleLog.user_id == current_user.id)
+    if since:
+        query = query.where(CycleLog.log_date >= since)
+    if before:
+        query = query.where(CycleLog.log_date <= before)
     rows = db.exec(
+        query
+        .order_by(CycleLog.log_date.desc(), CycleLog.created_at.desc())
+        .limit(limit)
+    ).all()
+    return [_cycle_log_payload(row) for row in reversed(rows)]
+
+
+@router.post("/cycle-logs", status_code=201)
+def save_cycle_symptom_log(
+    body: CycleSymptomLogBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    log_date = _parse_cycle_date(body.date, "date")
+    cycle_start_date = _parse_cycle_date(body.cycleStartDate or body.date, "cycleStartDate")
+    existing = db.exec(
+        select(CycleLog).where(
+            CycleLog.user_id == current_user.id,
+            CycleLog.log_date == log_date,
+        )
+    ).first()
+    row = existing or CycleLog(
+        user_id=current_user.id,
+        log_date=log_date,
+        period_start_date=cycle_start_date,
+    )
+    row = _apply_cycle_symptom_body(row, body, log_date, cycle_start_date)
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        row = db.exec(
+            select(CycleLog).where(
+                CycleLog.user_id == current_user.id,
+                CycleLog.log_date == log_date,
+            )
+        ).first()
+        if row is None:
+            raise
+        row = _apply_cycle_symptom_body(row, body, log_date, cycle_start_date)
+        db.add(row)
+        db.commit()
+    db.refresh(row)
+    return _cycle_log_payload(row)
+
+
+@router.get("/weight-entries")
+def list_weight_entries(
+    limit: int = Query(default=730, ge=1, le=5000),
+    since: date | None = Query(default=None),
+    before: date | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    query = (
         select(WeightEntry)
         .where(WeightEntry.user_id == current_user.id)
-        .order_by(WeightEntry.entry_date)
+    )
+    if since:
+        query = query.where(WeightEntry.entry_date >= since)
+    if before:
+        query = query.where(WeightEntry.entry_date <= before)
+    rows = db.exec(
+        query
+        .order_by(WeightEntry.entry_date.desc(), WeightEntry.created_at.desc())
+        .limit(limit)
     ).all()
-    return [_weight_entry_payload(r) for r in rows]
+    return [_weight_entry_payload(r) for r in reversed(rows)]
 
 
 @router.post("/weight-entries", status_code=201)
@@ -1408,6 +2060,114 @@ def sync_weight_entries(
     _promote_latest_weight_entry_to_profile(db, current_user.id)
     db.commit()
     return {"synced": len(entries)}
+
+
+# ─── User custom exercises ─────────────────────────────────────────────────────
+
+@router.get("/custom-exercises", response_model=list[UserCustomExerciseRead])
+def list_custom_exercises(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    return session.exec(
+        select(UserCustomExercise)
+        .where(UserCustomExercise.user_id == current_user.id)
+        .order_by(UserCustomExercise.created_at.desc())
+    ).all()
+
+
+@router.post("/custom-exercises", response_model=UserCustomExerciseRead)
+def upsert_custom_exercise(
+    body: UserCustomExerciseCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    normalized_name = _custom_exercise_name_key(body.name)
+    if not normalized_name:
+        raise HTTPException(status_code=422, detail="Exercise name is required")
+    row = session.exec(
+        select(UserCustomExercise).where(
+            UserCustomExercise.user_id == current_user.id,
+            UserCustomExercise.normalized_name == normalized_name,
+        )
+    ).first()
+    if row is None:
+        row = UserCustomExercise(user_id=current_user.id, name=body.name.strip(), normalized_name=normalized_name)
+    _apply_custom_exercise_body(row, body)
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+@router.post("/custom-exercises/sync", response_model=list[UserCustomExerciseRead])
+def sync_custom_exercises(
+    body: CustomExerciseSyncBody,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    for item in body.exercises[:500]:
+        normalized_name = _custom_exercise_name_key(item.name)
+        if not normalized_name:
+            continue
+        row = session.exec(
+            select(UserCustomExercise).where(
+                UserCustomExercise.user_id == current_user.id,
+                UserCustomExercise.normalized_name == normalized_name,
+            )
+        ).first()
+        if row is None:
+            row = UserCustomExercise(user_id=current_user.id, name=item.name.strip(), normalized_name=normalized_name)
+        _apply_custom_exercise_body(row, item)
+        session.add(row)
+    session.commit()
+    return session.exec(
+        select(UserCustomExercise)
+        .where(UserCustomExercise.user_id == current_user.id)
+        .order_by(UserCustomExercise.created_at.desc())
+    ).all()
+
+
+@router.put("/custom-exercises/{exercise_id}", response_model=UserCustomExerciseRead)
+def update_custom_exercise(
+    exercise_id: int,
+    body: UserCustomExerciseCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    row = session.get(UserCustomExercise, exercise_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Custom exercise not found")
+    normalized_name = _custom_exercise_name_key(body.name)
+    if not normalized_name:
+        raise HTTPException(status_code=422, detail="Exercise name is required")
+    duplicate = session.exec(
+        select(UserCustomExercise).where(
+            UserCustomExercise.user_id == current_user.id,
+            UserCustomExercise.normalized_name == normalized_name,
+            UserCustomExercise.id != exercise_id,
+        )
+    ).first()
+    if duplicate:
+        raise HTTPException(status_code=409, detail="A custom exercise with that name already exists")
+    _apply_custom_exercise_body(row, body)
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+@router.delete("/custom-exercises/{exercise_id}", status_code=204)
+def delete_custom_exercise(
+    exercise_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    row = session.get(UserCustomExercise, exercise_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Custom exercise not found")
+    session.delete(row)
+    session.commit()
 
 
 # ─── User equipment profiles ───────────────────────────────────────────────────

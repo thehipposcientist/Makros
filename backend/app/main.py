@@ -17,11 +17,25 @@ from app.cors import resolve_cors_config
 from app.database import create_db_and_tables, engine
 from app.limiter import limiter
 from app.logging_setup import configure_logging, get_logger, new_request_id, set_request_context
-from app.routers import auth, profile, workouts, meals, meta, ai, coach, saved_meals, supplements, sleep, health as health_router, readiness as readiness_router, recovery as recovery_router, social, plan_weeks, gear as gear_router, telemetry, foods
+from app.routers import auth, profile, workouts, meals, meta, ai, coach, recommendations, saved_meals, meal_routines, supplements, sleep, health as health_router, lifestyle as lifestyle_router, readiness as readiness_router, recovery as recovery_router, social, trainers, plan_weeks, gear as gear_router, telemetry, foods, workout_templates, manual_mode, watch as watch_router, imports as imports_router, insights as insights_router, admin as admin_router, billing as billing_router, sun_exposure as sun_exposure_router, context_insights as context_insights_router, goal_scores as goal_scores_router, streaks as streaks_router, integrations as integrations_router
 
 # Install JSON logging first so every subsequent log line is structured.
 configure_logging()
 logger = get_logger("app.main")
+
+# Register the HEIF/HEIC opener with Pillow at startup. iOS Photos
+# defaults to HEIC since iOS 11; without this, library uploads (body
+# scan, food photo, equipment scan, supplement scan, form photo) that
+# go through `_fix_image_mime` returned 400 because Pillow couldn't
+# decode the bytes for transcoding to JPEG. Both packages are pinned
+# in requirements.txt; the import guard keeps the app bootable in dev
+# environments where the wheel hasn't been installed yet.
+try:
+    import pillow_heif  # type: ignore[import-not-found]
+    pillow_heif.register_heif_opener()
+    logger.info("pillow_heif_registered")
+except Exception as _heif_err:  # noqa: BLE001
+    logger.warning("pillow_heif_unavailable", extra={"err": str(_heif_err)})
 
 app = FastAPI(title="Thallo API", version="0.1.0")
 
@@ -84,6 +98,11 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(_RequestIdMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 
+# Crash reporting + per-route latency budgets. No-op when sentry_sdk
+# isn't installed or SENTRY_DSN isn't set — see app/observability.py.
+from app.observability import init_observability  # noqa: E402
+init_observability(app)
+
 # Rate limiter — routes opt in via `@limiter.limit(...)`. Exceeded limits
 # get a friendly 429 via `_rate_limit_exceeded_handler`.
 app.state.limiter = limiter
@@ -93,10 +112,6 @@ app.add_middleware(SlowAPIMiddleware)
 
 @dataclass(frozen=True)
 class StartupBackgroundTasksConfig:
-    enrich_food_micros: bool
-    enrich_exercise_images: bool
-    backfill_muscle_fatigue: bool
-    backfill_gut_health: bool
     purge_expired_soft_deletes: bool
 
 
@@ -105,10 +120,6 @@ def startup_background_tasks_config(
 ) -> StartupBackgroundTasksConfig:
     env = os.environ if env is None else env
     return StartupBackgroundTasksConfig(
-        enrich_food_micros=env.get("STARTUP_ENRICH_FOODS_ENABLED", "0") == "1",
-        enrich_exercise_images=env.get("STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED", "0") == "1",
-        backfill_muscle_fatigue=env.get("STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED", "0") == "1",
-        backfill_gut_health=env.get("GUT_BACKFILL_ENABLED", "0") == "1",
         purge_expired_soft_deletes=env.get("ACCOUNT_HARD_DELETE_ENABLED", "1") == "1",
     )
 
@@ -157,224 +168,6 @@ def _cleanup_orphaned_plan_jobs() -> None:
         # Never block startup on cleanup. Worst case the client times out on
         # its own. We DO want the traceback in logs so we notice real bugs.
         logger.exception("orphan_cleanup_failed")
-
-
-def _startup_enrich_food_micros():
-    """Ensure every FoodNutrition row has the Layer 2 micronutrient
-    panel present in `extra_nutrients`. Runs on server startup as a
-    background thread so it never blocks boot.
-
-    Idempotent + incremental — only enriches rows missing Layer 2
-    keys. Gated by `STARTUP_ENRICH_FOODS_ENABLED=1`; default is off so
-    deploys do not make surprise OpenAI calls."""
-    import os
-    if os.getenv("STARTUP_ENRICH_FOODS_ENABLED", "0") != "1":
-        logger.info("food_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_FOODS_ENABLED=0"})
-        return
-    import threading
-    def _worker():
-        try:
-            from sqlmodel import Session, select
-            from app.database import engine
-            from app.models import Food, FoodNutrition
-            from openai import OpenAI
-            from app.routers.ai.utils import get_openai_api_key
-
-            REQUIRED = [
-                "cholesterol", "saturated_fat", "monounsaturated_fat",
-                "polyunsaturated_fat", "omega_3", "omega_6",
-                "potassium", "calcium", "iron", "magnesium",
-                "vitamin_c", "vitamin_d", "vitamin_b12",
-            ]
-
-            with Session(engine) as db:
-                rows = db.exec(select(FoodNutrition)).all()
-                thin = [n for n in rows if any(k not in (n.extra_nutrients or {}) for k in REQUIRED)]
-                if not thin:
-                    logger.info("food_enrichment_noop", extra={"total": len(rows)})
-                    return
-                logger.info("food_enrichment_starting", extra={"thin": len(thin), "total": len(rows)})
-
-            api_key = get_openai_api_key()
-            if not api_key:
-                logger.warning("food_enrichment_skipped_no_key")
-                return
-            client = OpenAI(api_key=api_key)
-
-            # Import the enrichment helper from the script so we don't
-            # duplicate the prompt + sanity-check logic.
-            import sys
-            sys.path.insert(0, "/app")
-            try:
-                from enrich_food_micros import _ai_enrich_batch, BATCH_SIZE
-            except Exception:
-                logger.exception("food_enrichment_import_failed")
-                return
-
-            with Session(engine) as db:
-                # Re-query in this session so the bind is attached.
-                rows = db.exec(select(FoodNutrition)).all()
-                thin_ids = {n.food_id for n in rows if any(k not in (n.extra_nutrients or {}) for k in REQUIRED)}
-                thin_foods = db.exec(select(Food).where(Food.id.in_(thin_ids))).all() if thin_ids else []
-                pairs = []
-                food_by_id = {f.id: f for f in thin_foods}
-                nut_by_id = {n.food_id: n for n in rows if n.food_id in thin_ids}
-                for fid in thin_ids:
-                    if fid in food_by_id and fid in nut_by_id:
-                        pairs.append((food_by_id[fid], nut_by_id[fid]))
-
-                enriched = 0
-                for start in range(0, len(pairs), BATCH_SIZE):
-                    batch = pairs[start : start + BATCH_SIZE]
-                    results = _ai_enrich_batch(client, batch)
-                    for food, nut in batch:
-                        micros = results.get(food.id)
-                        if not micros:
-                            continue
-                        extras = dict(getattr(nut, "extra_nutrients", None) or {})
-                        for k, v in micros.items():
-                            if k == "fiber":
-                                nut.fiber = v
-                            elif k == "sugar":
-                                nut.sugar = v
-                            elif k == "sodium":
-                                nut.sodium_mg = v
-                            else:
-                                extras[k] = v
-                        for k in REQUIRED:
-                            if k not in extras:
-                                extras[k] = 0.0
-                        nut.extra_nutrients = extras
-                        db.add(nut)
-                        enriched += 1
-                    db.commit()
-                logger.info("food_enrichment_done", extra={"enriched": enriched, "total": len(pairs)})
-        except Exception:
-            logger.exception("food_enrichment_failed")
-
-    threading.Thread(target=_worker, daemon=True, name="enrich-food-micros").start()
-    logger.info("food_enrichment_kicked_off")
-
-
-def _startup_enrich_exercise_images():
-    """Background: clean generic images then re-enrich from wger.de."""
-    import os
-    if os.getenv("STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED", "0") != "1":
-        logger.info("exercise_image_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED=0"})
-        return
-    import threading
-    def _worker():
-        try:
-            from app.seed_exercise_images import seed_exercise_images, clear_bad_images
-            clear_bad_images(engine)
-            seed_exercise_images(engine)
-        except Exception:
-            logger.exception("exercise_image_enrichment_failed")
-    threading.Thread(target=_worker, daemon=True, name="enrich-exercise-images").start()
-
-
-def _startup_backfill_muscle_fatigue():
-    """Background: resolve muscle fatigue for existing completions that don't have it."""
-    import os
-    if os.getenv("STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED", "0") != "1":
-        logger.info("fatigue_backfill_disabled", extra={"reason": "STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED=0"})
-        return
-    import threading
-    def _worker():
-        try:
-            from sqlmodel import Session, select
-            from app.models import WorkoutCompletion, WorkoutExercise, ExerciseSet
-            from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue
-            from app.seed_exercises_data import SEED_EXERCISES
-
-            seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
-            with Session(engine) as db:
-                rows = db.exec(
-                    select(WorkoutCompletion).where(WorkoutCompletion.resolved_muscle_fatigue == None)
-                ).all()
-                if not rows:
-                    return
-
-                backfilled = 0
-                for row in rows:
-                    # Try to find structured exercise data
-                    from app.models import WorkoutSession as WS
-                    session = db.exec(
-                        select(WS)
-                        .where(WS.user_id == row.user_id)
-                        .where(WS.workout_date == row.workout_date)
-                    ).first()
-
-                    if session:
-                        exercises = db.exec(
-                            select(WorkoutExercise)
-                            .where(WorkoutExercise.session_id == session.id)
-                        ).all()
-                        if exercises:
-                            ex_list = []
-                            for ex in exercises:
-                                seed = seed_map.get(ex.name.lower(), {})
-                                sets_count = db.exec(
-                                    select(ExerciseSet)
-                                    .where(ExerciseSet.workout_exercise_id == ex.id)
-                                    .where(ExerciseSet.completed == True)
-                                ).all()
-                                ex_list.append({
-                                    "name": ex.name,
-                                    "primary_muscle": seed.get("primary_muscle", ""),
-                                    "secondary_muscles": seed.get("secondary_muscles", []),
-                                    "is_compound": seed.get("is_compound", False),
-                                    "sets_logged": len(sets_count),
-                                })
-                            if ex_list:
-                                resolved = resolve_exercise_fatigue(
-                                    ex_list,
-                                    intensity=row.activity_intensity or row.stimulus or "moderate",
-                                    duration_minutes=max(1, row.duration_seconds // 60) if row.duration_seconds else 60,
-                                )
-                                row.resolved_muscle_fatigue = resolved
-                                db.add(row)
-                                backfilled += 1
-                                continue
-
-                    # Fallback: use focus label
-                    resolved = resolve_focus_fatigue(
-                        row.focus_label,
-                        intensity=row.activity_intensity or "moderate",
-                        duration_minutes=max(1, row.duration_seconds // 60) if row.duration_seconds else 60,
-                    )
-                    row.resolved_muscle_fatigue = resolved
-                    db.add(row)
-                    backfilled += 1
-
-                if backfilled:
-                    db.commit()
-                logger.info("fatigue_backfill_done", extra={"backfilled": backfilled, "total": len(rows)})
-        except Exception:
-            logger.exception("fatigue_backfill_failed")
-    threading.Thread(target=_worker, daemon=True, name="backfill-muscle-fatigue").start()
-
-
-def _startup_backfill_gut_health():
-    """Classify every distinct food name + compute daily gut/longevity metrics
-    for historical logs. Idempotent; skips rows already at the current version.
-    AI fallback stays off by default to avoid surprise API costs — flip
-    GUT_BACKFILL_ALLOW_AI=1 to enable during a deliberate pass."""
-    import os, threading
-    if os.getenv("GUT_BACKFILL_ENABLED", "0") != "1":
-        logger.info("gut_backfill_disabled", extra={"reason": "GUT_BACKFILL_ENABLED=0"})
-        return
-    allow_ai = os.getenv("GUT_BACKFILL_ALLOW_AI", "0") == "1"
-
-    def _worker():
-        try:
-            from app.services.nutrition.gut_backfill import run_full_backfill
-            stats = run_full_backfill(allow_ai=allow_ai)
-            logger.info("gut_backfill_startup_done", extra=stats)
-        except Exception:
-            logger.exception("gut_backfill_startup_failed")
-
-    threading.Thread(target=_worker, daemon=True, name="backfill-gut-health").start()
 
 
 def _purge_expired_soft_deletes():
@@ -432,22 +225,6 @@ def on_startup():
     create_db_and_tables()
     _cleanup_orphaned_plan_jobs()
     background_tasks = startup_background_tasks_config()
-    if background_tasks.enrich_food_micros:
-        _startup_enrich_food_micros()
-    else:
-        logger.info("food_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_FOODS_ENABLED=0"})
-    if background_tasks.enrich_exercise_images:
-        _startup_enrich_exercise_images()
-    else:
-        logger.info("exercise_image_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED=0"})
-    if background_tasks.backfill_muscle_fatigue:
-        _startup_backfill_muscle_fatigue()
-    else:
-        logger.info("fatigue_backfill_disabled", extra={"reason": "STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED=0"})
-    if background_tasks.backfill_gut_health:
-        _startup_backfill_gut_health()
-    else:
-        logger.info("gut_backfill_disabled", extra={"reason": "GUT_BACKFILL_ENABLED=0"})
     if background_tasks.purge_expired_soft_deletes:
         _purge_expired_soft_deletes()
     else:
@@ -469,26 +246,50 @@ def on_shutdown():
 
 app.include_router(auth.router)
 app.include_router(profile.router)
+# IMPORTANT: workout_templates registers before workouts because
+# workouts.router has a catch-all `GET /workouts/{session_id}` that would
+# swallow `/workouts/templates` (parsing "templates" as an int session id
+# and 422'ing). Order-of-registration is match-order in FastAPI.
+app.include_router(workout_templates.router)
 app.include_router(workouts.router)
-# IMPORTANT: saved_meals registers before meals because meals.router has
-# a catch-all `GET /meals/{meal_id}` that would swallow `/meals/saved`
-# (trying to parse "saved" as an int and 422'ing). Order-of-registration
-# is match-order in FastAPI.
+# IMPORTANT: saved_meals + meal_routines register before meals because
+# meals.router has a catch-all `GET /meals/{meal_id}` that would swallow
+# `/meals/saved` and `/meals/routines` (trying to parse them as ints and
+# 422'ing). Order-of-registration is match-order in FastAPI.
 app.include_router(saved_meals.router)
+app.include_router(meal_routines.router)
 app.include_router(meals.router)
 app.include_router(foods.router)
+app.include_router(billing_router.router)
 app.include_router(supplements.router)
 app.include_router(meta.router)
+app.include_router(goal_scores_router.router)
 app.include_router(ai.router)
 app.include_router(coach.router)
+app.include_router(recommendations.router)
 app.include_router(sleep.router)
 app.include_router(health_router.router)
+app.include_router(lifestyle_router.router)
+app.include_router(sun_exposure_router.router)
+app.include_router(insights_router.router)
+app.include_router(context_insights_router.router)
 app.include_router(readiness_router.router)
 app.include_router(recovery_router.router)
 app.include_router(social.router)
+app.include_router(trainers.router)
+app.include_router(streaks_router.router)
+app.include_router(integrations_router.router)
 app.include_router(plan_weeks.router)
+# Manual-mode endpoints — register after plan_weeks because the
+# /plan-weeks/{id}/days/{idx}/(use-template|clear|mark-rest) paths
+# extend that resource. FastAPI is happy with cross-router prefixes;
+# this is just for navigability.
+app.include_router(manual_mode.router)
+app.include_router(watch_router.router)
 app.include_router(gear_router.router)
+app.include_router(imports_router.router)
 app.include_router(telemetry.router)
+app.include_router(admin_router.router)
 
 
 @app.get("/health")

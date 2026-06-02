@@ -5,13 +5,13 @@
 // Account chrome. Mounted as a full-screen modal from the existing Account
 // surface — keeps the navigation graph flat.
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Switch, Alert, StyleSheet, Platform, Linking, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { APP_THEMES, THEME_PICKER_ORDER, getContrastingTextColor, getTheme, radius, resolveThemeName } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, getContrastingTextColor, getTheme, radius, resolveThemeName, toggleOffTrack } from '../constants/theme';
 import { AppThemeName, UserProfile } from '../types';
 import {
   loadReminderSettings, saveReminderSettings, type ReminderSettings,
@@ -20,6 +20,30 @@ import {
   loadMealReminderSettings, saveMealReminderSettings, type MealReminderSettings,
 } from '../utils/mealReminders';
 import {
+  loadHydrationReminderSettings, saveHydrationReminderSettings, type HydrationReminderSettings,
+} from '../utils/hydrationReminders';
+import {
+  loadSleepScoreNotificationSettings,
+  requestSleepScoreNotificationPermission,
+  saveSleepScoreNotificationSettings,
+  type SleepScoreNotificationSettings,
+} from '../utils/sleepScoreNotifications';
+import {
+  loadReadinessNotificationSettings,
+  requestReadinessNotificationPermission,
+  saveReadinessNotificationSettings,
+  type ReadinessNotificationSettings,
+} from '../utils/readinessNotifications';
+import {
+  cancelPlanCoachingNotifications,
+  loadCoachingNotificationSettings,
+  requestCoachingNotificationPermission,
+  saveCoachingNotificationSettings,
+  schedulePlanCoachingNotifications,
+  type CoachingNotificationSettings,
+} from '../utils/coachingNotifications';
+import { HYDRATION_REMINDER_INTERVAL_HOURS, formatHydrationReminderInterval } from '../utils/hydration';
+import {
   loadQuietHours, saveQuietHours, type QuietHoursSettings,
 } from '../utils/notificationPrefs';
 import type { WeightUnit, DistanceUnit } from '../utils/units';
@@ -27,6 +51,14 @@ import { configureExpandAnimation } from '../utils/layoutAnim';
 import { SUPPORT_EMAIL } from '../constants/legal';
 import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRIVACY_COPY } from '../constants/platformHealth';
 import { shouldShowMeals, shouldShowWorkouts } from '../utils/hiddenSurfaces';
+import {
+  isActivityDetectionAvailable,
+  loadActivityDetectionPreference,
+  saveActivityDetectionPreference,
+} from '../services/activityDetection';
+import ImportScreen from './ImportScreen';
+import HealthPermissionsScreen from './HealthPermissionsScreen';
+import TrainerPortal from '../components/TrainerPortal';
 
 interface Props {
   visible: boolean;
@@ -36,6 +68,7 @@ interface Props {
    *  pause/resume endpoints. Optional because the Settings screen also
    *  renders correctly for anonymous / not-yet-signed-in callers. */
   authToken?: string | null;
+  openImportOnShow?: boolean;
   onClose: () => void;
   onSignOut?: () => void;
   /** Persist a partial profile update. Same signature the parent uses
@@ -44,6 +77,16 @@ interface Props {
 }
 
 const COLLAPSED_THEME_COUNT = 9;
+
+type SettingsTab = 'theme' | 'reminders' | 'plan' | 'coach' | 'privacy';
+
+const SETTINGS_TABS: { key: SettingsTab; label: string }[] = [
+  { key: 'theme', label: 'Theme' },
+  { key: 'reminders', label: 'Reminders' },
+  { key: 'plan', label: 'Plan' },
+  { key: 'coach', label: 'Coach' },
+  { key: 'privacy', label: 'Privacy' },
+];
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
@@ -80,18 +123,76 @@ async function openDeviceSettings() {
   }
 }
 
-export default function SettingsScreen({ visible, profile, themeName, authToken, onClose, onSignOut, onProfileUpdate }: Props) {
+export default function SettingsScreen({ visible, profile, themeName, authToken, openImportOnShow = false, onClose, onSignOut, onProfileUpdate }: Props) {
   const insets = useSafeAreaInsets();
   const tc = getTheme(themeName).colors;
   const bottomNavClearance = Math.max(insets.bottom, 10) + 78;
 
   const [workoutReminder, setWorkoutReminder] = useState<ReminderSettings>({ enabled: false, hour: 8, minute: 0 });
   const [mealReminder, setMealReminder] = useState<MealReminderSettings>({ enabled: true, hour: 21, minute: 0 });
+  const [hydrationReminder, setHydrationReminder] = useState<HydrationReminderSettings>({
+    enabled: false,
+    startHour: 10,
+    endHour: 20,
+    intervalHours: 2,
+    skipIfTargetMet: true,
+  });
+  const [coachingNotifications, setCoachingNotifications] = useState<CoachingNotificationSettings>({
+    missedWorkoutEnabled: false,
+    postWorkoutMealEnabled: false,
+    weeklyPlanEnabled: false,
+  });
+  const [sleepScoreNotification, setSleepScoreNotification] = useState<SleepScoreNotificationSettings>({ enabled: false });
+  const [readinessNotification, setReadinessNotification] = useState<ReadinessNotificationSettings>({ enabled: false });
   const [quietHours, setQuietHours] = useState<QuietHoursSettings>({ enabled: false, startHour: 22, endHour: 7 });
   const [pausedUntil, setPausedUntil] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [themesExpanded, setThemesExpanded] = useState(false);
   const [privacyBusy, setPrivacyBusy] = useState<null | 'export' | 'delete'>(null);
+  const [importVisible, setImportVisible] = useState(false);
+  const [healthPermissionsVisible, setHealthPermissionsVisible] = useState(false);
+  const [activeTab, setActiveTab] = useState<SettingsTab>('theme');
+  const [activityDetectionEnabled, setActivityDetectionEnabled] = useState(false);
+
+  const markPendingImportRequested = useCallback((source: string) => {
+    const now = new Date().toISOString();
+    const existing = profile.pendingImports ?? [];
+    let updatedExisting = false;
+    const next = existing.map(entry => {
+      if (entry.source !== source || entry.completed_at) return entry;
+      updatedExisting = true;
+      return {
+        ...entry,
+        requested_at: entry.requested_at || now,
+        dismissed_at: null,
+      };
+    });
+    if (!updatedExisting) {
+      next.unshift({ source, requested_at: now });
+    }
+    onProfileUpdate({ pendingImports: next } as Partial<UserProfile>, true);
+  }, [onProfileUpdate, profile.pendingImports]);
+
+  const markPendingImportCompleted = useCallback((source: string) => {
+    const now = new Date().toISOString();
+    const existing = profile.pendingImports ?? [];
+    let matched = false;
+    const next = existing.map(entry => {
+      if (entry.source !== source || entry.completed_at) return entry;
+      matched = true;
+      return { ...entry, completed_at: now, dismissed_at: null };
+    });
+    if (!matched) {
+      next.unshift({ source, requested_at: now, completed_at: now });
+    }
+    onProfileUpdate({ pendingImports: next } as Partial<UserProfile>, true);
+  }, [onProfileUpdate, profile.pendingImports]);
+
+  useEffect(() => {
+    if (!visible || !openImportOnShow) return;
+    setActiveTab('plan');
+    setImportVisible(true);
+  }, [openImportOnShow, visible]);
 
   // Load reminder settings on every open so toggles reflect actual stored
   // state — important because reminders can also be modified during
@@ -100,14 +201,24 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
     if (!visible) return;
     (async () => {
       try {
-        const [wr, mr, qh] = await Promise.all([
+        const [wr, mr, hr, cn, ssn, rn, qh, ad] = await Promise.all([
           loadReminderSettings(),
           loadMealReminderSettings(),
+          loadHydrationReminderSettings(),
+          loadCoachingNotificationSettings(),
+          loadSleepScoreNotificationSettings(),
+          loadReadinessNotificationSettings(),
           loadQuietHours(),
+          loadActivityDetectionPreference(),
         ]);
         setWorkoutReminder(wr);
         setMealReminder(mr);
+        setHydrationReminder(hr);
+        setCoachingNotifications(cn);
+        setSleepScoreNotification(ssn);
+        setReadinessNotification(rn);
         setQuietHours(qh);
+        setActivityDetectionEnabled(ad);
       } catch {}
       // Surface the active plan's pause status, if any. Best-effort —
       // a 404 / network glitch just leaves the section showing "Not paused".
@@ -136,6 +247,19 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   const themeKeys = themesExpanded ? THEME_PICKER_ORDER : collapsedThemeKeys;
   const canCollapseThemes = THEME_PICKER_ORDER.length > COLLAPSED_THEME_COUNT;
 
+  const reschedulePlanCoachingNotifications = async () => {
+    if (!authToken || !showWorkouts) {
+      await cancelPlanCoachingNotifications();
+      return;
+    }
+    const { getActivePlanWeek } = await import('../services/api');
+    const planWeek = await getActivePlanWeek(authToken);
+    await schedulePlanCoachingNotifications({
+      planWeek,
+      workoutsVisible: showWorkouts,
+    });
+  };
+
   const updateWorkoutReminder = async (next: ReminderSettings) => {
     setWorkoutReminder(next);
     setLoading(true);
@@ -160,6 +284,60 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
     }
   };
 
+  const updateHydrationReminder = async (next: HydrationReminderSettings) => {
+    setHydrationReminder(next);
+    setLoading(true);
+    try {
+      await saveHydrationReminderSettings(next);
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateCoachingNotifications = async (next: CoachingNotificationSettings) => {
+    setCoachingNotifications(next);
+    setLoading(true);
+    try {
+      await saveCoachingNotificationSettings(next);
+      if (next.missedWorkoutEnabled || next.postWorkoutMealEnabled || next.weeklyPlanEnabled) {
+        await requestCoachingNotificationPermission();
+      }
+      await reschedulePlanCoachingNotifications();
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateSleepScoreNotification = async (next: SleepScoreNotificationSettings) => {
+    setSleepScoreNotification(next);
+    setLoading(true);
+    try {
+      await saveSleepScoreNotificationSettings(next);
+      if (next.enabled) await requestSleepScoreNotificationPermission();
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateReadinessNotification = async (next: ReadinessNotificationSettings) => {
+    setReadinessNotification(next);
+    setLoading(true);
+    try {
+      await saveReadinessNotificationSettings(next);
+      if (next.enabled) await requestReadinessNotificationPermission();
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const updateQuietHours = async (next: QuietHoursSettings) => {
     setQuietHours(next);
     setLoading(true);
@@ -169,7 +347,22 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
       // immediately — the schedulers consult quiet-hours when scheduling.
       if (workoutReminder.enabled) await saveReminderSettings(workoutReminder);
       if (mealReminder.enabled) await saveMealReminderSettings(mealReminder);
+      if (hydrationReminder.enabled) await saveHydrationReminderSettings(hydrationReminder);
+      await reschedulePlanCoachingNotifications();
     } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateActivityDetection = async (enabled: boolean) => {
+    setActivityDetectionEnabled(enabled);
+    setLoading(true);
+    try {
+      await saveActivityDetectionPreference(enabled);
+    } catch (e: any) {
+      setActivityDetectionEnabled(!enabled);
       Alert.alert('Could not update', e?.message ?? 'Try again.');
     } finally {
       setLoading(false);
@@ -262,13 +455,15 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   return (
     <View
       testID="settings-screen"
-      accessibilityLabel="settings-screen"
+      accessibilityLabel="Settings"
+      accessibilityViewIsModal
       style={[styles.root, { backgroundColor: tc.background, bottom: bottomNavClearance }]}>
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 12, borderBottomColor: tc.border }]}>
         <TouchableOpacity
           testID="settings-back"
-          accessibilityLabel="settings-back"
+          accessibilityRole="button"
+          accessibilityLabel="Close settings"
           onPress={onClose}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="chevron-back" size={26} color={tc.textPrimary} />
@@ -277,15 +472,53 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
         <View style={{ width: 26 }} />
       </View>
 
+      {/* Tab pills — one row, horizontally scrollable so all sections fit
+          on narrow devices without wrapping. */}
+      <View style={styles.tabBar}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.tabBarContent}>
+          {SETTINGS_TABS.map((t) => {
+            const active = activeTab === t.key;
+            return (
+              <TouchableOpacity
+                key={t.key}
+                testID={`settings-tab-${t.key}`}
+                accessibilityRole="tab"
+                accessibilityLabel={t.label}
+                accessibilityState={{ selected: active }}
+                onPress={() => setActiveTab(t.key)}
+                activeOpacity={0.75}
+                style={[
+                  styles.tabPill,
+                  {
+                    borderColor: active ? tc.primary : tc.border,
+                    backgroundColor: active ? tc.primary : 'transparent',
+                  },
+                ]}>
+                <Text style={[
+                  styles.tabPillText,
+                  { color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary },
+                ]}>{t.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }}>
 
         {/* ── Appearance ────────────────────────────────────────────── */}
+        {activeTab === 'theme' && (<>
         <View style={styles.sectionHeaderRow}>
           <Text style={[styles.sectionLabel, styles.sectionLabelInline, { color: tc.textMuted }]}>APPEARANCE</Text>
           {canCollapseThemes && (
             <TouchableOpacity
               testID="settings-themes-toggle"
-              accessibilityLabel="settings-themes-toggle"
+              accessibilityRole="button"
+              accessibilityLabel={themesExpanded ? 'Show fewer themes' : 'Show all themes'}
+              accessibilityState={{ expanded: themesExpanded }}
               onPress={toggleThemesExpanded}
               activeOpacity={0.75}
               style={[styles.themeToggle, { backgroundColor: tc.surface, borderColor: tc.border }]}>
@@ -309,7 +542,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 <TouchableOpacity
                   key={key}
                   testID={`settings-theme-${e2eId(key)}`}
-                  accessibilityLabel={`settings-theme-${e2eId(key)}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${theme.label} theme`}
+                  accessibilityState={{ selected: active }}
                   onPress={() => onProfileUpdate({ themePreference: key } as Partial<UserProfile>, true)}
                   activeOpacity={0.8}
                   style={[
@@ -355,6 +590,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </View>
             <Switch
               testID="settings-show-workouts-toggle"
+              accessibilityLabel="Show Workouts tab"
               value={showWorkouts}
               onValueChange={(v) => onProfileUpdate({
                 hiddenSurfaces: {
@@ -363,7 +599,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 },
               } as Partial<UserProfile>, true)}
               disabled={loading}
-              trackColor={{ false: tc.border, true: tc.primary }}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
             />
           </View>
           <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
@@ -375,6 +611,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </View>
             <Switch
               testID="settings-show-meals-toggle"
+              accessibilityLabel="Show Meals tab"
               value={showMeals}
               onValueChange={(v) => onProfileUpdate({
                 hiddenSurfaces: {
@@ -383,12 +620,15 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 },
               } as Partial<UserProfile>, true)}
               disabled={loading}
-              trackColor={{ false: tc.border, true: tc.primary }}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
             />
           </View>
         </View>
+        </>)}
+
 
         {/* ── Notifications ─────────────────────────────────────────── */}
+        {activeTab === 'reminders' && (<>
         <Text style={[styles.sectionLabel, { color: tc.textMuted }]}>NOTIFICATIONS</Text>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           {/* Workout reminder */}
@@ -401,10 +641,11 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </View>
             <Switch
               testID="settings-workout-reminders-toggle"
+              accessibilityLabel="Workout reminders"
               value={workoutReminder.enabled}
               onValueChange={(v) => updateWorkoutReminder({ ...workoutReminder, enabled: v })}
               disabled={loading}
-              trackColor={{ false: tc.border, true: tc.primary }}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
             />
           </View>
           {workoutReminder.enabled && (
@@ -413,7 +654,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <TouchableOpacity
                   testID="settings-workout-reminder-time-minus"
-                  accessibilityLabel="settings-workout-reminder-time-minus"
+                  accessibilityRole="button"
+                  accessibilityLabel="Move workout reminder 15 minutes earlier"
+                  accessibilityHint={`Current time ${formatTime(workoutReminder.hour, workoutReminder.minute)}`}
                   onPress={() => {
                     const { hour, minute } = stepTime(workoutReminder.hour, workoutReminder.minute, -15);
                     updateWorkoutReminder({ ...workoutReminder, hour, minute });
@@ -426,7 +669,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 </Text>
                 <TouchableOpacity
                   testID="settings-workout-reminder-time-plus"
-                  accessibilityLabel="settings-workout-reminder-time-plus"
+                  accessibilityRole="button"
+                  accessibilityLabel="Move workout reminder 15 minutes later"
+                  accessibilityHint={`Current time ${formatTime(workoutReminder.hour, workoutReminder.minute)}`}
                   onPress={() => {
                     const { hour, minute } = stepTime(workoutReminder.hour, workoutReminder.minute, 15);
                     updateWorkoutReminder({ ...workoutReminder, hour, minute });
@@ -438,6 +683,23 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </View>
           )}
 
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Missed workout follow-up</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Later same-day nudge to start today's PlanWeek workout or mark it skipped.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-missed-workout-notification-toggle"
+              accessibilityLabel="Missed workout follow-up"
+              value={coachingNotifications.missedWorkoutEnabled}
+              onValueChange={(v) => updateCoachingNotifications({ ...coachingNotifications, missedWorkoutEnabled: v })}
+              disabled={loading || !showWorkouts}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
           {/* Meal log reminder */}
           <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
             <View style={{ flex: 1 }}>
@@ -448,10 +710,11 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </View>
             <Switch
               testID="settings-meal-reminder-toggle"
+              accessibilityLabel="Meal log reminder"
               value={mealReminder.enabled}
               onValueChange={(v) => updateMealReminder({ ...mealReminder, enabled: v })}
               disabled={loading}
-              trackColor={{ false: tc.border, true: tc.primary }}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
             />
           </View>
           {mealReminder.enabled && (
@@ -460,7 +723,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <TouchableOpacity
                   testID="settings-meal-reminder-time-minus"
-                  accessibilityLabel="settings-meal-reminder-time-minus"
+                  accessibilityRole="button"
+                  accessibilityLabel="Move meal log reminder 15 minutes earlier"
+                  accessibilityHint={`Current time ${formatTime(mealReminder.hour, mealReminder.minute)}`}
                   onPress={() => {
                     const { hour, minute } = stepTime(mealReminder.hour, mealReminder.minute, -15);
                     updateMealReminder({ ...mealReminder, hour, minute });
@@ -473,7 +738,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 </Text>
                 <TouchableOpacity
                   testID="settings-meal-reminder-time-plus"
-                  accessibilityLabel="settings-meal-reminder-time-plus"
+                  accessibilityRole="button"
+                  accessibilityLabel="Move meal log reminder 15 minutes later"
+                  accessibilityHint={`Current time ${formatTime(mealReminder.hour, mealReminder.minute)}`}
                   onPress={() => {
                     const { hour, minute } = stepTime(mealReminder.hour, mealReminder.minute, 15);
                     updateMealReminder({ ...mealReminder, hour, minute });
@@ -485,23 +752,214 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </View>
           )}
 
-          {/* Quiet hours — global do-not-disturb window for workout + meal
-              reminders. Rest-timer notifications stay active during a live
-              workout regardless (user-initiated). When enabled, any reminder
-              whose configured time falls inside the window is suppressed. */}
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Post-workout meal nudge</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Reminder after a completed workout to log recovery food and protein.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-post-workout-meal-notification-toggle"
+              accessibilityLabel="Post-workout meal nudge"
+              value={coachingNotifications.postWorkoutMealEnabled}
+              onValueChange={(v) => updateCoachingNotifications({ ...coachingNotifications, postWorkoutMealEnabled: v })}
+              disabled={loading || !showMeals}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
+          {/* Hydration reminders */}
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Hydration reminders</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Daytime water nudges that stop once today's range is met.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-hydration-reminder-toggle"
+              accessibilityLabel="Hydration reminders"
+              value={hydrationReminder.enabled}
+              onValueChange={(v) => updateHydrationReminder({ ...hydrationReminder, enabled: v })}
+              disabled={loading}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+          {hydrationReminder.enabled && (
+            <>
+              <View style={[styles.timeRow, { borderTopColor: tc.border }]}>
+                <Text style={[styles.rowSub, { color: tc.textSecondary }]}>First reminder</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <TouchableOpacity
+                    testID="settings-hydration-start-minus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move first hydration reminder one hour earlier"
+                    accessibilityHint={`Current time ${formatTime(hydrationReminder.startHour, 0)}`}
+                    onPress={() => updateHydrationReminder({ ...hydrationReminder, startHour: (hydrationReminder.startHour + 23) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="remove" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                  <Text style={[styles.timeValue, { color: tc.textPrimary }]}>
+                    {formatTime(hydrationReminder.startHour, 0)}
+                  </Text>
+                  <TouchableOpacity
+                    testID="settings-hydration-start-plus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move first hydration reminder one hour later"
+                    accessibilityHint={`Current time ${formatTime(hydrationReminder.startHour, 0)}`}
+                    onPress={() => updateHydrationReminder({ ...hydrationReminder, startHour: (hydrationReminder.startHour + 1) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="add" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+              <View style={[styles.timeRow, { borderTopColor: tc.border }]}>
+                <Text style={[styles.rowSub, { color: tc.textSecondary }]}>Last reminder</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <TouchableOpacity
+                    testID="settings-hydration-end-minus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move last hydration reminder one hour earlier"
+                    accessibilityHint={`Current time ${formatTime(hydrationReminder.endHour, 0)}`}
+                    onPress={() => updateHydrationReminder({ ...hydrationReminder, endHour: (hydrationReminder.endHour + 23) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="remove" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                  <Text style={[styles.timeValue, { color: tc.textPrimary }]}>
+                    {formatTime(hydrationReminder.endHour, 0)}
+                  </Text>
+                  <TouchableOpacity
+                    testID="settings-hydration-end-plus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move last hydration reminder one hour later"
+                    accessibilityHint={`Current time ${formatTime(hydrationReminder.endHour, 0)}`}
+                    onPress={() => updateHydrationReminder({ ...hydrationReminder, endHour: (hydrationReminder.endHour + 1) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="add" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+              <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 0 }]}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Cadence</Text>
+                  <Text style={[styles.rowSub, { color: tc.textMuted }]}>How often to nudge inside the window.</Text>
+                </View>
+                <View style={[styles.toggle, { borderColor: tc.border }]}>
+                  {HYDRATION_REMINDER_INTERVAL_HOURS.map((hours) => {
+                    const active = hydrationReminder.intervalHours === hours;
+                    return (
+                      <TouchableOpacity
+                        key={hours}
+                        testID={`settings-hydration-interval-${hours}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Hydration cadence ${formatHydrationReminderInterval(hours)}`}
+                        accessibilityState={{ selected: active }}
+                        onPress={() => updateHydrationReminder({ ...hydrationReminder, intervalHours: hours })}
+                        style={[
+                          styles.toggleOpt,
+                          active && { backgroundColor: tc.primary },
+                        ]}>
+                        <Text style={[
+                          styles.toggleOptText,
+                          { color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary },
+                        ]}>{formatHydrationReminderInterval(hours)}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+              <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 0 }]}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Skip when range is met</Text>
+                  <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                    Stop today's remaining hydration reminders after you reach your water range.
+                  </Text>
+                </View>
+                <Switch
+                  testID="settings-hydration-skip-target-toggle"
+                  accessibilityLabel="Skip hydration reminders when range is met"
+                  value={hydrationReminder.skipIfTargetMet !== false}
+                  onValueChange={(v) => updateHydrationReminder({ ...hydrationReminder, skipIfTargetMet: v })}
+                  disabled={loading}
+                  trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+                />
+              </View>
+            </>
+          )}
+
+          {Platform.OS === 'ios' && (
+            <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Sleep readiness notification</Text>
+                <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                  Morning nudge after Apple Health sleep syncs. Includes readiness when available.
+                </Text>
+              </View>
+              <Switch
+                testID="settings-sleep-score-notification-toggle"
+                accessibilityLabel="Sleep readiness notification"
+                value={sleepScoreNotification.enabled}
+                onValueChange={(v) => updateSleepScoreNotification({ enabled: v })}
+                disabled={loading}
+                trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+              />
+            </View>
+          )}
+
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Readiness nudges</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Once-daily guidance when readiness says to fuel first, cap intensity, lighten, or recover.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-readiness-notification-toggle"
+              accessibilityLabel="Readiness nudges"
+              value={readinessNotification.enabled}
+              onValueChange={(v) => updateReadinessNotification({ enabled: v })}
+              disabled={loading}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Weekly plan notifications</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Rollover preview and new-week-ready nudges for the active 7-day PlanWeek.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-weekly-plan-notification-toggle"
+              accessibilityLabel="Weekly plan notifications"
+              value={coachingNotifications.weeklyPlanEnabled}
+              onValueChange={(v) => updateCoachingNotifications({ ...coachingNotifications, weeklyPlanEnabled: v })}
+              disabled={loading || !showWorkouts}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
+          {/* Quiet hours — global do-not-disturb window for workout, meal, hydration,
+              readiness, and morning sleep readiness notifications. Rest-timer
+              notifications stay active during a live workout regardless
+              (user-initiated). When enabled, any reminder whose configured
+              time falls inside the window is suppressed. */}
           <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Quiet hours</Text>
               <Text style={[styles.rowSub, { color: tc.textMuted }]}>
-                Silence reminders during this window. Rest-timer alerts mid-workout still fire.
+                Silence reminders, readiness nudges, and sleep readiness nudges during this window. Rest-timer alerts mid-workout still fire.
               </Text>
             </View>
             <Switch
               testID="settings-quiet-hours-toggle"
+              accessibilityLabel="Quiet hours"
               value={quietHours.enabled}
               onValueChange={(v) => updateQuietHours({ ...quietHours, enabled: v })}
               disabled={loading}
-              trackColor={{ false: tc.border, true: tc.primary }}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
             />
           </View>
           {quietHours.enabled && (
@@ -511,7 +969,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <TouchableOpacity
                     testID="settings-quiet-start-minus"
-                    accessibilityLabel="settings-quiet-start-minus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move quiet hours start one hour earlier"
+                    accessibilityHint={`Current time ${formatTime(quietHours.startHour, 0)}`}
                     onPress={() => updateQuietHours({ ...quietHours, startHour: (quietHours.startHour + 23) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="remove" size={16} color={tc.textSecondary} />
@@ -521,7 +981,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   </Text>
                   <TouchableOpacity
                     testID="settings-quiet-start-plus"
-                    accessibilityLabel="settings-quiet-start-plus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move quiet hours start one hour later"
+                    accessibilityHint={`Current time ${formatTime(quietHours.startHour, 0)}`}
                     onPress={() => updateQuietHours({ ...quietHours, startHour: (quietHours.startHour + 1) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="add" size={16} color={tc.textSecondary} />
@@ -533,7 +995,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <TouchableOpacity
                     testID="settings-quiet-end-minus"
-                    accessibilityLabel="settings-quiet-end-minus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move quiet hours end one hour earlier"
+                    accessibilityHint={`Current time ${formatTime(quietHours.endHour, 0)}`}
                     onPress={() => updateQuietHours({ ...quietHours, endHour: (quietHours.endHour + 23) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="remove" size={16} color={tc.textSecondary} />
@@ -543,7 +1007,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   </Text>
                   <TouchableOpacity
                     testID="settings-quiet-end-plus"
-                    accessibilityLabel="settings-quiet-end-plus"
+                    accessibilityRole="button"
+                    accessibilityLabel="Move quiet hours end one hour later"
+                    accessibilityHint={`Current time ${formatTime(quietHours.endHour, 0)}`}
                     onPress={() => updateQuietHours({ ...quietHours, endHour: (quietHours.endHour + 1) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="add" size={16} color={tc.textSecondary} />
@@ -553,8 +1019,10 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             </>
           )}
         </View>
+        </>)}
 
         {/* ── Units ─────────────────────────────────────────────────── */}
+        {activeTab === 'theme' && (<>
         <Text style={[styles.sectionLabel, { color: tc.textMuted }]}>UNITS</Text>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           <View style={styles.row}>
@@ -571,7 +1039,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   <TouchableOpacity
                     key={u}
                     testID={`settings-weight-unit-${u}`}
-                    accessibilityLabel={`settings-weight-unit-${u}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={u === 'lbs' ? 'Use pounds for body weight' : 'Use kilograms for body weight'}
+                    accessibilityState={{ selected: active }}
                     onPress={() => onProfileUpdate({ weightUnit: u } as Partial<UserProfile>, true)}
                     style={[
                       styles.toggleOpt,
@@ -601,7 +1071,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   <TouchableOpacity
                     key={u}
                     testID={`settings-distance-unit-${u}`}
-                    accessibilityLabel={`settings-distance-unit-${u}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={u === 'mi' ? 'Use miles for distance' : 'Use kilometers for distance'}
+                    accessibilityState={{ selected: active }}
                     onPress={() => onProfileUpdate({ distanceUnit: u } as Partial<UserProfile>, true)}
                     style={[
                       styles.toggleOpt,
@@ -621,8 +1093,10 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
         <Text style={{ fontSize: 11, color: tc.textMuted, lineHeight: 16, marginTop: 4, paddingHorizontal: 4 }}>
           Unit changes apply to display only — your underlying training history isn't re-converted, so charts and PRs stay continuous.
         </Text>
+        </>)}
 
         {/* ── Plan pause ─────────────────────────────────────────────── */}
+        {activeTab === 'plan' && (<>
         {authToken && (
           <>
             <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PLAN</Text>
@@ -640,7 +1114,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 </View>
                 <TouchableOpacity
                   testID="settings-plan-pause"
-                  accessibilityLabel="settings-plan-pause"
+                  accessibilityRole="button"
+                  accessibilityLabel={pausedUntil ? 'Resume plan' : 'Pause plan'}
+                  accessibilityState={{ disabled: loading }}
                   disabled={loading}
                   onPress={async () => {
                     setLoading(true);
@@ -690,7 +1166,61 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
           </>
         )}
 
+        {Platform.OS === 'ios' && (
+          <>
+            <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>ACTIVITY DETECTION</Text>
+            <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+              <View style={styles.row}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Detect walks, runs, and rides</Text>
+                  <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                    Use iPhone motion data while Thallo is open to suggest tracking sustained movement.
+                  </Text>
+                </View>
+                <Switch
+                  testID="settings-activity-detection-toggle"
+                  accessibilityLabel="Detect walks, runs, and rides"
+                  value={activityDetectionEnabled}
+                  onValueChange={updateActivityDetection}
+                  disabled={loading || !isActivityDetectionAvailable()}
+                  trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+                />
+              </View>
+              {!isActivityDetectionAvailable() && (
+                <Text style={[styles.rowSub, { color: tc.textMuted, borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 10, marginTop: 6 }]}>
+                  Motion activity detection is unavailable on this device.
+                </Text>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* ── Import from other apps ────────────────────────────────── */}
+        <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>IMPORT</Text>
+        <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+          <TouchableOpacity
+            testID="settings-open-imports"
+            accessibilityRole="button"
+            accessibilityLabel="Import from another app"
+            style={styles.row}
+            onPress={() => setImportVisible(true)}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Import from another app</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Bring your MyFitnessPal meals, Strong workouts, or Strava activities into Thallo.
+              </Text>
+            </View>
+            <Ionicons name="cloud-download-outline" size={18} color={tc.textMuted} />
+          </TouchableOpacity>
+        </View>
+        </>)}
+
+        {activeTab === 'coach' && authToken && (
+          <TrainerPortal authToken={authToken} themeName={profile.themePreference ?? themeName} />
+        )}
+
         {/* ── Privacy / Data ────────────────────────────────────────── */}
+        {activeTab === 'privacy' && (<>
         <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PRIVACY & DATA</Text>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           <View style={styles.privacyBlock}>
@@ -718,14 +1248,16 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             <View style={{ flex: 1 }}>
               <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>AI features</Text>
               <Text style={[styles.rowSub, { color: tc.textMuted }]}>
-                Coach chat, scans, meal parsing, and check-ins may send relevant inputs to Thallo's AI vendor to generate recommendations. Workout plan structure stays deterministic.
+                Coach chat, scans, meal parsing, and check-ins may send relevant inputs to Thallo's AI vendor. Workout plans and live load/reps guidance stay deterministic.
               </Text>
             </View>
           </View>
 
           <TouchableOpacity
             testID="settings-export-data"
-            accessibilityLabel="settings-export-data"
+            accessibilityRole="button"
+            accessibilityLabel="Export data"
+            accessibilityState={{ disabled: privacyBusy !== null, busy: privacyBusy === 'export' }}
             style={[styles.privacyActionRow, { borderTopColor: tc.border }]}
             disabled={privacyBusy !== null}
             onPress={handlePrivacyExport}>
@@ -742,7 +1274,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
 
           <TouchableOpacity
             testID="settings-contact-privacy"
-            accessibilityLabel="settings-contact-privacy"
+            accessibilityRole="button"
+            accessibilityLabel="Contact support or privacy"
             style={[styles.privacyActionRow, { borderTopColor: tc.border }]}
             onPress={handlePrivacyContact}>
             <View style={{ flex: 1 }}>
@@ -756,7 +1289,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
 
           <TouchableOpacity
             testID="settings-delete-account-data"
-            accessibilityLabel="settings-delete-account-data"
+            accessibilityRole="button"
+            accessibilityLabel="Delete account and data"
+            accessibilityState={{ disabled: privacyBusy !== null, busy: privacyBusy === 'delete' }}
             style={[styles.privacyActionRow, { borderTopColor: tc.border }]}
             disabled={privacyBusy !== null}
             onPress={handlePrivacyDelete}>
@@ -776,9 +1311,25 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
         <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PERMISSIONS</Text>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           <TouchableOpacity
-            testID="settings-open-device-settings"
-            accessibilityLabel="settings-open-device-settings"
+            testID="settings-open-health-permissions"
+            accessibilityRole="button"
+            accessibilityLabel={`${HEALTH_PLATFORM_LABEL} permissions`}
             style={styles.row}
+            onPress={() => setHealthPermissionsVisible(true)}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>{HEALTH_PLATFORM_LABEL} permissions</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Check sleep, heart, activity, workout, weight, nutrition, and recovery signals.
+              </Text>
+            </View>
+            <Ionicons name="heart-circle-outline" size={19} color={tc.textMuted} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            testID="settings-open-device-settings"
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${Platform.OS === 'ios' ? 'iOS' : 'Android'} Settings`}
+            style={[styles.row, { borderTopWidth: 1, borderTopColor: tc.border, paddingTop: 14, marginTop: 14 }]}
             onPress={openDeviceSettings}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Open {Platform.OS === 'ios' ? 'iOS' : 'Android'} Settings</Text>
@@ -791,42 +1342,32 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
           </TouchableOpacity>
         </View>
+        </>)}
 
-        {onSignOut && (
-          <>
-            <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>ACCOUNT</Text>
-            <TouchableOpacity
-              testID="settings-sign-out"
-              accessibilityLabel="settings-sign-out"
-              activeOpacity={0.82}
-              onPress={() => {
-                Alert.alert(
-                  'Sign out?',
-                  'You will need to sign back in to see your plan and progress.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Sign out',
-                      style: 'destructive',
-                      onPress: () => {
-                        onClose();
-                        onSignOut();
-                      },
-                    },
-                  ],
-                );
-              }}
-              style={[styles.signOutButton, { backgroundColor: tc.surface, borderColor: tc.error + '66' }]}>
-              <Ionicons name="log-out-outline" size={18} color={tc.error} />
-              <Text style={[styles.signOutText, { color: tc.error }]}>Sign Out</Text>
-            </TouchableOpacity>
-          </>
-        )}
-
+        {/* App version — always visible at the foot of the screen.
+            Account actions (incl. sign out) live on the profile page. */}
         <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 28 }}>
           Thallo · v1.0 · {Platform.OS === 'ios' ? 'iOS' : 'Android'}
         </Text>
       </ScrollView>
+
+      {/* Import screen — mounted inside SettingsScreen so the nav graph
+          stays flat. Receives the auth token so it can hit /imports/* */}
+      <ImportScreen
+        visible={importVisible}
+        themeName={profile.themePreference}
+        authToken={authToken ?? ''}
+        onClose={() => setImportVisible(false)}
+        onImportIntent={markPendingImportRequested}
+        onImportComplete={markPendingImportCompleted}
+      />
+
+      <HealthPermissionsScreen
+        visible={healthPermissionsVisible}
+        themeName={profile.themePreference ?? themeName}
+        age={profile.physicalStats?.age ?? null}
+        onClose={() => setHealthPermissionsVisible(false)}
+      />
     </View>
   );
 }
@@ -838,6 +1379,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: 1,
   },
   headerTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
+  tabBar: { paddingTop: 12, paddingBottom: 4 },
+  tabBarContent: { gap: 8, paddingHorizontal: 16 },
+  tabPill: {
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  tabPillText: { fontSize: 13, fontWeight: '800', letterSpacing: 0.2 },
   sectionLabel: {
     fontSize: 11, fontWeight: '700', letterSpacing: 1.0,
     marginTop: 12, marginBottom: 8, paddingHorizontal: 4,
@@ -896,7 +1446,7 @@ const styles = StyleSheet.create({
     paddingTop: 10, marginTop: 10, borderTopWidth: 1,
   },
   timeBtn: {
-    width: 30, height: 30, borderRadius: 15, borderWidth: 1,
+    width: 44, height: 44, borderRadius: 22, borderWidth: 1,
     alignItems: 'center', justifyContent: 'center',
   },
   timeValue: { fontSize: 14, fontWeight: '800', minWidth: 80, textAlign: 'center' },
@@ -904,7 +1454,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row', borderWidth: 1, borderRadius: 16, overflow: 'hidden',
   },
   toggleOpt: {
-    paddingHorizontal: 14, paddingVertical: 7,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   toggleOptText: {
     fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4,
@@ -915,11 +1469,11 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   themeToggle: {
-    minHeight: 28,
+    minHeight: 44,
     borderRadius: radius.sm,
     borderWidth: 1,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,

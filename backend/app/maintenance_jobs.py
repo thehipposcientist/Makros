@@ -33,7 +33,7 @@ def run_exercise_image_enrichment() -> None:
 def run_muscle_fatigue_backfill() -> None:
     from app.models import WorkoutCompletion, WorkoutExercise, ExerciseSet
     from app.models import WorkoutSession as WS
-    from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue
+    from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue, session_rpe_from_details
     from app.seed_exercises_data import SEED_EXERCISES
 
     seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
@@ -83,6 +83,12 @@ def run_muscle_fatigue_backfill() -> None:
                 row.focus_label,
                 intensity=row.activity_intensity or "moderate",
                 duration_minutes=max(1, row.duration_seconds // 60) if row.duration_seconds else 60,
+                rpe=session_rpe_from_details(getattr(row, "activity_details", None)),
+                activity_category=getattr(row, "activity_category", None),
+                activity_subtype=getattr(row, "activity_subtype", None),
+                cardio_style=getattr(row, "cardio_style", None),
+                cardio_load=getattr(row, "cardio_load", None),
+                hr_summary=getattr(row, "hr_summary", None),
             )
             db.add(row)
             backfilled += 1
@@ -92,10 +98,10 @@ def run_muscle_fatigue_backfill() -> None:
         logger.info("fatigue_backfill_done", extra={"backfilled": backfilled, "total": len(rows)})
 
 
-def run_gut_health_backfill(*, allow_ai: bool = False) -> None:
+def run_gut_health_backfill() -> None:
     from app.services.nutrition.gut_backfill import run_full_backfill
 
-    stats = run_full_backfill(allow_ai=allow_ai)
+    stats = run_full_backfill()
     logger.info("gut_backfill_done", extra=stats)
 
 
@@ -108,7 +114,6 @@ def main() -> int:
     parser.add_argument("--exercise-images", action="store_true", help="Refresh exercise images")
     parser.add_argument("--muscle-fatigue", action="store_true", help="Backfill resolved muscle fatigue")
     parser.add_argument("--gut-health", action="store_true", help="Backfill gut-health metrics")
-    parser.add_argument("--allow-ai", action="store_true", help="Allow AI fallback in jobs that support it")
     args = parser.parse_args()
 
     started = datetime.now(timezone.utc)
@@ -122,7 +127,7 @@ def main() -> int:
     if args.all or args.muscle_fatigue:
         run_muscle_fatigue_backfill()
     if args.all or args.gut_health:
-        run_gut_health_backfill(allow_ai=args.allow_ai)
+        run_gut_health_backfill()
 
     elapsed_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     logger.info("maintenance_jobs_done", extra={"elapsed_ms": round(elapsed_ms)})

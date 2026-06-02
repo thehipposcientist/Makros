@@ -7,14 +7,24 @@ import ExpoModulesCore
 import Foundation
 import WatchConnectivity
 import HealthKit
+import UIKit
 import os.log
 
 private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
-private let staleWorkoutCommandWindowMs: Double = 4 * 60 * 60 * 1000
+// TTL policy — drop stale REQUESTS, never casually drop user-entered
+// FACTS. `pull_state` is a refresh request that is worthless once stale,
+// so it keeps a short 2-minute window. Workout-session mutations
+// (log_set / start / end / swap / add) are durable facts the user
+// performed on the watch: a phone that was offline for days must still
+// replay them on next launch, hence the 7-day window. Day-scoped logs
+// (toggle_meal / log_hydration / supplements) keep 24h since they are
+// only meaningful for the day they were taken.
+private let staleWorkoutCommandWindowMs: Double = 7 * 24 * 60 * 60 * 1000
 private let staleQueuedCommandWindowMs: Double = 24 * 60 * 60 * 1000
 private let stalePullStateCommandWindowMs: Double = 2 * 60 * 1000
 private let pullStateDispatchCooldownMs: Double = 3 * 1000
 private let maxQueuedCommandEvents = 50
+private let snapshotSchemaVersion = 1
 
 public class ThalloWatchBridgeModule: Module {
     private let sessionHolder = _SessionHolder()
@@ -88,6 +98,10 @@ public class ThalloWatchBridgeModule: Module {
             return self.sessionHolder.sendContext(["theme": palette], realtimeKind: "theme")
         }
 
+        AsyncFunction("syncCellularAuth") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["cellular": payload], realtimeKind: "cellular")
+        }
+
         AsyncFunction("syncMeals") { (payload: [String: Any]) -> Bool in
             return self.sessionHolder.sendContext(["meals": payload], realtimeKind: "meals")
         }
@@ -100,6 +114,14 @@ public class ThalloWatchBridgeModule: Module {
             return self.sessionHolder.sendContext(["hydration": payload], realtimeKind: "hydration")
         }
 
+        AsyncFunction("syncActivity") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["activity": payload], realtimeKind: "activity")
+        }
+
+        AsyncFunction("syncLifestyle") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["lifestyle": payload], realtimeKind: "lifestyle")
+        }
+
         AsyncFunction("syncSleep") { (payload: [String: Any]) -> Bool in
             return self.sessionHolder.sendContext(["sleep": payload], realtimeKind: "sleep")
         }
@@ -110,6 +132,13 @@ public class ThalloWatchBridgeModule: Module {
 
         AsyncFunction("syncWeight") { (payload: [String: Any]) -> Bool in
             return self.sessionHolder.sendContext(["weight": payload], realtimeKind: "weight")
+        }
+
+        // Saved-templates list for the watch's Strength picker. Stored
+        // in applicationContext so a cold watch launch can hydrate
+        // immediately; no realtime push (the list rarely changes).
+        AsyncFunction("syncTemplates") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["templates": payload], realtimeKind: "templates")
         }
 
         // Push parsed meal items to the watch for review after speech transcription.
@@ -152,6 +181,8 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private let queuedCommandsKey = "thallo.watchBridge.queuedCommands"
     private let legacyQueuedHydrationCommandsKey = "thallo.watchBridge.queuedHydrationCommands"
     private let recentCommandIdsKey = "thallo.watchBridge.recentCommandIds"
+    private let lastSnapshotKey = "thallo.watchBridge.lastSnapshot"
+    private let snapshotVersionKey = "thallo.watchBridge.snapshotVersion"
     private var dispatchEvent: ((String, [String: Any]) -> Void)?
     private var userId: String?
     private var commandListenerCount = 0
@@ -165,6 +196,8 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private var recentCommandIdSet: Set<String> = []
     private var recentCommandIdsLoaded = false
     private var lastPullStateDispatchedAtMs: Double = 0
+    private var snapshotVersionSequence: Int = 0
+    private var lifecycleObserverTokens: [NSObjectProtocol] = []
 
     func setUserId(_ id: String?) {
         withOutboundLock { self.userId = id }
@@ -182,11 +215,13 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         let queued = compactQueuedCommandEvents(queuedCommands + loadQueuedCommands())
         queuedCommands.removeAll()
         saveQueuedCommands([])
+        logDiag("command.drained", ["count": queued.count])
         return queued
     }
 
     func activate(sendEvent: @escaping (String, [String: Any]) -> Void) {
         self.dispatchEvent = sendEvent
+        installLifecycleObservers()
         guard WCSession.isSupported() else {
             os_log("[wc-bridge] WCSession not supported on this device", log: wcLog, type: .error)
             return
@@ -194,7 +229,14 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         let s = WCSession.default
         s.delegate = self
         withOutboundLock {
-            self.latestApplicationContext = s.applicationContext
+            self.snapshotVersionSequence = UserDefaults.standard.integer(forKey: self.snapshotVersionKey)
+            // Prefer the OS-persisted applicationContext (authoritative
+            // last write). If it is empty — e.g. a context write never
+            // succeeded — fall back to the snapshot the bridge persisted
+            // itself, so a cold / background launch can still answer the
+            // watch from cache before React Native is running.
+            let osContext = s.applicationContext
+            self.latestApplicationContext = osContext.isEmpty ? self.loadPersistedSnapshot() : osContext
         }
         os_log("[wc-bridge] activate called, preState=%d, paired=%d, reachable=%d", log: wcLog, type: .default, s.activationState.rawValue, s.isPaired ? 1 : 0, s.isReachable ? 1 : 0)
         logDiag("activate.called", [
@@ -224,9 +266,20 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         return result
     }
 
+    // Structured bridge telemetry. Previously a no-op; now emits to the
+    // unified log so the watch-sync command lifecycle (received / queued /
+    // drained / deduped / dropped / snapshot published) is inspectable
+    // from Console.app and sysdiagnose without a debugger attached.
     private func logDiag(_ event: String, _ extra: [String: Any] = [:]) {
-        _ = event
-        _ = extra
+        if extra.isEmpty {
+            os_log("[wc-bridge] %{public}@", log: wcLog, type: .default, event)
+            return
+        }
+        let detail = extra
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+            .joined(separator: " ")
+        os_log("[wc-bridge] %{public}@ %{public}@", log: wcLog, type: .default, event, detail)
     }
 
     private func stampUserId(_ dict: inout [String: Any]) {
@@ -283,10 +336,12 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             } else {
                 merged.removeValue(forKey: "userId")
             }
+            stampSnapshotMeta(&merged, source: realtimeKind)
             do {
                 try s.updateApplicationContext(merged)
                 latestApplicationContext = merged
-                logDiag("sendContext.updated", [
+                persistLatestSnapshot(merged)
+                logDiag("snapshot.published", [
                     "keys": cleaned.keys.sorted().joined(separator: ","),
                     "bytes": approximateBytes(cleaned),
                 ])
@@ -383,8 +438,10 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 } else {
                     merged.removeValue(forKey: "userId")
                 }
+                stampSnapshotMeta(&merged, source: "progress")
                 try s.updateApplicationContext(merged)
                 latestApplicationContext = merged
+                persistLatestSnapshot(merged)
                 logDiag("sendProgress.updated", [
                     "revision": stamped["progressRevision"] ?? "",
                     "sessionId": stamped["sessionId"] ?? "",
@@ -448,6 +505,75 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                     _ = sendMessageActivated(stamped, session: s)
                 }
             }
+        }
+    }
+
+    // MARK: Snapshot cache
+
+    /// Stamp a transport envelope onto the outbound snapshot so the watch
+    /// — and anyone reading the logs — can tell which version of phone
+    /// state it is looking at and where it came from. Watch-side `Codable`
+    /// decoders ignore the unknown `_meta` key, so this is purely additive.
+    private func stampSnapshotMeta(_ dict: inout [String: Any], source: String?) {
+        snapshotVersionSequence += 1
+        var meta: [String: Any] = [
+            "schemaVersion": snapshotSchemaVersion,
+            "snapshotVersion": snapshotVersionSequence,
+            "generatedAt": Date().timeIntervalSince1970 * 1000,
+            "source": "phone-bridge",
+        ]
+        if let source, !source.isEmpty { meta["channel"] = source }
+        dict["_meta"] = meta
+        UserDefaults.standard.set(snapshotVersionSequence, forKey: snapshotVersionKey)
+    }
+
+    /// Persist the latest merged snapshot so a cold / background launch
+    /// can answer the watch even before React Native is running. iOS
+    /// already persists `applicationContext`; this is a belt-and-braces
+    /// copy for the case where the context write itself failed.
+    private func persistLatestSnapshot(_ snapshot: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(snapshot),
+              let data = try? JSONSerialization.data(withJSONObject: snapshot) else { return }
+        UserDefaults.standard.set(data, forKey: lastSnapshotKey)
+    }
+
+    private func loadPersistedSnapshot() -> [String: Any] {
+        guard let data = UserDefaults.standard.data(forKey: lastSnapshotKey),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return dict
+    }
+
+    /// Answer a watch `pull_state` directly from the bridge's cached
+    /// snapshot before JS has a chance to rebuild a fresher one. This keeps
+    /// the watch responsive when the phone app is suspended / backgrounded /
+    /// cold-launching, and it is harmless while JS is active because the JS
+    /// handler follows up with an authoritative snapshot. The snapshot already
+    /// carries its `_meta` from when it was built, so it is re-sent as-is.
+    private func respondToPullStateFromCache() {
+        withOutboundLock {
+            guard WCSession.isSupported() else { return }
+            let s = WCSession.default
+            guard s.activationState == .activated else { return }
+            var snapshot = latestApplicationContext
+            if snapshot.isEmpty { snapshot = loadPersistedSnapshot() }
+            guard !snapshot.isEmpty else {
+                logDiag("pullState.native.noCache")
+                return
+            }
+            do {
+                try s.updateApplicationContext(snapshot)
+                latestApplicationContext = snapshot
+            } catch {
+                os_log("[wc-bridge] pullState native context failed: %{public}@", log: wcLog, type: .error, "\(error)")
+            }
+            if s.isReachable {
+                _ = sendMessageActivated(snapshot, session: s)
+            }
+            logDiag("pullState.native.responded", [
+                "reachable": s.isReachable ? 1 : 0,
+                "keys": snapshot.keys.sorted().joined(separator: ","),
+            ])
         }
     }
 
@@ -560,23 +686,81 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             }
             rememberCommandId(commandId)
         }
+        logDiag("command.received", ["command": cmd])
         var payload = msg
         payload.removeValue(forKey: "kind")
         payload.removeValue(forKey: "command")
         os_log("[wc-bridge] dispatching command=%{public}@ to JS", log: wcLog, type: .default, cmd)
         let event: [String: Any] = ["command": cmd, "payload": payload]
+        if cmd == "pull_state" {
+            // Always answer a watch refresh from the native snapshot cache.
+            // When the phone app is backgrounded, JS listeners can still be
+            // registered even though React Native is suspended; waiting for JS
+            // in that state makes the watch look stale. If JS is actually
+            // active it will still receive the command below and push a fresher
+            // authoritative snapshot immediately after this cached response.
+            respondToPullStateFromCache()
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.commandListenerCount > 0 {
+            if self.commandListenerCount > 0 && self.isApplicationActive {
+                self.logDiag("command.dispatched", ["command": cmd])
                 self.dispatchEvent?("command", event)
             } else {
-                self.queuedCommands.append(event)
-                self.persistQueuedCommand(event)
-                if self.queuedCommands.count > maxQueuedCommandEvents {
-                    self.queuedCommands.removeFirst(self.queuedCommands.count - maxQueuedCommandEvents)
-                }
+                // No JS command listener attached — the phone app is
+                // suspended / backgrounded / cold-launching. Queue durable
+                // commands until the app becomes active; dispatching into a
+                // suspended React Native bridge can silently strand a watch tap.
+                let reason = self.commandListenerCount > 0 ? "background" : "noListener"
+                self.queueCommandEvent(event, command: cmd, reason: reason)
                 os_log("[wc-bridge] queued command=%{public}@ until JS listener attaches", log: wcLog, type: .default, cmd)
             }
+        }
+    }
+
+    private var isApplicationActive: Bool {
+        UIApplication.shared.applicationState == .active
+    }
+
+    private func installLifecycleObservers() {
+        guard lifecycleObserverTokens.isEmpty else { return }
+        let token = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.dispatchQueuedCommandsIfPossible(source: "appActive")
+        }
+        lifecycleObserverTokens.append(token)
+    }
+
+    private func queueCommandEvent(_ event: [String: Any], command: String, reason: String) {
+        queuedCommands.append(event)
+        persistQueuedCommand(event)
+        if queuedCommands.count > maxQueuedCommandEvents {
+            queuedCommands.removeFirst(queuedCommands.count - maxQueuedCommandEvents)
+        }
+        logDiag("command.queued", [
+            "command": command,
+            "depth": queuedCommands.count,
+            "reason": reason,
+        ])
+    }
+
+    private func dispatchQueuedCommandsIfPossible(source: String) {
+        guard commandListenerCount > 0, isApplicationActive else { return }
+        let queued = compactQueuedCommandEvents(queuedCommands + loadQueuedCommands())
+        guard !queued.isEmpty else { return }
+        queuedCommands.removeAll()
+        saveQueuedCommands([])
+        logDiag("command.flushQueuedToJS", [
+            "count": queued.count,
+            "source": source,
+        ])
+        for event in queued {
+            guard let command = event["command"] as? String else { continue }
+            logDiag("command.dispatchedQueued", ["command": command, "source": source])
+            dispatchEvent?("command", event)
         }
     }
 
@@ -619,11 +803,22 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             "log_set",
             "skip_rest",
             "swap_exercise",
+            // add_exercise is a durable mutation: when the watch's
+            // mid-workout Quick-Add fires while the JS listener isn't
+            // attached (phone restart, app launch), it must persist
+            // through UserDefaults so the next ActiveWorkoutScreen
+            // mount drains it. Without this it stays in-memory only
+            // and dies with the process.
+            "add_exercise",
+            "add_circuit",
             "toggle_meal",
             "log_hydration",
+            "log_lifestyle",
             "toggle_supplement",
+            "take_supplement_group",
             "take_all_supplements",
             "log_weight",
+            "parse_meal_speech",
             "confirm_meal_speech",
             "pull_state",
         ]
@@ -676,8 +871,13 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
 
     private func shouldDropDuplicatePullState(_ command: String, _ msg: [String: Any]) -> Bool {
         guard command == "pull_state" else { return false }
+        // Force pulls always pass and do NOT extend the cooldown
+        // window. A force is an explicit "I need fresh state now"
+        // signal — letting it poison the bucket would silently drop
+        // a follow-up non-force pull that the watch sends moments
+        // later (e.g. user taps the refresh strip then locks/unlocks
+        // and the wake-pull arrives within 3s).
         if (msg["force"] as? Bool) == true {
-            lastPullStateDispatchedAtMs = Date().timeIntervalSince1970 * 1000
             return false
         }
         let nowMs = Date().timeIntervalSince1970 * 1000
@@ -698,6 +898,8 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             "log_set",
             "swap_exercise",
             "skip_rest",
+            "add_exercise",
+            "add_circuit",
             "end_workout",
             "cancel_workout",
         ].contains(command)

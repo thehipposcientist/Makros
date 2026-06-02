@@ -13,7 +13,7 @@
 import React, { useEffect, useState } from 'react';
 import { Modal, View, Text, TouchableOpacity, ScrollView, Switch, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius, toggleOffTrack } from '../constants/theme';
 import { AppThemeName } from '../types';
 import {
   loadReminderSettings,
@@ -195,8 +195,8 @@ function ReminderBlock(props: {
         <Switch
           value={props.enabled}
           onValueChange={props.onToggle}
-          trackColor={{ false: tc.border, true: tc.primary + '55' }}
-          thumbColor={props.enabled ? tc.primary : tc.textMuted}
+          trackColor={{ false: toggleOffTrack(tc), true: tc.primary + '55' }}
+          thumbColor={props.enabled ? tc.primary : '#FFFFFF'}
         />
       </View>
 
@@ -290,8 +290,8 @@ function ReminderBlock(props: {
             <Switch
               value={props.skipFlag}
               onValueChange={props.onSkipToggle}
-              trackColor={{ false: tc.border, true: tc.primary + '55' }}
-              thumbColor={props.skipFlag ? tc.primary : tc.textMuted}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary + '55' }}
+              thumbColor={props.skipFlag ? tc.primary : '#FFFFFF'}
             />
           </View>
         </>

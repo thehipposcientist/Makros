@@ -14,8 +14,9 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.models import (
     RecoveryActivity, RecoveryActivityCreate,
-    User, WeeklyCheckIn, WeeklyCheckInCreate,
+    User, WeeklyCheckIn, WeeklyCheckInCreate, WorkoutCompletion,
 )
+from app.services.insights.insight_engine import collect_recovery_modalities
 
 
 def _ok(label: str) -> None:
@@ -161,6 +162,34 @@ def test_recovery_activity_filtering_by_modality():
     _ok(f"filter by modality='cold_plunge' returns 2 of 4 rows")
 
 
+def test_recovery_modality_insights_read_manual_activity_logs():
+    """Manual recovery completions feed the modality-response insight stream."""
+    print("\n[test] recovery: manual activity logs feed modality insights")
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as s:
+        _seed_user(s, user_id=6)
+        s.add(WorkoutCompletion(
+            user_id=6,
+            workout_date=today,
+            focus_label="Recovery",
+            duration_seconds=15 * 60,
+            activity_category="recovery",
+            activity_subtype="finnish_sauna",
+            activity_intensity="easy",
+            source_context="manual_activity",
+        ))
+        s.commit()
+
+        summary = collect_recovery_modalities(s, 6, days=7)
+
+    assert summary.activity_count == 1
+    assert today in summary.modality_dates["sauna"]
+    assert summary.modality_minutes["sauna"] == 15
+    assert "finnish_sauna" not in summary.modality_dates
+    _ok("manual finnish_sauna completion normalized to sauna insight input")
+
+
 def test_recovery_router_known_modalities_normalized():
     """Endpoint normalizes unknown modalities to 'other' rather than 422
     (forward-compat for taxonomy growth)."""
@@ -182,6 +211,7 @@ cases = [
     test_recovery_activity_persisted,
     test_recovery_activity_create_payload_validates,
     test_recovery_activity_filtering_by_modality,
+    test_recovery_modality_insights_read_manual_activity_logs,
     test_recovery_router_known_modalities_normalized,
 ]
 

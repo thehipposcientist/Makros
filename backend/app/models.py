@@ -1,12 +1,15 @@
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint, Index, text, Date
+from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint, Index, text, Date, Text
 from datetime import datetime, date, timezone
+from typing import Any
 
 from app.enums import (
-    GoalType, GoalPace, Gender, MealType,
+    SubscriptionTier, GoalType, GoalPace, Gender, MealType,
     EquipmentType, MuscleGroup, WorkoutSource, MealSource, FoodCategory,
     FoodSource, ExerciseType, EquipmentRole,
 )
+
+DateType = date
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -36,7 +39,18 @@ class User(SQLModel, table=True):
     password_reset_token_hash: str | None = Field(default=None)
     password_reset_expires_at: datetime | None = Field(default=None)
     account_deleted_at: datetime | None = Field(default=None)
-    subscription_tier: str = Field(default="free", index=True)
+    subscription_tier: str = Field(default=SubscriptionTier.FREE.value, index=True)
+    subscription_status: str | None = Field(default=None, index=True)
+    subscription_source: str | None = Field(default=None, index=True)
+    subscription_product_id: str | None = Field(default=None)
+    subscription_entitlement_id: str | None = Field(default=None)
+    subscription_store: str | None = Field(default=None)
+    subscription_environment: str | None = Field(default=None)
+    subscription_expires_at: datetime | None = Field(default=None, index=True)
+    trial_started_at: datetime | None = Field(default=None)
+    trial_ends_at: datetime | None = Field(default=None, index=True)
+    revenuecat_original_app_user_id: str | None = Field(default=None, index=True)
+    revenuecat_original_transaction_id: str | None = Field(default=None, index=True)
     apple_sub: str | None = Field(default=None, unique=True, index=True)
     google_sub: str | None = Field(default=None, unique=True, index=True)
     # Bumped on logout, password change, and password reset. Encoded as
@@ -57,6 +71,24 @@ class User(SQLModel, table=True):
     plan_cadence_anchor: date | None = Field(default=None)
 
 
+class LegalAcceptanceEvent(SQLModel, table=True):
+    __tablename__ = "legal_acceptance_events"
+    __table_args__ = (
+        Index("ix_legal_acceptance_user_accepted", "user_id", "accepted_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    legal_version: str = Field(index=True)
+    source: str = Field(index=True)
+    accepted_terms: bool = Field(default=True)
+    accepted_privacy: bool = Field(default=True)
+    accepted_health_disclaimer: bool = Field(default=True)
+    accepted_ai_disclaimer: bool = Field(default=True)
+    client_ip: str | None = Field(default=None)
+    user_agent: str | None = Field(default=None)
+    accepted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 class ClientTelemetryEvent(SQLModel, table=True):
     __tablename__ = "client_telemetry_events"
     id: int | None = Field(default=None, primary_key=True)
@@ -67,6 +99,44 @@ class ClientTelemetryEvent(SQLModel, table=True):
     app_version: str | None = Field(default=None)
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
+class WatchDevice(SQLModel, table=True):
+    __tablename__ = "watch_devices"
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", name="uq_watch_device_user_device"),
+        Index("ix_watch_device_user_active", "user_id", "revoked_at", "expires_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    device_id: str = Field(index=True)
+    token_hash: str = Field(unique=True, index=True)
+    issued_token_version: int = Field(default=0)
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    expires_at: datetime = Field(index=True)
+    revoked_at: datetime | None = Field(default=None, index=True)
+    last_seen_at: datetime | None = Field(default=None)
+    last_app_version: str | None = Field(default=None)
+    last_seen_ip: str | None = Field(default=None)
+
+
+class WatchCommandEvent(SQLModel, table=True):
+    __tablename__ = "watch_command_events"
+    __table_args__ = (
+        UniqueConstraint("user_id", "command_id", name="uq_watch_command_user_command"),
+        Index("ix_watch_command_user_created", "user_id", "created_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    watch_device_id: int | None = Field(default=None, foreign_key="watch_devices.id", index=True)
+    command_id: str = Field(index=True)
+    command: str = Field(index=True)
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    status: str = Field(default="received", index=True)
+    result_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    error: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    applied_at: datetime | None = Field(default=None)
 
 
 class AIUsageEvent(SQLModel, table=True):
@@ -92,6 +162,22 @@ class AIUsageEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 
+class BillingEvent(SQLModel, table=True):
+    __tablename__ = "billing_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "event_id", name="uq_billing_event_provider_event"),
+        Index("ix_billing_event_user_processed", "user_id", "processed_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    provider: str = Field(index=True)
+    event_id: str = Field(index=True)
+    event_type: str = Field(index=True)
+    app_user_id: str | None = Field(default=None, index=True)
+    user_id: int | None = Field(default=None, foreign_key="user.id", index=True)
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    processed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 # ─── User profile / stats ─────────────────────────────────────────────────────
 
 class UserProfile(SQLModel, table=True):
@@ -108,6 +194,11 @@ class UserProfile(SQLModel, table=True):
     age: int
     birthdate: date | None = Field(default=None, sa_column=Column(Date, nullable=True))
     gender: Gender = Field(sa_column=Column(SAEnum(Gender), nullable=False))
+    # Display-unit preferences. Storage of the values themselves stays canonical
+    # (lbs, miles, ft+in). Null = defaults (imperial: lbs / mi / in).
+    weight_unit: str | None = Field(default=None)    # 'lbs' | 'kg'
+    distance_unit: str | None = Field(default=None)  # 'mi'  | 'km'
+    height_unit: str | None = Field(default=None)    # 'in'  | 'cm'
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -132,6 +223,13 @@ class UserGoal(SQLModel, table=True):
     timeline_weeks: int | None = Field(default=None)
     is_active: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Baselines snapshotted when the goal row is created. Persisted so
+    # "fat lost since goal start" survives later weight/scan logging gaps —
+    # without these, computing progress relies on the earliest available
+    # entry, which silently shifts if the user back-logs a weigh-in.
+    start_weight_lbs: float | None = Field(default=None)
+    start_body_fat_pct: float | None = Field(default=None)
+    start_scan_id: int | None = Field(default=None, foreign_key="body_scans.id")
 
 
 class UserPreferences(SQLModel, table=True):
@@ -142,6 +240,15 @@ class UserPreferences(SQLModel, table=True):
     workout_duration_minutes: int | None = Field(default=None)
     core_frequency_per_week: int | None = Field(default=None)
     preferred_split: str | None = Field(default=None)
+    # Lifestyle activity outside of planned training. Drives a TDEE
+    # multiplier nudge in calorie_calculator.step_2b. Without this, the
+    # TDEE chain treats every user with the same training schedule
+    # identically — a desk worker and a construction worker who both
+    # lift 4×/wk would get the same maintenance calories, which is
+    # wrong by ~300–500 kcal/day. Values: "sedentary" | "light" |
+    # "moderate" | "active" | "very_active". None means "unknown / not
+    # asked yet" and the modifier is skipped (preserves legacy TDEE).
+    lifestyle_activity: str | None = Field(default=None)
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
     training_day_pattern: list | None = Field(default=None, sa_column=Column(JSON))
@@ -149,7 +256,53 @@ class UserPreferences(SQLModel, table=True):
     strength_baselines: dict | None = Field(default=None, sa_column=Column(JSON))
     cardio_baseline: dict | None = Field(default=None, sa_column=Column(JSON))
     foods_available: list = Field(default_factory=list, sa_column=Column(JSON))
+    # Legacy free-text injury list (one flattened string per injury). Kept
+    # for backward compatibility and as the substring-match fallback for
+    # the planner. New writes should populate injuries_structured below.
     injuries: list = Field(default_factory=list, sa_column=Column(JSON))
+    # Severity-aware structured records (one dict per active/recovering
+    # injury). Each item: {bodyPart, status, severity, muscleGroups,
+    # estimatedRecoveryDate}. The planner prefers this over the legacy
+    # strings; both can coexist (planner unions them — see
+    # planner._injury_blocked_patterns_combined).
+    injuries_structured: list = Field(default_factory=list, sa_column=Column(JSON))
+    # Manual mode (Pro-only): when on, the planner stops auto-generating
+    # workouts/meals; the user assembles their own week from saved
+    # templates (workout) or just logs freely against daily targets (meal).
+    # See backend/app/routers/profile.py::set_manual_mode and the
+    # auto_renew gate in week_manager.auto_renew_week.
+    workout_manual_mode: bool = Field(default=False)
+    meal_manual_mode: bool = Field(default=False)
+    # In-flight data imports from competitor apps. Each entry is a dict
+    # with shape:
+    #   { source: str,           # "myfitnesspal" | "cronometer" | "hevy"
+    #                            # | "strong" | "strava"
+    #     requested_at: str,     # ISO date — when the user tapped
+    #                            # "Open <app>" during onboarding
+    #     notified_at: str|null, # ISO date — last reminder notification
+    #     completed_at: str|null,# ISO date — when the actual import finished
+    #     dismissed_at: str|null }# ISO date — user dismissed the banner
+    # The list is patched as a whole on every PATCH /profile/preferences
+    # write (frontend manages the entry lifecycle). Banners and reminder
+    # notifications read this list to know what to surface.
+    pending_imports: list = Field(default_factory=list, sa_column=Column(JSON))
+    # Optional Health Insights profile facts. Defaults keep existing users
+    # in the "unknown / not opted in" state until they deliberately provide
+    # more context.
+    kidney_stone_history: str = Field(default="unknown")  # true | false | unknown
+    stone_type: str | None = Field(default=None)          # calcium_oxalate | uric_acid | struvite | cystine | unknown
+    stone_history_source: str | None = Field(default=None)  # self_reported | clinician_confirmed | unknown
+    stone_history_updated_at: datetime | None = Field(default=None)
+    reproductive_health_opt_in: bool = Field(default=False)
+    cycle_tracking_enabled: bool = Field(default=False)
+    trying_to_conceive: bool | None = Field(default=None)
+    pregnancy_status: str | None = Field(default=None)
+    known_pcos: bool | None = Field(default=None)
+    known_endometriosis: bool | None = Field(default=None)
+    gestational_diabetes_history: bool | None = Field(default=None)
+    glp1_support: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    sun_exposure_preferences: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    custom_macros: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -159,6 +312,8 @@ class UserCoachingState(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
     calorie_adjustment: int = Field(default=0)    # daily calories delta from baseline
     volume_adjustment_pct: int = Field(default=0) # training volume delta percentage
+    muscle_volume_adjustments: dict | None = Field(default=None, sa_column=Column(JSON))
+    intensity_adjustment_pct: int = Field(default=0)
     deload_until_date: date | None = Field(default=None)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -173,25 +328,19 @@ class UserDayState(SQLModel, table=True):
     skip_reason: str | None = Field(default=None)
     meal_checks: dict = Field(default_factory=dict, sa_column=Column(JSON))
     nutrition_plan: dict | None = Field(default=None, sa_column=Column(JSON))
+    nutrition_log_status: str | None = Field(default=None, index=True)
+    nutrition_log_status_source: str | None = Field(default=None)
+    nutrition_log_status_updated_at: datetime | None = Field(default=None)
     macro_overrides: dict | None = Field(default=None, sa_column=Column(JSON))
+    pain_present: bool | None = Field(default=None)
+    pain_body_part: str | None = Field(default=None)
+    pain_side: str | None = Field(default=None)
+    pain_severity_0_10: int | None = Field(default=None)
+    soreness_body_part: str | None = Field(default=None)
+    soreness_severity_0_10: int | None = Field(default=None)
+    pain_note: str | None = Field(default=None)
+    onset_context: str | None = Field(default=None)  # workout | daily_activity | unknown
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class SupplementAICache(SQLModel, table=True):
-    """Per-user cache for AI-generated supplement recommendations.
-
-    Signature-based invalidation: if `signature` matches the current
-    user state (goal + stack + age decade + diet shape) AND
-    `generated_at` is within TTL, return cached recs. Otherwise
-    regenerate. Keeps AI cost predictable and load instant.
-    """
-    __tablename__ = "supplement_ai_cache"
-    __table_args__ = (UniqueConstraint("user_id", name="uq_supplement_ai_cache_user"),)
-    id: int | None = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
-    signature: str = Field(default="")          # input-hash for invalidation
-    recs_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class SleepLog(SQLModel, table=True):
@@ -268,18 +417,27 @@ class DailyHealthSnapshot(SQLModel, table=True):
     # Activity + steps
     steps: int | None = Field(default=None)
     active_energy_kcal: float | None = Field(default=None)
+    basal_energy_kcal: float | None = Field(default=None)
     workout_minutes: int | None = Field(default=None)
-    cardio_minutes: int | None = Field(default=None)         # any HR-elevated activity
-    zone2_minutes: int | None = Field(default=None)          # specifically Z2
+    cardio_minutes: int | None = Field(default=None)         # cardio-classified workout minutes only
+    zone2_minutes: int | None = Field(default=None)          # Z2 minutes from cardio-classified workouts only
     # Cardiovascular
     resting_hr: float | None = Field(default=None)
     hrv_ms: float | None = Field(default=None)
     vo2_max: float | None = Field(default=None)
+    respiratory_rate: float | None = Field(default=None)
+    oxygen_saturation: float | None = Field(default=None)
+    wrist_temperature_c: float | None = Field(default=None)
+    sleep_breathing_disturbances: float | None = Field(default=None)
+    sleep_breathing_disturbances_elevated: bool | None = Field(default=None)
     # Body
     weight_lbs: float | None = Field(default=None)
     # Optional readiness composite (computed phone-side)
     readiness_score: int | None = Field(default=None)
     source: str = Field(default="apple_health")
+    # Optional per-provider/per-field provenance. Example:
+    # {"providers": ["apple_health", "oura"], "fields": {"hrv_ms": "oura"}}
+    source_details: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -290,15 +448,150 @@ class DailyHealthSnapshotUpsert(SQLModel):
     snapshot_date: date
     steps: int | None = None
     active_energy_kcal: float | None = None
+    basal_energy_kcal: float | None = None
     workout_minutes: int | None = None
     cardio_minutes: int | None = None
     zone2_minutes: int | None = None
     resting_hr: float | None = None
     hrv_ms: float | None = None
     vo2_max: float | None = None
+    respiratory_rate: float | None = None
+    oxygen_saturation: float | None = None
+    wrist_temperature_c: float | None = None
+    sleep_breathing_disturbances: float | None = None
+    sleep_breathing_disturbances_elevated: bool | None = None
     weight_lbs: float | None = None
     readiness_score: int | None = None
     source: str | None = None
+    source_details: dict | None = None
+
+
+class DailyStressSummary(SQLModel, table=True):
+    """One client-computed daily stress summary per user.
+
+    The timeline card models stress across the day from logged meals,
+    workouts/activity, and optional heart-rate samples. Persisting the
+    daily average lets the UI compare today against the user's own
+    baseline without treating stress as a planner mutation.
+    """
+    __tablename__ = "daily_stress_summaries"
+    __table_args__ = (
+        UniqueConstraint("user_id", "summary_date", name="uq_daily_stress_summary"),
+        Index("ix_daily_stress_user_date", "user_id", "summary_date"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    summary_date: date = Field(index=True)
+    avg_stress: float = Field(default=0)
+    max_stress: float | None = Field(default=None)
+    latest_stress: float | None = Field(default=None)
+    sample_count: int = Field(default=0)
+    source_count: int = Field(default=0)
+    source: str = Field(default="thallo_estimate")
+    source_details: dict | None = Field(default=None, sa_column=Column(JSON))
+    computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class DailyStressSummaryUpsert(SQLModel):
+    summary_date: date
+    avg_stress: float
+    max_stress: float | None = None
+    latest_stress: float | None = None
+    sample_count: int | None = None
+    source_count: int | None = None
+    source: str | None = None
+    source_details: dict | None = None
+    computed_at: datetime | None = None
+
+
+class DailyLifestyleLog(SQLModel, table=True):
+    """Optional private daily context entered by the user.
+
+    These rows explain recovery, sleep, digestion, and nutrition patterns.
+    They are never required for core app behavior and are not shared across
+    social surfaces.
+    """
+    __tablename__ = "daily_lifestyle_logs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "local_date", name="uq_daily_lifestyle_log_user_date"),
+        Index("ix_daily_lifestyle_logs_user_date", "user_id", "local_date"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    local_date: date = Field(index=True)
+    alcohol_level: str | None = Field(default=None, index=True)
+    alcohol_drinks: float | None = Field(default=None)
+    alcohol_timing: str | None = Field(default=None)
+    cannabis_level: str | None = Field(default=None, index=True)
+    cannabis_timing: str | None = Field(default=None)
+    bowel_movement_count: int | None = Field(default=None)
+    bowel_consistency: str | None = Field(default=None)
+    stress_level: str | None = Field(default=None, index=True)
+    illness_state: str | None = Field(default=None, index=True)
+    caffeine_mg: float | None = Field(default=None)
+    caffeine_timing: str | None = Field(default=None)
+    late_caffeine: bool | None = Field(default=None)
+    appetite: str | None = Field(default=None, index=True)
+    notes: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    source: str = Field(default="manual", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class HealthLabResult(SQLModel, table=True):
+    """Optional user-entered/imported lab result for cardiometabolic context.
+
+    Insight cards may use these as stronger screening context, but never as
+    diagnoses. Rows are sparse and additive so frontend collection can arrive
+    later without changing existing health snapshot behavior.
+    """
+    __tablename__ = "health_lab_results"
+    __table_args__ = (
+        Index("ix_health_lab_user_type_collected", "user_id", "lab_type", "collected_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    lab_type: str = Field(index=True)  # a1c | fasting_glucose | ldl | hdl | triglycerides | ...
+    value: float
+    unit: str
+    collected_at: datetime = Field(index=True)
+    source: str = Field(default="manual")  # manual | scan | imported | clinician | unknown
+    reference_range_low: float | None = Field(default=None)
+    reference_range_high: float | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CycleLog(SQLModel, table=True):
+    """Opt-in reproductive-health cycle entry.
+
+    This table is deliberately separate from generic health snapshots so cycle
+    insights can stay gated by explicit preferences and can be deleted/exported
+    independently later.
+    """
+    __tablename__ = "cycle_logs"
+    __table_args__ = (
+        Index("ix_cycle_logs_user_period_start", "user_id", "period_start_date"),
+        Index("ix_cycle_logs_user_log_date", "user_id", "log_date"),
+        UniqueConstraint("user_id", "log_date", name="uq_cycle_logs_user_log_date"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    log_date: date | None = Field(default=None, index=True)
+    period_start_date: date = Field(index=True)
+    period_end_date: date | None = Field(default=None)
+    phase: str | None = Field(default=None)
+    cycle_day: int | None = Field(default=None)
+    cycle_length: int | None = Field(default=None)
+    symptoms: list = Field(default_factory=list, sa_column=Column(JSON))
+    flow_level: str | None = Field(default=None)
+    cramps: str | None = Field(default=None)
+    energy: str | None = Field(default=None)
+    training_action: str | None = Field(default=None)
+    ovulation_estimate_source: str = Field(default="unknown")  # manual | predicted | test | unknown
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class WeeklyCheckIn(SQLModel, table=True):
@@ -352,6 +645,29 @@ class PlanWeekCheckin(SQLModel, table=True):
     ai_delta: dict | None = Field(default=None, sa_column=Column(JSON))
     commitments_json: list | None = Field(default=None, sa_column=Column(JSON))
     plan_goal: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class FitnessScoreSnapshot(SQLModel, table=True):
+    """One persisted Thallo-score reading per user per day.
+
+    `/ai/fitness/composite-score` upserts today's row on every call;
+    the headline `total` it returns is the average of these rows over
+    the last 28 days (or however many exist for a newer user). The
+    per-pillar columns are stored for future per-pillar smoothing —
+    today the endpoint only averages `total`."""
+    __tablename__ = "fitness_score_snapshots"
+    __table_args__ = (
+        UniqueConstraint("user_id", "snapshot_date", name="uq_fitness_score_snapshot"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    snapshot_date: date = Field(sa_column=Column(Date, nullable=False))
+    total: float
+    strength: float
+    cardio: float
+    consistency: float
+    recovery: float
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -412,6 +728,8 @@ class DailyRollup(SQLModel, table=True):
     carbs_g: float = Field(default=0)
     fat_g: float = Field(default=0)
     meals_logged: int = Field(default=0)
+    nutrition_log_status: str = Field(default="unknown", index=True)
+    nutrition_log_confidence: float = Field(default=0)
     # Targets snapshot (from active plan at time of rollup)
     kcal_target: float | None = Field(default=None)
     protein_target_g: float | None = Field(default=None)
@@ -442,9 +760,9 @@ class UserRollup(SQLModel, table=True):
     # Nutrition
     kcal_avg: float | None = Field(default=None)
     kcal_target_delta_pct: float | None = Field(default=None)
-    protein_adherence_pct: float | None = Field(default=None)  # % of days ≥85% of target
+    protein_adherence_pct: float | None = Field(default=None)  # % of days >=95% of target
     days_logged: int = Field(default=0)
-    adherence_pct: float | None = Field(default=None)          # % of days within ±15% of kcal target
+    adherence_pct: float | None = Field(default=None)          # % of days within +/-5% of kcal target
     # Training
     sessions_planned: int = Field(default=0)
     sessions_completed: int = Field(default=0)
@@ -642,6 +960,13 @@ class BodyScan(SQLModel, table=True):
     improvements: list = Field(default_factory=list, sa_column=Column(JSON))
     assessment: str | None = Field(default=None)
     disclaimer: str | None = Field(default=None)
+    confidence: str | None = Field(default=None)          # high / medium / low
+    photo_quality: str | None = Field(default=None)       # good / usable / poor
+    quality_flags: list = Field(default_factory=list, sa_column=Column(JSON))
+    needs_retake: bool = Field(default=False)
+    method: str | None = Field(default=None)
+    visual_estimate_pct: float | None = Field(default=None)
+    measurement_estimate_pct: float | None = Field(default=None)
     weight_lbs: float | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
@@ -701,10 +1026,29 @@ class Exercise(SQLModel, table=True):
     # "Watch demo on YouTube" search card in the client. Only the ~50
     # most-used exercises need curation — everything else uses search.
     video_id: str | None = Field(default=None)
+    # free-exercise-db identifier (e.g. "Barbell_Bench_Press_-_Medium_Grip").
+    # Resolved at seed time by name normalization. Drives the in-app form
+    # demo card — two real photo frames cycled on the FormVideoModal and
+    # used as the thumbnail on ExerciseVideoCard. Null = no match in the
+    # public dataset; client falls back to the YouTube thumbnail.
+    demo_exercise_db_id: str | None = Field(default=None)
     # "reps" (default) | "time" | "distance" | "calories". Lets the planner
     # and the client pick the right rep-target string ("30-45s", "20-30 yds")
     # instead of defaulting to goal-based rep counts for holds / carries.
     default_tracking_mode: str = Field(default="reps")
+    # Guided-flow ordering tag for stretches / yoga / foam-roll poses.
+    # Values: "warm" | "standing" | "floor" | "cool" | "breath" | "foam_roll" | None.
+    # Drives generate_yoga_day ordering and the GuidedFlowView swap filter.
+    flow_category: str | None = Field(default=None)
+    # Fine-grained muscle emphasis — display-layer only, orthogonal to
+    # `primary_muscle` + `secondary_muscles` (which drive the 12-bucket
+    # fatigue model). Values are from a fixed taxonomy in
+    # `services/workout/emphasis_inference.py::EMPHASIS_TAGS` (e.g.
+    # "front_delt", "side_delt", "rear_delt", "lats", "upper_back",
+    # "traps", "upper_chest", "lower_chest", "brachialis", etc.). The
+    # planner does NOT read this field — it's only surfaced in library
+    # detail UI + filter chips. Errors here are cosmetic.
+    emphasis: list = Field(default_factory=list, sa_column=Column(JSON))
 
 
 # ─── Food library ─────────────────────────────────────────────────────────────
@@ -828,6 +1172,51 @@ class UserRecentFood(SQLModel, table=True):
     last_used_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class FoodSubmission(SQLModel, table=True):
+    """User-submitted food awaiting review before it can become global.
+
+    Submitted foods are immediately saved as private `Food` rows so the user
+    can reuse them, while this row preserves the review/audit payload needed
+    to promote the item later without leaking unreviewed data into the shared
+    catalog.
+    """
+    __tablename__ = "food_submissions"
+    __table_args__ = (
+        Index("ix_food_submissions_status_created", "status", "created_at"),
+        Index("ix_food_submissions_user_status", "user_id", "status"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    food_id: int | None = Field(default=None, foreign_key="foods.id", index=True)
+    linked_food_id: int | None = Field(default=None, foreign_key="foods.id", index=True)
+    status: str = Field(default="pending", index=True)  # pending, approved, rejected
+    source_context: str = Field(default="manual")       # manual, barcode, label_photo, search_gap
+    name: str
+    normalized_name: str = Field(default="", index=True)
+    brand: str | None = Field(default=None)
+    barcode: str | None = Field(default=None, index=True)
+    serving_label: str = Field(default="1 serving")
+    serving_grams: float | None = Field(default=None)
+    calories: float = Field(default=0)
+    protein_g: float = Field(default=0)
+    carbs_g: float = Field(default=0)
+    fat_g: float = Field(default=0)
+    fiber_g: float | None = Field(default=None)
+    sugar_g: float | None = Field(default=None)
+    added_sugar_g: float | None = Field(default=None)
+    sodium_mg: float | None = Field(default=None)
+    micronutrients: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    aliases: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    front_image_url: str | None = Field(default=None)
+    nutrition_label_image_url: str | None = Field(default=None)
+    raw_payload: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    review_note: str | None = Field(default=None)
+    reviewed_by_user_id: int | None = Field(default=None, foreign_key="user.id")
+    reviewed_at: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Equipment library (seeded reference data) ────────────────────────────────
 
 class Equipment(SQLModel, table=True):
@@ -849,6 +1238,50 @@ class ExerciseEquipment(SQLModel, table=True):
     equipment_id: int = Field(foreign_key="equipment.id", index=True)
     required: bool = Field(default=True)
     role: str = Field(default="primary")  # EquipmentRole: primary | support | optional
+
+
+# ─── User-created exercise library ────────────────────────────────────────────
+
+class UserCustomExercise(SQLModel, table=True):
+    """User-scoped exercise rows created manually or from AI search/photo scans.
+
+    These are intentionally separate from the canonical seeded `Exercise`
+    catalog. A scan can make a lift available to one user without polluting the
+    global planner library for everyone else.
+    """
+    __tablename__ = "user_custom_exercises"
+    __table_args__ = (
+        UniqueConstraint("user_id", "normalized_name", name="uq_user_custom_exercise_name"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str
+    normalized_name: str = Field(index=True)
+    primary_muscle: str = Field(default="full_body")
+    secondary_muscles: list = Field(default_factory=list, sa_column=Column(JSON))
+    equipment: str = Field(default="")
+    equipment_slugs: list = Field(default_factory=list, sa_column=Column(JSON))
+    equipment_bucket: str = Field(default="")
+    movement_pattern: str | None = Field(default=None)
+    exercise_type: str = Field(default="strength")
+    default_tracking_mode: str = Field(default="reps")
+    is_compound: bool | None = Field(default=None)
+    image_url: str | None = Field(default=None)
+    video_id: str | None = Field(default=None)
+    demo_exercise_db_id: str | None = Field(default=None)
+    sets: int = Field(default=3)
+    reps: str = Field(default="8-12")
+    rest_seconds: int = Field(default=60)
+    description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    form_cues: list = Field(default_factory=list, sa_column=Column(JSON))
+    aliases: list = Field(default_factory=list, sa_column=Column(JSON))
+    programming_tags: list = Field(default_factory=list, sa_column=Column(JSON))
+    source: str = Field(default="manual")
+    plan_eligible: bool = Field(default=False)
+    ai_confidence: str | None = Field(default=None)
+    validation_status: str = Field(default="needs_review")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── User equipment profiles (capability-aware cardio tracking) ───────────────
@@ -1037,11 +1470,27 @@ class WorkoutCompletion(SQLModel, table=True):
     cardio_style: str | None = Field(default=None)
     distance_miles: float | None = Field(default=None)
     calories_burned: int | None = Field(default=None)
+    # Per-subtype structured detail captured by LogActivityModal: sauna
+    # temperature, cold plunge water temp + immersion depth, breathwork
+    # protocol, climbing grade, yoga style, swim pool length + stroke,
+    # cycling watts + elevation, etc. Shape varies by activity_category +
+    # activity_subtype — see src/types/index.ts ManualActivityDetails.
+    activity_details: dict | None = Field(default=None, sa_column=Column(JSON))
+    # GPS route — list of {lat, lon, t_ms, acc_m, alt_m, v_acc_m} samples captured by
+    # cardioGpsTracker (iPhone) or HKWorkoutRouteBuilder (watch). Drives
+    # the post-workout map summary + the live polyline during the
+    # session. Null for indoor cardio + lifting; up to ~3600 entries
+    # per hour at 1Hz, ~30 KB serialized — well under JSONB limits.
+    route_coords: list | None = Field(default=None, sa_column=Column(JSON))
     hr_summary: dict | None = Field(default=None, sa_column=Column(JSON))
     resolved_muscle_fatigue: dict | None = Field(default=None, sa_column=Column(JSON))
     started_at: datetime | None = Field(default=None)
     ended_at: datetime | None = Field(default=None)
     external_source_id: str | None = Field(default=None, index=True)
+    # Client-supplied idempotency token. Native double-taps/retries should
+    # send the same value so the completion and structured WorkoutSession rows
+    # update in place instead of creating duplicates.
+    idempotency_key: str | None = Field(default=None, index=True)
     # Post-workout feedback. Used by weekly_review for struggle metrics
     # and by the trainer for context. All optional — pre-feedback
     # completions and silent log paths still work.
@@ -1052,7 +1501,185 @@ class WorkoutCompletion(SQLModel, table=True):
     intensity: int | None = Field(default=None)
     soreness_areas: list | None = Field(default=None, sa_column=Column(JSON))
     feedback_notes: str | None = Field(default=None)
+    training_score: int | None = Field(default=None)
+    training_rating: str | None = Field(default=None)
+    training_pillars: dict | None = Field(default=None, sa_column=Column(JSON))
+    training_pillar_breakdown: list | None = Field(default=None, sa_column=Column(JSON))
+    # Edwards' TRIMP (Training Impulse) — cardio session load = sum of
+    # zone-minutes × zone-weight. Null for non-cardio sessions (strength,
+    # mobility) and for cardio sessions that have no `hr_summary.zoneMinutes`
+    # to compute from. Aggregatable across a week the way strength volume is.
+    # See `activity_energy.compute_cardio_load` for the formula + rationale.
+    cardio_load: float | None = Field(default=None)
+    # Import provenance — null for native completions. Set by the
+    # Strong / Strava / Hevy importers. Imported workouts feed fatigue
+    # and progression identically to native ones.
+    import_source: str | None = Field(default=None, index=True)
+    import_batch_id: int | None = Field(default=None, foreign_key="import_batches.id")
+    # Idempotency hash, partial-unique on (user_id, import_hash).
+    import_hash: str | None = Field(default=None)
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ─── Sun exposure estimation ─────────────────────────────────────────────────
+
+class SunExposureSegment(SQLModel, table=True):
+    """Derived, privacy-bounded estimate for a daylight/activity window.
+
+    Raw GPS is deliberately absent. If a workout route is used, the service
+    stores only a coarse geohash/context bucket plus coefficients.
+    """
+    __tablename__ = "sun_exposure_segments"
+    __table_args__ = (
+        Index("ix_sun_exposure_user_start", "user_id", "start_time"),
+        Index("ix_sun_exposure_user_activity", "user_id", "activity_id"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    start_time: datetime = Field(index=True)
+    end_time: datetime
+    duration_minutes: float
+    coarse_location_hash: str | None = Field(default=None, index=True)
+    activity_id: int | None = Field(default=None, foreign_key="workout_completions.id", index=True)
+    uv_index_average: float = Field(default=0.0)
+    uv_index_max: float = Field(default=0.0)
+    light_intensity_lux: float | None = Field(default=None)
+    local_start_minute: int | None = Field(default=None)
+    local_end_minute: int | None = Field(default=None)
+    timezone_offset_minutes: int | None = Field(default=None)
+    daylight: bool = Field(default=True)
+    outdoor_confidence: float = Field(default=0.0)
+    area_context: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    effective_uv_minutes: float = Field(default=0.0)
+    open_sky_equivalent_minutes: float = Field(default=0.0)
+    confidence: str = Field(default="low")
+    source: str = Field(default="coarse_location", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SunExposureCorrection(SQLModel, table=True):
+    __tablename__ = "sun_exposure_corrections"
+    __table_args__ = (
+        Index("ix_sun_exposure_correction_context", "user_id", "context_key"),
+        Index("ix_sun_exposure_correction_segment", "user_id", "segment_id"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    segment_id: int | None = Field(default=None, foreign_key="sun_exposure_segments.id", index=True)
+    correction_type: str = Field(index=True)
+    context_key: str | None = Field(default=None, index=True)
+    area_type: str | None = Field(default=None, index=True)
+    adjusted_sky_exposure_coefficient: float | None = Field(default=None)
+    adjusted_outdoor_confidence: float | None = Field(default=None)
+    notes: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
+# ─── Context-aware health insights ───────────────────────────────────────────
+
+class UserInsightPreferences(SQLModel, table=True):
+    __tablename__ = "user_insight_preferences"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    enable_move_insights: bool = Field(default=False)
+    enable_recovery_insights: bool = Field(default=False)
+    enable_environment_insights: bool = Field(default=False)
+    enable_social_insights: bool = Field(default=False)
+    enable_pattern_insights: bool = Field(default=False)
+    use_coarse_location: bool = Field(default=False)
+    use_workout_routes: bool = Field(default=False)
+    use_weather_environment_data: bool = Field(default=False)
+    use_social_context: bool = Field(default=False)
+    allow_notifications: bool = Field(default=False)
+    allow_occasional_correction_prompts: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ContextInsight(SQLModel, table=True):
+    __tablename__ = "context_insights"
+    __table_args__ = (
+        UniqueConstraint("user_id", "insight_key", name="uq_context_insight_user_key"),
+        Index("ix_context_insight_user_created", "user_id", "created_at"),
+        Index("ix_context_insight_user_category", "user_id", "category"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    insight_key: str = Field(index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    type: str = Field(index=True)
+    category: str = Field(index=True)
+    title: str
+    summary: str = Field(sa_column=Column(Text, nullable=False))
+    recommended_action: str = Field(sa_column=Column(Text, nullable=False))
+    confidence: str = Field(default="low", index=True)
+    data_sources: list = Field(default_factory=list, sa_column=Column(JSON))
+    explanation: str = Field(sa_column=Column(Text, nullable=False))
+    safety_note: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    valid_until: datetime | None = Field(default=None, index=True)
+    dismissed_at: datetime | None = Field(default=None, index=True)
+
+
+class ContextSegment(SQLModel, table=True):
+    __tablename__ = "context_segments"
+    __table_args__ = (
+        Index("ix_context_segment_user_start", "user_id", "start_time"),
+        Index("ix_context_segment_user_place", "user_id", "place_category"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    start_time: datetime = Field(index=True)
+    end_time: datetime
+    coarse_location_hash: str | None = Field(default=None, index=True)
+    place_category: str | None = Field(default=None, index=True)
+    activity_type: str | None = Field(default=None, index=True)
+    workout_id: int | None = Field(default=None, foreign_key="workout_completions.id", index=True)
+    daylight: bool | None = Field(default=None)
+    uv_index: float | None = Field(default=None)
+    air_quality_index: int | None = Field(default=None)
+    temperature: float | None = Field(default=None)
+    humidity: float | None = Field(default=None)
+    elevation_gain_meters: float | None = Field(default=None)
+    steps: int | None = Field(default=None)
+    heart_rate_avg: float | None = Field(default=None)
+    social_context: str | None = Field(default=None)
+    confidence: str = Field(default="low")
+    source: list = Field(default_factory=list, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
+class DailyFeatureSet(SQLModel, table=True):
+    __tablename__ = "daily_feature_sets"
+    __table_args__ = (
+        UniqueConstraint("user_id", "date", name="uq_daily_feature_set_user_date"),
+        Index("ix_daily_feature_set_user_date", "user_id", "date"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    date: DateType = Field(sa_column=Column(Date, nullable=False, index=True))
+    steps: int = Field(default=0)
+    active_minutes: int = Field(default=0)
+    strength_workout_count: int = Field(default=0)
+    weight_bearing_minutes: int = Field(default=0)
+    mobility_minutes: int = Field(default=0)
+    elevation_gain_meters: float = Field(default=0.0)
+    outdoor_daylight_minutes: int = Field(default=0)
+    open_sky_equivalent_minutes: int = Field(default=0)
+    high_uv_minutes: int = Field(default=0)
+    sleep_duration_minutes: int | None = Field(default=None)
+    sleep_consistency_score: float | None = Field(default=None)
+    resting_heart_rate: float | None = Field(default=None)
+    hrv: float | None = Field(default=None)
+    workout_load: float | None = Field(default=None)
+    recovery_score: float | None = Field(default=None)
+    social_activity_count: int | None = Field(default=None)
+    active_commute_minutes: int | None = Field(default=None)
+    sedentary_block_minutes: int | None = Field(default=None)
+    source: list = Field(default_factory=list, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── Workouts ──────────────────────────────────────────────────────────────────
@@ -1073,6 +1700,7 @@ class WorkoutSession(SQLModel, table=True):
     source: WorkoutSource = Field(sa_column=Column(SAEnum(WorkoutSource), nullable=False, default=WorkoutSource.GENERATED))
     notes: str | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
+    external_source_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -1089,6 +1717,11 @@ class WorkoutExercise(SQLModel, table=True):
     primary_muscle_snapshot: str | None = Field(default=None)
     secondary_muscles_snapshot: list | None = Field(default=None, sa_column=Column(JSON))
     is_compound_snapshot: bool | None = Field(default=None)
+    movement_pattern_snapshot: str | None = Field(default=None)
+    impact_level: str | None = Field(default=None)       # low | moderate | high | unknown
+    load_type: str | None = Field(default=None)          # bodyweight | free_weight | machine | cardio | mixed
+    intensity_estimate: float | None = Field(default=None)
+    novelty_flag: bool | None = Field(default=None)
     notes: str | None = Field(default=None)
     target_reps_text: str | None = Field(default=None)  # e.g. "8–12" or "AMRAP"
     rest_seconds: int | None = Field(default=None)
@@ -1126,6 +1759,9 @@ class ExerciseSet(SQLModel, table=True):
     actual_pace: str | None = Field(default=None)
     heart_rate_avg: int | None = Field(default=None)
     cardio_metrics: dict | None = Field(default=None, sa_column=Column(JSON))
+    # Free-form per-set notes ("form felt sloppy", "left shoulder tight").
+    # Surfaced inline on the set card in ActiveWorkoutScreen.
+    notes: str | None = Field(default=None)
 
 
 # ─── Meals ────────────────────────────────────────────────────────────────────
@@ -1134,6 +1770,9 @@ class Meal(SQLModel, table=True):
     __tablename__ = "meals"
     __table_args__ = (
         Index('ix_meal_user_date', 'user_id', 'meal_date'),
+        # Partial unique index on import_hash — only enforces uniqueness
+        # when the column is non-null (native logs have null and can
+        # repeat freely). See database._ensure_meal_import_columns.
     )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -1142,12 +1781,58 @@ class Meal(SQLModel, table=True):
     name: str
     source: MealSource = Field(sa_column=Column(SAEnum(MealSource), nullable=False, default=MealSource.LOGGED))
     notes: str | None = Field(default=None)
+    # Import provenance — null for native logs. The `MealSource` enum
+    # stays {generated, logged}; this column is the orthogonal "where
+    # did the logged data come from" answer. Imported meals behave
+    # identically to native logs in scoring/recovery/social — they're
+    # just visually distinguishable in the diary UI.
+    import_source: str | None = Field(default=None, index=True)
+    import_batch_id: int | None = Field(default=None, foreign_key="import_batches.id")
+    # sha256(user_id|source|external_date|meal_type|food_name|calories|protein)
+    # Idempotency: re-uploading the same export doesn't duplicate. The
+    # backend migration adds a partial unique index on (user_id, import_hash)
+    # so native rows with null hash can repeat freely.
+    import_hash: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    version: int = Field(default=1)
     # When the user actually ate this meal. Separate from created_at so
     # back-logging a breakfast at 2pm still shows "8am" on the timeline.
     # Nullable because existing rows pre-migration won't have it; clients
     # fall back to (meal_date + noon) when NULL.
     consumed_at: datetime | None = Field(default=None, index=True)
+    # Optional meal-level image. Both fields nullable — the meal UI must
+    # render fine with no image at all. `image_source` is a free-form
+    # provenance tag ("user_photo", "recipe", "pexels", "product", "category") used
+    # by the client resolver to pick a fallback and by future cleanup
+    # jobs to tell user-uploaded photos apart from auto-resolved ones.
+    image_url: str | None = Field(default=None)
+    image_source: str | None = Field(default=None)
+    # Nullable provenance link for meals logged from a SavedMeal/Favorite.
+    # Logged rows remain snapshots; the link is for provenance and delete
+    # detach cleanup, not retroactive template propagation.
+    saved_meal_id: int | None = Field(default=None, foreign_key="saved_meals.id", index=True)
+    # Original client row key for plan/manual-day rows. `meal_type`
+    # intentionally stays coarse for analytics, but this preserves exact
+    # row identity when users reorder, duplicate, or have 5+ meals in a day.
+    client_meal_key: str | None = Field(default=None, index=True)
+    # ── Template/routine provenance + idempotency ───────────────────────
+    # A logged meal is ALWAYS its own snapshot. These fields only record
+    # where the snapshot came from (traceability) and guarantee one row per
+    # user action — they never cause retroactive template propagation.
+    #
+    # source_type: "manual" | "favorite" | "routine" | "plan" — orthogonal
+    # to MealSource (generated/logged). Nullable for pre-migration rows.
+    source_type: str | None = Field(default=None, index=True)
+    # Routine-occurrence linkage. A partial unique index on
+    # (user_id, source_routine_id, routine_occurrence_key) guarantees one
+    # logged row per routine occurrence (see database._ensure_meal_idempotency_columns).
+    source_routine_id: int | None = Field(default=None, index=True)
+    routine_occurrence_key: str | None = Field(default=None)
+    # Client-supplied idempotency token. Partial unique index on
+    # (user_id, idempotency_key) collapses retried / double-tapped creates
+    # to a single row. Native rows with NULL repeat freely.
+    idempotency_key: str | None = Field(default=None)
 
 
 class MealItem(SQLModel, table=True):
@@ -1165,6 +1850,125 @@ class MealItem(SQLModel, table=True):
     protein_g: float
     carbs_g: float
     fat_g: float
+    # Optional per-serving nutrient snapshots from external imports or
+    # scan/search payloads. These preserve user-logged historical data
+    # even when the row cannot be linked to a canonical FoodNutrition row.
+    saturated_fat_g: float | None = Field(default=None)
+    # Trans fat is tracked separately because dietary guidance treats it as a
+    # "keep close to zero" target. Null = unknown source, 0 = source said 0.
+    trans_fat_g: float | None = Field(default=None)
+    cholesterol_mg: float | None = Field(default=None)
+    sodium_mg: float | None = Field(default=None)
+    fiber_g: float | None = Field(default=None)
+    sugar_g: float | None = Field(default=None)
+    added_sugar_g: float | None = Field(default=None)
+    caffeine_mg: float | None = Field(default=None)
+    # Alcohol stored in grams (canonical). Standard-drinks display is derived.
+    alcohol_g: float | None = Field(default=None)
+    potassium_mg: float | None = Field(default=None)
+    calcium_mg: float | None = Field(default=None)
+    magnesium_mg: float | None = Field(default=None)
+    iron_mg: float | None = Field(default=None)
+    phosphorus_mg: float | None = Field(default=None)
+    iodine_mcg: float | None = Field(default=None)
+    choline_mg: float | None = Field(default=None)
+    vitamin_d_mcg: float | None = Field(default=None)
+    vitamin_b12_mcg: float | None = Field(default=None)
+    vitamin_k_mcg: float | None = Field(default=None)
+    vitamin_e_mg: float | None = Field(default=None)
+    folate_mcg: float | None = Field(default=None)
+    zinc_mg: float | None = Field(default=None)
+    # Total omega-3 in grams (legacy field, preserved for backward compat).
+    # When subtypes (ALA/EPA/DHA) are known, they're stored in mg below.
+    omega_3_g: float | None = Field(default=None)
+    omega_3_ala_mg: float | None = Field(default=None)
+    omega_3_epa_mg: float | None = Field(default=None)
+    omega_3_dha_mg: float | None = Field(default=None)
+    omega_6_mg: float | None = Field(default=None)
+
+
+# ─── Integration credentials ────────────────────────────────────────────────
+#
+# Per-user OAuth tokens for third-party services (Strava, Oura, WHOOP,
+# Garmin, ...). Each row is one (user, provider) pair. Refresh tokens
+# are bearer credentials — treat them like passwords. Never log them.
+#
+# The pipeline pattern:
+#   1. User taps "Connect Strava" → backend returns authorize URL with
+#      a CSRF state nonce.
+#   2. Strava redirects to our /callback → backend exchanges code,
+#      writes a row here with access + refresh + expires_at.
+#   3. Periodic sync reads the row, refreshes if expired, calls the
+#      provider API, persists results into the existing target tables
+#      (WorkoutCompletion etc.) the same way file imports do.
+
+class IntegrationCredential(SQLModel, table=True):
+    __tablename__ = "integration_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_integration_user_provider"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    # "strava" | "oura" | "whoop" | "garmin" | "fitbit"
+    provider: str = Field(index=True)
+    # Stored via app.field_encryption.encrypt_text/decrypt_text. Legacy
+    # plaintext rows remain readable and are re-encrypted on token refresh.
+    access_token: str | None = Field(default=None)
+    refresh_token: str | None = Field(default=None)
+    expires_at: datetime | None = Field(default=None)
+    # Provider's user identifier (e.g. Strava's athlete.id). Useful for
+    # webhook routing and debugging multi-account ambiguity.
+    external_user_id: str | None = Field(default=None)
+    # JSON blob — provider-specific extras (Strava's `scope`, Oura's
+    # device list, etc.). Schema-on-read so each provider can carry
+    # whatever it needs without new columns per integration.
+    extras: dict | None = Field(default=None, sa_column=Column(JSON))
+    # "active" | "revoked" | "expired"
+    status: str = Field(default="active", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_synced_at: datetime | None = Field(default=None)
+
+
+# ─── Data imports ────────────────────────────────────────────────────────────
+#
+# Tracks one upload from an external app (MFP / Strong / Strava / etc.).
+# `data_type` discriminates which downstream tables got rows:
+#   "meals"    — populated Meal + MealItem rows
+#   "workouts" — populated WorkoutCompletion + ExerciseSet rows
+#
+# Per-row idempotency lives on the target tables (`Meal.import_hash`,
+# `WorkoutCompletion.import_hash`) — re-uploading the same export
+# doesn't duplicate rows; it just updates this batch's counters.
+#
+# Rollback path: `DELETE /imports/{batch_id}` removes all rows where
+# `import_batch_id == batch_id` and marks the batch `status='rolled_back'`.
+
+class ImportBatch(SQLModel, table=True):
+    __tablename__ = "import_batches"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    # "myfitnesspal" | "cronometer" | "hevy" | "strong" | "fitnotes" | "strava" | "csv"
+    source: str = Field(index=True)
+    # "meals" | "workouts"
+    data_type: str = Field(default="meals")
+    # Original filename, for UI display only. May be null for OAuth-based
+    # sources (Strava) that don't upload a file.
+    filename: str | None = Field(default=None)
+    # "processing" | "complete" | "failed" | "rolled_back"
+    status: str = Field(default="processing", index=True)
+    # Tallies — surfaced in the import-status UI.
+    total_rows: int = Field(default=0)
+    matched_rows: int = Field(default=0)    # row mapped to a Thallo Food/Exercise with high confidence
+    ai_matched_rows: int = Field(default=0) # AI fallback was used
+    fallback_rows: int = Field(default=0)   # imported with parsed macros but no Food link
+    skipped_rows: int = Field(default=0)    # deliberately ignored (totals, blanks)
+    error_rows: int = Field(default=0)      # parse errors surfaced to the user for review
+    # Errors list: [{row_index, message}, ...]. Surfaced in the review UI.
+    errors: list = Field(default_factory=list, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = Field(default=None)
 
 
 # ─── Saved Meals ──────────────────────────────────────────────────────────────
@@ -1176,8 +1980,12 @@ class MealItem(SQLModel, table=True):
 
 class SavedMeal(SQLModel, table=True):
     __tablename__ = "saved_meals"
+    __table_args__ = (
+        UniqueConstraint("user_id", "source_meal_id", name="uq_saved_meals_user_source_meal"),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
+    source_meal_id: int | None = Field(default=None, index=True)
     name: str
     notes: str | None = Field(default=None)
     # Snapshotted totals — lets the UI show macros/cals without joining
@@ -1194,6 +2002,176 @@ class SavedMeal(SQLModel, table=True):
     times_logged: int = Field(default=0)
     last_logged_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Optional thumbnail for the favorites carousel. Same convention as
+    # Meal.image_url: nullable, fallback handled client-side via the
+    # food-image resolver (category icon → placeholder).
+    image_url: str | None = Field(default=None)
+    image_source: str | None = Field(default=None)
+    # Optional share/import metadata. A saved meal is private until
+    # share_code is minted; imports are copied into the recipient's
+    # library and keep only attribution + original code provenance.
+    share_code: str | None = Field(default=None, index=True, unique=True)
+    times_imported: int = Field(default=0)
+    source_share_code: str | None = Field(default=None)
+    source_owner_username: str | None = Field(default=None)
+    # Client-side idempotency token for "Save as Favorite". A retried POST
+    # carrying the same key collapses to the existing row via the partial
+    # unique index `uq_saved_meals_user_idempotency_key`. Older rows leave
+    # this null and can repeat freely; only present-keyed writes dedupe.
+    idempotency_key: str | None = Field(default=None)
+
+
+# ─── Meal Routines ────────────────────────────────────────────────────────────
+#
+# A MealRoutine is a recurring scheduled meal *template* — the durable,
+# server-owned successor to the old AsyncStorage-only "mealRoutines" list.
+# It is NEVER itself a logged meal. A routine occurrence for a date only
+# becomes a Meal row when the user logs it, edits that day, or marks it
+# complete (see routers/meal_routines.log_routine_occurrence).
+#
+# Editing a routine updates THIS row (and its JSON items) in place — it
+# never duplicates the routine and never mutates already-logged Meal rows.
+# Items use the same JSON shape as SavedMeal.items so a routine is
+# self-contained (snapshot copied into meal_log_items at log time).
+
+class MealRoutine(SQLModel, table=True):
+    __tablename__ = "meal_routines"
+    __table_args__ = (
+        Index("ix_meal_routines_user_order", "user_id", "display_order", "created_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str
+    notes: str | None = Field(default=None)
+    # Coarse meal type the routine logs under. Nullable → resolver picks by time.
+    meal_type: MealType | None = Field(
+        default=None, sa_column=Column(SAEnum(MealType), nullable=True)
+    )
+    # Schedule. days_of_week: list[int], 0=Mon..6=Sun. Empty == every day.
+    days_of_week: list = Field(default_factory=list, sa_column=Column(JSON))
+    default_time: str | None = Field(default=None)   # "HH:MM" local clock time
+    start_date: date | None = Field(default=None)
+    end_date: date | None = Field(default=None)
+    active: bool = Field(default=True, index=True)
+    # Optional provenance: the SavedMeal this routine was created from.
+    source_template_id: int | None = Field(default=None, index=True)
+    # Client idempotency token for create. (user_id, idempotency_key) is unique
+    # (partial index) so a retried / double-submitted create dedupes instead of
+    # inserting a duplicate routine.
+    idempotency_key: str | None = Field(default=None, index=True)
+    # Snapshotted totals + items (same JSON item shape as SavedMeal.items).
+    total_calories: float = Field(default=0.0)
+    total_protein_g: float = Field(default=0.0)
+    total_carbs_g: float = Field(default=0.0)
+    total_fat_g: float = Field(default=0.0)
+    items: list = Field(default_factory=list, sa_column=Column(JSON))
+    display_order: int = Field(default=0, index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# A per-date override for a single routine occurrence the user has NOT
+# logged yet (a logged occurrence lives as a Meal row instead). Lets a user
+# skip or edit one day without touching the base routine. Unique per
+# (user, routine, date) so editing the same day twice updates in place.
+
+class RoutineOccurrenceException(SQLModel, table=True):
+    __tablename__ = "routine_occurrence_exceptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "routine_id", "occurrence_date",
+            name="uq_routine_occurrence_exception",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    routine_id: int = Field(index=True)
+    occurrence_date: date
+    occurrence_key: str | None = Field(default=None)
+    override_time: str | None = Field(default=None)
+    skipped: bool = Field(default=False)
+    # Edited name + items JSON for an un-logged one-day edit.
+    edited_payload: dict | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ─── Workout Templates ───────────────────────────────────────────────────────
+#
+# A WorkoutTemplate is a user-authored, reusable single-day workout the user
+# can launch from the "Saved templates" section of the home screen. The full
+# WorkoutDay payload is snapshotted in workout_json so a template row is
+# self-contained and portable across users on import.
+#
+# Sharing: when the user generates a share code, share_code is set to a
+# 6-char ambiguity-stripped uppercase string (unique across the table).
+# Recipients call /workouts/templates/shared/{code}/import which COPIES the
+# template into a fresh row on their own user_id. Deleting the original or
+# revoking the code never affects already-imported copies.
+#
+# client_id is a frontend-assigned UUID. The mobile cache is keyed by uuid
+# so we keep it as the public identifier for API paths; the int PK is
+# server-internal. UNIQUE (user_id, client_id) guarantees idempotent upsert.
+
+class WorkoutTemplate(SQLModel, table=True):
+    __tablename__ = "workout_templates"
+    __table_args__ = (
+        UniqueConstraint("user_id", "client_id", name="uq_workout_template_user_client"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    client_id: str = Field(default="", index=True)
+    name: str
+    notes: str | None = Field(default=None)
+    workout_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    share_code: str | None = Field(default=None, index=True, unique=True)
+    times_imported: int = Field(default=0)
+    source_share_code: str | None = Field(default=None)
+    # Attribution — captured at import time so revoking the share code
+    # later doesn't strip credit from already-imported copies. Username
+    # snapshot is intentional (not a FK) so we don't have to join on
+    # every read and so deleted-user fallout stays scoped.
+    source_owner_username: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ─── Workout Template Bundle ─────────────────────────────────────────────────
+#
+# A bundle is a named collection of share codes — the multi-template share
+# layer on top of WorkoutTemplate.share_code. Bundle codes are 8 chars (vs
+# the 6-char per-template code) so URL/path routing can disambiguate by
+# length without an extra prefix.
+#
+# Items hold *snapshots* of the shareCode at bundle creation time. We do
+# not FK into workout_templates: the owner can revoke an underlying
+# template's share_code or delete it, and the bundle should degrade to
+# "this item is no longer available" rather than crash. The receiver-side
+# import path resolves each item by share code at import time.
+
+class WorkoutTemplateBundle(SQLModel, table=True):
+    __tablename__ = "workout_template_bundles"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str = Field(default="")
+    share_code: str = Field(default="", index=True, unique=True)
+    times_imported: int = Field(default=0)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class WorkoutTemplateBundleItem(SQLModel, table=True):
+    __tablename__ = "workout_template_bundle_items"
+    __table_args__ = (
+        UniqueConstraint("bundle_id", "share_code", name="uq_bundle_item_share_code"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    bundle_id: int = Field(foreign_key="workout_template_bundles.id", index=True)
+    # Snapshot of the per-template share code at bundle-creation time.
+    # NOT an FK to WorkoutTemplate — see the bundle docstring for the
+    # reasoning. Resolution happens at preview/import time.
+    share_code: str
+    position: int = Field(default=0)
 
 
 # ─── Supplement Stack ─────────────────────────────────────────────────────────
@@ -1218,6 +2196,10 @@ class SupplementIngredient(SQLModel, table=True):
     description: str | None = Field(default=None)
     timing_notes: str | None = Field(default=None)   # e.g. "Take with fat-containing meal"
     safety_notes: str | None = Field(default=None)   # e.g. "Avoid if on blood thinners"
+    common_uses: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    deficiency_risks: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    excess_risks: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    food_sources: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
 
 class SupplementProduct(SQLModel, table=True):
@@ -1264,12 +2246,24 @@ class UserSupplementStack(SQLModel, table=True):
     taken_with_food: bool = Field(default=False)
     active: bool = Field(default=True)
     notes: str | None = Field(default=None)
+    description: str | None = Field(default=None)
+    effectiveness_confidence: str | None = Field(default=None)  # "high" | "medium" | "low"
     # Denormalized from ingredient when available — keeps cards
     # informative without a join on every render.
     evidence_tier: str | None = Field(default=None)
     risk_tier: str | None = Field(default=None)
     timing_notes: str | None = Field(default=None)
     safety_notes: str | None = Field(default=None)
+    common_uses: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    deficiency_risks: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    excess_risks: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    food_sources: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    source_terms: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    # Structured Supplement Facts panel parsed from a label scan —
+    # {"serving_size": {count, unit}, "nutrients": [{key, nutrient, amount,
+    # unit, percent_dv}], "parse_source": ...}. Credited toward micronutrient
+    # coverage via supplement_facts.credited_micros_from_content.
+    nutrient_content: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -1282,8 +2276,13 @@ class SupplementLog(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     stack_item_id: int = Field(foreign_key="user_supplement_stack.id", index=True)
     taken_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    name: str | None = Field(default=None)
+    normalized_name: str | None = Field(default=None, index=True)
     dose_amount: float | None = Field(default=None)
     dose_unit: str | None = Field(default=None)
+    timing_context: str = Field(default="unknown")  # morning | pre_workout | post_workout | evening | bedtime | unknown
+    source: str = Field(default="manual")           # manual | imported | inferred
+    confidence: float | None = Field(default=None)
     skipped: bool = Field(default=False)
 
 
@@ -1343,11 +2342,9 @@ class FoodMetadata(SQLModel, table=True):
     processed_meat_flag: bool = Field(default=False)
     refined_grain_flag: bool = Field(default=False)
     # v4 — AI-estimated amounts for nutrients USDA doesn't label.
-    # Set by an AI enrichment pass (see `ai_classify.estimate_amounts`)
-    # for every food regardless of the deterministic keyword pass, so
-    # a custom food like "Grandma's chicken soup" with collagen content
-    # is no longer lost when its name doesn't match a regex. Per-serving
-    # values; the daily aggregator multiplies by servings consumed.
+    # Set only during live cold-miss classification, never by startup or
+    # deploy backfills. Per-serving values; the daily aggregator multiplies
+    # by servings consumed.
     collagen_g_per_serving: float | None = Field(default=None)
     # Probiotic count in BILLIONS of CFU per serving. CFUs are the
     # bioactive unit for probiotics (1 cup yogurt ≈ 1–10B, kefir ≈
@@ -1358,9 +2355,22 @@ class FoodMetadata(SQLModel, table=True):
     # read without a migration. New rows leave this nil and rely on
     # cfu_billions for aggregation.
     probiotic_servings_per_serving: float | None = Field(default=None)
+    # Prebiotic fiber per serving (grams). Fermentable fibers (inulin,
+    # FOS, GOS, resistant starch) that feed the gut microbiome. USDA
+    # doesn't expose this; values come from a curated lookup table for
+    # high-confidence foods (chicory, garlic, onion, etc.) plus live AI
+    # estimation for unknown foods. Aggregated daily as
+    # `prebiotic_g_per_serving × servings_consumed`.
+    prebiotic_g_per_serving: float | None = Field(default=None)
     # Confidence tier of the AI estimate: "high" / "med" / "low" / "none".
     # UI uses this to grey-out low-confidence numbers.
     amount_confidence: str = Field(default="none")
+    # Structured tags used by Health Insights. These are populated at live
+    # classification time and consumed as facts; insight cards must not
+    # re-scan food names to infer them.
+    insight_tags: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    insight_tags_source: str = Field(default="none")
+    insight_tags_confidence: float = Field(default=0.0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -1404,6 +2414,17 @@ class DailyNutritionMetrics(SQLModel, table=True):
     # v3 — per-item descriptive tag aggregates
     added_sugar_g: float = Field(default=0)
     sodium_mg: float = Field(default=0)
+    caffeine_mg: float = Field(default=0)
+    potassium_mg: float = Field(default=0)
+    calcium_mg: float = Field(default=0)
+    magnesium_mg: float = Field(default=0)
+    iron_mg: float = Field(default=0)
+    vitamin_d_mcg: float = Field(default=0)
+    vitamin_b12_mcg: float = Field(default=0)
+    folate_mcg: float = Field(default=0)
+    zinc_mg: float = Field(default=0)
+    omega_3_g: float = Field(default=0)
+    micronutrient_item_count: int = Field(default=0)
     seafood_servings: float = Field(default=0)
     fruit_servings: float = Field(default=0)
     vegetable_servings: float = Field(default=0)
@@ -1419,6 +2440,12 @@ class DailyNutritionMetrics(SQLModel, table=True):
     # my probiotic target today?" a real number instead of a coarse
     # servings count.
     probiotic_cfu_billions: float = Field(default=0)
+    # Daily prebiotic fiber (grams). Sum of `prebiotic_g_per_serving ×
+    # servings consumed` across the day's items. Tracks fermentable
+    # fibers that feed the gut microbiome — the food side of the
+    # pre/probiotic axis. Distinct from `fiber_total_g` (which counts
+    # all fiber, including non-fermentable cellulose).
+    prebiotic_g: float = Field(default=0)
     # Max % of daily protein concentrated in a single meal — flags the
     # "all protein at dinner" pattern for muscle-gain users.
     max_meal_protein_pct: float = Field(default=0)
@@ -1431,6 +2458,10 @@ class DailyNutritionMetrics(SQLModel, table=True):
     recovery_flags: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     # Plant slugs seen today (for weekly rollup dedup):
     plant_slugs: list | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    # Per-day counts for enriched Health Insight tags, e.g.
+    # {"red_meat": 1, "caffeine": 2}. Built from FoodMetadata, not from
+    # insight-engine food-name scanning.
+    insight_tag_counts: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     # How many items fell into each classification bucket:
     item_count: int = Field(default=0)
     classified_item_count: int = Field(default=0)
@@ -1521,6 +2552,18 @@ class FeedLike(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class FeedComment(SQLModel, table=True):
+    __tablename__ = "feed_comments"
+    __table_args__ = (
+        Index("ix_feed_comments_item_created", "feed_item_id", "created_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    feed_item_id: int = Field(foreign_key="activity_feed.id", index=True)
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 class SocialNotification(SQLModel, table=True):
     __tablename__ = "social_notifications"
     __table_args__ = (
@@ -1546,6 +2589,63 @@ class SocialNotification(SQLModel, table=True):
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
     read_at: datetime | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
+# ─── Trainer / client relationships ─────────────────────────────────────────
+
+class TrainerProfile(SQLModel, table=True):
+    __tablename__ = "trainer_profiles"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    display_name: str | None = Field(default=None)
+    business_name: str | None = Field(default=None)
+    bio: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    website_url: str | None = Field(default=None)
+    contact_email: str | None = Field(default=None)
+    is_accepting_clients: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TrainerClientRelationship(SQLModel, table=True):
+    __tablename__ = "trainer_client_relationships"
+    __table_args__ = (
+        UniqueConstraint("trainer_user_id", "client_user_id", name="uq_trainer_client_pair"),
+        Index("ix_trainer_client_trainer_status", "trainer_user_id", "status"),
+        Index("ix_trainer_client_client_status", "client_user_id", "status"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    trainer_user_id: int = Field(foreign_key="user.id", index=True)
+    client_user_id: int = Field(foreign_key="user.id", index=True)
+    # pending | active | declined | revoked
+    status: str = Field(default="pending", index=True)
+    requested_by_id: int = Field(foreign_key="user.id", index=True)
+    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    accepted_at: datetime | None = Field(default=None)
+    revoked_at: datetime | None = Field(default=None)
+    invite_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    share_workouts: bool = Field(default=True)
+    share_nutrition: bool = Field(default=False)
+    share_body_metrics: bool = Field(default=False)
+    share_recovery: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TrainerClientNote(SQLModel, table=True):
+    __tablename__ = "trainer_client_notes"
+    __table_args__ = (
+        Index("ix_trainer_client_notes_relationship_created", "relationship_id", "created_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    relationship_id: int = Field(foreign_key="trainer_client_relationships.id", index=True)
+    trainer_user_id: int = Field(foreign_key="user.id", index=True)
+    client_user_id: int = Field(foreign_key="user.id", index=True)
+    author_user_id: int = Field(foreign_key="user.id", index=True)
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    visible_to_client: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── Request / Response schemas ───────────────────────────────────────────────
@@ -1580,6 +2680,16 @@ class UserRead(SQLModel):
     health_disclaimer_version: str | None = None
     ai_disclaimer_version: str | None = None
     subscription_tier: str = "free"
+    subscription_status: str = "free"
+    subscription_source: str | None = None
+    subscription_product_id: str | None = None
+    subscription_entitlement_id: str | None = None
+    subscription_store: str | None = None
+    subscription_environment: str | None = None
+    subscription_expires_at: datetime | None = None
+    trial_started_at: datetime | None = None
+    trial_ends_at: datetime | None = None
+    revenuecat_app_user_id: str | None = None
 
 class LoginRequest(SQLModel):
     email: str
@@ -1602,6 +2712,11 @@ class ProfileUpsert(SQLModel):
     age: int | None = None
     birthdate: date | None = None
     gender: Gender
+    # Display-unit preferences. Optional so older clients keep working;
+    # null is treated as default (imperial: lbs / mi / in).
+    weight_unit: str | None = None     # 'lbs' | 'kg'
+    distance_unit: str | None = None   # 'mi'  | 'km'
+    height_unit: str | None = None     # 'in'  | 'cm'
 
 class GoalUpsert(SQLModel):
     goal_type: GoalType
@@ -1615,6 +2730,11 @@ class PreferencesUpsert(SQLModel):
     workout_duration_minutes: int | None = None
     core_frequency_per_week: int | None = None
     preferred_split: str | None = None
+    # Lifestyle activity outside training. Drives the TDEE step_2b
+    # nudge — see calorie_calculator. Optional; older clients that
+    # don't send this field leave the stored value untouched (see the
+    # onboarding-sync upsert which only overwrites when present).
+    lifestyle_activity: str | None = None
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
     equipment_settings: dict | None = None
     training_day_pattern: list[int] | None = None
@@ -1623,6 +2743,34 @@ class PreferencesUpsert(SQLModel):
     cardio_baseline: dict | None = None
     foods_available: list[str]
     injuries: list[str] = Field(default_factory=list)
+    # Optional severity-aware structured payload. Each item:
+    # {bodyPart, status, severity, muscleGroups[], estimatedRecoveryDate?}.
+    # Older clients that only know about the legacy string field can
+    # omit this and the backend keeps the existing behavior.
+    injuries_structured: list[dict] = Field(default_factory=list)
+    # Optional because older clients do not send these through the
+    # onboarding/profile-sync route. The router preserves existing values
+    # when omitted and only allows Pro users to turn manual mode on.
+    workout_manual_mode: bool | None = None
+    meal_manual_mode: bool | None = None
+    # Optional in-flight import state. Each item:
+    # {source, requested_at, notified_at?, completed_at?, dismissed_at?}.
+    # Older clients omit this; backend leaves any previously-stored list
+    # untouched in that case (see /onboarding-sync upsert logic).
+    pending_imports: list[dict] = Field(default_factory=list)
+    kidney_stone_history: str | None = None
+    stone_type: str | None = None
+    stone_history_source: str | None = None
+    reproductive_health_opt_in: bool | None = None
+    cycle_tracking_enabled: bool | None = None
+    trying_to_conceive: bool | None = None
+    pregnancy_status: str | None = None
+    known_pcos: bool | None = None
+    known_endometriosis: bool | None = None
+    gestational_diabetes_history: bool | None = None
+    glp1_support: dict | None = None
+    sun_exposure_preferences: dict | None = None
+    custom_macros: dict | None = None
 
 class OnboardingSync(SQLModel):
     profile: ProfileUpsert
@@ -1641,7 +2789,18 @@ class DayStateUpsert(SQLModel):
     clear_skip_reason: bool = False
     meal_checks: dict | None = None
     nutrition_plan: dict | None = None
+    nutrition_log_status: str | None = None
+    nutrition_log_status_source: str | None = None
+    clear_nutrition_log_status: bool = False
     macro_overrides: dict | None = None
+    pain_present: bool | None = None
+    pain_body_part: str | None = None
+    pain_side: str | None = None
+    pain_severity_0_10: int | None = None
+    soreness_body_part: str | None = None
+    soreness_severity_0_10: int | None = None
+    pain_note: str | None = None
+    onset_context: str | None = None
 
 
 class WeeklyCheckInCreate(SQLModel):
@@ -1685,6 +2844,11 @@ class ExerciseCreate(SQLModel):
     notes: str | None = None
     target_reps_text: str | None = None  # e.g. "8–12" or "AMRAP"
     rest_seconds: int | None = None
+    movement_pattern: str | None = None
+    impact_level: str | None = None
+    load_type: str | None = None
+    intensity_estimate: float | None = None
+    novelty_flag: bool | None = None
     sets: list[SetCreate]
 
 class WorkoutSessionCreate(SQLModel):
@@ -1699,6 +2863,7 @@ class SetLog(SQLModel):
     actual_reps: int
     actual_weight_lbs: float | None = None
     rpe: int | None = None
+    notes: str | None = None
 
 class MealItemCreate(SQLModel):
     food_name: str
@@ -1711,6 +2876,31 @@ class MealItemCreate(SQLModel):
     protein_g: float
     carbs_g: float
     fat_g: float
+    source: str | None = None
+    fdc_id: str | None = None
+    external_id: str | None = None
+    barcode: str | None = None
+    brand: str | None = None
+    serving: str | None = None
+    fiber: float | None = None
+    sugar: float | None = None
+    sodium_mg: float | None = None
+    micronutrients: dict | None = None
+    saturated_fat_g: float | None = None
+    cholesterol_mg: float | None = None
+    fiber_g: float | None = None
+    sugar_g: float | None = None
+    added_sugar_g: float | None = None
+    caffeine_mg: float | None = None
+    potassium_mg: float | None = None
+    calcium_mg: float | None = None
+    magnesium_mg: float | None = None
+    iron_mg: float | None = None
+    vitamin_d_mcg: float | None = None
+    vitamin_b12_mcg: float | None = None
+    folate_mcg: float | None = None
+    zinc_mg: float | None = None
+    omega_3_g: float | None = None
 
 class MealCreate(SQLModel):
     meal_date: date
@@ -1722,6 +2912,15 @@ class MealCreate(SQLModel):
     # ISO timestamp for when the user actually ate this meal. Optional —
     # server defaults to now() when omitted. Allows back-logging.
     consumed_at: datetime | None = None
+    image_url: str | None = None
+    image_source: str | None = None
+    saved_meal_id: int | None = None
+    # Where the snapshot came from: "manual" | "favorite" | "plan". Routine
+    # logs go through the routine endpoint (which also sets source_routine_id).
+    source_type: str | None = None
+    # Client idempotency token — a retried/double-tapped create collapses to
+    # one row via the (user_id, idempotency_key) partial unique index.
+    idempotency_key: str | None = None
 
 
 # ─── Food schemas ────────────────────────────────────────────────────────────
@@ -1751,6 +2950,9 @@ class FoodRead(SQLModel):
     carbs: float = 0
     fat: float = 0
     fiber: float | None = None
+    sugar: float | None = None
+    added_sugar_g: float | None = None
+    sodium_mg: float | None = None
     reference_unit: str = "100g"
     # Available servings
     servings: list[FoodServingRead] = []
@@ -1770,6 +2972,66 @@ class FoodCreate(SQLModel):
 
 
 # ─── User equipment profile schemas ──────────────────────────────────────────
+
+class UserCustomExerciseCreate(SQLModel):
+    """Create / update a user-owned custom exercise."""
+    name: str
+    primary_muscle: str = "full_body"
+    secondary_muscles: list[str] = Field(default_factory=list)
+    equipment: str = ""
+    equipment_slugs: list[str] = Field(default_factory=list)
+    equipment_bucket: str | None = None
+    movement_pattern: str | None = None
+    exercise_type: str | None = "strength"
+    default_tracking_mode: str | None = "reps"
+    is_compound: bool | None = None
+    image_url: str | None = None
+    video_id: str | None = None
+    demo_exercise_db_id: str | None = None
+    sets: int = 3
+    reps: str = "8-12"
+    rest_seconds: int = 60
+    description: str | None = None
+    form_cues: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    programming_tags: list[str] = Field(default_factory=list)
+    source: str = "manual"
+    plan_eligible: bool | None = None
+    ai_confidence: str | None = None
+    validation_status: str | None = None
+
+
+class UserCustomExerciseRead(SQLModel):
+    id: int
+    user_id: int
+    name: str
+    normalized_name: str
+    primary_muscle: str
+    secondary_muscles: list[str]
+    equipment: str
+    equipment_slugs: list[str]
+    equipment_bucket: str
+    movement_pattern: str | None
+    exercise_type: str
+    default_tracking_mode: str
+    is_compound: bool | None
+    image_url: str | None
+    video_id: str | None
+    demo_exercise_db_id: str | None
+    sets: int
+    reps: str
+    rest_seconds: int
+    description: str | None
+    form_cues: list[str]
+    aliases: list[str]
+    programming_tags: list[str]
+    source: str
+    plan_eligible: bool
+    ai_confidence: str | None
+    validation_status: str
+    created_at: datetime
+    updated_at: datetime
+
 
 class UserEquipmentProfileCreate(SQLModel):
     """Create / update one piece of user equipment."""

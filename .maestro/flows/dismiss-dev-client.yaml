@@ -22,9 +22,9 @@ tags:
 
 - runFlow:
     when:
-      visible: "http://localhost:8081"
+      visible: "http://(localhost|10\\.0\\.2\\.2):(8081|8082)"
     commands:
-      - tapOn: "http://localhost:8081"
+      - tapOn: "http://(localhost|10\\.0\\.2\\.2):(8081|8082)"
 
 - waitForAnimationToEnd:
     timeout: 1000

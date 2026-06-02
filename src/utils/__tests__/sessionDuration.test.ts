@@ -14,8 +14,8 @@ describe('session duration display range', () => {
     expect(clampDisplayedSessionMinutes(42, 60)).toBe(45);
   });
 
-  it('still caps unusually long estimates at the selected range max', () => {
-    expect(clampDisplayedSessionMinutes(76, 60)).toBe(60);
+  it('surfaces estimates that exceed the selected range max', () => {
+    expect(clampDisplayedSessionMinutes(76, 60)).toBe(76);
   });
 
   it('leaves raw estimates alone when no session range is available', () => {

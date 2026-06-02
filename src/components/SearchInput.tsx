@@ -41,7 +41,7 @@ const SearchInput = forwardRef<TextInput, Props>(function SearchInput(
         ref={ref}
         value={value}
         onChangeText={onChangeText}
-        style={[style, showClear ? styles.inputWithClear : null]}
+        style={[style, styles.inputTextReset, showClear ? styles.inputWithClear : null]}
         {...rest}
       />
       {showClear && (
@@ -76,6 +76,10 @@ const styles = StyleSheet.create({
   inputWithClear: {
     // Reserve room for the clear icon so text doesn't collide with it.
     paddingRight: 36,
+  },
+  inputTextReset: {
+    letterSpacing: 0,
+    fontWeight: '400',
   },
   clearBtn: {
     position: 'absolute',

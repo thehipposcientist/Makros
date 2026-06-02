@@ -97,9 +97,26 @@ def seed_exercises(session: Session) -> None:
     added = 0
     updated = 0
 
+    from app.services.workout.demo_resolver import resolve_demo_db_id
+    from app.services.workout.emphasis_inference import infer_emphasis
+
     for entry in SEED_EXERCISES:
         slug = entry["slug"]
         name = entry["name"]
+        demo_id = resolve_demo_db_id(name)
+        # Convert MuscleGroup enum / string to plain string for the
+        # inference helper (which is pure-function and doesn't import
+        # the enum).
+        prim_str = (
+            entry["primary_muscle"].value
+            if hasattr(entry["primary_muscle"], "value")
+            else str(entry["primary_muscle"])
+        )
+        sec_strs = [
+            (s.value if hasattr(s, "value") else str(s))
+            for s in entry.get("secondary_muscles", [])
+        ]
+        emphasis_tags = infer_emphasis(name, prim_str, sec_strs)
 
         # Find existing by slug first, then by name (backfill slug)
         ex = existing_by_slug.get(slug) or existing_by_name.get(name)
@@ -122,6 +139,9 @@ def seed_exercises(session: Session) -> None:
             # seed entry hasn't set the field explicitly.
             from app.seed_exercises_data import hydrated_exercise as _hydrate
             ex.default_tracking_mode = _hydrate(entry).get("default_tracking_mode", "reps")
+            ex.flow_category = entry.get("flow_category")
+            ex.demo_exercise_db_id = demo_id
+            ex.emphasis = emphasis_tags
             session.add(ex)
             updated += 1
         else:
@@ -141,6 +161,9 @@ def seed_exercises(session: Session) -> None:
                 is_machine=entry.get("is_machine", False),
                 is_unilateral=entry.get("is_unilateral", False),
                 default_tracking_mode=hydrated.get("default_tracking_mode", "reps"),
+                flow_category=entry.get("flow_category"),
+                demo_exercise_db_id=demo_id,
+                emphasis=emphasis_tags,
             )
             session.add(ex)
             added += 1
@@ -324,10 +347,9 @@ def seed_foods(session: Session) -> None:
                     fn.sugar = sugar_v
                     fn.added_sugar_g = n.get("added_sugar_g")
                     fn.sodium_mg = sodium_v
-                    # Merge seed extras on top of any existing AI-backfilled
-                    # extras so authoritative seed values always win for the
-                    # fields they cover, while AI-enriched fields the seed
-                    # doesn't cover (omega_3, vitamins, etc.) are preserved.
+                    # Merge seed extras on top of any existing enriched extras
+                    # so authoritative seed values always win for fields they
+                    # cover while preserving older values the seed omits.
                     if extras_v:
                         merged = dict(fn.extra_nutrients or {})
                         merged.update(extras_v)

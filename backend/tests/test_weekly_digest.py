@@ -171,7 +171,8 @@ def test_full_week_reports_sessions_volume_and_adherence() -> None:
     assert focus_dist.get("Push") == 1 and focus_dist.get("Pull") == 1
     # Nutrition reflects the logged meals
     assert digest["nutrition"]["days_logged"] == 5
-    assert digest["nutrition"]["avg_protein_g"] > 100
+    assert digest["nutrition"]["avg_protein_g"] == round((165 * 5) / 7, 1)
+    assert digest["nutrition"]["avg_protein_g_when_logged"] == 165.0
     _ok("full week: 4 days / 4 planned → 100%, 12 sets, volume reported")
 
 

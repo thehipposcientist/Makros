@@ -4,9 +4,9 @@ Last updated: 2026-04-29
 
 ## Overview
 
-The workout planner is fully deterministic. Given the same inputs, it produces the same plan every time. No AI is involved in exercise selection, split logic, weekly recipe generation, or prescription.
+The workout planner is fully deterministic. Given the same inputs, it produces the same plan every time. No AI is involved in exercise selection, split logic, weekly recipe generation, prescription, or live next-set load/reps.
 
-AI is used separately for nutrition plans, the coach chat, text fallback search, and dedicated image-analysis endpoints — but never for the core workout programming. Legacy AI plan review is effectively disabled (`PLAN_REVIEW_ENABLED=0` is a no-op). In-workout set recommendations are deterministic first, with AI review only when the deterministic result is flagged as suspicious.
+AI is used separately for nutrition plans, the coach chat, text fallback search, and dedicated image-analysis endpoints — but never for the core workout programming. Legacy AI plan review is effectively disabled (`PLAN_REVIEW_ENABLED=0` is a no-op). In-workout set recommendations are deterministic rule outputs with structured reasons/trace; suspicious sets are flagged for explainability, not sent to an LLM to choose a number.
 
 ## Pipeline
 
@@ -70,7 +70,7 @@ Recovery/Mobility Day Generation (planner.py)
 SetProgramming (set_programming.py)
   - per-set intent: warmup / heavy_top / backoff / volume / technique
   - equipment-aware load increments
-  - next-set recommendations (deterministic, AI-reviewed when suspicious)
+  - next-set recommendations (deterministic, traceable when suspicious)
   |
   v
 Validation (planner.py validate_plan)
@@ -232,11 +232,11 @@ Equipment and exercise-type aware:
 - Bodyweight: +reps or add external load
 
 ### Next-Set Recommendations
-1. Deterministic recommender runs first (always)
-2. `is_suspicious()` checks for: feel-reps disagreement, first session of exercise, big overshoot/undershoot
-3. If suspicious -> AI review via `in_workout_review.py`
-4. AI receives deterministic result as context; can confirm, override, or soften
-5. Response tagged with `source: "deterministic"` or `source: "ai_reviewed"`
+1. Deterministic recommender runs always.
+2. `is_suspicious()` checks for feel-reps disagreement, first session of exercise, and big overshoot/undershoot.
+3. Suspicious sets stay deterministic; `in_workout_review.py` classifies and explains the rule output without calling an LLM.
+4. Responses include `algorithmSource`, `dataSource`, `reasonTags`, and an optional trace so the number is auditable.
+5. AI may answer separate coach/form/load questions, but it must not choose or persist live next-set load/reps.
 
 ## Focus Auto-Correction
 
@@ -280,7 +280,7 @@ Workout completion upsert key: `(user_id, workout_date, focus_label)` — not `(
 | Supplement / equipment / form / body photo scans | Yes | gpt-5.4-mini | Dedicated image-analysis routes |
 | Plan review (legacy path) | No | — | Permanently disabled in current app path |
 | In-workout set review | No | — | Deterministic suspicion reviewer only |
-| Food enrichment | Yes | gpt-4o-mini | food_quality classification |
+| Food classification fallback | Yes | gpt-4o-mini | food_quality classification on live cold misses |
 | Injury assessment | Yes | gpt-4o-mini | Severity, muscle groups, recovery estimate |
 
 ## External Data Sources

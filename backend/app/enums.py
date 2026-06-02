@@ -1,6 +1,26 @@
 from enum import Enum
 
 
+class SubscriptionTier(str, Enum):
+    FREE = "free"
+    PRO = "pro"
+
+
+class SubscriptionStatus(str, Enum):
+    FREE = "free"
+    TRIALING = "trialing"
+    TRIAL_CANCELLED = "trial_cancelled"
+    ACTIVE = "active"
+    GRACE_PERIOD = "grace_period"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+    BILLING_ISSUE = "billing_issue"
+    BETA = "beta"
+    PROMOTIONAL = "promotional"
+    TEMPORARY = "temporary"
+
+
 class GoalType(str, Enum):
     FAT_LOSS             = "fat_loss"
     MUSCLE_GAIN          = "muscle_gain"

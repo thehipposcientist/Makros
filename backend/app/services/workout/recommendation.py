@@ -28,9 +28,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import re
 from typing import Literal, Optional
 
+from .exercise_metadata import uses_numeric_load
 from .performance import ExercisePerformance
+from .recency import adjust_confidence_for_recency, recency_adjustment
 
 
 RecommendationSource = Literal[
@@ -92,7 +95,7 @@ def _equipment_text(exercise: dict | None) -> str:
     if not isinstance(exercise, dict):
         return ""
     parts: list[str] = []
-    for key in ("equipment_bucket", "equipment", "name", "slug"):
+    for key in ("equipment_bucket", "equipment", "name", "slug", "laterality"):
         value = exercise.get(key)
         if isinstance(value, list):
             for item in value:
@@ -105,33 +108,118 @@ def _equipment_text(exercise: dict | None) -> str:
     return " ".join(parts).lower().replace("-", "_").replace(" ", "_")
 
 
+_UNILATERAL_NAME_RE = re.compile(
+    r"\b(single|one|uni(?:lateral)?|alt(?:ernating)?)\s*[-_ ]?(arm|leg|side|hand|sided)\b"
+    r"|\b(iso[-_ ]?lateral|suitcase)\b"
+)
+
+
+def _laterality(exercise: dict | None) -> str:
+    if not isinstance(exercise, dict):
+        return "bilateral"
+    explicit = str(exercise.get("laterality") or "").strip().lower()
+    if explicit in {"unilateral", "single", "single_side", "single-sided"}:
+        return "unilateral"
+    if explicit in {"alternating", "alternate"}:
+        return "alternating"
+    if explicit in {"bilateral", "both", "both_sides", "two_arm", "two_leg"}:
+        return "bilateral"
+    if explicit == "either":
+        return "either"
+    if exercise.get("is_unilateral"):
+        return "unilateral"
+    nameish = f"{exercise.get('name') or ''} {exercise.get('slug') or ''}".lower().replace("_", " ")
+    if _UNILATERAL_NAME_RE.search(nameish):
+        return "unilateral"
+    return "bilateral"
+
+
+def _is_unilateral_only(exercise: dict | None) -> bool:
+    return _laterality(exercise) in {"unilateral", "alternating"}
+
+
 def _uses_per_dumbbell_load(exercise: dict | None) -> bool:
     """Whether logged/recommended load is one dumbbell, not the pair total."""
     text = _equipment_text(exercise)
     return "dumbbell" in text or "_db_" in f"_{text}_"
 
 
+def _uses_per_side_load(exercise: dict | None) -> bool:
+    """Whether displayed load is one side/handle rather than bilateral total."""
+    if _uses_per_dumbbell_load(exercise):
+        return True
+    if not _is_unilateral_only(exercise):
+        return False
+    text = _equipment_text(exercise)
+    if "bodyweight" in text or "body_weight" in text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "cable",
+            "machine",
+            "plate_loaded",
+            "landmine",
+            "kettlebell",
+            "barbell",
+            "smith",
+        )
+    )
+
+
 def _display_to_total_factor(exercise: dict | None) -> float:
-    return 2.0 if _uses_per_dumbbell_load(exercise) else 1.0
+    return 2.0 if _uses_per_side_load(exercise) else 1.0
 
 
 def _load_unit_transfer_factor(source_exercise: dict | None, target_exercise: dict | None) -> float:
     """Convert a source profile's displayed load into target display units.
 
-    Dumbbell movements are logged as the load of one dumbbell. Barbell,
-    T-bar, cable, and machine movements are logged as total implement/stack
-    load. When transferring between those worlds, normalize through a rough
-    total-load equivalent so a 110 lb T-bar row does not become a 110 lb
-    dumbbell row per hand, and a 55 lb dumbbell row does not become a 55 lb
-    T-bar row.
+    Dumbbell and explicitly unilateral cable/machine movements are logged as
+    one side/handle. Barbell, T-bar, bilateral cable, and bilateral machine
+    movements are logged as total implement/stack load. Normalize through a
+    rough total-load equivalent so a 110 lb seated cable row does not become a
+    110 lb single-arm cable row, and a 50 lb single-arm row does not become a
+    50 lb bilateral row.
     """
     return _display_to_total_factor(source_exercise) / _display_to_total_factor(target_exercise)
 
 
+def _load_semantics(exercise: dict | None) -> str:
+    if not isinstance(exercise, dict):
+        return "resistance"
+    explicit = str(exercise.get("load_semantics") or "").strip().lower()
+    if explicit in {"assistance", "counterweight"}:
+        return "assistance"
+    text = _equipment_text(exercise)
+    nameish = f"{exercise.get('name') or ''} {exercise.get('slug') or ''}".lower()
+    if not uses_numeric_load(exercise):
+        return "non_numeric"
+    if "assisted_pullup_machine" in text or "counterweight" in nameish:
+        return "assistance"
+    if "assisted" in nameish and ("pull" in nameish or "dip" in nameish):
+        return "assistance"
+    return "resistance"
+
+
+def _load_semantics_compatible(source_exercise: dict | None, target_exercise: dict | None) -> bool:
+    """Prevent inverse-load assistance numbers from becoming resistance loads."""
+    return _load_semantics(source_exercise) == _load_semantics(target_exercise)
+
+
 def _recommendation_increment(target_exercise: dict) -> float:
-    if _uses_per_dumbbell_load(target_exercise):
+    if not uses_numeric_load(target_exercise):
+        return 0.0
+    if _uses_per_side_load(target_exercise):
         return 5.0 if target_exercise.get("is_compound") else 2.5
     return 5.0 if target_exercise.get("is_compound") else 2.5
+
+
+def _laterality_compatible_for_direct_swap(source_exercise: dict | None, target_exercise: dict | None) -> bool:
+    source = _laterality(source_exercise)
+    target = _laterality(target_exercise)
+    if source == target:
+        return True
+    return "either" in {source, target}
 
 
 def _estimate_working_weight(
@@ -160,6 +248,23 @@ def _estimate_working_weight(
     return _round_to_plate(working, increment=increment)
 
 
+def _apply_profile_recency(
+    *,
+    weight_lbs: float,
+    confidence: float,
+    reason: str,
+    profile: ExercisePerformance,
+    increment: float,
+    today: date | None,
+) -> tuple[float, float, str]:
+    adj = recency_adjustment(profile.last_performed_on, today=today)
+    if not adj.is_stale:
+        return weight_lbs, confidence, reason
+    adjusted = _round_to_plate(weight_lbs * adj.load_multiplier, increment=increment)
+    adjusted_confidence = adjust_confidence_for_recency(confidence, adj)
+    return adjusted, adjusted_confidence, f"{reason}; {adj.reason}"
+
+
 def _category(target_ex: dict) -> str:
     """Refined category derivation used by `_CATEGORY_DEFAULTS`.
 
@@ -168,7 +273,8 @@ def _category(target_ex: dict) -> str:
     that was way too light for squat/deadlift and too heavy for
     overhead press. Now we split compounds by movement pattern family:
 
-        upper_push   — bench, overhead press, dips, horizontal/vertical press
+        horizontal_push — bench, dips, horizontal / incline press
+        vertical_push   — overhead press, shoulder press, push press
         upper_pull   — rows, pulldowns, pullups (same family, lighter than push)
         squat        — back squat, front squat, leg press, hack squat
         hinge        — deadlift, RDL, good morning (heaviest family)
@@ -178,15 +284,19 @@ def _category(target_ex: dict) -> str:
     a lateral raise.
     """
     bucket = (target_ex.get("equipment_bucket") or "").lower()
-    if bucket == "bodyweight":
+    if bucket == "bodyweight" or not uses_numeric_load(target_ex):
         return "bodyweight"
     if target_ex.get("is_machine"):
         return "machine"
     pattern = (target_ex.get("movement_pattern") or "").lower()
     is_compound = bool(target_ex.get("is_compound"))
     if is_compound:
+        if pattern in {"vertical_press", "overhead_press"}:
+            return "vertical_push"
+        if pattern in {"horizontal_press", "chest_press"}:
+            return "horizontal_push"
         if "press" in pattern:
-            return "upper_push"
+            return "horizontal_push"
         if "pull" in pattern or "row" in pattern:
             return "upper_pull"
         if pattern == "squat":
@@ -196,7 +306,7 @@ def _category(target_ex: dict) -> str:
         if pattern == "lunge":
             # Loaded lunges sit closer to a squat anchor than a press.
             return "squat"
-        return "upper_push"  # unclassified compound — safe mid-range
+        return "horizontal_push"  # unclassified compound — safe mid-range
     # Isolation: split upper vs. lower body so the 20 lb lateral raise
     # default doesn't collide with the 45 lb leg curl default.
     muscle = (target_ex.get("primary_muscle") or "").lower()
@@ -208,13 +318,17 @@ def _category(target_ex: dict) -> str:
 # Conservative on purpose — better to under-recommend and let the user
 # progress up than crush them with a made-up starting weight. Numbers
 # are calibrated against typical strength-level tables: a beginner
-# intermediate squat defaults to 135 (plates on the bar) vs an OHP at
-# 95 — these are reasonable "warm-up-and-feel-it-out" starting loads,
-# not working weights for the whole session.
+# intermediate squat defaults to 135 (plates on the bar), while vertical
+# pressing starts around an empty bar before per-dumbbell conversion.
+# These are reasonable "warm-up-and-feel-it-out" starting loads, not
+# working weights for the whole session.
 _CATEGORY_DEFAULTS = {
-    ("upper_push", "beginner"):      45.0,   # empty barbell
-    ("upper_push", "intermediate"):  95.0,
-    ("upper_push", "advanced"):     145.0,
+    ("horizontal_push", "beginner"):      45.0,   # empty barbell
+    ("horizontal_push", "intermediate"):  95.0,
+    ("horizontal_push", "advanced"):     145.0,
+    ("vertical_push", "beginner"):        25.0,
+    ("vertical_push", "intermediate"):    45.0,
+    ("vertical_push", "advanced"):        75.0,
     ("upper_pull", "beginner"):      45.0,
     ("upper_pull", "intermediate"):  85.0,
     ("upper_pull", "advanced"):     135.0,
@@ -246,10 +360,18 @@ def recommend_starting_weight(
     *,
     target_reps: Optional[str] = None,
     experience: str = "intermediate",
+    today: date | None = None,
 ) -> WeightRecommendation:
     """Layered lookup for a planned exercise. See module docstring."""
     target_slug = target_exercise.get("slug") or ""
     target_name = target_exercise.get("name") or target_slug
+    if not uses_numeric_load(target_exercise):
+        return WeightRecommendation(
+            weight_lbs=0.0,
+            confidence=0.10,
+            source="default",
+            reason=f"{target_name} is not tracked with a numeric load",
+        )
     target_inc = _recommendation_increment(target_exercise)
 
     # Tier 1: exact history. Confidence calibration:
@@ -271,14 +393,24 @@ def recommend_starting_weight(
                     source="strength_anchor",
                     reason=f"Based on your signup {p.name} baseline",
                 )
+            confidence = min(0.95, 0.45 + 0.08 * p.session_count)
+            reason = (
+                f"Based on your last {p.session_count} "
+                f"{target_name} session" + ("s" if p.session_count != 1 else "")
+            )
+            weight, confidence, reason = _apply_profile_recency(
+                weight_lbs=weight,
+                confidence=confidence,
+                reason=reason,
+                profile=p,
+                increment=target_inc,
+                today=today,
+            )
             return WeightRecommendation(
                 weight_lbs=weight,
-                confidence=min(0.95, 0.45 + 0.08 * p.session_count),
+                confidence=confidence,
                 source="exact_history",
-                reason=(
-                    f"Based on your last {p.session_count} "
-                    f"{target_name} session" + ("s" if p.session_count != 1 else "")
-                ),
+                reason=reason,
             )
 
     # Tier 2: substitution group — exercises the seed marks as direct swaps
@@ -289,6 +421,10 @@ def recommend_starting_weight(
             if slug == target_slug:
                 continue
             if ex.get("substitution_group") != sub_group:
+                continue
+            if not _laterality_compatible_for_direct_swap(ex, target_exercise):
+                continue
+            if not _load_semantics_compatible(ex, target_exercise):
                 continue
             p = profiles.get(slug)
             if p is not None:
@@ -314,11 +450,21 @@ def recommend_starting_weight(
                 # Substitution-group ceiling sits clearly below exact-
                 # history confidence so a single-session direct swap
                 # never outranks a 1-session exact match.
+                confidence = min(0.70, 0.40 + 0.04 * p.session_count)
+                reason = f"Transferred from {anchor_label} (direct swap)"
+                weight, confidence, reason = _apply_profile_recency(
+                    weight_lbs=weight,
+                    confidence=confidence,
+                    reason=reason,
+                    profile=p,
+                    increment=target_inc,
+                    today=today,
+                )
                 return WeightRecommendation(
                     weight_lbs=weight,
-                    confidence=min(0.70, 0.40 + 0.04 * p.session_count),
+                    confidence=confidence,
                     source="substitution_group",
-                    reason=f"Transferred from {anchor_label} (direct swap)",
+                    reason=reason,
                 )
 
     # Tier 3: movement pattern (e.g. horizontal_press). Only transfer
@@ -335,10 +481,12 @@ def recommend_starting_weight(
                 continue
             if bool(ex.get("is_compound")) != want_compound:
                 continue
+            if not _load_semantics_compatible(ex, target_exercise):
+                continue
             p = profiles.get(slug)
             if p is not None:
                 candidates.append((slug, p))
-        best = _pick_best_1rm(candidates)
+        best = _pick_best_1rm(candidates, today=today)
         if best is not None:
             slug, p = best
             source_ex = all_exercises_by_slug.get(slug)
@@ -360,11 +508,21 @@ def recommend_starting_weight(
                 # Movement-pattern transfer is a coarser signal than a
                 # direct substitution-group swap, so its flat confidence
                 # sits below the substitution-group ceiling.
+                confidence = 0.40
+                reason = f"Estimated from {anchor_label}"
+                weight, confidence, reason = _apply_profile_recency(
+                    weight_lbs=weight,
+                    confidence=confidence,
+                    reason=reason,
+                    profile=p,
+                    increment=target_inc,
+                    today=today,
+                )
                 return WeightRecommendation(
                     weight_lbs=weight,
-                    confidence=0.40,
+                    confidence=confidence,
                     source="movement_pattern",
-                    reason=f"Estimated from {anchor_label}",
+                    reason=reason,
                 )
 
     # Tier 4: same primary muscle + same equipment bucket. Last
@@ -380,10 +538,12 @@ def recommend_starting_weight(
                 continue
             if (ex.get("equipment_bucket") or "").lower() != bucket:
                 continue
+            if not _load_semantics_compatible(ex, target_exercise):
+                continue
             p = profiles.get(slug)
             if p is not None:
                 candidates.append((slug, p))
-        best = _pick_best_1rm(candidates)
+        best = _pick_best_1rm(candidates, today=today)
         if best is not None:
             slug, p = best
             source_ex = all_exercises_by_slug.get(slug)
@@ -399,14 +559,24 @@ def recommend_starting_weight(
                 # muscle family and the right gear, but the movement
                 # itself isn't matched. Lower confidence than
                 # movement-pattern transfer by design.
+                confidence = 0.25
+                reason = (
+                    f"New exercise estimate based on "
+                    f"{'your signup ' + p.name + ' baseline' if getattr(p, 'source', 'history') == 'strength_anchor' else 'recent ' + muscle + ' ' + bucket + ' work'}"
+                )
+                weight, confidence, reason = _apply_profile_recency(
+                    weight_lbs=weight,
+                    confidence=confidence,
+                    reason=reason,
+                    profile=p,
+                    increment=target_inc,
+                    today=today,
+                )
                 return WeightRecommendation(
                     weight_lbs=weight,
-                    confidence=0.25,
+                    confidence=confidence,
                     source="muscle_bucket",
-                    reason=(
-                        f"New exercise estimate based on "
-                        f"{'your signup ' + p.name + ' baseline' if getattr(p, 'source', 'history') == 'strength_anchor' else 'recent ' + muscle + ' ' + bucket + ' work'}"
-                    ),
+                    reason=reason,
                 )
 
     # Tier 5: category default — zero real data; best-effort baseline.
@@ -415,7 +585,15 @@ def recommend_starting_weight(
     if exp_key not in ("beginner", "intermediate", "advanced"):
         exp_key = "intermediate"
     weight = _CATEGORY_DEFAULTS.get((cat, exp_key), 45.0)
-    if _uses_per_dumbbell_load(target_exercise) and cat in ("upper_push", "upper_pull", "squat", "hinge"):
+    if _uses_per_side_load(target_exercise) and cat in (
+        "horizontal_push",
+        "vertical_push",
+        "upper_push",
+        "upper_pull",
+        "squat",
+        "hinge",
+        "machine",
+    ):
         weight = _round_to_plate(weight / 2.0, increment=target_inc)
     pretty_cat = cat.replace("_", " ")
     return WeightRecommendation(
@@ -448,13 +626,22 @@ def _pick_most_recent(
 
 def _pick_best_1rm(
     candidates: list[tuple[str, ExercisePerformance]],
+    *,
+    today: date | None = None,
 ) -> Optional[tuple[str, ExercisePerformance]]:
     """Prefer the profile with the highest Epley 1RM. Used for
     movement-pattern and muscle-bucket transfers where the goal is a
     strong anchor, not recency."""
     if not candidates:
         return None
-    return sorted(candidates, key=lambda item: item[1].estimated_1rm_lbs, reverse=True)[0]
+    return sorted(
+        candidates,
+        key=lambda item: (
+            item[1].estimated_1rm_lbs
+            * recency_adjustment(item[1].last_performed_on, today=today).load_multiplier
+        ),
+        reverse=True,
+    )[0]
 
 
 # ── Fatigue-aware overlay ────────────────────────────────────────────

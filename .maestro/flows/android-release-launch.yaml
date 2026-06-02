@@ -1,0 +1,24 @@
+# Fast Android release-build launch smoke.
+#
+# This intentionally checks only the first unauthenticated screen. Broader
+# lifecycle coverage lives in the seeded Maestro flows.
+
+appId: com.thallo.app
+name: android-release-launch
+tags:
+  - smoke
+  - android
+  - release
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- extendedWaitUntil:
+    visible: "Create account"
+    timeout: 30000
+
+- assertVisible: "Training and nutrition built around your real week."
+- assertVisible: "I already have an account"

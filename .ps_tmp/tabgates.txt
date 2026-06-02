@@ -1,0 +1,11 @@
+9405:    if (tab === 'trends' && authToken && !paceLoadedRef.current) {
+9631:      isActive && !!authToken && showMealProgress && (tab === 'today' || tab === 'health' || tab === 'insights');
+10807:        {tab === 'today' ? (
+10928:              active={isActive && tab === 'today'}
+11034:      ) : tab === 'trends' && showWorkoutProgress ? (
+11896:      ) : tab === 'insights' ? (
+13294:      ) : tab === 'health' ? (
+13356:                isActive={isActive && tab === 'health'}
+13366:                isActive={isActive && tab === 'health'}
+13924:                  isActive={isActive && tab === 'health'}
+14194:      ) : tab === 'body' ? (

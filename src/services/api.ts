@@ -4,6 +4,28 @@ import { Platform } from 'react-native';
 import { goalCategory } from '../constants/goalConfig';
 import { effectiveAge } from '../utils/age';
 import { resolveApiBaseUrl } from '../utils/apiBaseUrl';
+import { normalizeSunExposurePreferences } from '../utils/sunExposure';
+import { STORAGE_KEYS } from '../utils/storageKeys.ts';
+import type {
+  AreaSunContext,
+  CustomExerciseItem,
+  ManualActivityDetails,
+  SunExposureCorrectionOption,
+  SunExposureDailySummary,
+  SunExposurePreferences,
+  SunExposureSegment,
+  SubscriptionStatus,
+  SubscriptionTier,
+  WorkoutDay,
+} from '../types';
+import type {
+  ContextAwareInsight,
+  ContextInsightsResponse,
+  DailyInsightAction,
+  HealthInsightsResponse,
+  UserInsightPreferences,
+} from '../types/insights';
+import { customExerciseFromApi, customExerciseToApiPayload } from '../utils/customExercises';
 
 /** Exported for callers that need to hit the API outside the `request`
  *  helper (e.g. direct `fetch` for endpoints that return binary/large
@@ -24,6 +46,58 @@ function getBaseUrl(): string {
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+
+export type BillingEntitlement = {
+  subscription_tier: SubscriptionTier | string;
+  subscription_status?: string | null;
+  subscription_source?: string | null;
+  subscription_product_id?: string | null;
+  subscription_entitlement_id?: string | null;
+  subscription_store?: string | null;
+  subscription_environment?: string | null;
+  subscription_expires_at?: string | null;
+  trial_started_at?: string | null;
+  trial_ends_at?: string | null;
+  revenuecat_app_user_id?: string | null;
+};
+
+const SUBSCRIPTION_STATUSES = new Set<SubscriptionStatus>([
+  'free',
+  'trialing',
+  'trial_cancelled',
+  'active',
+  'grace_period',
+  'cancelled',
+  'expired',
+  'revoked',
+  'billing_issue',
+  'beta',
+  'promotional',
+  'temporary',
+]);
+
+function normalizeSubscriptionTier(value: unknown): SubscriptionTier {
+  return String(value ?? '').toLowerCase() === 'pro' ? 'pro' : 'free';
+}
+
+function normalizeSubscriptionStatus(value: unknown): SubscriptionStatus | undefined {
+  if (value == null || value === '') return undefined;
+  const status = String(value).trim().toLowerCase();
+  return SUBSCRIPTION_STATUSES.has(status as SubscriptionStatus) ? (status as SubscriptionStatus) : 'free';
+}
+
+let unauthorizedHandler: ((path: string) => void) | null = null;
+let unauthorizedFired = false;
+
+/** Register a global handler invoked once when an authenticated request
+ *  returns 401. Used by `app/index.tsx` to drop local auth state and
+ *  bounce the user to the sign-in screen. Without it, every screen's
+ *  `.catch` swallows the 401 into an empty state, which is
+ *  indistinguishable from "you have no data". */
+export function setUnauthorizedHandler(fn: ((path: string) => void) | null): void {
+  unauthorizedHandler = fn;
+  unauthorizedFired = false;
+}
 
 function requestMethod(options: RequestInit = {}): string {
   return String(options.method ?? 'GET').toUpperCase();
@@ -68,10 +142,22 @@ export async function recordTelemetryEvent(
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000, noRetry = false): Promise<T> {
-  const maxRetries = noRetry ? 0 : 2;
-  let lastError: Error | undefined;
+async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000, noRetry = false, retrySafe = false): Promise<T> {
   const method = requestMethod(options);
+  // Never auto-retry a write that lacks an idempotency key. If the server
+  // already applied it but the response was slow/dropped, retrying would
+  // insert a DUPLICATE — the root cause of duplicated meal logs and routines.
+  // GET/HEAD are always retry-safe; writes retry only when the body carries a
+  // non-null idempotency_key the backend can dedupe on.
+  const isWrite = method !== 'GET' && method !== 'HEAD';
+  const bodyStr = typeof options.body === 'string' ? options.body : '';
+  const hasIdempotencyKey = /"idempotency_key"\s*:\s*"[^"]/.test(bodyStr);
+  // `retrySafe` lets read-only POSTs (AI scans, lookups) keep retries: they
+  // mutate no user data, so a retry on a slow/dropped response is safe and
+  // important for reliability over flaky networks. Without it, the
+  // idempotency guard above would disable retries for these long vision calls.
+  const maxRetries = (noRetry || (isWrite && !hasIdempotencyKey && !retrySafe)) ? 0 : 2;
+  let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
@@ -97,6 +183,29 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
         continue;
       }
 
+      // Backend answered — even if 4xx — so we're reachable. The
+      // online-status bus uses this to flip back from offline → online
+      // the moment a real fetch lands, in addition to the heartbeat.
+      try {
+        const { markRequestOutcome } = require('../hooks/useOnlineStatus');
+        markRequestOutcome(true);
+      } catch { /* hook lookup is best-effort; never break the request */ }
+
+      // 401 on an authenticated call = token expired / revoked. Notify
+      // the registered handler ONCE per session so the app can drop
+      // local auth state and bounce to sign-in. Fire-and-throw — don't
+      // retry, a bad token won't fix itself. Anonymous calls (no
+      // Authorization header) shouldn't trigger sign-out: a 401 there
+      // means the endpoint requires auth and the caller forgot it.
+      if (res.status === 401 && tokenFromHeaders(options.headers)) {
+        if (!unauthorizedFired && unauthorizedHandler) {
+          unauthorizedFired = true;
+          try { unauthorizedHandler(path); } catch {}
+        }
+        recordTelemetryEvent('api_unauthorized', { path }, tokenFromHeaders(options.headers));
+        throw new Error('session_expired');
+      }
+
       // Empty-body responses (204 No Content, or anything sent without a
       // Content-Length / explicit empty body) can't be JSON-parsed —
       // calling `res.json()` on them throws `SyntaxError: Unexpected end
@@ -114,7 +223,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
           recordTelemetryEvent('api_error', { path, status: res.status, detail: `HTTP ${res.status}` }, tokenFromHeaders(options.headers));
           throw new Error(`HTTP ${res.status}`);
         }
-        invalidateReadCacheAfterMutation(method, tokenFromHeaders(options.headers));
+        invalidateReadCacheAfterMutation(method, path, tokenFromHeaders(options.headers));
         return undefined as unknown as T;
       }
 
@@ -138,7 +247,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
         recordTelemetryEvent('api_error', { path, status: res.status, detail }, tokenFromHeaders(options.headers));
         throw new Error(detail);
       }
-      invalidateReadCacheAfterMutation(method, tokenFromHeaders(options.headers));
+      invalidateReadCacheAfterMutation(method, path, tokenFromHeaders(options.headers));
       return data as T;
     } catch (e: any) {
       clearTimeout(timer);
@@ -151,6 +260,10 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
       if (e.message === 'Network request failed') {
         lastError = new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
         recordTelemetryEvent('api_network_error', { path }, tokenFromHeaders(options.headers));
+        try {
+          const { markRequestOutcome } = require('../hooks/useOnlineStatus');
+          markRequestOutcome(false, e);
+        } catch { /* best-effort */ }
         if (attempt < maxRetries) continue;
         throw lastError;
       }
@@ -163,23 +276,173 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
 const readInflight = new Map<string, Promise<any>>();
 const readCache = new Map<string, { expiresAt: number; value: any }>();
 let readCacheEpoch = 0;
+let legacyPersistentReadCacheCleanup: Promise<void> | null = null;
 
-function invalidateReadCacheAfterMutation(method: string, token?: string): void {
+function cacheScopeFromToken(token?: string): string {
+  if (!token) return 'anon';
+  // Non-cryptographic namespace hash: good enough to partition cache keys
+  // without writing bearer tokens into AsyncStorage key names.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < token.length; i += 1) {
+    hash ^= token.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `u_${(hash >>> 0).toString(36)}`;
+}
+
+// Read-cache domains a given mutation should bust. A meal write refreshes meal
+// reads + the nutrition-derived surfaces (insights, calorie ranges, readiness
+// nutrition pillar, AI nutrition analyses) — but does NOT nuke unrelated
+// domains' caches, which previously forced a full refetch storm and made the
+// app feel frozen right after logging. Falls back to the mutated path's own
+// top-level segment for anything not explicitly mapped.
+function invalidationPrefixesForPath(path: string): string[] {
+  const seg = '/' + (path.replace(/^\/+/, '').split(/[/?#]/)[0] || '');
+  switch (seg) {
+    case '/meals':
+      return ['/meals', '/profile', '/lifestyle', '/readiness', '/ai'];
+    case '/workouts':
+      return ['/workouts', '/profile', '/readiness', '/ai'];
+    case '/lifestyle':
+      return ['/lifestyle', '/readiness', '/profile', '/meals'];
+    default:
+      return [seg];
+  }
+}
+
+function invalidateReadCacheAfterMutation(method: string, path: string, token?: string): void {
   if (method === 'GET' || method === 'HEAD') return;
   readCacheEpoch += 1;
-  const tokenPrefix = token != null ? `${token}::` : null;
+  const scope = token != null ? `${cacheScopeFromToken(token)}::` : null;
+  const prefixes = invalidationPrefixesForPath(path);
+  const affected = (key: string): boolean => {
+    if (scope && !key.startsWith(scope)) return false;
+    const pathPart = scope ? key.slice(scope.length) : key.replace(/^[^:]*::/, '');
+    return prefixes.some(p => pathPart.startsWith(p));
+  };
   for (const key of Array.from(readCache.keys())) {
-    if (!tokenPrefix || key.startsWith(tokenPrefix)) readCache.delete(key);
+    if (affected(key)) readCache.delete(key);
   }
   for (const key of Array.from(readInflight.keys())) {
-    if (!tokenPrefix || key.startsWith(tokenPrefix)) readInflight.delete(key);
+    if (affected(key)) readInflight.delete(key);
   }
+  // Persistent layer clear stays broad but is non-blocking/background, so it
+  // never contributes to the foreground refetch storm.
+  void clearPersistentReadCache(scope);
 }
 
 function readRequestKey(path: string, options: RequestInit = {}): string | null {
   const method = requestMethod(options);
   if (method !== 'GET') return null;
-  return `${tokenFromHeaders(options.headers) ?? ''}::${path}`;
+  return `${cacheScopeFromToken(tokenFromHeaders(options.headers))}::${path}`;
+}
+
+// ── Persistent SWR cache layer ────────────────────────────────────────────
+//
+// Survives app kill so cold-start screens render from cache instead of
+// stalling on a 30s network call. When a `requestRead` consumer's
+// in-memory cache misses but persistent cache has a fresh-enough entry,
+// we race the network fetch against a soft timeout (~4s); if the
+// network is slow, we return the cached value immediately and let the
+// fetch keep running in the background to refresh the cache for the
+// NEXT call. Result: every GET endpoint gets stale-while-revalidate
+// behavior automatically.
+//
+// Keyed by `${hash(token)}::${path}` so multi-user scenarios stay scoped
+// without storing auth/session tokens in AsyncStorage key names.
+// Wiped on sign-out via the persistent-key prefix list in
+// app/index.tsx (USER_SCOPED_KEYS).
+const PERSISTENT_READ_CACHE_PREFIX = STORAGE_KEYS.cache.readCachePrefix;
+const PERSISTENT_READ_CACHE_INDEX_KEY = STORAGE_KEYS.cache.readCacheIndex;
+const LEGACY_PERSISTENT_READ_CACHE_PREFIX = STORAGE_KEYS.cache.legacyReadCachePrefix;
+const LEGACY_PERSISTENT_READ_CACHE_INDEX_KEY = STORAGE_KEYS.cache.legacyReadCacheIndex;
+const PERSISTENT_TTL_MS = 24 * 60 * 60 * 1000;       // 24h
+const SOFT_TIMEOUT_MS = 4000;                          // race-fallback to cache
+
+interface PersistedReadEntry {
+  value: any;
+  storedAt: number;
+}
+
+function cleanupLegacyPersistentReadCache(): Promise<void> {
+  if (!legacyPersistentReadCacheCleanup) {
+    legacyPersistentReadCacheCleanup = (async () => {
+      try {
+        const keys = await AsyncStorage.getAllKeys();
+        const legacyKeys = keys.filter(key => key.startsWith(LEGACY_PERSISTENT_READ_CACHE_PREFIX));
+        if (legacyKeys.length > 0) await AsyncStorage.multiRemove(legacyKeys);
+        await AsyncStorage.removeItem(LEGACY_PERSISTENT_READ_CACHE_INDEX_KEY);
+      } catch {
+        /* non-fatal — old cache entries expire by prefix wipe on sign-out */
+      }
+    })();
+  }
+  return legacyPersistentReadCacheCleanup;
+}
+
+async function loadPersistentRead<T>(key: string): Promise<PersistedReadEntry | null> {
+  try {
+    void cleanupLegacyPersistentReadCache();
+    const raw = await AsyncStorage.getItem(PERSISTENT_READ_CACHE_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedReadEntry;
+    if (!parsed || typeof parsed.storedAt !== 'number') return null;
+    if (Date.now() - parsed.storedAt > PERSISTENT_TTL_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function savePersistentRead(key: string, value: any): Promise<void> {
+  try {
+    void cleanupLegacyPersistentReadCache();
+    await AsyncStorage.setItem(
+      PERSISTENT_READ_CACHE_PREFIX + key,
+      JSON.stringify({ value, storedAt: Date.now() } satisfies PersistedReadEntry),
+    );
+    // Track the keys we've written so the wipe path can find them
+    // without scanning the whole AsyncStorage keyspace.
+    const indexRaw = await AsyncStorage.getItem(PERSISTENT_READ_CACHE_INDEX_KEY);
+    const idx: string[] = indexRaw ? JSON.parse(indexRaw) : [];
+    if (!idx.includes(key)) {
+      idx.push(key);
+      await AsyncStorage.setItem(PERSISTENT_READ_CACHE_INDEX_KEY, JSON.stringify(idx));
+    }
+  } catch {
+    /* non-fatal — caching is opportunistic */
+  }
+}
+
+async function clearPersistentReadCache(tokenPrefix: string | null): Promise<void> {
+  try {
+    const indexRaw = await AsyncStorage.getItem(PERSISTENT_READ_CACHE_INDEX_KEY);
+    if (!indexRaw) return;
+    const idx: string[] = JSON.parse(indexRaw);
+    const toRemove = tokenPrefix
+      ? idx.filter(k => k.startsWith(tokenPrefix))
+      : idx;
+    if (toRemove.length === 0) return;
+    await AsyncStorage.multiRemove(toRemove.map(k => PERSISTENT_READ_CACHE_PREFIX + k));
+    if (tokenPrefix) {
+      const remaining = idx.filter(k => !k.startsWith(tokenPrefix));
+      await AsyncStorage.setItem(PERSISTENT_READ_CACHE_INDEX_KEY, JSON.stringify(remaining));
+    } else {
+      await AsyncStorage.removeItem(PERSISTENT_READ_CACHE_INDEX_KEY);
+    }
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Wipe the persistent read cache. Called from the app-level
+ *  sign-out + user-switch paths so a different user signing in on
+ *  the same device never sees the prior user's responses. */
+export async function clearAllPersistentReadCache(): Promise<void> {
+  readCacheEpoch += 1;
+  readCache.clear();
+  readInflight.clear();
+  await clearPersistentReadCache(null);
 }
 
 async function requestRead<T>(
@@ -187,27 +450,77 @@ async function requestRead<T>(
   options: RequestInit = {},
   timeoutMs = 30000,
   ttlMs = 15000,
+  softTimeoutMs: number | null = SOFT_TIMEOUT_MS,
 ): Promise<T> {
   const key = readRequestKey(path, options);
   if (!key) return request<T>(path, options, timeoutMs);
+
+  // Layer 1 — in-memory cache (fastest, session-lifetime).
   const cached = readCache.get(key);
   const now = Date.now();
   if (cached && cached.expiresAt > now) return cached.value as T;
+
+  // Layer 2 — in-flight dedupe.
   const existing = readInflight.get(key);
   if (existing) return existing as Promise<T>;
+
+  // Kick off the network fetch + cache write.
   const startedEpoch = readCacheEpoch;
-  const promise = request<T>(path, options, timeoutMs)
+  const networkPromise = request<T>(path, options, timeoutMs)
     .then(value => {
       if (readCacheEpoch === startedEpoch) {
         readCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+        // Persist for next cold start. Fire-and-forget.
+        void savePersistentRead(key, value);
       }
       return value;
     })
     .finally(() => {
       readInflight.delete(key);
     });
-  readInflight.set(key, promise);
-  return promise;
+  readInflight.set(key, networkPromise);
+
+  if (softTimeoutMs == null) {
+    return await networkPromise;
+  }
+
+  // Layer 3 — race(network, soft timeout). If the network hasn't
+  // resolved within the configured soft timeout AND we have a persistent cache
+  // entry, return the cached value immediately. The network fetch
+  // keeps running and will refresh the cache for the next call.
+  // No persistent cache → wait the full timeout for the network.
+  const softTimeoutSentinel = Symbol('soft-timeout');
+  let softTimer: ReturnType<typeof setTimeout> | null = null;
+  const softRace = new Promise<symbol>(resolve => {
+    softTimer = setTimeout(() => resolve(softTimeoutSentinel), Math.max(0, softTimeoutMs));
+  });
+  try {
+    const winner = await Promise.race([networkPromise, softRace]);
+    if (softTimer) clearTimeout(softTimer);
+    if (winner === softTimeoutSentinel) {
+      const persisted = await loadPersistentRead<T>(key);
+      if (persisted) {
+        // Promote to in-memory so subsequent calls within the TTL
+        // window skip the persistent read.
+        readCache.set(key, { value: persisted.value, expiresAt: Date.now() + ttlMs });
+        return persisted.value as T;
+      }
+      // No persistent cache — fall through and keep waiting on the
+      // network up to its hard timeout.
+      return await networkPromise;
+    }
+    return winner as T;
+  } catch (e) {
+    if (softTimer) clearTimeout(softTimer);
+    // Network errored — if we have a persistent cache, prefer it
+    // over throwing. Better to render stale data than break the UI.
+    const persisted = await loadPersistentRead<T>(key);
+    if (persisted) {
+      readCache.set(key, { value: persisted.value, expiresAt: Date.now() + ttlMs });
+      return persisted.value as T;
+    }
+    throw e;
+  }
 }
 
 type ListWindowOptions = {
@@ -215,6 +528,9 @@ type ListWindowOptions = {
   skip?: number;
   since?: string | null;
   before?: string | null;
+  fresh?: boolean;
+  timeoutMs?: number;
+  noRetry?: boolean;
 };
 
 function normalizeWindowOptions(input: number | ListWindowOptions | undefined, defaultLimit: number): Required<Pick<ListWindowOptions, 'limit' | 'skip'>> & Pick<ListWindowOptions, 'since' | 'before'> {
@@ -249,10 +565,10 @@ export async function register(
       password,
       first_name: opts?.firstName,
       last_name: opts?.lastName,
-      accepted_terms: opts?.acceptedTerms ?? true,
-      accepted_privacy: opts?.acceptedPrivacy ?? true,
-      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer ?? true,
-      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer ?? true,
+      accepted_terms: opts?.acceptedTerms === true,
+      accepted_privacy: opts?.acceptedPrivacy === true,
+      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer === true,
+      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer === true,
       legal_version: opts?.legalVersion,
     }),
   });
@@ -288,10 +604,10 @@ export async function loginWithApple(
       first_name: opts?.firstName ?? undefined,
       last_name: opts?.lastName ?? undefined,
       legal_version: opts?.legalVersion,
-      accepted_terms: opts?.acceptedTerms ?? true,
-      accepted_privacy: opts?.acceptedPrivacy ?? true,
-      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer ?? true,
-      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer ?? true,
+      accepted_terms: opts?.acceptedTerms === true,
+      accepted_privacy: opts?.acceptedPrivacy === true,
+      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer === true,
+      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer === true,
     }),
   });
   recordTelemetryEvent('apple_login_completed', { is_new_user: result.is_new_user }, result.access_token);
@@ -317,10 +633,10 @@ export async function loginWithGoogle(
       first_name: opts?.firstName ?? undefined,
       last_name: opts?.lastName ?? undefined,
       legal_version: opts?.legalVersion,
-      accepted_terms: opts?.acceptedTerms ?? true,
-      accepted_privacy: opts?.acceptedPrivacy ?? true,
-      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer ?? true,
-      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer ?? true,
+      accepted_terms: opts?.acceptedTerms === true,
+      accepted_privacy: opts?.acceptedPrivacy === true,
+      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer === true,
+      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer === true,
     }),
   });
   recordTelemetryEvent('google_login_completed', { is_new_user: result.is_new_user }, result.access_token);
@@ -429,6 +745,78 @@ export async function getMe(
   }, opts.timeoutMs ?? 30000, opts.noRetry ?? false);
 }
 
+export type WatchTokenResponse = {
+  access_token: string;
+  token_type: 'bearer' | string;
+  expires_at: string;
+  api_base_url: string;
+  user_id: number;
+};
+
+export async function issueWatchToken(
+  token: string,
+  body: { device_id?: string; app_version?: string } = {},
+): Promise<WatchTokenResponse> {
+  return request<WatchTokenResponse>('/auth/watch-token', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getBillingEntitlement(token: string): Promise<BillingEntitlement> {
+  return request<BillingEntitlement>('/billing/entitlement', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function syncRevenueCatEntitlement(token: string): Promise<BillingEntitlement> {
+  return request<BillingEntitlement>('/billing/revenuecat/sync', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function cancelSignupTrial(token: string): Promise<BillingEntitlement> {
+  return request<BillingEntitlement>('/billing/signup-trial/cancel', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** DUMMY test billing — grants Pro with no real payment. Backend is gated by
+ *  DUMMY_BILLING_ENABLED so this 403s in any environment where it's off. */
+export async function mockCheckout(token: string): Promise<BillingEntitlement> {
+  return request<BillingEntitlement>('/billing/mock-checkout', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** DUMMY test billing — drops the user back to Free. */
+export async function mockDowngrade(token: string): Promise<BillingEntitlement> {
+  return request<BillingEntitlement>('/billing/mock-downgrade', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function billingEntitlementToProfilePatch(entitlement: BillingEntitlement): Partial<import('../types').UserProfile> {
+  return {
+    subscriptionTier: normalizeSubscriptionTier(entitlement.subscription_tier),
+    subscriptionStatus: normalizeSubscriptionStatus(entitlement.subscription_status),
+    subscriptionSource: entitlement.subscription_source ?? undefined,
+    subscriptionProductId: entitlement.subscription_product_id ?? undefined,
+    subscriptionEntitlementId: entitlement.subscription_entitlement_id ?? undefined,
+    subscriptionStore: entitlement.subscription_store ?? undefined,
+    subscriptionEnvironment: entitlement.subscription_environment ?? undefined,
+    subscriptionExpiresAt: entitlement.subscription_expires_at ?? undefined,
+    trialStartedAt: entitlement.trial_started_at ?? undefined,
+    trialEndsAt: entitlement.trial_ends_at ?? undefined,
+    revenueCatAppUserId: entitlement.revenuecat_app_user_id ?? undefined,
+  };
+}
+
 export async function updateEmail(token: string, email: string) {
   return request<{ email: string }>('/auth/update-email', {
     method: 'PUT',
@@ -481,12 +869,25 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       firstName:  data.first_name ?? undefined,
       lastName:   data.last_name ?? undefined,
       avatarUrl:  data.social_profile?.avatar_url ?? undefined,
-      subscriptionTier: data.subscription_tier === 'pro' ? 'pro' : 'free',
+      subscriptionTier: normalizeSubscriptionTier(data.subscription_tier),
+      subscriptionStatus: normalizeSubscriptionStatus(data.subscription_status),
+      subscriptionSource: data.subscription_source ?? undefined,
+      subscriptionProductId: data.subscription_product_id ?? undefined,
+      subscriptionEntitlementId: data.subscription_entitlement_id ?? undefined,
+      subscriptionStore: data.subscription_store ?? undefined,
+      subscriptionEnvironment: data.subscription_environment ?? undefined,
+      subscriptionExpiresAt: data.subscription_expires_at ?? undefined,
+      trialStartedAt: data.trial_started_at ?? undefined,
+      trialEndsAt: data.trial_ends_at ?? undefined,
+      revenueCatAppUserId: data.revenuecat_app_user_id ?? undefined,
       goal:       goalTrack,
       goalDetails: {
         pace:             data.goal.pace,
         targetWeightLbs:  data.goal.target_weight_lbs ?? undefined,
         timelineWeeks:    data.goal.timeline_weeks ?? undefined,
+        startWeightLbs:   data.goal.start_weight_lbs ?? undefined,
+        startBodyFatPct:  data.goal.start_body_fat_pct ?? undefined,
+        goalStartedAt:    data.goal.created_at ?? undefined,
       },
       physicalStats: {
         weightLbs:    currentWeightLbs,
@@ -506,7 +907,16 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       strengthBaselines:      data.preferences.strength_baselines ?? undefined,
       cardioBaseline:         data.preferences.cardio_baseline ?? undefined,
       foodsAvailable:         data.preferences.foods_available ?? [],
+      pendingImports:         Array.isArray(data.preferences.pending_imports) ? data.preferences.pending_imports : [],
+      sunExposurePreferences:  normalizeSunExposurePreferences(data.preferences.sun_exposure_preferences),
+      glp1Support:            data.preferences.glp1_support ?? undefined,
+      workoutManualMode:      Boolean(data.preferences.workout_manual_mode),
+      mealManualMode:         Boolean(data.preferences.meal_manual_mode),
+      customMacros:           data.preferences.custom_macros ?? undefined,
       customFoods:            [],
+      customExercises:        (Array.isArray(data.custom_exercises) ? data.custom_exercises : [])
+        .map(customExerciseFromApi)
+        .filter(Boolean) as CustomExerciseItem[],
       savedMeals:             [],
       weightEntries,
       weightHistory: weightEntries?.map((entry: any) => ({
@@ -520,6 +930,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
     return null;
   }
 }
+
 
 
 /**
@@ -554,13 +965,10 @@ async function buildMealRoutineText(profile: import('../types').UserProfile): Pr
 /** Compute the total macros + count for every pinned routine meal.
  *  Sent to the backend so the assembler can:
  *    1. Subtract routine macros from the daily target.
- *    2. Subtract routine count from mealsPerDay so the generated meals
- *       plus pinned routines fit the user's meal budget.
+ *    2. Avoid recreating routine-owned slots in generated meal concepts.
  *
- *  `routineSlots` is sent as a synthetic list of length N (one entry
- *  per pinned routine) — the backend only reads its length now, the
- *  string contents are ignored. We keep the field name + shape for
- *  back-compat with the existing PlanRequest schema.
+ *  `routineSlots` preserves the routine meal type labels when available
+ *  so generation can avoid duplicating those concepts.
  *
  *  Returns null when the user has no routines pinned. */
 async function buildRoutinePayload(): Promise<{
@@ -609,9 +1017,10 @@ async function buildRoutinePayload(): Promise<{
       { calories: 0, protein: 0, carbs: 0, fat: 0 },
     );
     console.log('[buildRoutinePayload]', routines.length, 'routines →', totals);
-    // One synthetic slot per pinned routine — the backend just reads
-    // the count.
-    const slots = routines.map((_, i) => `routine_${i}`);
+    const slots = routines.map((r, i) => {
+      const slot = String(r.mealType ?? '').trim().toLowerCase();
+      return ['breakfast', 'lunch', 'dinner', 'snack'].includes(slot) ? slot : `routine_${i}`;
+    });
     return {
       routineMacros: {
         calories: Math.round(totals.calories),
@@ -630,11 +1039,21 @@ function buildLogContext(
   profile: import('../types').UserProfile,
   userLog?: import('../types').UserLogEntry[],
   extraContext?: string,
+  options?: { includeNutritionSupports?: boolean },
 ): string | undefined {
   const parts: string[] = [];
   // Onboarding context — what the user said they last trained at signup
   if (profile.lastWorkoutContext) {
     parts.push(`User's recent activity (from sign-up): ${profile.lastWorkoutContext}`);
+  }
+  if (options?.includeNutritionSupports && profile.glp1Support?.enabled) {
+    const appetite = profile.glp1Support.appetite?.replace(/_/g, ' ') ?? 'normal';
+    const sideEffects = (profile.glp1Support.sideEffects ?? []).map(s => s.replace(/_/g, ' '));
+    parts.push([
+      `GLP-1 support mode is enabled. User reports ${appetite} appetite${sideEffects.length ? ` and wants support for ${sideEffects.join(', ')}` : ''}.`,
+      'Nutrition guidance should prioritize smaller protein-forward meals, hydration, gentle fiber, and lean-mass preservation through adequate protein and strength training.',
+      'Do not provide medication, dose, or prescribing advice; suggest contacting their clinician for severe or persistent symptoms.',
+    ].join(' '));
   }
   // Any extra context built by the caller (e.g. recent workout sessions)
   if (extraContext) parts.push(extraContext);
@@ -661,6 +1080,32 @@ function buildInjuries(profile: import('../types').UserProfile): string[] {
   return list;
 }
 
+/**
+ * Severity-aware structured payload for the planner. Sent alongside the
+ * legacy `buildInjuries()` flat strings so the backend can preserve
+ * backwards compatibility (older builds and the substring fallback in
+ * `_INJURY_MAP` still work). Only active/recovering entries are sent.
+ */
+function buildInjuriesStructured(
+  profile: import('../types').UserProfile,
+): Array<{
+  bodyPart: string;
+  status: string;
+  severity?: string;
+  muscleGroups?: string[];
+  estimatedRecoveryDate?: string;
+}> {
+  return (profile.injuryEntries ?? [])
+    .filter((e: any) => e.status !== 'resolved' && e.bodyPart)
+    .map((e: any) => ({
+      bodyPart: String(e.bodyPart),
+      status: String(e.status || 'active'),
+      severity: e.severity ? String(e.severity) : 'moderate',
+      muscleGroups: Array.isArray(e.muscleGroups) ? e.muscleGroups : [],
+      estimatedRecoveryDate: e.estimatedRecoveryDate ?? undefined,
+    }));
+}
+
 export interface WeeklyReview {
   adherence: number;       // 1-5: how many planned workouts completed
   energy: number;          // 1-5: overall energy/recovery rating
@@ -671,7 +1116,7 @@ export interface WeeklyReview {
 /** Full plan — called on first sign-up or when goal/pace changes (updates both sides). */
 /** AsyncStorage key where we persist the in-flight plan job id so we can
  *  resume polling across app launches / backgrounding events. */
-const PENDING_PLAN_JOB_KEY = 'pending_plan_job';
+const PENDING_PLAN_JOB_KEY = STORAGE_KEYS.plan.pendingJob;
 
 export type PendingPlanKind = 'full' | 'workout' | 'nutrition' | 'nutrition_remaining';
 export interface PendingPlanMarker {
@@ -906,6 +1351,7 @@ export async function getAIPlans(
   options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string; weeklyReview?: WeeklyReview },
 ) {
   const injuriesOrLimitations = buildInjuries(profile);
+  const injuriesStructured = buildInjuriesStructured(profile);
   const mealRoutineText = await buildMealRoutineText(profile);
   const routinePayload = await buildRoutinePayload();
   const payload: Record<string, any> = {
@@ -927,13 +1373,14 @@ export async function getAIPlans(
     experienceLevel:        profile.experienceLevel,
     preferredSplit:         profile.preferredSplit || undefined,
     injuriesOrLimitations,
+    injuriesStructured,
     mealRoutine:            mealRoutineText,
     routineMacros:          routinePayload?.routineMacros,
     routineSlots:           routinePayload?.routineSlots ?? [],
-    mealsPerDay:            Math.max(1, Math.min(10, profile.mealsPerDay ?? 3)),
     mealVariety:            Math.max(1, Math.min(7, profile.mealVariety ?? 5)),
     customMacros:           profile.customMacros ?? undefined,
-    userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
+    glp1Support:            profile.glp1Support?.enabled ? profile.glp1Support : undefined,
+    userContext:            buildLogContext(profile, options?.userLog, options?.extraContext, { includeNutritionSupports: true }),
   };
   if (options?.weeklyReview) {
     payload.weeklyReview = options.weeklyReview;
@@ -991,6 +1438,7 @@ export async function getAIWorkoutPlan(
     experienceLevel:        profile.experienceLevel,
     preferredSplit:         profile.preferredSplit || undefined,
     injuriesOrLimitations:  buildInjuries(profile),
+    injuriesStructured:     buildInjuriesStructured(profile),
     userContext:            buildLogContext(profile, options?.userLog, options?.extraContext),
   };
 
@@ -1058,10 +1506,10 @@ async function buildNutritionOnlyPayload(
     mealRoutine:          mealRoutineText,
     routineMacros:        routinePayload?.routineMacros,
     routineSlots:         routinePayload?.routineSlots ?? [],
-    mealsPerDay:          Math.max(1, Math.min(10, profile.mealsPerDay ?? 3)),
     mealVariety:          Math.max(1, Math.min(7, profile.mealVariety ?? 5)),
     customMacros:         profile.customMacros ?? undefined,
-    userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
+    glp1Support:          profile.glp1Support?.enabled ? profile.glp1Support : undefined,
+    userContext:          buildLogContext(profile, options?.userLog, options?.extraContext, { includeNutritionSupports: true }),
   };
 }
 
@@ -1122,6 +1570,16 @@ export async function getAIRemainingWeekNutritionPlan(
   return result;
 }
 
+export type RecommendationAiSafety = {
+  status: 'not_required' | 'pending' | 'ok' | 'review' | 'unavailable' | 'disabled' | 'error' | 'missing' | string;
+  verdict?: 'ok' | 'review' | null;
+  reasonCode?: string | null;
+  cacheKey?: string | null;
+  flags?: string[];
+  shouldHold?: boolean;
+  updatedAt?: number;
+};
+
 export async function getWeightRecommendation(
   token: string,
   exerciseName: string,
@@ -1140,8 +1598,10 @@ export async function getWeightRecommendation(
     incrementLbs?: number;
     allTimeBestWeightLbs?: number;
     allTimeBestReps?: number;
+    allTimeBestDate?: string;
     lastSessionBestWeightLbs?: number;
     lastSessionBestReps?: number;
+    lastSessionBestDate?: string;
     /** Planner-propagated anchor (already history-aware). Tier 2 in the
      *  backend pipeline — beats all client-side bests when present. */
     plannedTargetWeightLbs?: number;
@@ -1156,19 +1616,37 @@ export async function getWeightRecommendation(
     /** Planner-emitted per-set scheme. Lets live recs honor top-set →
      *  backoff transitions instead of treating every set as straight work. */
     setScheme?: import('../types').PlannedSet[] | null;
+    /** Override the default 8s timeout. Live in-workout callers should
+     *  pass a low value (~2500ms) so a stalled cellular round trip
+     *  never blocks the next-set UI; the fallback in
+     *  refreshRecommendationForExercise covers the timeout case. */
+    timeoutMs?: number;
   },
-): Promise<{ weightLbs: number; reps: number; tip: string }> {
-  return request('/ai/recommend-weight', {
+): Promise<{
+  weightLbs: number;
+  reps: number;
+  tip: string;
+  algorithmSource?: 'deterministic_progression' | string;
+  dataSource?: string;
+  confidence?: number | string | null;
+  reasonTags?: string[];
+  trace?: Record<string, any> | null;
+  aiSafety?: RecommendationAiSafety | null;
+}> {
+  const { timeoutMs, ...payload } = options ?? {};
+  return request('/recommendations/next-set', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ exerciseName, goal, lastSets, nextSetNumber, ...options }),
-  });
+    body: JSON.stringify({ exerciseName, goal, lastSets, nextSetNumber, ...payload }),
+  }, typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 8000, true);
 }
 
 /** Estimated one-rep-max for the user's showcase compound lifts.
- *  Powered by the deterministic performance profile (Epley 1RM from
- *  recent logged sessions). Returns only lifts the user has actually
- *  trained in the ~28-day window. */
+ *  Powered by the fatigue-aware Fresh Strength Signal: weights each
+ *  contributing set by its position in the session (slot × set
+ *  number) and folds RIR into a confidence weight rather than
+ *  rejecting noisy sets. Falls back to the rolling-overlay Epley
+ *  number when the freshness window is too sparse. */
 export type OneRepMaxLift = {
   slug: string;
   name: string;
@@ -1176,8 +1654,30 @@ export type OneRepMaxLift = {
   topWeightLbs: number;
   topReps: number;
   sessionCount: number;
+  /** Legacy 0..1 confidence from the raw performance profile. Kept
+   *  for back-compat — new UI should read `signalConfidence`. */
   confidence: number;
   lastPerformedOn: string | null;
+  /** % change of the fresh-signal eRM in the last 28 days vs the
+   *  prior 28 days. Null when there's no prior-window data. */
+  trend28dPct: number | null;
+  /** Same trend but over a 56-day window. Useful for once-a-week
+   *  lifters where 28d is too thin. Null if not enough data. */
+  trend56dPct: number | null;
+  /** Count of fresh sets that fed the signal. Surface as a small
+   *  caption ("based on n fresh sets") in the UI. */
+  freshSetCount: number;
+  /** Confidence bucket for the fresh-signal estimate. */
+  signalConfidence: 'high' | 'med' | 'low';
+  /**
+   *  - `full`    — solid freshness data, the signal is trustworthy.
+   *  - `partial` — some data but sparse or mostly late-session.
+   *  - `rough`   — fell back to the legacy rolling/raw top-set
+   *                computation. Show a "based on raw top sets"
+   *                caveat in the UI.
+   *  - `missing` — no usable data; the lift won't appear.
+   */
+  dataQuality: 'full' | 'partial' | 'rough' | 'missing';
 };
 
 export async function getOneRepMaxShowcase(token: string): Promise<OneRepMaxLift[]> {
@@ -1193,7 +1693,8 @@ export async function getOneRepMaxShowcase(token: string): Promise<OneRepMaxLift
 
 /** 4-pillar composite fitness score. Each pillar is a 0-100 subscore
  *  with a human-readable reason and a data quality tag. The headline
- *  `total` is a weighted average. */
+ *  `total` is a 28-day moving average of the daily weighted-pillar
+ *  score; `rawTotal` is today's instant value before smoothing. */
 export type FitnessPillar = {
   name: 'Strength' | 'Cardio' | 'Consistency' | 'Recovery';
   score: number;
@@ -1201,9 +1702,17 @@ export type FitnessPillar = {
   dataQuality: 'full' | 'partial' | 'missing';
 };
 export type FitnessCompositeScore = {
+  /** 28-day moving average of the daily score — the smoothed headline. */
   total: number;
+  /** Today's instant score, before moving-average smoothing. */
+  rawTotal?: number;
   rating: 'Elite' | 'Strong' | 'Solid' | 'Building' | 'Starting';
+  /** Pillar subscores reflect today's instant state, not the average. */
   pillars: FitnessPillar[];
+  /** Moving-average window length in days (28). */
+  windowDays?: number;
+  /** Daily snapshots inside the window — 1 for a brand-new user. */
+  sampleCount?: number;
 };
 
 export async function getFitnessCompositeScore(
@@ -1222,7 +1731,7 @@ export async function getFitnessCompositeScore(
     if (params.recentSleepHours != null) qs.set('recent_sleep_hours', String(params.recentSleepHours));
     if (params.avgSessionRpe != null) qs.set('avg_session_rpe', String(params.avgSessionRpe));
     const path = `/ai/fitness/composite-score${qs.toString() ? `?${qs.toString()}` : ''}`;
-    return await request<FitnessCompositeScore>(path, {
+    return await requestRead<FitnessCompositeScore>(path, {
       headers: { Authorization: `Bearer ${token}` },
     });
   } catch {
@@ -1234,7 +1743,7 @@ export async function getFitnessCompositeScore(
  *  to the backend's legacy GoalType enum. The backend only accepts a
  *  fixed set of values; passing anything else makes /profile/onboarding
  *  return 422 and the user's profile silently fails to sync, which then
- *  cascades into "calorie ranges 404" errors elsewhere in the app. */
+ *  cascades into calorie-target 404 errors elsewhere in the app. */
 function mapGoalToBackendType(frontendGoal: string | undefined | null): string {
   if (!frontendGoal) return 'maintain';
   const g = frontendGoal.toLowerCase();
@@ -1325,6 +1834,9 @@ export async function syncOnboarding(token: string, profile: import('../types').
         age:           profile.physicalStats.age,
         birthdate:     profile.physicalStats.birthdate ?? null,
         gender:        profile.physicalStats.gender,
+        weight_unit:   profile.weightUnit ?? null,
+        distance_unit: profile.distanceUnit ?? null,
+        height_unit:   profile.heightUnit ?? null,
       },
       goal: {
         goal_type:         mappedGoal,
@@ -1337,6 +1849,11 @@ export async function syncOnboarding(token: string, profile: import('../types').
         days_per_week:   profile.daysPerWeek,
         workout_duration_minutes: profile.workoutDurationMinutes ?? null,
         preferred_split: profile.preferredSplit ?? null,
+        // Lifestyle activity outside training — drives the TDEE step_2b
+        // nudge. Omitted when undefined so older backends ignore it and
+        // the existing prefs row stays untouched (server-side keeps the
+        // previous value when the field is absent from the payload).
+        ...(profile.lifestyleActivity ? { lifestyle_activity: profile.lifestyleActivity } : {}),
         equipment:       profile.equipment,
         equipment_settings: profile.equipmentSettings ?? null,
         training_day_pattern: trainingDayPattern && trainingDayPattern.length === profile.daysPerWeek ? trainingDayPattern : null,
@@ -1344,14 +1861,25 @@ export async function syncOnboarding(token: string, profile: import('../types').
         strength_baselines: profile.strengthBaselines ?? null,
         cardio_baseline: profile.cardioBaseline ?? null,
         foods_available: profile.foodsAvailable,
+        pending_imports: Array.isArray(profile.pendingImports) ? profile.pendingImports : [],
+        sun_exposure_preferences: profile.sunExposurePreferences
+          ? normalizeSunExposurePreferences(profile.sunExposurePreferences)
+          : undefined,
+        glp1_support: profile.glp1Support ?? { enabled: false },
+        custom_macros: profile.customMacros ?? null,
+        ...(profile.workoutManualMode !== undefined ? { workout_manual_mode: !!profile.workoutManualMode } : {}),
+        ...(profile.mealManualMode !== undefined ? { meal_manual_mode: !!profile.mealManualMode } : {}),
         injuries:        buildInjuries(profile),
+        // Severity-aware structured records — written into the JSONB
+        // column added by the injuries_structured migration. Older
+        // backends ignore this key.
+        injuries_structured: buildInjuriesStructured(profile),
       },
     }),
   });
   recordTelemetryEvent('onboarding_completed', {
     goal: profile.goal,
     days_per_week: profile.daysPerWeek,
-    meals_per_day: profile.mealsPerDay ?? 3,
   }, token);
   return result;
 }
@@ -1438,7 +1966,7 @@ export async function getGoals() {
 // library schema — old v2 caches didn't include it, so the detail page
 // was still falling back to the "Home" bucket label. Bump the suffix
 // any time the shape or required fields change.
-const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v4';
+const EXERCISE_LIBRARY_CACHE_KEY = STORAGE_KEYS.cache.exerciseLibraryV5;
 const EXERCISE_LIBRARY_TTL_MS = 24 * 60 * 60 * 1000;
 let exerciseLibraryMemoryCache: { ts: number; rows: any[] } | null = null;
 let exerciseLibraryInflight: Promise<any[]> | null = null;
@@ -1515,6 +2043,10 @@ export type LoggedSetPayload = {
   actual_pace?: string | null;
   heart_rate_avg?: number | null;
   cardio_metrics?: Record<string, string> | null;
+  /** Free-form per-set note (e.g. "form sloppy on rep 5"). */
+  notes?: string | null;
+  /** Distinguishes warmups from working sets for analytics/progression. */
+  set_type?: 'working' | 'warmup' | 'dropset' | 'amrap' | string | null;
 };
 
 export type LoggedExercisePayload = {
@@ -1526,6 +2058,7 @@ export type LoggedExercisePayload = {
   primary_muscle?: string | null;
   secondary_muscles?: string[] | null;
   is_compound?: boolean | null;
+  movement_pattern?: string | null;
   order_index?: number;
   sets: LoggedSetPayload[];
 };
@@ -1594,8 +2127,10 @@ export async function generateWorkoutDay(
     preferred_split?: string;
     priority_region?: string;
     injuries?: string[];
+    injuries_structured?: Record<string, any>[];
     disliked_exercises?: string[];
     focus_override?: string;
+    stimulus_override?: 'strength' | 'hypertrophy' | 'volume' | string;
     // Preceding-day focuses the user has already fixed in their
     // current plan but haven't completed yet. Most-recent LAST (natural
     // plan order). Backend normalizes these into the recent-focus
@@ -1610,17 +2145,29 @@ export async function generateWorkoutDay(
   }, 15000);
 }
 
+export async function generateStandaloneSession(
+  token: string,
+  params: { kind: 'stretch' | 'yoga' | 'foam_roll'; duration_minutes: number },
+): Promise<{ day: WorkoutDay & { _standalone?: boolean; _standalone_kind?: string } }> {
+  return request('/workouts/standalone/generate', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(params),
+  }, 10000);
+}
+
 export async function logWorkoutStarted(
   token: string,
   workout_date: string,
   focus_label: string,
   stimulus?: string,
+  opts?: { timeoutMs?: number; noRetry?: boolean },
 ) {
   return request('/workouts/start', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ workout_date, focus_label, stimulus }),
-  }, 10000);
+  }, opts?.timeoutMs ?? 10000, opts?.noRetry ?? false);
 }
 
 export interface PRAchievement {
@@ -1637,6 +2184,27 @@ export interface WorkoutCompleteResponse {
   ok: boolean;
   structured_persisted?: boolean;
   prs?: PRAchievement[];
+  calories_burned?: number | null;
+  hr_summary?: {
+    avgBpm?: number | null;
+    maxBpm?: number | null;
+    zoneMinutes?: number[] | null;
+  } | null;
+  training_score?: number | null;
+  training_rating?: 'Crushed' | 'Solid' | 'Light' | 'Below' | null;
+}
+
+export interface WorkoutTrainingScorePayload {
+  score?: number;
+  rating?: 'Crushed' | 'Solid' | 'Light' | 'Below';
+  pillars?: { effort: number; volume: number; duration: number; consistency: number };
+  pillarBreakdown?: Array<{
+    key: string;
+    label: string;
+    value: number;
+    max: number;
+    present: boolean;
+  }>;
 }
 
 export async function logWorkoutDone(
@@ -1654,6 +2222,13 @@ export async function logWorkoutDone(
     distanceMiles?: number;
     caloriesBurned?: number;
     avgHeartRate?: number;
+    /** GPS route coords captured during the session. Persisted on the
+     *  WorkoutCompletion row so post-workout map + Apple Fitness route
+     *  view can render the trail. Lifting + indoor cardio omit. */
+    routeCoords?: Array<{ lat: number; lon: number; t_ms: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }>;
+    /** Per-subtype structured detail (sauna temp, cold plunge depth,
+     *  swim stroke, climbing grade, etc). */
+    details?: ManualActivityDetails;
   },
   healthMetrics?: {
     caloriesBurned?: number;
@@ -1665,6 +2240,7 @@ export async function logWorkoutDone(
     sorenessAreas?: string[];
     notes?: string;
   },
+  training?: WorkoutTrainingScorePayload,
   /** Explicit gear-attribution override. When set (even to []), the
    *  backend SKIPS keyword-based auto-accumulation and only credits the
    *  given gear IDs. Used by the per-session disambiguation prompt when
@@ -1673,14 +2249,16 @@ export async function logWorkoutDone(
    *  "no gear used today" signal. */
   gearIds?: number[],
   source?: {
-    sourceContext?: 'planned' | 'saved_template' | 'custom_strength' | 'manual_activity' | 'apple_health' | 'watch' | 'coach_log' | string;
+    sourceContext?: 'planned' | 'saved_template' | 'custom_strength' | 'custom_cardio' | 'manual_activity' | 'apple_health' | 'watch' | 'coach_log' | string;
     templateId?: string | null;
     planDayId?: number | null;
     stimulus?: string | null;
     startedAt?: string | null;
     endedAt?: string | null;
     externalSourceId?: string | null;
+    idempotencyKey?: string | null;
   },
+  opts?: { timeoutMs?: number; noRetry?: boolean },
 ): Promise<WorkoutCompleteResponse> {
   const activityHrSummary = activity?.avgHeartRate
     ? { avgBpm: activity.avgHeartRate, maxBpm: activity.avgHeartRate, zoneMinutes: [] }
@@ -1707,6 +2285,7 @@ export async function logWorkoutDone(
       ...(source?.startedAt ? { started_at: source.startedAt } : {}),
       ...(source?.endedAt ? { ended_at: source.endedAt } : {}),
       ...(source?.externalSourceId ? { external_source_id: source.externalSourceId } : {}),
+      ...(source?.idempotencyKey ? { idempotency_key: source.idempotencyKey } : {}),
       ...(exercises && exercises.length > 0 ? { exercises } : {}),
       ...(activity?.category ? {
         activity_category: activity.category,
@@ -1716,18 +2295,26 @@ export async function logWorkoutDone(
         cardio_style: activity.cardioStyle,
       } : {}),
       ...(activity?.distanceMiles != null ? { distance_miles: activity.distanceMiles } : {}),
+      ...(activity?.details && Object.keys(activity.details).length > 0
+        ? { activity_details: activity.details } : {}),
+      ...(activity?.routeCoords && activity.routeCoords.length > 0
+        ? { route_coords: activity.routeCoords } : {}),
       ...(caloriesBurned ? { calories_burned: caloriesBurned } : {}),
       ...(hrSummary ? { hr_summary: hrSummary } : {}),
       ...(feedback?.feeling ? { feeling: feedback.feeling } : {}),
       ...(feedback?.intensity ? { intensity: feedback.intensity } : {}),
       ...(feedback?.sorenessAreas && feedback.sorenessAreas.length > 0 ? { soreness_areas: feedback.sorenessAreas } : {}),
       ...(feedback?.notes ? { feedback_notes: feedback.notes } : {}),
+      ...(training?.score != null ? { training_score: training.score } : {}),
+      ...(training?.rating ? { training_rating: training.rating } : {}),
+      ...(training?.pillars ? { training_pillars: training.pillars } : {}),
+      ...(training?.pillarBreakdown ? { training_pillar_breakdown: training.pillarBreakdown } : {}),
       // gear_ids: undefined → keyword auto-match (legacy default)
       // gear_ids: []        → explicit "no gear used today"
       // gear_ids: [1,3]     → only credit these IDs, skip keyword match
       ...(Array.isArray(gearIds) ? { gear_ids: gearIds } : {}),
     }),
-  });
+  }, opts?.timeoutMs ?? 30000, opts?.noRetry ?? false);
   recordTelemetryEvent('workout_completed', {
     workout_date,
     focus_label,
@@ -1746,12 +2333,21 @@ export async function syncInProgressWorkout(
   workout_date: string,
   focus_label: string,
   exercises: LoggedExercisePayload[],
+  source?: {
+    sourceContext?: 'planned' | 'saved_template' | 'custom_strength' | 'custom_cardio' | 'manual_activity' | 'apple_health' | 'watch' | 'coach_log' | string;
+  },
+  opts?: { timeoutMs?: number; noRetry?: boolean },
 ): Promise<{ ok: boolean; session_id: number | null; exercises: number; sets: number }> {
   return request('/workouts/sync', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ workout_date, focus_label, exercises }),
-  }, 10000);
+    body: JSON.stringify({
+      workout_date,
+      focus_label,
+      exercises,
+      ...(source?.sourceContext ? { source_context: source.sourceContext } : {}),
+    }),
+  }, opts?.timeoutMs ?? 10000, opts?.noRetry ?? false);
 }
 
 export interface WorkoutCompletionRecord {
@@ -1767,6 +2363,7 @@ export interface WorkoutCompletionRecord {
   started_at?: string | null;
   ended_at?: string | null;
   external_source_id?: string | null;
+  idempotency_key?: string | null;
   activity_category?: string | null;
   activity_subtype?: string | null;
   activity_intensity?: string | null;
@@ -1774,11 +2371,24 @@ export interface WorkoutCompletionRecord {
   cardio_style?: string | null;
   distance_miles?: number | null;
   calories_burned?: number | null;
+  /** Per-subtype structured detail JSONB (sauna temp, cold plunge depth,
+   *  swim stroke, climbing grade, etc). */
+  activity_details?: Record<string, unknown> | null;
+  /** GPS route trail captured during the session. Drives post-workout
+   *  map summary + sharing surfaces. Null for indoor cardio + lifting. */
+  route_coords?: Array<{ lat: number; lon: number; t_ms?: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }> | null;
   hr_summary?: {
     avgBpm?: number | null;
     maxBpm?: number | null;
     zoneMinutes?: number[] | null;
   } | null;
+  training_score?: number | null;
+  training_rating?: 'Crushed' | 'Solid' | 'Light' | 'Below' | string | null;
+  training_pillars?: { effort: number; volume: number; duration: number; consistency: number } | null;
+  training_pillar_breakdown?: WorkoutTrainingScorePayload['pillarBreakdown'] | null;
+  /** Provenance tag set by the import pipelines (Strong/Hevy/Strava).
+   *  Drives the "IMPORTED" badge on the workout-history card. */
+  import_source?: string | null;
 }
 
 export interface WorkoutSessionSetRecord {
@@ -1786,6 +2396,7 @@ export interface WorkoutSessionSetRecord {
   target_reps_min?: number | null;
   target_reps_max?: number | null;
   target_weight_lbs?: number | null;
+  set_type?: string | null;
   actual_reps?: number | null;
   actual_weight_lbs?: number | null;
   actual_rir?: number | null;
@@ -1796,6 +2407,8 @@ export interface WorkoutSessionSetRecord {
   actual_pace?: string | null;
   heart_rate_avg?: number | null;
   cardio_metrics?: Record<string, string> | null;
+  /** Free-form note for this set (e.g. "form felt sloppy on rep 5"). */
+  notes?: string | null;
 }
 
 export interface WorkoutSessionExerciseRecord {
@@ -1814,6 +2427,7 @@ export interface WorkoutSessionRecord {
   id: number;
   workout_date: string;
   focus: string;
+  source?: string | null;
   completed_at?: string | null;
   created_at?: string | null;
   exercises?: WorkoutSessionExerciseRecord[];
@@ -1827,9 +2441,17 @@ export async function listWorkoutSessions(
   const params = new URLSearchParams({ limit: String(limit), skip: String(skip) });
   if (since) params.set('since', since);
   if (before) params.set('before', before);
-  return requestRead(`/workouts?${params}`, {
+  const path = `/workouts?${params}`;
+  const requestOptions = {
     headers: { Authorization: `Bearer ${token}` },
-  }, 30000, 10000);
+  };
+  const fresh = typeof opts === 'object' && opts?.fresh;
+  if (fresh) {
+    const timeoutMs = typeof opts === 'object' ? opts.timeoutMs : undefined;
+    const noRetry = typeof opts === 'object' ? opts.noRetry : undefined;
+    return request<WorkoutSessionRecord[]>(path, requestOptions, timeoutMs ?? 15000, noRetry ?? true);
+  }
+  return requestRead(path, requestOptions, 30000, 10000);
 }
 
 /** Fetch the user's recent completion markers. No per-set detail. Used to
@@ -1842,15 +2464,190 @@ export async function listWorkoutCompletions(
   const params = new URLSearchParams({ limit: String(limit), skip: String(skip) });
   if (since) params.set('since', since);
   if (before) params.set('before', before);
-  return requestRead(`/workouts/completions?${params}`, {
+  const path = `/workouts/completions?${params}`;
+  const requestOptions = {
     headers: { Authorization: `Bearer ${token}` },
-  }, 30000, 10000);
+  };
+  const fresh = typeof opts === 'object' && opts?.fresh;
+  if (fresh) {
+    const timeoutMs = typeof opts === 'object' ? opts.timeoutMs : undefined;
+    const noRetry = typeof opts === 'object' ? opts.noRetry : undefined;
+    return request<WorkoutCompletionRecord[]>(path, requestOptions, timeoutMs ?? 15000, noRetry ?? true);
+  }
+  return requestRead(path, requestOptions, 30000, 10000);
+}
+
+export interface SunExposureSegmentCreateRequest {
+  startTime: string;
+  endTime: string;
+  durationMinutes?: number;
+  coarseLocationHash?: string | null;
+  activityId?: number | null;
+  routeCoords?: Array<{ lat: number; lon: number; t_ms?: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }>;
+  uvIndexAverage: number;
+  uvIndexMax?: number;
+  lightIntensityLux?: number | null;
+  localStartMinute?: number | null;
+  localEndMinute?: number | null;
+  timezoneOffsetMinutes?: number | null;
+  daylight?: boolean;
+  outdoorConfidence?: number;
+  areaContext?: AreaSunContext;
+  areaHints?: Record<string, unknown>;
+  activityCategory?: string | null;
+  activitySubtype?: string | null;
+  activitySource?: string | null;
+  source?: SunExposureSegment['source'];
+  userCorrection?: SunExposureCorrectionOption;
+}
+
+export async function getSunExposurePreferences(token: string): Promise<SunExposurePreferences> {
+  const result = await requestRead<SunExposurePreferences>('/sun-exposure/preferences', {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000, 10000);
+  return normalizeSunExposurePreferences(result);
+}
+
+export async function updateSunExposurePreferences(
+  token: string,
+  preferences: Partial<SunExposurePreferences>,
+): Promise<SunExposurePreferences> {
+  const result = await request<SunExposurePreferences>('/sun-exposure/preferences', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(preferences),
+  }, 10000);
+  return normalizeSunExposurePreferences(result);
+}
+
+export async function createSunExposureSegment(
+  token: string,
+  payload: SunExposureSegmentCreateRequest,
+): Promise<SunExposureSegment> {
+  return request<SunExposureSegment>('/sun-exposure/segments', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 10000);
+}
+
+export async function listSunExposureSegments(token: string, dayISO: string): Promise<SunExposureSegment[]> {
+  const params = new URLSearchParams({ day: dayISO.slice(0, 10) });
+  return requestRead<SunExposureSegment[]>(`/sun-exposure/segments?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000, 10000);
+}
+
+export async function getSunExposureSummary(token: string, dayISO: string): Promise<SunExposureDailySummary> {
+  const params = new URLSearchParams({ day: dayISO.slice(0, 10) });
+  return requestRead<SunExposureDailySummary>(`/sun-exposure/summary?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000, 10000);
+}
+
+export async function getSunExposureHistory(token: string, days = 30): Promise<SunExposureDailySummary[]> {
+  const params = new URLSearchParams({ days: String(Math.max(1, Math.min(365, Math.round(days)))) });
+  return requestRead<SunExposureDailySummary[]>(`/sun-exposure/history?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000, 10000);
+}
+
+export async function correctSunExposureSegment(
+  token: string,
+  payload: { segmentId?: number | null; correctionType: SunExposureCorrectionOption; contextKey?: string | null; notes?: string | null },
+): Promise<{ correction: Record<string, unknown>; segment: SunExposureSegment | null }> {
+  return request('/sun-exposure/corrections', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 10000);
+}
+
+export async function deleteSunExposureDerivedData(token: string): Promise<void> {
+  await request('/sun-exposure/derived-data', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000);
+}
+
+export type LifestyleDoseLevel = 'none' | 'light' | 'moderate' | 'heavy';
+export type LifestyleTiming = 'morning' | 'afternoon' | 'evening' | 'late' | 'unknown';
+export type BowelConsistency = 'normal' | 'loose' | 'hard' | 'mixed' | 'not_sure';
+export type LifestyleStressLevel = 'low' | 'moderate' | 'high';
+export type IllnessState = 'healthy' | 'rundown' | 'sick';
+export type AppetiteLevel = 'low' | 'normal' | 'high';
+
+export interface DailyLifestyleLog {
+  id?: number | null;
+  userId?: number;
+  localDate: string;
+  hasLog?: boolean;
+  alcoholLevel?: LifestyleDoseLevel | null;
+  alcoholDrinks?: number | null;
+  alcoholTiming?: LifestyleTiming | null;
+  cannabisLevel?: LifestyleDoseLevel | null;
+  cannabisTiming?: LifestyleTiming | null;
+  bowelMovementCount?: number | null;
+  bowelConsistency?: BowelConsistency | null;
+  stressLevel?: LifestyleStressLevel | null;
+  illnessState?: IllnessState | null;
+  caffeineMg?: number | null;
+  caffeineTiming?: LifestyleTiming | null;
+  lateCaffeine?: boolean | null;
+  appetite?: AppetiteLevel | null;
+  notes?: string | null;
+  source?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  pending?: boolean;
+}
+
+export type DailyLifestyleLogPayload = Partial<Omit<
+  DailyLifestyleLog,
+  'id' | 'userId' | 'localDate' | 'hasLog' | 'createdAt' | 'updatedAt' | 'pending'
+>>;
+
+export async function getLifestyleLogs(
+  token: string,
+  startDate: string,
+  endDate: string,
+): Promise<{ userId: number; startDate: string; endDate: string; logs: DailyLifestyleLog[] }> {
+  const params = new URLSearchParams({
+    startDate: startDate.slice(0, 10),
+    endDate: endDate.slice(0, 10),
+  });
+  return requestRead(`/lifestyle/daily?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000, 10000);
+}
+
+export async function getLifestyleLog(token: string, localDate: string): Promise<DailyLifestyleLog> {
+  return requestRead<DailyLifestyleLog>(`/lifestyle/daily/${encodeURIComponent(localDate.slice(0, 10))}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000, 5000);
+}
+
+export async function upsertLifestyleLog(
+  token: string,
+  localDate: string,
+  payload: DailyLifestyleLogPayload,
+): Promise<DailyLifestyleLog> {
+  return request<DailyLifestyleLog>(`/lifestyle/daily/${encodeURIComponent(localDate.slice(0, 10))}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 10000);
 }
 
 export interface FatigueScore {
+  muscle_recovery_score: number;
+  muscle_recovery_label: string;
+  // Deprecated compatibility aliases. Prefer muscle_recovery_* for UI; true
+  // training readiness comes from /readiness/today.
   readiness_score: number;
   readiness_label: string;
   muscle_fatigue: Record<string, number>;
+  raw_muscle_fatigue?: Record<string, number>;
   focus_readiness: Record<string, number>;  // 0.0-1.0 floats (NOT 0-100)
   top_fatigued: Array<{ muscle: string; value: number }>;
   blocked_focuses: string[];
@@ -1868,6 +2665,14 @@ export interface FatigueScore {
     recovery_bonus_applied: boolean;
     calories_avg?: number;
   };
+  explanations?: Array<{ type: string; severity: string; message: string }>;
+  recommendations?: Array<{
+    type: string;
+    severity: string;
+    message: string;
+    lower_body_readiness?: number;
+    alternatives?: string[];
+  }>;
 }
 
 export async function getFatigueScore(token: string): Promise<FatigueScore> {
@@ -1906,6 +2711,38 @@ export async function getWorkoutStatus(
   });
 }
 
+/** Conflict detection — call after a new injury is saved to find
+ *  upcoming exercises in the active PlanWeek that the new injury
+ *  would now block. Backend reads the plan; caller only sends the
+ *  injury list. Completed days are excluded server-side. */
+export interface InjuryConflict {
+  day_index: number;
+  focus: string;
+  exercise_name: string;
+  slug?: string | null;
+  movement_pattern: string;
+  reason: string;
+}
+export async function detectInjuryConflicts(
+  token: string,
+  injuries: import('../types').InjuryEntry[],
+): Promise<{ conflicts: InjuryConflict[]; summary: string; today_index: number }> {
+  const structured = injuries
+    .filter(e => e.status !== 'resolved' && e.bodyPart)
+    .map(e => ({
+      bodyPart: e.bodyPart,
+      status: e.status || 'active',
+      severity: e.severity || 'moderate',
+      muscleGroups: e.muscleGroups ?? [],
+      estimatedRecoveryDate: e.estimatedRecoveryDate,
+    }));
+  return request('/workouts/injury-conflicts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ structured_injuries: structured, legacy_injuries: [] }),
+  });
+}
+
 export async function getGoalConfig() {
   return request<{
     weight_goals: string[];
@@ -1924,7 +2761,15 @@ export async function getDayState(token: string, dayKey: string) {
 export async function upsertDayState(
   token: string,
   dayKey: string,
-  payload: { skipped_focus?: string | null; skip_reason?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any; macro_overrides?: any },
+  payload: {
+    skipped_focus?: string | null;
+    skip_reason?: string | null;
+    meal_checks?: Record<string, boolean>;
+    nutrition_plan?: any;
+    nutrition_log_status?: 'unknown' | 'partial' | 'rough_estimate' | 'complete' | null;
+    nutrition_log_status_source?: string | null;
+    macro_overrides?: any;
+  },
 ) {
   // Patch semantics — only send fields the caller actually wants to change.
   // Backend treats omitted fields as "leave existing value alone" (since the
@@ -1943,6 +2788,14 @@ export async function upsertDayState(
   }
   if (payload.meal_checks !== undefined) body.meal_checks = payload.meal_checks;
   if (payload.nutrition_plan !== undefined) body.nutrition_plan = payload.nutrition_plan;
+  if (payload.nutrition_log_status === null) {
+    body.clear_nutrition_log_status = true;
+  } else if (payload.nutrition_log_status !== undefined) {
+    body.nutrition_log_status = payload.nutrition_log_status;
+    if (payload.nutrition_log_status_source !== undefined) {
+      body.nutrition_log_status_source = payload.nutrition_log_status_source;
+    }
+  }
   if (payload.macro_overrides !== undefined) body.macro_overrides = payload.macro_overrides;
   return request('/profile/day-state/' + dayKey, {
     method: 'PUT',
@@ -1964,6 +2817,8 @@ export async function submitWeeklyCheckin(
     thigh_in?: number;
     calf_in?: number;
     body_fat_pct?: number;
+    bp_systolic?: number;
+    bp_diastolic?: number;
     energy: number;
     sleep: number;
     adherence: number;
@@ -1978,7 +2833,7 @@ export async function submitWeeklyCheckin(
 }
 
 export async function getInsights(token: string) {
-  return request('/profile/insights', {
+  return requestRead('/profile/insights', {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2028,7 +2883,30 @@ export async function upsertNightlySleepBatch(token: string, payloads: SleepNigh
 export type SleepHistoryItem = SleepNightlyPayload;
 
 export async function getSleepHistory(token: string, days: number = 30) {
-  return request<SleepHistoryItem[]>(`/sleep/history?days=${days}`, {
+  return requestRead<SleepHistoryItem[]>(`/sleep/history?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export type SleepPressureStatus = 'not_enough_data' | 'clear' | 'low' | 'moderate' | 'high';
+
+export interface SleepPressureResponse {
+  status: SleepPressureStatus;
+  pressure_hours: number;
+  display_hours: number;
+  is_capped: boolean;
+  sleep_need_hours: number;
+  recent_average_hours: number | null;
+  nights_count: number;
+  window_days: number;
+  confidence: 'low' | 'medium' | 'high';
+  sleep_score_penalty: number;
+  headline: string;
+  detail: string;
+}
+
+export async function getSleepPressure(token: string, days: number = 14) {
+  return requestRead<SleepPressureResponse>(`/sleep/pressure?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2044,15 +2922,26 @@ export type DailyHealthSnapshotPayload = {
   snapshot_date: string;                      // YYYY-MM-DD
   steps?: number | null;
   active_energy_kcal?: number | null;
+  basal_energy_kcal?: number | null;
   workout_minutes?: number | null;
   cardio_minutes?: number | null;
   zone2_minutes?: number | null;
   resting_hr?: number | null;
   hrv_ms?: number | null;
   vo2_max?: number | null;
+  respiratory_rate?: number | null;
+  oxygen_saturation?: number | null;
+  wrist_temperature_c?: number | null;
+  sleep_breathing_disturbances?: number | null;
+  sleep_breathing_disturbances_elevated?: boolean | null;
   weight_lbs?: number | null;
   readiness_score?: number | null;
   source?: string | null;
+  source_details?: {
+    providers?: string[];
+    fields?: Record<string, string>;
+    [key: string]: unknown;
+  } | null;
 };
 
 export async function upsertDailyHealthSnapshot(token: string, payload: DailyHealthSnapshotPayload) {
@@ -2074,7 +2963,322 @@ export async function upsertDailyHealthSnapshotBatch(token: string, payloads: Da
 export type DailyHealthHistoryItem = DailyHealthSnapshotPayload;
 
 export async function getDailyHealthHistory(token: string, days: number = 30) {
-  return request<DailyHealthHistoryItem[]>(`/health/history?days=${days}`, {
+  return requestRead<DailyHealthHistoryItem[]>(`/health/history?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Daily Stress summary (per user per day) ────────────────────────────────
+//
+// The Progress Today stress timeline computes a modeled daily average from
+// meals, workouts/activity, and optional HR samples. Persisting that summary
+// lets the app compare today against the user's own baseline.
+
+export type DailyStressSummaryPayload = {
+  summary_date: string;
+  avg_stress: number;
+  max_stress?: number | null;
+  latest_stress?: number | null;
+  sample_count?: number | null;
+  source_count?: number | null;
+  source?: 'thallo_estimate' | 'logs_estimate' | 'hr_logs_estimate' | 'manual' | 'imported' | 'unknown' | string | null;
+  source_details?: Record<string, unknown> | null;
+  computed_at?: string | null;
+};
+
+export type DailyStressComparison = {
+  delta: number;
+  label: 'about_usual' | 'higher_than_usual' | 'much_higher_than_usual' | 'lower_than_usual' | 'much_lower_than_usual' | string;
+  copy: string;
+  severity: 'neutral' | 'watch' | 'high' | 'low' | string;
+};
+
+export type DailyStressSummaryItem = DailyStressSummaryPayload & {
+  avg_stress: number;
+  max_stress?: number | null;
+  latest_stress?: number | null;
+  sample_count: number;
+  source_count: number;
+  source: string;
+  updated_at?: string | null;
+  comparison?: DailyStressComparison | null;
+};
+
+export type DailyStressBaseline = {
+  window_days: number;
+  avg_stress: number;
+  days_with_data: number;
+  min_stress: number;
+  max_stress: number;
+};
+
+export type DailyStressHistoryResponse = {
+  as_of: string;
+  days: number;
+  baseline_days: number;
+  baseline: DailyStressBaseline | null;
+  today: DailyStressSummaryItem | null;
+  rows: DailyStressSummaryItem[];
+};
+
+export async function upsertDailyStressSummary(token: string, payload: DailyStressSummaryPayload) {
+  return request<{ status: string; summary: DailyStressSummaryItem }>('/health/stress-summary', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getDailyStressHistory(token: string, days: number = 30, baselineDays: number = 14, asOf?: string | null) {
+  const d = Math.max(1, Math.min(365, Math.round(days || 30)));
+  const b = Math.max(3, Math.min(90, Math.round(baselineDays || 14)));
+  const asOfParam = asOf ? `&as_of=${encodeURIComponent(asOf)}` : '';
+  return requestRead<DailyStressHistoryResponse>(`/health/stress-history?days=${d}&baseline_days=${b}${asOfParam}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 60 * 1000, SOFT_TIMEOUT_MS);
+}
+
+export type MetabolicSignalConfidence = 'low' | 'medium' | 'high';
+export type MetabolicSignalStatus = 'low' | 'watch' | 'moderate' | 'elevated' | 'high' | 'unknown';
+export type MetabolicSignalRiskDirection = 'higher_is_better' | 'higher_is_worse';
+
+export type MetabolicSignalEstimate = {
+  key: string;
+  title: string;
+  score: number;
+  label: string;
+  status: MetabolicSignalStatus;
+  risk_direction: MetabolicSignalRiskDirection;
+  confidence: MetabolicSignalConfidence;
+  summary: string;
+  drivers: string[];
+  positive_factors: string[];
+  limiting_factors: string[];
+  recommendations: string[];
+  data_used: string[];
+  missing_data: string[];
+  window_days: number;
+  disclaimer: string;
+};
+
+export type MetabolicStressRhythmSegment = {
+  key: string;
+  title: string;
+  window_label: string;
+  expected_pattern: string;
+  score: number;
+  label: string;
+  status: MetabolicSignalStatus;
+  risk_direction: MetabolicSignalRiskDirection;
+  confidence: MetabolicSignalConfidence;
+  summary: string;
+  drivers: string[];
+  data_used: string[];
+  missing_data: string[];
+};
+
+export type MetabolicStressRhythm = {
+  key: string;
+  title: string;
+  confidence: MetabolicSignalConfidence;
+  summary: string;
+  segments: MetabolicStressRhythmSegment[];
+  data_used: string[];
+  missing_data: string[];
+  disclaimer: string;
+};
+
+export type MetabolicSignalsResponse = {
+  user_id: string;
+  window_days: number;
+  generated_at: string;
+  confidence: MetabolicSignalConfidence;
+  disclaimer: string;
+  data_coverage: Record<string, {
+    label: string;
+    window_days?: number;
+    days_with_data?: number;
+    records?: number;
+    quality: MetabolicSignalConfidence | 'missing';
+  }>;
+  data_used: string[];
+  missing_data: string[];
+  hormone_support: {
+    score: number;
+    label: string;
+    confidence: MetabolicSignalConfidence;
+    summary: string;
+    estimates: MetabolicSignalEstimate[];
+  };
+  stress_rhythm?: MetabolicStressRhythm;
+  autophagy: MetabolicSignalEstimate;
+  source_metrics: Record<string, number | string | null>;
+};
+
+export async function getMetabolicSignals(token: string, days: number = 30): Promise<MetabolicSignalsResponse> {
+  const clamped = Math.max(14, Math.min(30, Math.round(days || 30)));
+  return requestRead<MetabolicSignalsResponse>(`/health/metabolic-signals?days=${clamped}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 5 * 60 * 1000, SOFT_TIMEOUT_MS);
+}
+
+export type LabMarker = {
+  key: string;
+  label: string;
+  default_unit: string;
+  aliases?: string[];
+};
+
+export type HealthLabResultPayload = {
+  lab_type: string;
+  value: number;
+  unit?: string | null;
+  collected_at?: string | null;
+  source?: 'manual' | 'scan' | 'imported' | 'clinician' | 'unknown' | string | null;
+  reference_range_low?: number | null;
+  reference_range_high?: number | null;
+};
+
+export type HealthLabResultItem = HealthLabResultPayload & {
+  id: number;
+  lab_label: string;
+  unit: string;
+  collected_at: string;
+  source: string;
+  created_at?: string | null;
+};
+
+export async function getLabMarkers(token: string): Promise<{ markers: LabMarker[] }> {
+  return request('/health/labs/markers', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getHealthLabResults(token: string, days: number = 365): Promise<HealthLabResultItem[]> {
+  return request(`/health/labs?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function saveHealthLabResult(
+  token: string,
+  payload: HealthLabResultPayload,
+): Promise<HealthLabResultItem> {
+  return request('/health/labs', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function saveHealthLabResultsBatch(
+  token: string,
+  payloads: HealthLabResultPayload[],
+): Promise<{ status: string; count: number; labs: HealthLabResultItem[] }> {
+  return request('/health/labs/batch', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payloads),
+  });
+}
+
+export async function deleteHealthLabResult(token: string, labId: number): Promise<{ status: string; deleted: number }> {
+  return request(`/health/labs/${labId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+type HealthInsightsOptions = {
+  includeUnknown?: boolean;
+  categories?: string[];
+  riskSignals?: boolean;
+  preferFresh?: boolean;
+};
+
+function healthInsightsPath(
+  days: number = 14,
+  options?: Pick<HealthInsightsOptions, 'includeUnknown' | 'categories' | 'riskSignals'>,
+): string {
+  const params = new URLSearchParams();
+  params.set('days', String(days));
+  if (options?.includeUnknown) params.set('include_unknown', 'true');
+  if (options?.riskSignals === false) params.set('risk_signals', 'false');
+  if (options?.categories?.length) params.set('categories', options.categories.join(','));
+  return `/insights/health?${params.toString()}`;
+}
+
+export async function getCachedHealthInsights(
+  token: string,
+  days: number = 14,
+  options?: Pick<HealthInsightsOptions, 'includeUnknown' | 'categories' | 'riskSignals'>,
+): Promise<HealthInsightsResponse | null> {
+  const path = healthInsightsPath(days, options);
+  const key = readRequestKey(path, { headers: { Authorization: `Bearer ${token}` } });
+  if (!key) return null;
+  const now = Date.now();
+  const cached = readCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.value as HealthInsightsResponse;
+  const persisted = await loadPersistentRead<HealthInsightsResponse>(key);
+  return persisted?.value ?? null;
+}
+
+export async function getHealthInsights(
+  token: string,
+  days: number = 14,
+  options?: HealthInsightsOptions,
+): Promise<HealthInsightsResponse> {
+  return requestRead<HealthInsightsResponse>(healthInsightsPath(days, options), {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 5 * 60 * 1000, options?.preferFresh ? null : SOFT_TIMEOUT_MS);
+}
+
+export async function getContextInsightPreferences(token: string): Promise<UserInsightPreferences> {
+  return request<UserInsightPreferences>('/context-insights/preferences', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updateContextInsightPreferences(
+  token: string,
+  payload: Partial<UserInsightPreferences>,
+): Promise<UserInsightPreferences> {
+  return request<UserInsightPreferences>('/context-insights/preferences', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getContextInsights(
+  token: string,
+  days: number = 14,
+  includeDismissed = false,
+): Promise<ContextInsightsResponse> {
+  const params = new URLSearchParams();
+  params.set('days', String(days));
+  if (includeDismissed) params.set('include_dismissed', 'true');
+  return request<ContextInsightsResponse>(`/context-insights?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getNextBestContextAction(token: string, days: number = 14): Promise<DailyInsightAction> {
+  return request<DailyInsightAction>(`/context-insights/next-action?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function dismissContextInsight(token: string, insightId: string): Promise<ContextAwareInsight> {
+  return request<ContextAwareInsight>(`/context-insights/${encodeURIComponent(insightId)}/dismiss`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function deleteContextInsightDerivedData(token: string): Promise<void> {
+  return request<void>('/context-insights/derived-data', {
+    method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2156,6 +3360,16 @@ export type AIExerciseResult = {
   is_compound?: boolean;
   secondary_muscles?: string[];
   movement_pattern?: string | null;
+  /** Short common abbreviations / synonyms (1-3 entries) returned by the
+   *  AI prompt so freshly-imported exercises match later text searches
+   *  for those names. e.g. "BP" / "Bench" for Bench Press. Wger results
+   *  don't carry aliases, so this is AI-source-only. */
+  aliases?: string[];
+  /** free-exercise-db identifier — when present, the client renders a
+   *  static photo demo (or 2-frame cycling preview inside FormVideoModal)
+   *  in addition to the YouTube fallback. Populated server-side from
+   *  Exercise.demo_exercise_db_id at seed time. */
+  demo_exercise_db_id?: string | null;
 };
 
 /** Resolve an exercise name to a YouTube video ID for the top form
@@ -2165,11 +3379,21 @@ export type AIExerciseResult = {
 export async function getExerciseVideo(
   token: string,
   exerciseName: string,
+  context?: {
+    equipment?: string | null;
+    primaryMuscle?: string | null;
+    movementPattern?: string | null;
+  },
 ): Promise<{ video_id: string; candidates?: string[]; search_url: string; cached?: boolean }> {
   return request('/ai/exercise-video', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ exercise_name: exerciseName }),
+    body: JSON.stringify({
+      exercise_name: exerciseName,
+      equipment: context?.equipment ?? undefined,
+      primary_muscle: context?.primaryMuscle ?? undefined,
+      movement_pattern: context?.movementPattern ?? undefined,
+    }),
   }, 12000);
 }
 
@@ -2192,9 +3416,47 @@ export async function searchExerciseAI(
   });
   // Client-side dedupe belt-and-suspenders in case the backend prompt
   // still returns a known exercise.
-  const excludeLower = new Set((body.exclude ?? []).map(n => n.toLowerCase()));
-  const filtered = (res.results ?? []).filter(r => !excludeLower.has(r.name.toLowerCase()));
+  const key = (value: unknown) => String(value ?? '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const excluded = new Set((body.exclude ?? []).map(key).filter(Boolean));
+  const filtered = (res.results ?? []).filter(r => !excluded.has(key(r.name)));
   return { results: filtered };
+}
+
+/** Identify gym equipment / a machine from a single photo and return
+ *  3-6 exercises that machine supports, each with primary + secondary
+ *  muscles and standard sets/reps. Backend prefers verbatim names from
+ *  `library_names` when one of the supported exercises is already in
+ *  the user's library — so scanning a familiar cable machine returns
+ *  the user's existing Cable Row / Lat Pulldown rows instead of fresh
+ *  duplicates.
+ *
+ *  Response also includes `equipment_identified` (the detected machine
+ *  name, e.g. "Cable Machine") so the UI can show "Found: ___ — here
+ *  are exercises you can do with it." Empty string + empty results
+ *  when the photo is too ambiguous to identify equipment. */
+export async function analyzeExercisePhoto(
+  token: string,
+  body: {
+    image_base64: string;
+    mime_type?: string;
+    library_names?: string[];
+    equipment?: string[];
+    injuries?: string[];
+  },
+): Promise<{
+  equipment_identified?: string;
+  results: Array<AIExerciseResult & { match_source?: 'library' | 'ai' }>;
+}> {
+  return request('/ai/exercise-photo', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  }, 30000);
 }
 
 // ─── Cardio equipment profiles ───────────────────────────────────────────────
@@ -2258,6 +3520,9 @@ export async function suggestExercisesForWorkout(
   body: {
     workout_focus: string;
     current_exercises: string[];
+    completed_exercises?: string[];
+    scheduled_exercises?: string[];
+    exclude?: string[];
     equipment?: string[];
     injuries?: string[];
   },
@@ -2326,23 +3591,24 @@ export async function getLatestPlanJob(token: string): Promise<{ job: PlanJob | 
 }
 
 export async function getGuardrails(token: string) {
-  return request<{ warnings: string[] }>('/profile/guardrails', {
+  return requestRead<{ warnings: string[] }>('/profile/guardrails', {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
 
 export async function getCoachMemory(token: string) {
-  return request<any[]>('/profile/coach-memory', {
+  return requestRead<any[]>('/profile/coach-memory', {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
 
-// ─── Calorie reference ranges ────────────────────────────────────────────────
+// ─── Calorie reference targets ───────────────────────────────────────────────
 
 export interface CalorieRanges {
   bmr: number;
   activity_multiplier: number;
   maintenance_calories: number;
+  formula_maintenance_calories?: number;
   cut_calories: number;
   bulk_calories: number;
   cut_protein_g: number;
@@ -2362,14 +3628,72 @@ export interface CalorieRanges {
   cut_adjustment_kcal?: number;
   maintenance_adjustment_kcal?: number;
   bulk_adjustment_kcal?: number;
+  source_tdee_kind?: string;
+  source_tdee_kcal?: number | null;
+  health_energy_adjustment_kcal?: number;
+  health_basal_adjustment_kcal?: number;
 }
 
-/** Cut / maintain / bulk calorie reference card for the signed-in user.
+/** Cut / maintain / bulk calorie reference targets for the signed-in user.
  *  Computed server-side by the same calorie_calculator module that drives
  *  the meal plan targets — read-only preview, doesn't change the user's
  *  actual goal. */
 export async function getCalorieRanges(token: string): Promise<CalorieRanges> {
-  return request('/profile/calorie-ranges', {
+  return requestRead('/profile/calorie-ranges', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── User custom exercises ───────────────────────────────────────────────────
+
+export async function getCustomExercises(token: string): Promise<CustomExerciseItem[]> {
+  const rows = await request<any[]>('/profile/custom-exercises', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return (rows ?? []).map(customExerciseFromApi).filter(Boolean) as CustomExerciseItem[];
+}
+
+export async function saveCustomExercise(
+  token: string,
+  exercise: CustomExerciseItem,
+): Promise<CustomExerciseItem> {
+  const row = await request<any>('/profile/custom-exercises', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(customExerciseToApiPayload(exercise)),
+  });
+  return customExerciseFromApi(row) ?? exercise;
+}
+
+export async function updateCustomExercise(
+  token: string,
+  exercise: CustomExerciseItem,
+): Promise<CustomExerciseItem> {
+  if (!exercise.server_id) return saveCustomExercise(token, exercise);
+  const row = await request<any>(`/profile/custom-exercises/${exercise.server_id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(customExerciseToApiPayload(exercise)),
+  });
+  return customExerciseFromApi(row) ?? exercise;
+}
+
+export async function syncCustomExercises(
+  token: string,
+  exercises: CustomExerciseItem[],
+): Promise<CustomExerciseItem[]> {
+  const rows = await request<any[]>('/profile/custom-exercises/sync', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ exercises: exercises.map(customExerciseToApiPayload) }),
+  });
+  return (rows ?? []).map(customExerciseFromApi).filter(Boolean) as CustomExerciseItem[];
+}
+
+export async function deleteCustomExercise(token: string, exercise: CustomExerciseItem): Promise<void> {
+  if (!exercise.server_id) return;
+  await request(`/profile/custom-exercises/${exercise.server_id}`, {
+    method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2391,7 +3715,7 @@ export async function putUserState(token: string, state: Record<string, any>): P
 }
 
 export async function getProgressionInsights(token: string, exerciseName: string) {
-  return request<any>(`/workouts/progression/${encodeURIComponent(exerciseName)}`, {
+  return requestRead<any>(`/workouts/progression/${encodeURIComponent(exerciseName)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2422,11 +3746,11 @@ export async function matchGoal(
   }, 12000);
 }
 
-/** Look up a packaged food by barcode via OpenFoodFacts. */
+/** Look up a packaged food by barcode via local catalog, USDA, then fallback sources. */
 export async function lookupBarcode(
   token: string,
   barcode: string,
-): Promise<{ name: string; barcode: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number>; source: string }> {
+): Promise<FoodSearchResult & { barcode?: string | null }> {
   return request<any>('/ai/barcode-lookup', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -2443,15 +3767,85 @@ export type FoodSearchResult = {
   fat: number;
   fiber?: number;
   micronutrients?: Record<string, number>;
-  source?: 'seed' | 'user' | 'usda' | 'barcode' | 'ai';
+  source?: 'seed' | 'user' | 'usda' | 'fatsecret' | 'barcode' | 'ai' | 'vision_estimate' | string;
   fdc_id?: string | null;
   external_id?: string | null;
+  barcode?: string | null;
   food_id?: number | null;
   serving_id?: number | null;
   serving_grams?: number | null;
   brand?: string | null;
   is_verified?: boolean;
   is_preferred?: boolean;
+  trust_badge?: 'verified' | 'label' | 'user' | 'estimate' | 'catalog' | string;
+  processing_bucket?: 'minimally_processed' | 'processed' | 'ultra_processed' | 'unknown' | string;
+  food_quality?: 'whole' | 'processed' | 'unknown' | string;
+  protein_source?: 'plant' | 'animal' | 'mixed' | 'none' | 'unknown' | string;
+  fermented?: boolean;
+  probiotic?: boolean;
+  omega3_rich?: boolean;
+  plant_count?: number;
+  seafood?: boolean;
+  fruit?: boolean;
+  vegetable?: boolean;
+  alcohol?: boolean;
+  processed_meat?: boolean;
+  refined_grain?: boolean;
+};
+
+export type FoodSubmissionPayload = {
+  name: string;
+  brand?: string | null;
+  barcode?: string | null;
+  serving?: string | null;
+  serving_grams?: number | null;
+  calories: number;
+  protein?: number;
+  protein_g?: number;
+  carbs?: number;
+  carbs_g?: number;
+  fat?: number;
+  fat_g?: number;
+  fiber?: number | null;
+  fiber_g?: number | null;
+  sugar?: number | null;
+  sugar_g?: number | null;
+  added_sugar_g?: number | null;
+  sodium_mg?: number | null;
+  micronutrients?: Record<string, number>;
+  aliases?: string[];
+  front_image_url?: string | null;
+  nutrition_label_image_url?: string | null;
+  source_context?: 'manual' | 'barcode' | 'label_photo' | 'search_gap' | string;
+  raw_payload?: Record<string, any>;
+};
+
+export type FoodSubmission = FoodSearchResult & {
+  id: number;
+  status: 'pending' | 'approved' | 'rejected' | string;
+  source_context: string;
+  linked_food_id?: number | null;
+  aliases?: string[];
+  front_image_url?: string | null;
+  nutrition_label_image_url?: string | null;
+  review_note?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  reviewed_at?: string | null;
+};
+
+export type ScannedFoodResult = FoodSearchResult & {
+  preparation?: string;
+  estimated_grams?: number;
+  gram_range_low?: number;
+  gram_range_high?: number;
+  portion_confidence?: 'high' | 'medium' | 'low' | string;
+  nutrition_source?: string;
+  nutrition_confidence?: 'high' | 'medium' | 'low' | string;
+  calorie_range?: { low: number; high: number };
+  review_hint?: string;
+  source_context?: string;
+  context_inferred?: boolean;
 };
 
 /** Search food nutrition info by name. Local/recent foods rank first,
@@ -2460,7 +3854,7 @@ export async function searchFoodNutrition(
   token: string,
   query: string,
   opts?: { forceAi?: boolean; allowAiFallback?: boolean },
-): Promise<{ results: FoodSearchResult[]; sources?: { local: number; usda: number; ai: number }; preferred_foods?: string[] }> {
+): Promise<{ results: FoodSearchResult[]; sources?: { local: number; usda: number; ai: number; fatsecret?: number }; preferred_foods?: string[] }> {
   const params = new URLSearchParams({
     q: query,
     include_remote: 'true',
@@ -2471,6 +3865,30 @@ export async function searchFoodNutrition(
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   }, 45000);
+}
+
+export async function submitFoodToCatalog(
+  token: string,
+  payload: FoodSubmissionPayload,
+): Promise<FoodSubmission> {
+  return request<any>('/foods/submissions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 12000);
+}
+
+export async function listFoodSubmissions(
+  token: string,
+  status?: string,
+): Promise<{ submissions: FoodSubmission[] }> {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  const query = params.toString();
+  return request<any>(`/foods/submissions${query ? `?${query}` : ''}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 10000);
 }
 
 export async function addPreferredFood(
@@ -2484,28 +3902,46 @@ export async function addPreferredFood(
   }, 10000);
 }
 
+export type FoodClassificationResult = {
+  name: string;
+  protein_source: string;
+  fermented: boolean;
+  probiotic: boolean;
+  omega3_rich: boolean;
+  plant_count: number;
+  food_quality: string;
+  processing_bucket?: string;
+  seafood?: boolean;
+  fruit?: boolean;
+  vegetable?: boolean;
+  alcohol?: boolean;
+  processed_meat?: boolean;
+  refined_grain?: boolean;
+};
+
 export async function classifyFoods(
   token: string,
   names: string[],
-): Promise<{ classifications: Array<{ name: string; protein_source: string; fermented: boolean; probiotic: boolean; omega3_rich: boolean; plant_count: number; food_quality: string }> }> {
+  opts?: { allowAi?: boolean },
+): Promise<{ classifications: FoodClassificationResult[] }> {
   return request<any>('/ai/classify-foods', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ names }),
-  }, 10000);
+    body: JSON.stringify({ names, allow_ai: opts?.allowAi ?? true }),
+  }, 45000);
 }
 
 /** Enrich food items with micronutrients. Used for routine/custom foods
  *  that bypass normal plan gen enrichment. */
 export async function enrichFoodItems(
   token: string,
-  items: Array<{ name: string; quantity?: number; unit?: string }>,
+  items: Array<{ name: string; quantity?: number; unit?: string; calories?: number }>,
 ): Promise<{ items: Array<{ name: string; micronutrients: Record<string, number> }> }> {
   return request<any>('/ai/plans/enrich-items', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ items }),
-  }, 25000);
+  }, 15000, true);
 }
 
 /** Parse natural language workout descriptions into structured sessions. */
@@ -2525,17 +3961,63 @@ export async function parseWorkoutPhoto(
   token: string,
   photoBase64: string,
   mimeType = 'image/jpeg',
+  options: { userContext?: string; templateMode?: boolean } = {},
+): Promise<{ sessions: Array<{ date: string; focus: string; completed: boolean; durationSeconds: number; exercises: any[]; distanceMiles?: number; caloriesBurned?: number; avgHeartRate?: number; source?: string }> }> {
+  return parseWorkoutPhotos(
+    token,
+    [{ base64: photoBase64, mimeType }],
+    options,
+  );
+}
+
+/** Parse one or more workout screenshots/photos in a single AI pass. */
+export async function parseWorkoutPhotos(
+  token: string,
+  photos: Array<{ base64: string; mimeType?: string | null }>,
+  options: { userContext?: string; templateMode?: boolean } = {},
+): Promise<{ sessions: Array<{ date: string; focus: string; completed: boolean; durationSeconds: number; exercises: any[]; distanceMiles?: number; caloriesBurned?: number; avgHeartRate?: number; source?: string }> }> {
+  const clean = photos
+    .map(p => ({ base64: String(p.base64 || '').trim(), mimeType: p.mimeType || 'image/jpeg' }))
+    .filter(p => p.base64)
+    .slice(0, 6);
+  return request<any>('/ai/parse-workouts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      text: options.templateMode ? 'Workout template screenshot import' : 'Workout screenshot import',
+      currentDate: new Date().toISOString().slice(0, 10),
+      photo_base64_list: clean.map(p => p.base64),
+      photo_mime_types: clean.map(p => p.mimeType),
+      user_context: options.userContext || undefined,
+      template_mode: !!options.templateMode,
+    }),
+  }, clean.length > 1 ? 60000 : 45000);
+}
+
+/** Parse a workout PDF or image file into review-first session/template candidates. */
+export async function parseWorkoutFile(
+  token: string,
+  payload: {
+    fileBase64: string;
+    mimeType?: string | null;
+    filename?: string | null;
+    userContext?: string;
+    templateMode?: boolean;
+  },
 ): Promise<{ sessions: Array<{ date: string; focus: string; completed: boolean; durationSeconds: number; exercises: any[]; distanceMiles?: number; caloriesBurned?: number; avgHeartRate?: number; source?: string }> }> {
   return request<any>('/ai/parse-workouts', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({
-      text: 'Workout screenshot import',
+      text: payload.templateMode ? 'Workout template file import' : 'Workout file import',
       currentDate: new Date().toISOString().slice(0, 10),
-      photo_base64: photoBase64,
-      photo_mime_type: mimeType,
+      file_base64: payload.fileBase64,
+      file_mime_type: payload.mimeType || undefined,
+      filename: payload.filename || undefined,
+      user_context: payload.userContext || undefined,
+      template_mode: !!payload.templateMode,
     }),
-  }, 45000);
+  }, 60000);
 }
 
 export async function askTrainerQuestion(
@@ -2641,7 +4123,7 @@ export async function askWorkoutQuestion(
     convoTurns: payload.conversation?.length ?? 0,
   });
 
-  const resp = await request<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }>('/ai/workout-question', {
+  const resp = await request<{ answer: string; quick_cues: string[]; adjustment: string; safety_note: string }>('/coach/workout-question', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -2658,14 +4140,18 @@ export async function askWorkoutQuestion(
 
 export async function analyzeFoodPhoto(
   token: string,
-  payload: { image_base64: string; mime_type?: string },
+  payload: { image_base64: string; mime_type?: string; context?: string },
 ): Promise<{
   meal_name: string;
   items: string[];
+  item_details?: ScannedFoodResult[];
+  foods?: ScannedFoodResult[];
   calories: number;
   protein: number;
   carbs: number;
   fat: number;
+  calorie_range?: { low: number; high: number };
+  estimation_method?: string;
 }> {
   return request('/ai/food-photo', {
     method: 'POST',
@@ -2698,23 +4184,22 @@ export async function scanFoodsPhoto(
   payload: {
     images: Array<{ image_base64: string; mime_type?: string }>;
     context?: string;
+    // Trusted server-side context — improves identification/disambiguation
+    // without letting it override clearly visible foods.
+    meal_slot?: string;
+    dietary_preference?: string;
+    allergies?: string[];
   },
 ): Promise<{
-  foods: Array<{
-    name: string;
-    serving: string;
-    calories: number;
-    protein: number;
-    carbs: number;
-    fat: number;
-    micronutrients?: Record<string, number>;
-  }>;
+  foods: ScannedFoodResult[];
+  calorie_range?: { low: number; high: number };
+  estimation_method?: string;
 }> {
   return request('/ai/scan-foods', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  }, 60000);
+  }, 60000, false, true);
 }
 
 export async function lookupSupplementFromPhoto(
@@ -2727,10 +4212,16 @@ export async function lookupSupplementFromPhoto(
   tagline?: string;
   whatItDoes?: string;
   evidence?: 'strong' | 'moderate' | 'limited';
+  effectivenessConfidence?: 'high' | 'medium' | 'low';
   dose?: string;
   timing?: string;
   goodFor?: string[];
   cautions?: string;
+  commonUses?: string[] | null;
+  deficiencyRisks?: string[] | null;
+  excessRisks?: string[] | null;
+  foodSources?: string[] | null;
+  nutrient_content?: NutrientContent | null;
 }> {
   // 60s timeout — AI vision calls on label photos routinely take
   // 25-45s. Default 30s was timing out mid-flight, leaving the UI
@@ -2742,6 +4233,23 @@ export async function lookupSupplementFromPhoto(
   }, 60000);
 }
 
+/** One row of a parsed Supplement Facts panel. */
+export type NutrientFact = {
+  key?: string;
+  nutrient: string;
+  amount: number;
+  unit: string;
+  percent_dv?: number | null;
+};
+
+/** Structured Supplement Facts panel extracted from a label scan.
+ *  Credited toward micronutrient coverage server-side. */
+export type NutrientContent = {
+  serving_size?: { count?: number | null; unit?: string | null } | null;
+  nutrients: NutrientFact[];
+  parse_source?: string;
+};
+
 export type ScannedSupplement = {
   name: string;
   category: string;
@@ -2749,8 +4257,16 @@ export type ScannedSupplement = {
   dose_unit: string;
   evidence_tier: 'strong' | 'moderate' | 'limited' | 'weak';
   risk_tier: 'low' | 'moderate' | 'high';
+  description?: string | null;
+  effectiveness_confidence?: 'high' | 'medium' | 'low' | null;
   timing_notes?: string | null;
   safety_notes?: string | null;
+  common_uses?: string[] | null;
+  deficiency_risks?: string[] | null;
+  excess_risks?: string[] | null;
+  food_sources?: string[] | null;
+  source_terms?: string[] | null;
+  nutrient_content?: NutrientContent | null;
 };
 
 /** Multi-supplement photo scan — AI identifies every bottle/container
@@ -2760,6 +4276,37 @@ export async function scanSupplementsMulti(
   payload: { image_base64: string; mime_type?: string },
 ): Promise<{ supplements: ScannedSupplement[]; count: number }> {
   return request('/ai/scan-supplements', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 60000);
+}
+
+export type LabScanCandidate = HealthLabResultPayload & {
+  lab_label: string;
+  unit: string;
+  value: number;
+  collected_at?: string | null;
+  source: 'scan';
+  confidence?: 'high' | 'medium' | 'low' | string;
+};
+
+export async function scanLabReport(
+  token: string,
+  payload: {
+    image_base64?: string;
+    file_base64?: string;
+    mime_type?: string;
+    filename?: string;
+  },
+): Promise<{
+  report_collected_at?: string | null;
+  labs: LabScanCandidate[];
+  count: number;
+  warnings?: string[];
+  disclaimer?: string;
+}> {
+  return request('/ai/scan-labs', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -2778,9 +4325,22 @@ export type SpokenFoodItem = {
   carbs: number;
   fat: number;
   micronutrients?: Record<string, number>;
+  processing_bucket?: 'minimally_processed' | 'processed' | 'ultra_processed' | 'unknown' | string;
+  food_quality?: 'whole' | 'processed' | 'unknown' | string;
+  protein_source?: 'plant' | 'animal' | 'mixed' | 'none' | 'unknown' | string;
+  fermented?: boolean;
+  probiotic?: boolean;
+  omega3_rich?: boolean;
+  plant_count?: number;
+  seafood?: boolean;
+  fruit?: boolean;
+  vegetable?: boolean;
+  alcohol?: boolean;
+  processed_meat?: boolean;
+  refined_grain?: boolean;
 };
 
-/** Two-stage speech-to-meal: audio → Whisper transcript → structured
+/** Two-stage speech-to-meal: audio → transcript → structured
  *  food items with estimated macros. User reviews before it lands in
  *  the meal editor. */
 export async function speechToMeal(
@@ -2791,7 +4351,7 @@ export async function speechToMeal(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  }, 60000);
+  }, 60000, true);
 }
 
 export async function lookupSupplement(
@@ -2804,10 +4364,15 @@ export async function lookupSupplement(
   tagline?: string;
   whatItDoes?: string;
   evidence?: 'strong' | 'moderate' | 'limited';
+  effectivenessConfidence?: 'high' | 'medium' | 'low';
   dose?: string;
   timing?: string;
   goodFor?: string[];
   cautions?: string;
+  commonUses?: string[] | null;
+  deficiencyRisks?: string[] | null;
+  excessRisks?: string[] | null;
+  foodSources?: string[] | null;
 }> {
   return request('/ai/supplement-info', {
     method: 'POST',
@@ -2848,7 +4413,7 @@ export async function getWorkoutSummary(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 10000, true);
 }
 
 export type FoodVerificationVerdict = 'ok' | 'corrected' | 'insufficient_data';
@@ -2909,12 +4474,25 @@ export async function getPreSetRecommendation(
   reasonTags: string[];
   askForFeelAfterSet: boolean;
   source: 'deterministic' | 'ai_review' | 'fallback';
+  algorithmSource?: 'deterministic_progression' | string;
+  dataSource?: string;
+  trace?: Record<string, any> | null;
+  aiSafety?: RecommendationAiSafety | null;
 }> {
-  return request('/ai/pre-set-recommendation', {
+  return request('/recommendations/pre-set', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
+  }, 8000, true);
+}
+
+export async function getRecommendationAiSafetyStatus(
+  token: string,
+  cacheKey: string,
+): Promise<RecommendationAiSafety> {
+  return request(`/recommendations/ai-safety/${encodeURIComponent(cacheKey)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 2500, true);
 }
 
 export async function getAiWarmup(
@@ -2963,6 +4541,15 @@ export interface BodyScanResult {
   improvements: string[];
   assessment: string;
   disclaimer: string;
+  confidence?: 'high' | 'medium' | 'low' | string;
+  photoQuality?: 'good' | 'usable' | 'poor' | string;
+  qualityFlags?: string[];
+  needsRetake?: boolean;
+  sensitivePhoto?: boolean;
+  photoHidden?: boolean;
+  method?: string;
+  visualEstimatePct?: number | null;
+  measurementEstimatePct?: number | null;
 }
 
 // ─── Meal history ────────────────────────────────────────────────────────────
@@ -2975,6 +4562,7 @@ export interface MealHistoryItem {
   source?: string | null;
   fdc_id?: string | null;
   external_id?: string | null;
+  barcode?: string | null;
   brand?: string | null;
   is_verified?: boolean | null;
   quantity: number;
@@ -2983,7 +4571,31 @@ export interface MealHistoryItem {
   protein_g: number;
   carbs_g: number;
   fat_g: number;
+  saturated_fat_g?: number | null;
+  cholesterol_mg?: number | null;
+  sodium_mg?: number | null;
+  fiber_g?: number | null;
+  sugar_g?: number | null;
+  added_sugar_g?: number | null;
+  caffeine_mg?: number | null;
+  potassium_mg?: number | null;
+  calcium_mg?: number | null;
+  magnesium_mg?: number | null;
+  iron_mg?: number | null;
+  vitamin_d_mcg?: number | null;
+  vitamin_b12_mcg?: number | null;
+  folate_mcg?: number | null;
+  zinc_mg?: number | null;
+  omega_3_g?: number | null;
   micronutrients?: Record<string, number> | null;
+  processing_bucket?: 'minimally_processed' | 'processed' | 'ultra_processed' | 'unknown' | string | null;
+  food_quality?: 'whole' | 'processed' | 'unknown' | string | null;
+  protein_source?: 'plant' | 'animal' | 'mixed' | 'none' | 'unknown' | string | null;
+  fermented?: boolean | null;
+  probiotic?: boolean | null;
+  omega3_rich?: boolean | null;
+  plant_count?: number | null;
+  processed_meat?: boolean | null;
 }
 
 export interface MealHistoryEntry {
@@ -2992,10 +4604,43 @@ export interface MealHistoryEntry {
   meal_type: string | null;
   name: string;
   source: string | null;
+  saved_meal_id?: number | null;
+  client_meal_key?: string | null;
   consumed_at?: string | null;
   created_at?: string | null;
+  updated_at?: string | null;
+  version?: number | null;
+  // Template/routine provenance (refactor: templates vs instances). The
+  // logged row is always its own snapshot; these are for traceability only.
+  source_type?: string | null;            // "manual" | "favorite" | "routine" | "plan"
+  source_routine_id?: number | null;
+  routine_occurrence_key?: string | null;
+  idempotency_key?: string | null;
   items: MealHistoryItem[];
-  totals: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+  totals: { calories: number; protein_g: number; carbs_g: number; fat_g: number; fiber_g?: number | null };
+  /** Optional meal-level image. NULL = no image; client falls back to
+   *  category icon via src/utils/foodImage.ts. `image_source` is one of
+   *  "user_photo" | "recipe" | "pexels" | "product" | "asset" | "category". */
+  image_url?: string | null;
+  image_source?: string | null;
+}
+
+export interface MealPageResponse {
+  meal: MealHistoryEntry & { version?: number | null; updated_at?: string | null };
+  viewer: {
+    is_favorite: boolean;
+    can_edit: boolean;
+    saved_meal_id?: number | null;
+    last_logged_at?: string | null;
+    user_specific_notes?: string | null;
+  };
+  logs: MealHistoryEntry[];
+  permissions: {
+    can_edit: boolean;
+    can_delete: boolean;
+    can_favorite: boolean;
+    can_log: boolean;
+  };
 }
 
 export interface MealAverages {
@@ -3024,9 +4669,9 @@ export interface MealAverages {
 
 export async function logMealChecked(
   token: string,
-  payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string; consumed_at?: string },
-): Promise<{ id: number; consumed_at?: string | null }> {
-  const result = await request<{ id: number; consumed_at?: string | null }>('/meals/log-checked', {
+  payload: { meal_date: string; meal_type: string; client_meal_key?: string; meal: Record<string, any>; source?: string; consumed_at?: string; idempotency_key?: string },
+): Promise<{ id: number; client_meal_key?: string | null; consumed_at?: string | null }> {
+  const result = await request<{ id: number; client_meal_key?: string | null; consumed_at?: string | null }>('/meals/log-checked', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -3041,7 +4686,7 @@ export async function logMealChecked(
 
 export async function unlogMealChecked(
   token: string,
-  payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string },
+  payload: { meal_date: string; meal_type: string; client_meal_key?: string; meal: Record<string, any>; source?: string },
 ): Promise<{ deleted: number; meal_date: string }> {
   return request('/meals/unlog-checked', {
     method: 'POST',
@@ -3053,7 +4698,7 @@ export async function unlogMealChecked(
 export async function getMealHistory(token: string, days = 30, limit = 100): Promise<{ meals: MealHistoryEntry[] }> {
   return requestRead(`/meals/history?days=${days}&limit=${limit}`, {
     headers: { Authorization: `Bearer ${token}` },
-  }, 30000, 10000);
+  }, 30000, 0, null);
 }
 
 /** Hard-delete a logged meal by its backend Meal id. The matching MealItem
@@ -3061,7 +4706,36 @@ export async function getMealHistory(token: string, days = 30, limit = 100): Pro
  *  date so the score / averages reflect the deletion immediately. Used
  *  by the History tab's per-meal trash button. */
 export async function deleteLoggedMeal(token: string, mealId: number): Promise<void> {
-  await request(`/meals/${mealId}`, {
+  try {
+    await request(`/meals/${mealId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (err: any) {
+    const message = String(err?.message ?? err ?? '').toLowerCase();
+    if (message.includes('meal not found')) {
+      invalidateReadCacheAfterMutation('DELETE', `/meals/${mealId}`, token);
+      return;
+    }
+    throw err;
+  }
+}
+
+export async function getMealPage(token: string, mealId: number): Promise<MealPageResponse> {
+  return requestRead(`/meals/${mealId}/page`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 0, null);
+}
+
+export async function favoriteMeal(token: string, mealId: number): Promise<MealPageResponse> {
+  return request(`/meals/${mealId}/favorite`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function unfavoriteMeal(token: string, mealId: number): Promise<MealPageResponse> {
+  return request(`/meals/${mealId}/favorite`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -3095,6 +4769,8 @@ export interface GutHealthToday {
   collagen_g: number;
   /** AI-estimated probiotic CFU from today's logged items, in billions. */
   probiotic_cfu_billions?: number;
+  /** Prebiotic (fermentable) fiber grams from today's logged items. */
+  prebiotic_g?: number;
   seafood_servings: number;
   fruit_servings: number;
   vegetable_servings: number;
@@ -3137,6 +4813,10 @@ export interface GutHealthWindow {
   probiotic_cfu_billions?: number;
   /** AI-estimated average probiotic CFU per logged day, in billions. */
   avg_probiotic_cfu_billions?: number;
+  /** Prebiotic fiber grams across the full window. */
+  prebiotic_g?: number;
+  /** Average prebiotic fiber grams per logged day. */
+  avg_prebiotic_g?: number;
   seafood_servings: number;
   fruit_servings: number;
   vegetable_servings: number;
@@ -3187,14 +4867,30 @@ export interface NutritionScoreBreakdownItem {
   value_pct: number;     // 0-100 for bar
   raw: number;
   target: number | null;
+  target_min?: number | null;
+  target_max?: number | null;
   unit: string;
   on_track: boolean;
+}
+
+export type NutritionLogStatus = 'unknown' | 'partial' | 'rough_estimate' | 'complete';
+
+export interface NutritionLogCompleteness {
+  status: NutritionLogStatus;
+  confidence: number;
+  source: string;
+  reason: string;
+  meals_logged: number;
+  expected_meals: number;
+  logged_calories: number;
+  calorie_target: number | null;
+  usable_for_recovery: boolean;
 }
 
 export interface NutritionScoreToday {
   date: string;
   score: number;
-  source?: 'projected' | 'logged';
+  source?: 'projected' | 'logged' | 'empty';
   adherence: number;
   quality: number;
   micro: number;
@@ -3205,6 +4901,7 @@ export interface NutritionScoreToday {
   likely_gaps: string[];
   flags: Record<string, boolean>;
   indicators: Record<string, any>;
+  completeness?: NutritionLogCompleteness;
   adherence_breakdown: NutritionScoreBreakdownItem[];
   quality_breakdown: NutritionScoreBreakdownItem[];
   micro_breakdown: NutritionScoreBreakdownItem[];
@@ -3217,11 +4914,12 @@ export interface NutritionScoreToday {
 export interface NutritionScoreWeeklyDay {
   date: string;
   score: number | null;
-  source?: 'projected' | 'logged';
+  source?: 'projected' | 'logged' | 'empty';
   adherence?: number;
   quality?: number;
   micro?: number;
   logged: boolean;
+  completeness?: NutritionLogCompleteness;
 }
 
 export interface NutritionScoreWeekly {
@@ -3254,17 +4952,117 @@ export interface AdjustedDailyTarget {
   adjusted_calories: number;
   adjustment_applied: number;
   weekly_adjustment_applied?: number;
+  // Raw over/under-budget calorie totals from the prior days in this
+  // ISO week. Used by DailyTargetAdjustmentBanner to write specific
+  // "you went ~N over Mon-Wed" copy instead of vague "based on earlier
+  // days" text. `weekly_valid_days` reports how many of the past days
+  // had enough data to count toward the smoothing (a partial-log day
+  // is ignored).
+  weekly_over_budget_kcal?: number;
+  weekly_under_budget_kcal?: number;
+  weekly_valid_days?: number;
   activity_adjustment_applied?: number;
+  // Newer aliases — same values as activity_adjustment_applied / activity_calories_burned
+  // but matching the explicit naming used in the heavy-day breakdown.
+  activity_adjustment_kcal?: number;
+  activity_workout_adjustment_kcal?: number;
+  activity_neat_adjustment_kcal?: number;
+  activity_total_burned_kcal?: number;
   activity_calories_burned?: number;
   activity_duration_minutes?: number;
   activity_workout_count?: number;
   activity_at_cap?: boolean;
+  is_heavy_training_day?: boolean;
+  // 'none' | 'workout' | 'workout_heavy' | 'workout_neat' | 'neat'
+  activity_adjustment_reason?: string;
   at_cap: boolean;
   days_remaining: number;
   weekly_budget_remaining: number;
+  calories_logged_so_far?: number;
+  calories_logged_before_date?: number;
+  weekly_smoothing_basis?: 'prior_days' | string;
+  weekly_smoothing_locked_for_date?: boolean;
+  weekly_smoothing_cutoff_date?: string | null;
+  target_day_type?: 'heavy' | 'leg' | 'hard' | 'standard' | 'easy' | 'rest' | string | null;
   note: string | null;
   activity_note?: string | null;
+  nutrition_target_explanation?: string | null;
+  formula_daily_target?: number;
+  resolved_daily_target?: number;
+  maintenance_calories?: number;
+  goal_adjustment_kcal?: number;
+  goal_adjustment_pct?: number | null;
+  goal_pace_label?: string | null;
+  coaching_adjustment_kcal?: number;
+  health_basal_adjustment_kcal?: number;
+  health_basal_target_adjustment_kcal?: number;
+  health_energy_adjustment_kcal?: number;
+  rolling_health_activity_adjustment_kcal?: number;
+  day_type_adjustment_kcal?: number;
+  same_day_activity_refuel?: number;
+  workout_day_type?: string | null;
+  protein_basis_lbs?: number | null;
+  protein_factor?: number | null;
+  fat_percent?: number | null;
+  fat_floor_g?: number | null;
+  warnings?: string[];
+  target_basis?: {
+    goal?: string | null;
+    goal_type?: string | null;
+    goal_pace?: string | null;
+    rate_summary?: string | null;
+    formula_daily_target?: number | null;
+    formula_tdee?: number | null;
+    formula_tdee_kcal?: number | null;
+    apple_tdee_kcal?: number | null;
+    apple_valid_days?: number | null;
+    maintenance_source?: string | null;
+    maintenance_blend?: Record<string, any> | null;
+    resolved_daily_target?: number | null;
+    base_daily_target?: number | null;
+    maintenance_calories?: number | null;
+    goal_adjustment_kcal?: number | null;
+    goal_adjustment_pct?: number | null;
+    goal_pace_label?: string | null;
+    coaching_adjustment_kcal?: number | null;
+    health_basal_adjustment_kcal?: number | null;
+    health_basal_target_adjustment_kcal?: number | null;
+    health_energy_adjustment_kcal?: number | null;
+    rolling_health_activity_adjustment_kcal?: number | null;
+    day_type_adjustment_kcal?: number | null;
+    source_bmr_kind?: string | null;
+    source_bmr_kcal?: number | null;
+    source_tdee_kind?: string | null;
+    source_tdee_kcal?: number | null;
+    bmr?: number | null;
+    activity_multiplier?: number | null;
+    source_weight_lbs?: number | null;
+    source_weight_kind?: string | null;
+    protein_basis_lbs?: number | null;
+    protein_basis_kind?: string | null;
+    protein_factor?: number | null;
+    fat_percent?: number | null;
+    fat_floor_g?: number | null;
+    min_carbs_g?: number | null;
+    warnings?: string[];
+    health_signal?: Record<string, any> | null;
+    health_energy_signal?: Record<string, any> | null;
+  } | null;
   adjusted_macros: { calories?: number; protein_g: number; carbs_g: number; fat_g: number } | null;
+  hydration_target_oz?: number;
+  hydration_breakdown?: {
+    target_oz: number;
+    target_min_oz?: number;
+    target_max_oz?: number;
+    baseline_oz: number;
+    training_addon_oz: number;
+    active_energy_addon_oz: number;
+    heat_addon_oz: number;
+    protein_addon_oz?: number;
+    alcohol_addon_oz?: number;
+    intensity_bucket?: string;
+    reason?: string | null;
+  };
 }
 
 export async function getAdjustedDailyTarget(token: string, date?: string): Promise<AdjustedDailyTarget> {
@@ -3295,17 +5093,24 @@ export async function getRecoveryFlags(
   });
 }
 
-// Hydration — daily log + target. The backend computes a target that
+// Hydration — daily log + target range. The backend computes a midpoint that
 // reflects weight + sex (base), planned/actual workout minutes (sweat
 // replacement), today's logged protein (kidney filtration), and any
-// alcohol logged (diuretic). `breakdown` exposes each contribution in oz
-// so the UI can explain the number — e.g. "104 oz = 96 base + 16 workout
-// − 8 you didn't drink yet today." All breakdown fields are integers.
+// alcohol logged (diuretic), then wraps that adapted midpoint in a soft
+// daily range. `breakdown` exposes each contribution in oz so the UI can
+// explain the number. All breakdown fields are integers.
 export interface HydrationBreakdown {
   base: number;
   activity: number;
   protein: number;
   alcohol: number;
+  target_min_oz?: number;
+  target_max_oz?: number;
+  training?: number;
+  active_energy?: number;
+  heat?: number;
+  intensity?: string;
+  reason?: string | null;
 }
 export type HydrationElectrolyteStatus = 'not_needed' | 'consider' | 'planned' | 'covered';
 export interface HydrationElectrolyteGuidance {
@@ -3333,11 +5138,19 @@ export interface HydrationGuidance {
   electrolytes: HydrationElectrolyteGuidance;
   supplements: HydrationSupplementSignals;
   notes: HydrationGuidanceNote[];
+  active_energy_kcal?: number | null;
+  workout_calories_burned?: number | null;
+  activity_category?: string | null;
+  activity_intensity?: string | null;
+  cardio_style?: string | null;
+  target_reason?: string | null;
 }
 export interface HydrationStatus {
   date: string;
   ounces: number;
   target_ounces: number;
+  target_ounces_min?: number;
+  target_ounces_max?: number;
   /** Optional — older app builds may not surface this. */
   breakdown?: HydrationBreakdown;
   /** Sodium/supplement advice. Does not change the ounce target by itself. */
@@ -3348,22 +5161,36 @@ export async function getHydration(token: string, logDate?: string): Promise<Hyd
   return request(`/meals/hydration${qs}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
-export async function logHydration(token: string, ounces: number, logDate?: string): Promise<{ date: string; ounces: number }> {
+type HydrationLogOptions = {
+  commandId?: string;
+};
+
+export async function logHydration(
+  token: string,
+  ounces: number,
+  logDate?: string,
+  opts: HydrationLogOptions = {},
+): Promise<{ date: string; ounces: number }> {
   return request('/meals/hydration', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ounces, ...(logDate ? { log_date: logDate } : {}) }),
+    body: JSON.stringify({ ounces, ...(logDate ? { log_date: logDate } : {}), ...(opts.commandId ? { command_id: opts.commandId } : {}) }),
   });
 }
 
 // Atomic delta for quick-add buttons. Backend reads the row, adds the
 // delta, and writes back in one transaction so rapid taps compose
 // correctly (three +8oz taps = +24oz, not +8oz from the last write).
-export async function logHydrationDelta(token: string, deltaOz: number, logDate?: string): Promise<{ date: string; ounces: number }> {
+export async function logHydrationDelta(
+  token: string,
+  deltaOz: number,
+  logDate?: string,
+  opts: HydrationLogOptions = {},
+): Promise<{ date: string; ounces: number }> {
   return request('/meals/hydration', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ delta_oz: deltaOz, ...(logDate ? { log_date: logDate } : {}) }),
+    body: JSON.stringify({ delta_oz: deltaOz, ...(logDate ? { log_date: logDate } : {}), ...(opts.commandId ? { command_id: opts.commandId } : {}) }),
   });
 }
 
@@ -3393,6 +5220,8 @@ export interface WeeklyDigest {
   nutrition: {
     avg_calories: number;
     avg_protein_g: number;
+    avg_calories_when_logged?: number;
+    avg_protein_g_when_logged?: number;
     days_logged: number;
     target_protein_g: number | null;
     protein_hit_pct: number | null;
@@ -3476,12 +5305,14 @@ export interface MuscleBalanceEntry { sets: number; pct: number }
 
 export interface MuscleBalanceResult {
   muscles: Record<string, MuscleBalanceEntry>;
+  detail_muscles?: Record<string, MuscleBalanceEntry>;
   period_days: number;
   total_sets: number;
+  detail_total_sets?: number;
   balance_score: number;
 }
 
-export async function getMuscleBalance(token: string, days = 14): Promise<MuscleBalanceResult> {
+export async function getMuscleBalance(token: string, days = 30): Promise<MuscleBalanceResult> {
   return requestRead(`/ai/muscle-balance?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   }, 30000, 30000);
@@ -3515,8 +5346,11 @@ export interface WeightEntryAPI {
   logged_at?: string;
 }
 
-export async function getWeightEntries(token: string): Promise<WeightEntryAPI[]> {
-  return requestRead<WeightEntryAPI[]>('/profile/weight-entries', {
+export async function getWeightEntries(token: string, opts: ListWindowOptions = { limit: 730 }): Promise<WeightEntryAPI[]> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 730) });
+  if (opts.since) params.set('since', opts.since);
+  if (opts.before) params.set('before', opts.before);
+  return requestRead<WeightEntryAPI[]>(`/profile/weight-entries?${params}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   }, 30000, 30000);
@@ -3527,14 +5361,6 @@ export async function saveWeightEntryAPI(token: string, date: string, weightLbs:
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ date, weight_lbs: weightLbs, source, logged_at: loggedAt }),
-  });
-}
-
-export async function syncWeightEntries(token: string, entries: WeightEntryAPI[]): Promise<void> {
-  await request('/profile/weight-entries/sync', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify(entries),
   });
 }
 
@@ -3552,6 +5378,46 @@ export async function clearWeightEntriesAPI(token: string): Promise<{ deleted: n
   });
 }
 
+// ─── Cycle Symptom Logs ─────────────────────────────────────────────────────
+
+export type CycleSymptomLogAPI = {
+  id?: string;
+  date: string;
+  cycleStartDate: string;
+  phase: 'menses' | 'follicular' | 'ovulation' | 'luteal' | 'unknown';
+  dayOfCycle: number | null;
+  cycleLengthDays: number | null;
+  flow: 'unspecified' | 'light' | 'moderate' | 'heavy';
+  cramps: 'none' | 'mild' | 'moderate' | 'severe';
+  energy: 'low' | 'normal' | 'high';
+  action?: 'keep' | 'lighter' | 'recovery' | null;
+  updatedAt: string;
+};
+
+export async function listCycleSymptomLogs(
+  token: string,
+  opts: ListWindowOptions = { limit: 120 },
+): Promise<CycleSymptomLogAPI[]> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 120) });
+  if (opts.since) params.set('since', opts.since);
+  if (opts.before) params.set('before', opts.before);
+  return requestRead<CycleSymptomLogAPI[]>(`/profile/cycle-logs?${params}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 30000);
+}
+
+export async function saveCycleSymptomLog(
+  token: string,
+  log: CycleSymptomLogAPI,
+): Promise<CycleSymptomLogAPI> {
+  return request<CycleSymptomLogAPI>('/profile/cycle-logs', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(log),
+  });
+}
+
 // ─── Body Scan History ──────────────────────────────────────────────────────
 
 export interface BodyScanHistoryItem {
@@ -3566,6 +5432,15 @@ export interface BodyScanHistoryItem {
   improvements: string[];
   assessment: string | null;
   disclaimer: string | null;
+  confidence?: string | null;
+  photoQuality?: string | null;
+  qualityFlags?: string[];
+  needsRetake?: boolean;
+  sensitivePhoto?: boolean;
+  photoHidden?: boolean;
+  method?: string | null;
+  visualEstimatePct?: number | null;
+  measurementEstimatePct?: number | null;
   weightLbs: number | null;
 }
 
@@ -3575,6 +5450,13 @@ export async function getBodyScanHistory(token: string): Promise<BodyScanHistory
     headers: { Authorization: `Bearer ${token}` },
   });
   return Array.isArray(result) ? result : (result.scans ?? []);
+}
+
+export async function deleteBodyScan(token: string, scanId: string | number): Promise<{ deleted: number; id: string }> {
+  return request(`/ai/body-scans/${encodeURIComponent(String(scanId))}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }
 
 // ─── Saved Meals ─────────────────────────────────────────────────────────────
@@ -3590,12 +5472,29 @@ export type SavedMealItem = {
   protein_g: number;
   carbs_g: number;
   fat_g: number;
+  saturated_fat_g?: number | null;
+  cholesterol_mg?: number | null;
+  sodium_mg?: number | null;
+  fiber_g?: number | null;
+  sugar_g?: number | null;
+  added_sugar_g?: number | null;
+  caffeine_mg?: number | null;
+  potassium_mg?: number | null;
+  calcium_mg?: number | null;
+  magnesium_mg?: number | null;
+  iron_mg?: number | null;
+  vitamin_d_mcg?: number | null;
+  vitamin_b12_mcg?: number | null;
+  folate_mcg?: number | null;
+  zinc_mg?: number | null;
+  omega_3_g?: number | null;
   micronutrients?: Record<string, number> | null;
 };
 
 export type SavedMeal = {
   id: number;
   user_id: number;
+  source_meal_id?: number | null;
   name: string;
   notes?: string | null;
   total_calories: number;
@@ -3606,6 +5505,17 @@ export type SavedMeal = {
   times_logged: number;
   last_logged_at?: string | null;
   created_at: string;
+  image_url?: string | null;
+  image_source?: string | null;
+  share_code?: string | null;
+  times_imported?: number;
+  source_share_code?: string | null;
+  source_owner_username?: string | null;
+};
+
+export type SharedSavedMealPreview = SavedMeal & {
+  owner_username?: string | null;
+  owned_by_viewer?: boolean;
 };
 
 export async function listSavedMeals(token: string): Promise<SavedMeal[]> {
@@ -3614,7 +5524,7 @@ export async function listSavedMeals(token: string): Promise<SavedMeal[]> {
 
 export async function createSavedMeal(
   token: string,
-  body: { name: string; notes?: string | null; items?: SavedMealItem[]; from_meal_id?: number },
+  body: { name: string; notes?: string | null; items?: SavedMealItem[]; from_meal_id?: number; image_url?: string | null; image_source?: string | null; resolve_image?: boolean; idempotency_key?: string },
 ): Promise<SavedMeal> {
   return request('/meals/saved', {
     method: 'POST',
@@ -3630,13 +5540,12 @@ export async function deleteSavedMeal(token: string, savedId: number): Promise<v
   });
 }
 
-/** Edit the saved-meal template. Past logs (meals already on your
- *  calendar) are snapshots and DO NOT change. Only future logs pull
- *  from the updated template. */
+/** Edit the saved-meal template. Logged meals keep their original name
+ *  and item/macro snapshots; the saved template changes for future logs. */
 export async function updateSavedMeal(
   token: string,
   savedId: number,
-  patch: { name?: string; notes?: string | null; items?: SavedMealItem[] },
+  patch: { name?: string; notes?: string | null; items?: SavedMealItem[]; image_url?: string | null; image_source?: string | null },
 ): Promise<SavedMeal> {
   return request(`/meals/saved/${savedId}`, {
     method: 'PATCH',
@@ -3648,9 +5557,514 @@ export async function updateSavedMeal(
 export async function logSavedMeal(
   token: string,
   savedId: number,
-  body: { meal_date?: string; meal_type?: string; consumed_at?: string },
+  body: { meal_date?: string; meal_type?: string; consumed_at?: string; idempotency_key?: string },
 ): Promise<{ meal_id: number; saved_meal_id: number; times_logged: number }> {
   return request(`/meals/saved/${savedId}/log`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function shareSavedMeal(
+  token: string,
+  savedId: number,
+): Promise<{ shareCode: string; savedMeal: SavedMeal }> {
+  return request(`/meals/saved/${savedId}/share`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function revokeSavedMealShare(token: string, savedId: number): Promise<void> {
+  await request(`/meals/saved/${savedId}/share`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function previewSharedSavedMeal(
+  token: string,
+  code: string,
+): Promise<SharedSavedMealPreview> {
+  return request(`/meals/saved/shared/${encodeURIComponent(code)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function importSharedSavedMeal(
+  token: string,
+  code: string,
+): Promise<SavedMeal> {
+  return request(`/meals/saved/shared/${encodeURIComponent(code)}/import`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+
+// ─── Meal Routines (backend-owned recurring templates) ────────────────────────
+//
+// Server successor to the old AsyncStorage-only `mealRoutines` list. A
+// routine is a TEMPLATE; logging an occurrence creates one Meal row, deduped
+// by (user, routine, occurrence_key). See backend routers/meal_routines.py.
+
+export type MealRoutineItem = {
+  food_name: string;
+  food_id?: number | null;
+  serving_id?: number | null;
+  quantity: number;
+  unit: string;
+  serving_grams?: number | null;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+};
+
+export type MealRoutine = {
+  id: number;
+  user_id: number;
+  name: string;
+  notes?: string | null;
+  meal_type?: string | null;
+  days_of_week: number[];
+  default_time?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  active: boolean;
+  source_template_id?: number | null;
+  display_order: number;
+  total_calories: number;
+  total_protein_g: number;
+  total_carbs_g: number;
+  total_fat_g: number;
+  items: MealRoutineItem[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type MealRoutineInput = {
+  name: string;
+  notes?: string | null;
+  meal_type?: string | null;
+  days_of_week?: number[];
+  default_time?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  active?: boolean;
+  source_template_id?: number | null;
+  display_order?: number;
+  items?: MealRoutineItem[];
+  idempotency_key?: string | null;
+};
+
+export async function listMealRoutines(token: string, includeInactive = false): Promise<MealRoutine[]> {
+  return request(`/meals/routines?include_inactive=${includeInactive ? 'true' : 'false'}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function createMealRoutineApi(token: string, body: MealRoutineInput): Promise<MealRoutine> {
+  return request('/meals/routines', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+/** PATCH the routine template in place — never duplicates the routine, never
+ *  rewrites already-logged meals. */
+export async function updateMealRoutineApi(token: string, routineId: number, patch: Partial<MealRoutineInput>): Promise<MealRoutine> {
+  return request(`/meals/routines/${routineId}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** Archive (soft-delete) the routine. Historical logs are kept. */
+export async function deleteMealRoutineApi(token: string, routineId: number): Promise<{ archived: number }> {
+  return request(`/meals/routines/${routineId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Log one routine occurrence as a single Meal. Idempotent on
+ *  (routine, occurrence_key) so a double tap never duplicates. */
+export async function logMealRoutineOccurrence(
+  token: string,
+  routineId: number,
+  body: { occurrence_date?: string; occurrence_key?: string; meal_type?: string; consumed_at?: string; idempotency_key?: string },
+): Promise<{ meal_id: number; source_routine_id: number; routine_occurrence_key: string; deduped: boolean }> {
+  return request(`/meals/routines/${routineId}/log`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Edit a single day of a routine. If that day is already logged it updates
+ *  the Meal; otherwise it writes a one-day exception. Never edits the base
+ *  routine. */
+export async function updateMealRoutineOccurrence(
+  token: string,
+  routineId: number,
+  body: { occurrence_date: string; occurrence_key?: string; name?: string; items?: MealRoutineItem[]; override_time?: string; skipped?: boolean },
+): Promise<Record<string, any>> {
+  return request(`/meals/routines/${routineId}/occurrence`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+
+// ─── Workout Templates ──────────────────────────────────────────────────────
+//
+// User-authored single-day workouts that live on the backend (table
+// `workout_templates`). The mobile cache (AsyncStorage key
+// `workoutTemplates`) is a hot mirror of this — see src/utils/workoutTemplates.ts.
+
+export type WorkoutTemplateRecord = {
+  id: string;                       // client_id (uuid)
+  name: string;
+  workout: WorkoutDay;
+  notes?: string | null;
+  shareCode: string | null;
+  timesImported: number;
+  sourceShareCode: string | null;
+  sourceOwnerUsername: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SharedWorkoutTemplatePreview = WorkoutTemplateRecord & {
+  ownerUsername: string | null;
+};
+
+export async function listWorkoutTemplates(token: string): Promise<WorkoutTemplateRecord[]> {
+  return request('/workouts/templates', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Idempotent on (user, id) — create OR update; the server matches by
+ *  client_id and merges. Use this for the optimistic-write path. */
+export async function upsertWorkoutTemplate(
+  token: string,
+  body: { id: string; name: string; workout: WorkoutDay; notes?: string | null },
+): Promise<WorkoutTemplateRecord> {
+  return request('/workouts/templates', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateWorkoutTemplate(
+  token: string,
+  id: string,
+  body: { id: string; name: string; workout: WorkoutDay; notes?: string | null },
+): Promise<WorkoutTemplateRecord> {
+  return request(`/workouts/templates/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteWorkoutTemplate(token: string, id: string): Promise<void> {
+  await request(`/workouts/templates/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function shareWorkoutTemplate(
+  token: string,
+  id: string,
+): Promise<{ shareCode: string; template: WorkoutTemplateRecord }> {
+  return request(`/workouts/templates/${encodeURIComponent(id)}/share`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function revokeWorkoutTemplateShare(token: string, id: string): Promise<void> {
+  await request(`/workouts/templates/${encodeURIComponent(id)}/share`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function previewSharedWorkoutTemplate(
+  token: string,
+  code: string,
+): Promise<SharedWorkoutTemplatePreview> {
+  return request(`/workouts/templates/shared/${encodeURIComponent(code)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function importSharedWorkoutTemplate(
+  token: string,
+  code: string,
+  clientId: string,
+): Promise<WorkoutTemplateRecord> {
+  return request(`/workouts/templates/shared/${encodeURIComponent(code)}/import`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ clientId }),
+  });
+}
+
+
+// ─── Workout Template Bundles (multi-template share) ────────────────────────
+//
+// A bundle is a named collection of share codes. Bundle codes are 8 chars
+// (vs the 6-char per-template code) so the import sheet can disambiguate
+// by length. See backend/app/routers/workout_templates.py for the full
+// model + endpoints.
+
+/** One template's preview slot inside a bundle. `available:false` rows
+ *  are tombstones — the underlying template was deleted or its share
+ *  code was revoked, but the bundle still references it. UI should grey
+ *  these out and exclude them from the import selection. */
+export type SharedWorkoutTemplateBundleItem =
+  | {
+      shareCode: string;
+      available: true;
+      name: string;
+      notes?: string | null;
+      workout: WorkoutDay;
+      ownerUsername: string | null;
+    }
+  | {
+      shareCode: string;
+      available: false;
+      name: null;
+      workout: null;
+      ownerUsername: null;
+    };
+
+export type SharedWorkoutTemplateBundle = {
+  bundleCode: string;
+  name: string;
+  ownerUsername: string | null;
+  ownedByViewer: boolean;
+  timesImported: number;
+  items: SharedWorkoutTemplateBundleItem[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Each `skipped` row carries a machine-readable `reason` so the UI can
+ *  surface why a particular item didn't import (already owned, server
+ *  couldn't find the share code, etc.) without parsing English. */
+export type ImportSharedWorkoutTemplateBundleResult = {
+  bundleCode: string;
+  imported: WorkoutTemplateRecord[];
+  skipped: Array<{ shareCode: string; reason: 'already_owner' | 'not_found' | string }>;
+};
+
+export async function createWorkoutTemplateBundle(
+  token: string,
+  body: { name: string; templateIds: string[] },
+): Promise<SharedWorkoutTemplateBundle> {
+  return request('/workouts/templates/bundles', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function previewSharedWorkoutTemplateBundle(
+  token: string,
+  code: string,
+): Promise<SharedWorkoutTemplateBundle> {
+  return request(`/workouts/templates/bundles/shared/${encodeURIComponent(code)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function importSharedWorkoutTemplateBundle(
+  token: string,
+  code: string,
+  items: Array<{ shareCode: string; clientId: string }>,
+): Promise<ImportSharedWorkoutTemplateBundleResult> {
+  return request(`/workouts/templates/bundles/shared/${encodeURIComponent(code)}/import`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ items }),
+  });
+}
+
+
+// ─── Manual mode (Pro-only) ─────────────────────────────────────────────────
+
+export type ManualModeState = {
+  workout_manual_mode: boolean;
+  meal_manual_mode: boolean;
+  future_days_cleared?: number;
+};
+
+export async function setManualMode(
+  token: string,
+  body: { workout_manual_mode?: boolean; meal_manual_mode?: boolean },
+): Promise<ManualModeState> {
+  return request('/profile/preferences/manual-mode', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export type ManualPlanDayResponse = {
+  plan_week_id: number;
+  day_index: number;
+  day_date: string;
+  status: string;
+  is_rest: boolean;
+  workout_json: WorkoutDay | null;
+  locked: boolean;
+  lock_reason: string | null;
+  generation_source: string;
+  source_template_id?: string | null;
+  source_template_name?: string | null;
+};
+
+export async function useTemplateForPlanDay(
+  token: string,
+  planWeekId: number,
+  dayIndex: number,
+  templateId: string,
+): Promise<ManualPlanDayResponse> {
+  return request(`/plan-weeks/${planWeekId}/days/${dayIndex}/use-template`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ template_id: templateId }),
+  });
+}
+
+export async function clearPlanDay(
+  token: string,
+  planWeekId: number,
+  dayIndex: number,
+): Promise<ManualPlanDayResponse> {
+  return request(`/plan-weeks/${planWeekId}/days/${dayIndex}/clear`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function markPlanDayRest(
+  token: string,
+  planWeekId: number,
+  dayIndex: number,
+  isRest: boolean = true,
+): Promise<ManualPlanDayResponse> {
+  return request(`/plan-weeks/${planWeekId}/days/${dayIndex}/mark-rest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ is_rest: isRest }),
+  });
+}
+
+export type ManualGeneratedWorkoutFocus =
+  | 'push' | 'pull' | 'legs'
+  | 'upper' | 'lower' | 'full_body'
+  | 'cardio' | 'mobility' | 'recovery';
+
+export type ManualGeneratedWorkoutStimulus = 'balanced' | 'heavy' | 'pump';
+
+export async function generateWorkoutForPlanDay(
+  token: string,
+  planWeekId: number,
+  dayIndex: number,
+  body: {
+    focus: ManualGeneratedWorkoutFocus;
+    stimulus?: ManualGeneratedWorkoutStimulus;
+    session_minutes?: number | null;
+  },
+): Promise<ManualPlanDayResponse> {
+  return request(`/plan-weeks/${planWeekId}/days/${dayIndex}/generate-workout`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  }, 15000);
+}
+
+
+// ─── AI evaluate-week (Pro) ─────────────────────────────────────────────────
+
+export type WeekEvaluation = {
+  headline: string;
+  summary: string;
+  observations: Array<{ kind: 'win' | 'gap' | 'note'; text: string }>;
+  suggestions: string[];
+  _payload?: {
+    goal: string;
+    mode: 'auto' | 'manual';
+    review: {
+      week_start?: string;
+      week_end?: string;
+      sessions_completed?: number;
+      sessions_planned?: number;
+      adherence_pct?: number;
+      cardio_minutes?: number;
+      headline?: string;
+    };
+    manual_meta?: {
+      assigned_days: number;
+      completed_days: number;
+      unassigned_days: number;
+      rest_days: number;
+    };
+  };
+  _model?: string;
+};
+
+export async function evaluateWeek(
+  token: string,
+  body: { end_date?: string; days?: number } = {},
+): Promise<WeekEvaluation> {
+  return request('/coach/evaluate-week', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+
+// ─── AI evaluate-meal-day (Pro) ─────────────────────────────────────────────
+
+export type MealDayEvaluation = {
+  headline: string;
+  summary: string;
+  observations: Array<{ kind: 'win' | 'gap' | 'note'; text: string }>;
+  suggestions: string[];
+  /** Echoed structured payload the AI saw — handy for debugging the
+   *  result + understanding why it said what it said. */
+  _payload?: {
+    date: string;
+    goal: string;
+    targets: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+    actuals: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+    meal_count: number;
+  };
+  _model?: string;
+};
+
+export async function evaluateMealDay(
+  token: string,
+  body: {
+    target_date: string;
+    targets?: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+  },
+): Promise<MealDayEvaluation> {
+  return request('/coach/evaluate-meal-day', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
@@ -3663,8 +6077,8 @@ export async function logSavedMeal(
 export async function updateMeal(
   token: string,
   mealId: number,
-  patch: { meal_type?: string; consumed_at?: string | null; notes?: string | null; name?: string; items?: MealHistoryItem[] },
-): Promise<any> {
+  patch: { meal_type?: string; consumed_at?: string | null; notes?: string | null; name?: string; items?: MealHistoryItem[]; version?: number | null; expected_version?: number | null },
+): Promise<MealPageResponse> {
   return request(`/meals/${mealId}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}` },
@@ -3672,8 +6086,56 @@ export async function updateMeal(
   });
 }
 
+export async function copyLoggedMeal(
+  token: string,
+  mealId: number,
+  body: {
+    meal_date?: string;
+    meal_type?: string;
+    consumed_at?: string | null;
+    name?: string;
+    notes?: string | null;
+    quantity_scale?: number;
+    idempotency_key?: string;
+  } = {},
+): Promise<any> {
+  return request(`/meals/${mealId}/copy`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function splitLoggedMeal(
+  token: string,
+  mealId: number,
+  body: {
+    keep_fraction?: number;
+    remaining_meal_date?: string;
+    remaining_meal_type?: string;
+    remaining_consumed_at?: string | null;
+    remaining_name?: string;
+  } = {},
+): Promise<any> {
+  return request(`/meals/${mealId}/split`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
 
 // ─── Supplements ────────────────────────────────────────────────────────────
+
+export type SupplementUsageGuidance = {
+  key: string;
+  slug: string;
+  title: string;
+  body: string;
+  cadence?: string | null;
+  cycle_candidate: boolean;
+  severity: 'info' | 'warning';
+};
 
 export type SupplementIngredient = {
   id: number;
@@ -3686,6 +6148,11 @@ export type SupplementIngredient = {
   description?: string | null;
   timing_notes?: string | null;
   safety_notes?: string | null;
+  common_uses?: string[] | null;
+  deficiency_risks?: string[] | null;
+  excess_risks?: string[] | null;
+  food_sources?: string[] | null;
+  usage_guidance?: SupplementUsageGuidance | null;
 };
 
 export type StackItem = {
@@ -3693,6 +6160,8 @@ export type StackItem = {
   user_id: number;
   supplement_ingredient_id?: number | null;
   supplement_product_id?: number | null;
+  ingredient_slug?: string | null;
+  ingredient_name?: string | null;
   custom_name?: string | null;
   category?: string | null;
   goal?: string | null;
@@ -3706,15 +6175,24 @@ export type StackItem = {
   taken_with_food: boolean;
   active: boolean;
   notes?: string | null;
+  description?: string | null;
+  effectiveness_confidence?: 'high' | 'medium' | 'low' | null;
   evidence_tier?: string | null;
   risk_tier?: string | null;
   timing_notes?: string | null;
   safety_notes?: string | null;
+  common_uses?: string[] | null;
+  deficiency_risks?: string[] | null;
+  excess_risks?: string[] | null;
+  food_sources?: string[] | null;
+  source_terms?: string[] | null;
+  nutrient_content?: NutrientContent | null;
+  usage_guidance?: SupplementUsageGuidance | null;
   created_at: string;
 };
 
 export type TodayStackItem = StackItem & {
-  logs_today: Array<{ id: number; taken_at: string; skipped: boolean; dose_amount?: number | null }>;
+  logs_today: Array<{ id: number; taken_at: string; skipped: boolean; name?: string | null; dose_amount?: number | null; dose_unit?: string | null }>;
   ingredient_slug?: string | null;
   ingredient_name?: string | null;
 };
@@ -3727,6 +6205,46 @@ export type SupplementRecommendation = {
   evidence_tier: string;
   risk_tier: string;
   priority: 'high' | 'moderate' | 'low';
+};
+
+export type SupplementHistoryItem = {
+  id: number;
+  user_id: number;
+  stack_item_id: number;
+  taken_at: string;
+  name?: string | null;
+  display_name: string;
+  normalized_name?: string | null;
+  dose_amount?: number | null;
+  dose_unit?: string | null;
+  timing_context: string;
+  source: string;
+  confidence?: number | null;
+  skipped: boolean;
+  category?: string | null;
+  timing?: string | null;
+  group_label?: string | null;
+  active?: boolean | null;
+  supplement_ingredient_id?: number | null;
+  ingredient_slug?: string | null;
+  ingredient_name?: string | null;
+  usage_guidance?: SupplementUsageGuidance | null;
+};
+
+export type SupplementHistoryResponse = {
+  days: number;
+  limit: number;
+  summary: {
+    taken: number;
+    skipped: number;
+    taken_days: number;
+  };
+  items: SupplementHistoryItem[];
+};
+
+export type SupplementHistoryFilters = {
+  stackItemId?: number;
+  ingredientSlug?: string | null;
 };
 
 export async function listSupplementIngredients(): Promise<SupplementIngredient[]> {
@@ -3773,6 +6291,19 @@ export async function logDose(
   });
 }
 
+/** Undo today's most recent dose log for a stack item — for a supplement
+ *  accidentally marked taken (or skipped). No-op (deleted: 0) if nothing
+ *  was logged today. */
+export async function unlogDose(
+  token: string,
+  stackId: number,
+): Promise<{ deleted: number; log_id?: number }> {
+  return request(`/supplements/stack/${stackId}/log`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 /** Bulk-log every active item in a group with one tap.
  *  Pass `group_label` for user-defined groups, or `timing` for the
  *  built-in buckets ("morning", "pre_workout", etc.). Items already
@@ -3792,25 +6323,23 @@ export async function getTodaySupplements(token: string): Promise<TodayStackItem
   return request('/supplements/today', { headers: { Authorization: `Bearer ${token}` } });
 }
 
-// AI-layered supplement recommendations — catches supplements the
-// deterministic engine doesn't know about (adaptogens, niche stuff
-// like CoQ10 for statin users, collagen for joint goals). Cached
-// server-side per user, 14-day TTL, auto-invalidates on context change.
-export type AISupplementRecommendation = SupplementRecommendation & {
-  ai_generated?: boolean;
-};
-export async function getAISupplementRecommendations(
+export async function getSupplementHistory(
   token: string,
-  force_refresh: boolean = false,
-): Promise<{
-  recommendations: AISupplementRecommendation[];
-  generated_at: string;
-  from_cache: boolean;
-}> {
-  const qs = force_refresh ? '?force_refresh=true' : '';
-  return request(`/supplements/ai-recommendations${qs}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  }, 60000);
+  days = 30,
+  limit = 200,
+  filters: SupplementHistoryFilters = {},
+): Promise<SupplementHistoryResponse> {
+  const params = new URLSearchParams({
+    days: String(days),
+    limit: String(limit),
+  });
+  if (typeof filters.stackItemId === 'number') {
+    params.set('stack_item_id', String(filters.stackItemId));
+  }
+  if (filters.ingredientSlug) {
+    params.set('ingredient_slug', filters.ingredientSlug);
+  }
+  return request(`/supplements/history?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
 export async function getSupplementRecommendations(token: string): Promise<{
@@ -3872,6 +6401,12 @@ export interface MuscleVolumeRow {
   spike_ratio: number;
 }
 
+export interface EmphasisVolumeRow {
+  emphasis: string;
+  total_sets: number;
+  exercise_count: number;
+}
+
 export interface WeeklyVolumeSnapshot {
   user_id: number;
   window_start: string;
@@ -3879,6 +6414,7 @@ export interface WeeklyVolumeSnapshot {
   total_hard_sets: number;
   sessions_counted: number;
   by_muscle: Record<string, MuscleVolumeRow>;
+  by_emphasis?: Record<string, EmphasisVolumeRow>;
 }
 
 export interface PlanRecommendation {
@@ -3934,7 +6470,17 @@ export interface GoalForecastSummary {
   metric_label: string;
   metric_value: string;
   metric_detail: string;
+  raw_execution?: number;
+  execution_score?: number;
   execution_pct: number;
+  forecast_multiplier?: number;
+  execution_breakdown?: {
+    training: number;
+    nutrition: number;
+    recovery: number;
+    recovery_assumed_neutral?: boolean;
+    weights?: { training: number; nutrition: number; recovery: number };
+  };
   confidence: 'low' | 'medium' | 'high';
   tone: 'success' | 'warning' | 'neutral';
   assumption: string;
@@ -3942,6 +6488,90 @@ export interface GoalForecastSummary {
   drivers: string[];
   limiters: string[];
   stats: Array<{ label: string; value: string; detail: string }>;
+}
+
+export type GoalScoreWindow = 'current_week' | 'rolling_7d' | 'rolling_14d' | 'rolling_28d' | 'goal_to_date';
+
+export interface GoalExecutionBreakdownItem {
+  driverId: string;
+  driverName: string;
+  category: 'training' | 'nutrition' | 'sleep' | 'recovery' | 'cardio' | 'measurement' | string;
+  weight: number;
+  score: number;
+  weightedContribution: number;
+  targetSummary: string;
+  actualSummary: string;
+  evidence: string[];
+  missingData: string[];
+  limiterSeverity: 'none' | 'low' | 'moderate' | 'high' | string;
+}
+
+export interface GoalConfidenceBreakdownItem {
+  component: string;
+  weight: number;
+  score: number;
+  reason: string;
+}
+
+export interface GoalProjectedOutcome {
+  metric: string;
+  unit: string;
+  targetChange: number;
+  expectedMidpoint: number;
+  expectedLow: number;
+  expectedHigh: number;
+  timeframeDays: number;
+  displayText: string;
+}
+
+export interface GoalLimitingFactor {
+  driverName: string;
+  reason: string;
+  impact: 'low' | 'moderate' | 'high' | string;
+  suggestedFix: string;
+}
+
+export interface GoalNextBestAction {
+  title: string;
+  description: string;
+  expectedImpact: string;
+}
+
+export interface GoalScoreResult {
+  goalId: string | number | null;
+  goalType: string;
+  periodStart: string;
+  periodEnd: string;
+  executionScore: number;
+  executionLabel: string;
+  executionBreakdown: GoalExecutionBreakdownItem[];
+  projectionConfidence: number;
+  confidenceLabel: string;
+  confidenceBreakdown: GoalConfidenceBreakdownItem[];
+  responseFactor: number;
+  projectedOutcome: GoalProjectedOutcome;
+  limitingFactors: GoalLimitingFactor[];
+  nextBestActions: GoalNextBestAction[];
+}
+
+export interface GoalScoresResponse {
+  scores: GoalScoreResult[];
+  window: GoalScoreWindow | string;
+  asOfDate: string;
+}
+
+export async function getGoalScores(
+  token: string,
+  opts: { window?: GoalScoreWindow; asOfDate?: string | null } = {},
+): Promise<GoalScoresResponse> {
+  const params = new URLSearchParams();
+  if (opts.window) params.set('window', opts.window);
+  if (opts.asOfDate) params.set('as_of', opts.asOfDate);
+  const qs = params.toString();
+  return requestRead<GoalScoresResponse>(`/goals/score${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 30000);
 }
 
 export async function getWeeklyReview(
@@ -4104,7 +6734,9 @@ export interface PlanDayResponse {
   day_date: string;
   /** 0..6 — index within the week. */
   day_index: number;
-  /** 'pending' | 'in_progress' | 'completed' | 'skipped'. */
+  /** 'pending' | 'in_progress' | 'completed' | 'skipped' | 'unassigned' | 'edited'.
+   *  'unassigned' appears in workout-manual-mode weeks where the user
+   *  hasn't yet picked a template. */
   status: string;
   is_rest: boolean;
   locked: boolean;
@@ -4128,6 +6760,11 @@ export interface PlanWeekResponse {
   days_per_week: number;
   session_minutes: number | null;
   preferred_split: string | null;
+  program_enrollment_id?: number | null;
+  program_id?: string | null;
+  program_version?: number | null;
+  program_week_index?: number | null;
+  program_phase?: string | null;
   /** ISO date the plan resumes. While set + in the future, auto-renew,
    *  auto-skip, and reminders all suspend. */
   paused_until?: string | null;
@@ -4171,6 +6808,56 @@ export async function repairPlanWeekInjuryConflicts(token: string): Promise<Plan
   return request<PlanWeekResponse>('/plans/week/repair-injury-conflicts', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function repairPlanWeekEquipmentConflicts(token: string): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/week/repair-equipment-conflicts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updatePlanWeekSessionDuration(
+  token: string,
+  sessionMinutes: number,
+): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/week/update-session-duration', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_session_minutes: sessionMinutes }),
+  });
+}
+
+export interface CheckinPlanSettingsResponse {
+  plan_week: PlanWeekResponse;
+  changed_fields: Record<string, { from?: any; to?: any }>;
+  applied_to_current_week: boolean;
+  explanation: string;
+}
+
+export async function applyPlanWeekCheckinSettings(
+  token: string,
+  body: {
+    goal?: string | null;
+    daysPerWeek?: number | null;
+    preferredSplit?: string | null;
+    sessionMinutes?: number | null;
+    applyToCurrentWeek?: boolean;
+    reason?: string | null;
+  },
+): Promise<CheckinPlanSettingsResponse> {
+  return request<CheckinPlanSettingsResponse>('/plans/week/checkin-settings', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      goal: body.goal ?? null,
+      days_per_week: body.daysPerWeek ?? null,
+      preferred_split: body.preferredSplit ?? null,
+      session_minutes: body.sessionMinutes ?? null,
+      apply_to_current_week: !!body.applyToCurrentWeek,
+      reason: body.reason ?? 'weekly_checkin',
+    }),
   });
 }
 
@@ -4383,6 +7070,20 @@ export interface ReadinessFactor {
   detail: string | null;
 }
 
+export interface ReadinessReasonItem {
+  type: string;         // e.g. "delayed_damage_window", "soreness_reported", "avoid_heavy_lower"
+  severity?: 'low' | 'moderate' | 'high';
+  message: string;
+  /** avoid_heavy_lower carries the lower-body readiness + suggested swaps. */
+  lower_body_readiness?: number;
+  alternatives?: string[];
+}
+
+export interface ReadinessTopFatigued {
+  muscle: string;       // "quads" | "glutes" | ...
+  readiness: number;    // 0-100 (100 = fresh)
+}
+
 export interface ReadinessTodayResponse {
   score: number;        // 0-100 canonical readiness
   label: string;        // "Primed" | "Ready" | "Moderate" | "Fatigued" | "—"
@@ -4394,6 +7095,18 @@ export interface ReadinessTodayResponse {
   /** Server-stamped version. Watch ignores any push older than its
    *  current value. Client should treat as opaque. */
   computed_at_ms: number;
+  /** Per-focus readiness 0-100 ("lower", "push", "pull", ...). A user can be
+   *  generally ready (high `score`) while a focus like "lower" is much lower.
+   *  Additive — may be {} on cold start or older servers. */
+  focus_readiness?: Record<string, number>;
+  /** Per-muscle readiness 0-100 ("quads", "chest", ...). 100 = fresh. */
+  muscle_readiness?: Record<string, number>;
+  /** Most-fatigued muscles, lowest readiness first. */
+  top_fatigued?: ReadinessTopFatigued[];
+  /** Actionable training guidance (e.g. avoid heavy lower-body today). */
+  recommendations?: ReadinessReasonItem[];
+  /** Plain-language reasons behind the score (soreness, delayed damage, etc). */
+  explanations?: ReadinessReasonItem[];
 }
 
 export async function getReadinessToday(
@@ -4480,6 +7193,146 @@ export async function getWeeklyVolume(token: string, days = 7): Promise<WeeklyVo
   });
 }
 
+// ─── Weekly Cardio Load (Edwards' TRIMP) ───────────────────────────────────
+//
+// Parallel surface to weekly volume — one rolled-up TRIMP per ISO week.
+// Backend computes the rows from `WorkoutCompletion.cardio_load` at write
+// time, so this call stays cheap. `trend_label` is the ratio bucket
+// comparing the current week to the prior 4-week mean — handy for a
+// one-line "Trending up" / "Steady" / "Trending down" caption.
+export interface CardioLoadWeek {
+  week_start: string;   // YYYY-MM-DD (Monday)
+  week_end: string;     // YYYY-MM-DD (Sunday)
+  load: number;         // sum of Edwards' TRIMP across the week
+  session_count: number;
+}
+
+export interface WeeklyCardioLoadSnapshot {
+  weeks: CardioLoadWeek[];
+  rolling_baseline_load: number;
+  current_week_load: number;
+  trend_ratio: number | null;
+  // "trending_up" | "flat" | "trending_down" | "no_baseline"
+  trend_label: 'trending_up' | 'flat' | 'trending_down' | 'no_baseline';
+}
+
+export async function getWeeklyCardioLoad(token: string, weeks = 8): Promise<WeeklyCardioLoadSnapshot> {
+  return request<WeeklyCardioLoadSnapshot>(`/workouts/weekly-cardio-load?weeks=${weeks}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Streaks ───────────────────────────────────────────────────────────────
+//
+// Three streaks: workout, meal, readiness. Server-authoritative — computed
+// from existing tables on read so they survive reinstalls. `current` is the
+// active streak; `best` is the longest in the last 365 days. One-day grace
+// rule applied (see backend/app/services/streaks.py).
+export type StreakKind = 'workout' | 'meal' | 'readiness';
+export interface StreakState {
+  kind: StreakKind;
+  current: number;
+  best: number;
+  last_logged: string | null;
+  today_logged: boolean;
+}
+export interface StreaksResponse {
+  streaks: StreakState[];
+}
+
+export async function getStreaks(token: string): Promise<StreaksResponse> {
+  return request<StreaksResponse>('/streaks', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Cardio progression ────────────────────────────────────────────────────
+//
+// PR bests + recent-vs-prior trends per activity. Powers the Cardio
+// Progression tab on Progress (sits alongside CardioLoadCard). Empty arrays
+// mean "no signal" — the UI should hide the corresponding tile, not show 0.
+export interface PaceBest {
+  distance_label: '5k' | '10k' | '10mi' | 'half_marathon' | 'marathon';
+  activity: 'run' | 'ride';
+  pace_seconds_per_mile: number;
+  duration_seconds: number;
+  distance_miles: number;
+  achieved_on: string;
+}
+export interface PaceTrend {
+  activity: 'run' | 'ride';
+  recent_avg_pace_sec_per_mile: number | null;
+  prior_avg_pace_sec_per_mile: number | null;
+  delta_pct: number | null;       // negative = faster
+  recent_sessions: number;
+  prior_sessions: number;
+}
+export interface CardioProgressionSnapshot {
+  bests: PaceBest[];
+  trends: PaceTrend[];
+  recent_cardio_load: number;
+  recent_active_days: number;
+}
+export async function getCardioProgression(token: string): Promise<CardioProgressionSnapshot> {
+  return request<CardioProgressionSnapshot>('/workouts/cardio-progression', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Wearable integrations ─────────────────────────────────────────────────
+//
+// Generic provider abstraction — one set of endpoints handles Strava,
+// Garmin, Oura, WHOOP, Fitbit. Whether a provider is `connected` vs
+// `configured` vs `available` drives the Settings → Integrations tile
+// state. See docs/engineering/wearables.md.
+export interface WearableProviderInfo {
+  slug: 'strava' | 'garmin' | 'oura' | 'whoop' | 'fitbit';
+  name: string;
+  /** Operator has set the OAuth client creds. False → tile is "Coming soon". */
+  configured: boolean;
+  /** User has connected this provider. */
+  connected: boolean;
+  capabilities: string[];
+  last_synced_at: string | null;
+}
+
+export async function listIntegrations(token: string): Promise<{ providers: WearableProviderInfo[] }> {
+  return request<{ providers: WearableProviderInfo[] }>('/integrations', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getIntegrationAuthorizeUrl(token: string, provider: string): Promise<{ authorize_url: string; state: string }> {
+  return request<{ authorize_url: string; state: string }>(`/integrations/${provider}/authorize`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function syncIntegration(token: string, provider: string, days = 30): Promise<{
+  activities_imported: number;
+  health_snapshots_imported: number;
+  sleep_logs_imported: number;
+  errors: number;
+  error_messages: string[];
+}> {
+  return request(`/integrations/${provider}/sync?days=${days}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function disconnectIntegration(token: string, provider: string): Promise<{ status: 'disconnected' | 'not_connected' }> {
+  return request(`/integrations/${provider}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // ─── Estimated 1RM ─────────────���───────────────────────────────────────────
 
 export interface E1RMEstimate {
@@ -4509,31 +7362,64 @@ export async function getE1RMHistory(token: string, exerciseName: string, role =
   }, 30000, 30000);
 }
 
-export async function getAllE1RM(token: string): Promise<{ exercises: Record<string, number> }> {
-  return requestRead(`/workouts/e1rm/all`, {
+export async function getAllE1RM(token: string, days = 365): Promise<{ exercises: Record<string, number>; days?: number }> {
+  return requestRead(`/workouts/e1rm/all?days=${encodeURIComponent(String(days))}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   }, 30000, 30000);
 }
 
 export interface HRZone {
+  /** 1..5 — five %MHR bands (Apple / Garmin / Whoop convention). */
   zone: number;
   label: string;
   low: number;
   high: number;
 }
 
+export type HRMaxSource = 'user_entered' | 'observed' | 'estimated_tanaka';
+export type HRRestingSource = 'apple_health_7d' | 'apple_health_30d' | 'user_profile' | 'fallback';
+
 export interface HRZonesResponse {
+  /** Always 'pct_max_hr' for now. Surfaced explicitly so future
+   *  alternatives (e.g. %HRR Karvonen, lactate-threshold zones) can be
+   *  distinguished by callers without a release-coordinated migration. */
+  method: 'pct_max_hr';
   max_hr: number;
   resting_hr: number;
+  max_hr_source: HRMaxSource;
+  resting_hr_source: HRRestingSource;
   vo2_max: number | null;
   zones: HRZone[];
 }
 
-export async function getHRZones(token: string, restingHr?: number, vo2Max?: number): Promise<HRZonesResponse> {
+export interface HRZonesQuery {
+  /** Lowest-priority RHR — treated as `user_profile` source. */
+  restingHr?: number;
+  vo2Max?: number;
+  /** User-measured max HR. Highest priority. */
+  userMaxHR?: number;
+  /** High-confidence observed max HR (e.g. peak from a recent
+   *  interval session). Wins over the Tanaka age estimate. */
+  observedMaxHR?: number;
+  /** 7-day rolling RHR average from Apple Health. */
+  rhr7d?: number;
+  /** 30-day rolling RHR average from Apple Health. */
+  rhr30d?: number;
+}
+
+export async function getHRZones(token: string, query?: HRZonesQuery | number, vo2Max?: number): Promise<HRZonesResponse> {
+  // Backwards compat: legacy callers passed `(token, restingHr?, vo2Max?)`.
+  const opts: HRZonesQuery = typeof query === 'number'
+    ? { restingHr: query, vo2Max }
+    : (query ?? {});
   const params = new URLSearchParams();
-  if (restingHr != null) params.set('resting_hr', String(restingHr));
-  if (vo2Max != null) params.set('vo2_max', String(vo2Max));
+  if (opts.restingHr != null) params.set('resting_hr', String(opts.restingHr));
+  if (opts.vo2Max != null) params.set('vo2_max', String(opts.vo2Max));
+  if (opts.userMaxHR != null) params.set('user_max_hr', String(opts.userMaxHR));
+  if (opts.observedMaxHR != null) params.set('observed_max_hr', String(opts.observedMaxHR));
+  if (opts.rhr7d != null) params.set('rhr_7d', String(opts.rhr7d));
+  if (opts.rhr30d != null) params.set('rhr_30d', String(opts.rhr30d));
   const qs = params.toString();
   return request(`/workouts/hr-zones${qs ? `?${qs}` : ''}`, {
     method: 'GET',
@@ -4547,7 +7433,12 @@ export interface PaceHistoryPoint {
   distance: number | null;
   pace: string | null;
   duration_seconds: number | null;
-  metrics: Record<string, string> | null;
+  pace_duration_seconds?: number | null;
+  moving_seconds?: number | null;
+  elapsed_seconds?: number | null;
+  stopped_seconds?: number | null;
+  duration_source?: string | null;
+  metrics: Record<string, string | number | boolean | null> | null;
 }
 
 export async function getPaceHistory(token: string, exercise?: string, days = 90): Promise<{ points: PaceHistoryPoint[] }> {
@@ -4560,6 +7451,9 @@ export async function getPaceHistory(token: string, exercise?: string, days = 90
 }
 
 // ─── Social ────────────────────────────────────────────────────────────────
+
+const SOCIAL_READ_TTL_MS = 15_000;
+const SOCIAL_SOFT_TIMEOUT_MS = 1_000;
 
 export interface SocialMe {
   user_id: number;
@@ -4630,7 +7524,7 @@ export interface SocialSearchHit {
 
 export interface SocialNotification {
   id: number;
-  notification_type: 'friend_request' | 'friend_accept' | 'feed_like' | string;
+  notification_type: 'friend_request' | 'friend_accept' | 'feed_like' | 'feed_comment' | string;
   subject_type: 'friendship' | 'feed_item' | string;
   subject_id: number;
   actor_user_id: number;
@@ -4644,6 +7538,7 @@ export interface SocialNotification {
     focus?: string;
     date?: string;
     caption?: string;
+    comment?: string;
   };
   read_at: string | null;
   created_at: string;
@@ -4655,9 +7550,9 @@ export interface SocialNotificationsResponse {
 }
 
 export async function getSocialMe(token: string): Promise<SocialMe> {
-  return request<SocialMe>('/social/me', {
+  return requestRead<SocialMe>('/social/me', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export async function updateSocialMe(
@@ -4672,9 +7567,9 @@ export async function updateSocialMe(
 }
 
 export async function listFriends(token: string): Promise<SocialFriendsList> {
-  return request<SocialFriendsList>('/social/friends', {
+  return requestRead<SocialFriendsList>('/social/friends', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export async function requestFriend(token: string, username: string): Promise<SocialPendingRequest> {
@@ -4733,21 +7628,21 @@ export async function reportUser(
 }
 
 export async function searchUsers(token: string, q: string): Promise<SocialSearchHit[]> {
-  return request<SocialSearchHit[]>(`/social/search?q=${encodeURIComponent(q)}`, {
+  return requestRead<SocialSearchHit[]>(`/social/search?q=${encodeURIComponent(q)}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export async function getSocialDigest(token: string): Promise<SocialDigest> {
-  return request<SocialDigest>('/social/digest', {
+  return requestRead<SocialDigest>('/social/digest', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export async function listSocialNotifications(token: string): Promise<SocialNotificationsResponse> {
-  return request<SocialNotificationsResponse>('/social/notifications', {
+  return requestRead<SocialNotificationsResponse>('/social/notifications', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export async function markSocialNotificationRead(token: string, notificationId: number): Promise<{ ok: boolean }> {
@@ -4761,6 +7656,207 @@ export async function markAllSocialNotificationsRead(token: string): Promise<{ o
   return request<{ ok: boolean; updated: number }>('/social/notifications/read-all', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// ─── Trainers ──────────────────────────────────────────────────────────────
+
+const TRAINER_READ_TTL_MS = 10_000;
+
+export interface TrainerProfile {
+  user_id: number;
+  display_name: string | null;
+  business_name: string | null;
+  bio: string | null;
+  website_url: string | null;
+  contact_email: string | null;
+  is_accepting_clients: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TrainerUser {
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  trainer_business_name?: string | null;
+}
+
+export interface TrainerPermissionFlags {
+  share_workouts: boolean;
+  share_nutrition: boolean;
+  share_body_metrics: boolean;
+  share_recovery: boolean;
+}
+
+export interface TrainerRelationship {
+  id: number;
+  status: 'pending' | 'active' | 'declined' | 'revoked' | string;
+  role: 'trainer' | 'client' | string;
+  direction: 'incoming' | 'outgoing' | 'active' | string;
+  trainer: TrainerUser;
+  client: TrainerUser;
+  share_workouts: boolean;
+  share_nutrition: boolean;
+  share_body_metrics: boolean;
+  share_recovery: boolean;
+  invite_message: string | null;
+  requested_at: string;
+  accepted_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface TrainerRelationshipsResponse {
+  as_trainer: TrainerRelationship[];
+  as_client: TrainerRelationship[];
+}
+
+export interface TrainerClientSummary {
+  relationship_id: number;
+  client: TrainerUser;
+  permissions: TrainerPermissionFlags;
+  workouts: {
+    planned: number;
+    completed: number;
+    missed: number;
+    adherence_pct: number;
+    last_workout_date: string | null;
+    focus_counts: Record<string, number>;
+  };
+  nutrition: {
+    shared: boolean;
+    days_logged?: number | null;
+    avg_calories?: number | null;
+    avg_protein_g?: number | null;
+    protein_hit_days?: number | null;
+  };
+  body: {
+    shared: boolean;
+    latest_weight_lbs?: number | null;
+    latest_weight_date?: string | null;
+  };
+  recovery: {
+    shared: boolean;
+    pain_present?: boolean | null;
+    pain_body_part?: string | null;
+    soreness_body_part?: string | null;
+    soreness_severity_0_10?: number | null;
+    latest_sleep_hours?: number | null;
+  };
+  flags: string[];
+  notes_count: number;
+}
+
+export interface TrainerDashboard {
+  window_start: string;
+  window_end: string;
+  clients: TrainerClientSummary[];
+}
+
+export interface TrainerNote {
+  id: number;
+  relationship_id: number;
+  trainer_user_id: number;
+  client_user_id: number;
+  author_user_id: number;
+  body: string;
+  visible_to_client: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getTrainerProfile(token: string): Promise<TrainerProfile | null> {
+  return requestRead<TrainerProfile | null>('/trainers/profile', {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, TRAINER_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
+}
+
+export async function updateTrainerProfile(
+  token: string,
+  body: Partial<Pick<TrainerProfile, 'display_name' | 'business_name' | 'bio' | 'website_url' | 'contact_email' | 'is_accepting_clients'>>,
+): Promise<TrainerProfile> {
+  return request<TrainerProfile>('/trainers/profile', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listTrainerRelationships(token: string): Promise<TrainerRelationshipsResponse> {
+  return requestRead<TrainerRelationshipsResponse>('/trainers/relationships', {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, TRAINER_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
+}
+
+export type TrainerRelationshipRequestBody = Partial<TrainerPermissionFlags> & {
+  username: string;
+  message?: string | null;
+};
+
+export async function requestTrainerClient(
+  token: string,
+  body: TrainerRelationshipRequestBody,
+): Promise<TrainerRelationship> {
+  return request<TrainerRelationship>('/trainers/clients/request', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function requestMyTrainer(
+  token: string,
+  body: TrainerRelationshipRequestBody,
+): Promise<TrainerRelationship> {
+  return request<TrainerRelationship>('/trainers/my-trainer/request', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function acceptTrainerRelationship(
+  token: string,
+  relationshipId: number,
+  body: Partial<TrainerPermissionFlags> = {},
+): Promise<TrainerRelationship> {
+  return request<TrainerRelationship>(`/trainers/relationships/${relationshipId}/accept`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function rejectTrainerRelationship(token: string, relationshipId: number): Promise<void> {
+  await request(`/trainers/relationships/${relationshipId}/reject`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function revokeTrainerRelationship(token: string, relationshipId: number): Promise<void> {
+  await request(`/trainers/relationships/${relationshipId}/revoke`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getTrainerDashboard(token: string, days = 7): Promise<TrainerDashboard> {
+  return requestRead<TrainerDashboard>(`/trainers/dashboard?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, TRAINER_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
+}
+
+export async function createTrainerClientNote(
+  token: string,
+  clientUserId: number,
+  body: { body: string; visible_to_client?: boolean },
+): Promise<TrainerNote> {
+  return request<TrainerNote>(`/trainers/clients/${clientUserId}/notes`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
   });
 }
 
@@ -4798,6 +7894,20 @@ export interface FeedItem {
   created_at: string;
   like_count: number;
   liked_by_me: boolean;
+  comment_count: number;
+  recent_comments: FeedComment[];
+}
+
+export interface FeedComment {
+  id: number;
+  feed_item_id: number;
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  avatar_url?: string | null;
+  body: string;
+  created_at: string;
+  can_delete: boolean;
 }
 
 type FeedWindowOptions = {
@@ -4816,16 +7926,16 @@ function feedWindowQuery(input?: number | FeedWindowOptions): string {
 
 export async function getSocialFeed(token: string, options?: number | FeedWindowOptions): Promise<{ items: FeedItem[] }> {
   const qs = feedWindowQuery(options);
-  return request<{ items: FeedItem[] }>(`/social/feed${qs}`, {
+  return requestRead<{ items: FeedItem[] }>(`/social/feed${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export async function getUserFeed(token: string, userId: number, options?: number | FeedWindowOptions): Promise<{ items: FeedItem[] }> {
   const qs = feedWindowQuery(options);
-  return request<{ items: FeedItem[] }>(`/social/feed/${userId}${qs}`, {
+  return requestRead<{ items: FeedItem[] }>(`/social/feed/${userId}${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
 }
 
 export interface WorkoutPostSummary {
@@ -4883,10 +7993,42 @@ export async function toggleFeedLike(token: string, itemId: number): Promise<{ l
   });
 }
 
+export async function listFeedComments(
+  token: string,
+  itemId: number,
+): Promise<{ items: FeedComment[]; comment_count: number }> {
+  return requestRead<{ items: FeedComment[]; comment_count: number }>(`/social/feed/${itemId}/comments`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, SOCIAL_READ_TTL_MS, SOCIAL_SOFT_TIMEOUT_MS);
+}
+
+export async function createFeedComment(
+  token: string,
+  itemId: number,
+  body: string,
+): Promise<{ comment: FeedComment; comment_count: number }> {
+  return request<{ comment: FeedComment; comment_count: number }>(`/social/feed/${itemId}/comments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function deleteFeedComment(
+  token: string,
+  itemId: number,
+  commentId: number,
+): Promise<{ ok: boolean; comment_count: number }> {
+  return request<{ ok: boolean; comment_count: number }>(`/social/feed/${itemId}/comments/${commentId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function parseMealText(
   token: string,
   text: string,
-): Promise<{ items: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }> }> {
+): Promise<{ items: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; processing_bucket?: string; food_quality?: string; protein_source?: string; fermented?: boolean; probiotic?: boolean; omega3_rich?: boolean; plant_count?: number }> }> {
   return request('/ai/parse-meal-text', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },

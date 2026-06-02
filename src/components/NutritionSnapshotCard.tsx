@@ -11,6 +11,7 @@
 import { useMemo, useState } from 'react';
 import { View, Text, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { getTheme, radius } from '../constants/theme';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { AppThemeName } from '../types';
@@ -67,6 +68,13 @@ export default function NutritionSnapshotCard({
           overflow: 'hidden',
         }}
       >
+        <LinearGradient
+          pointerEvents="none"
+          colors={[theme.sections.meals.strong + '16', 'transparent'] as any}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}
+        />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
           <View style={{
             width: 56, height: 56, borderRadius: 28,
@@ -112,6 +120,14 @@ export default function NutritionSnapshotCard({
         overflow: 'hidden',
       }}
     >
+      <LinearGradient
+        pointerEvents="none"
+        colors={[labelColor + '20', theme.sections.meals.strong + '12', 'transparent'] as any}
+        locations={[0, 0.52, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}
+      />
       {/* Accent strip along the left edge — matches TrainingReadinessCard. */}
       <View style={{
         position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,

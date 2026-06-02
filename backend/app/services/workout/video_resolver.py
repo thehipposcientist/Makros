@@ -26,6 +26,118 @@ _UA = (
 )
 _HEADERS = {"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"}
 
+VIDEO_EQUIPMENT_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"band", "bands", "resistance", "mini", "loop"}),
+    frozenset({"dumbbell", "dumbbells", "db"}),
+    frozenset({"barbell", "bb"}),
+    frozenset({"cable", "cables", "pulley"}),
+    frozenset({"machine", "selectorized", "hammer", "plate-loaded"}),
+    frozenset({"kettlebell", "kettlebells", "kb"}),
+    frozenset({"bodyweight", "calisthenic", "calisthenics", "no-equipment"}),
+)
+
+_BROAD_EQUIPMENT_LABELS = {
+    "full",
+    "full gym",
+    "gym",
+    "home",
+    "home friendly",
+    "home-friendly",
+    "minimal",
+    "minimal equipment",
+    "other",
+    "cardio",
+    "none",
+}
+
+_EQUIPMENT_SEARCH_PHRASES = {
+    "adjustable_dumbbells": "dumbbell",
+    "barbell": "barbell",
+    "bodyweight": "bodyweight",
+    "cable_machine": "cable",
+    "single_cable_station": "cable",
+    "dual_cable_station": "cable",
+    "dumbbells": "dumbbell",
+    "ez_curl_bar": "EZ bar",
+    "kettlebell": "kettlebell",
+    "kettlebells": "kettlebell",
+    "landmine_attachment": "landmine",
+    "lat_pulldown_machine": "lat pulldown machine",
+    "leg_curl_machine": "leg curl machine",
+    "leg_extension_machine": "leg extension machine",
+    "mini_band": "mini band",
+    "pull_up_bar": "pull-up bar",
+    "resistance_bands": "resistance band",
+    "smith_machine": "Smith machine",
+    "suspension_trainer": "suspension trainer",
+    "trap_bar": "trap bar",
+    "weighted_vest": "weighted vest",
+    "weight_plates": "weight plate",
+}
+
+
+def _tokenize(value: str | None) -> list[str]:
+    return [
+        t for t in _re.split(r"[^a-z0-9]+", (value or "").lower().replace("_", " "))
+        if t
+    ]
+
+
+def equipment_family_tokens(value: str | None) -> set[str]:
+    tokens = set(_tokenize(value))
+    if not tokens:
+        return set()
+    for family in VIDEO_EQUIPMENT_FAMILIES:
+        if tokens.intersection(family):
+            return set(family)
+    return set()
+
+
+def _humanize_equipment(value: str) -> str:
+    return " ".join(part.capitalize() for part in value.replace("_", " ").replace("-", " ").split())
+
+
+def equipment_search_phrase(equipment: str | None) -> str | None:
+    """Return a useful YouTube-search equipment phrase.
+
+    The planner/client may send broad buckets ("gym", "home") or concrete
+    gear slugs ("dumbbells", "cable_machine"). Broad buckets are too vague
+    for form-video search, while concrete gear disambiguates generic names
+    like "Sumo Squat" without renaming the exercise in the library.
+    """
+    raw = (equipment or "").strip()
+    if not raw:
+        return None
+    for part in _re.split(r"[,/|]+", raw):
+        label = part.strip()
+        if not label:
+            continue
+        key = label.lower().replace("-", "_").replace(" ", "_")
+        normalized_label = label.lower().replace("_", " ").strip()
+        if key in _BROAD_EQUIPMENT_LABELS or normalized_label in _BROAD_EQUIPMENT_LABELS:
+            continue
+        return _EQUIPMENT_SEARCH_PHRASES.get(key) or _humanize_equipment(label)
+    return None
+
+
+def build_exercise_video_query(exercise_name: str, equipment: str | None = None) -> str:
+    """Build the exact YouTube query used for exercise form demos."""
+    name = (exercise_name or "").strip()
+    if not name:
+        return ""
+    phrase = equipment_search_phrase(equipment)
+    if phrase:
+        name_tokens = set(_tokenize(name))
+        phrase_tokens = set(_tokenize(phrase))
+        name_family = equipment_family_tokens(name)
+        phrase_family = equipment_family_tokens(phrase)
+        duplicates_name = phrase_tokens and phrase_tokens.issubset(name_tokens)
+        duplicates_family = bool(name_family and phrase_family and name_family == phrase_family)
+        if duplicates_name or duplicates_family:
+            phrase = None
+    prefix = f"{phrase} " if phrase else ""
+    return f"{prefix}{name} proper form tutorial"
+
 
 def oembed_probe(vid: str, timeout: float = 4.0) -> dict | None:
     """Probe YouTube oEmbed. Returns `{video_id, title, thumbnail_url,
@@ -69,15 +181,19 @@ def _extract_ids(html: str) -> list[str]:
     return ids
 
 
-def find_youtube_video_id(exercise_name: str, max_probes: int = 10) -> str | None:
+def find_youtube_video_id(
+    exercise_name: str,
+    max_probes: int = 10,
+    equipment: str | None = None,
+) -> str | None:
     """Return the first embeddable YouTube video_id for
-    `"{exercise_name} proper form tutorial"` — or None when nothing
+    a targeted form tutorial query — or None when nothing
     embeddable turns up. Blocking. ~3-8 seconds per call.
     """
     name = (exercise_name or "").strip()
     if not name:
         return None
-    query = f"{name} proper form tutorial"
+    query = build_exercise_video_query(name, equipment)
     search_url = (
         f"https://www.youtube.com/results?search_query={_urlparse.quote(query)}"
     )
@@ -106,7 +222,11 @@ def find_youtube_video_id(exercise_name: str, max_probes: int = 10) -> str | Non
     return None
 
 
-def scrape_embeddable_options(exercise_name: str, max_probes: int = 20) -> list[dict]:
+def scrape_embeddable_options(
+    exercise_name: str,
+    max_probes: int = 20,
+    equipment: str | None = None,
+) -> list[dict]:
     """Full version used by the `/ai/exercise-video` endpoint. Returns
     up to 10 embeddable options (video_id + title + thumbnail + author +
     is_short). Interleaves regular results with the YouTube Shorts feed
@@ -114,7 +234,7 @@ def scrape_embeddable_options(exercise_name: str, max_probes: int = 20) -> list[
     name = (exercise_name or "").strip()
     if not name:
         return []
-    query = f"{name} proper form tutorial"
+    query = build_exercise_video_query(name, equipment)
     search_url = (
         f"https://www.youtube.com/results?search_query={_urlparse.quote(query)}"
     )

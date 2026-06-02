@@ -1,8 +1,9 @@
 """Weekly volume-by-muscle-group tracker.
 
-Counts hard sets per muscle group per week from completed `ExerciseSet`
-rows. Seed-library exercises read muscle tags from `Exercise`; custom or
-template exercises use the muscle snapshot stored on `WorkoutExercise`.
+Counts effortful working sets per muscle group per week from completed
+`ExerciseSet` rows. Seed-library exercises read muscle tags from `Exercise`;
+custom or template exercises use the muscle snapshot stored on
+`WorkoutExercise`.
 Secondary-muscle contributions are weighted at 0.5x since a primary-muscle
 set is a stronger stimulus than being a synergist.
 
@@ -26,6 +27,7 @@ from sqlmodel import select
 
 from app.enums import MuscleGroup
 from app.models import Exercise, ExerciseSet, WorkoutExercise, WorkoutSession
+from app.services.workout.emphasis_tracking import detail_tags_for_exercise
 
 
 # Evidence-based "healthy" weekly hard-set ranges per muscle group.
@@ -80,6 +82,26 @@ class MuscleVolume:
 
 
 @dataclass
+class EmphasisVolume:
+    """Hard-set exposure for a fine-grained muscle emphasis tag.
+
+    A single set can count for multiple detail tags. Example: a row may
+    count once for both `lats` and `upper_back`, because these are
+    independent regional exposures rather than mutually exclusive buckets.
+    """
+    emphasis: str
+    total_sets: float
+    exercise_count: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "emphasis": self.emphasis,
+            "total_sets": round(self.total_sets, 1),
+            "exercise_count": self.exercise_count,
+        }
+
+
+@dataclass
 class WeeklyVolumeSnapshot:
     """Full week-window rollup of per-muscle hard-set counts."""
     user_id: int
@@ -88,6 +110,7 @@ class WeeklyVolumeSnapshot:
     total_hard_sets: float
     sessions_counted: int
     by_muscle: dict[str, MuscleVolume] = field(default_factory=dict)
+    by_emphasis: dict[str, EmphasisVolume] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -97,13 +120,14 @@ class WeeklyVolumeSnapshot:
             "total_hard_sets": round(self.total_hard_sets, 1),
             "sessions_counted": self.sessions_counted,
             "by_muscle": {k: v.to_dict() for k, v in self.by_muscle.items()},
+            "by_emphasis": {k: v.to_dict() for k, v in self.by_emphasis.items()},
         }
 
     def muscles_low(self) -> list[str]:
-        return [m for m, v in self.by_muscle.items() if v.status == "low"]
+        return [m for m, v in self.by_muscle.items() if v.status == "undertrained"]
 
     def muscles_high(self) -> list[str]:
-        return [m for m, v in self.by_muscle.items() if v.status == "high"]
+        return [m for m, v in self.by_muscle.items() if v.status in {"high", "excessive", "spike"}]
 
 
 def _classify(muscle: str, total_sets: float, spike_ratio: float = 1.0) -> tuple[str, int | None, int | None]:
@@ -152,6 +176,47 @@ def _muscles_to_list(value: Any) -> list[str]:
     return [m for m in (_muscle_to_str(item) for item in value) if m]
 
 
+def _is_countable_hard_set(
+    *,
+    completed: bool,
+    set_type: str | None,
+    actual_reps: int | None,
+    actual_weight_lbs: float | None,
+    actual_rir: float | None,
+    rpe: int | float | None,
+) -> bool:
+    """Effortful set gate for weekly volume.
+
+    Prefer actual RIR/RPE when present. For older logs without effort
+    capture, count plausible working sets so historical users don't lose
+    all volume signal.
+    """
+    if not completed:
+        return False
+    st = (set_type or "working").lower()
+    if st in ("warmup", "warm_up", "mobility", "recovery", "technique"):
+        return False
+    if actual_rir is not None:
+        try:
+            return float(actual_rir) <= 4.0
+        except (TypeError, ValueError):
+            pass
+    if rpe is not None:
+        try:
+            return float(rpe) >= 6.0
+        except (TypeError, ValueError):
+            pass
+    if actual_reps is not None:
+        try:
+            reps = int(actual_reps)
+        except (TypeError, ValueError):
+            reps = 0
+        if reps <= 0:
+            return False
+        return reps >= 5 or float(actual_weight_lbs or 0) > 0
+    return True
+
+
 def compute_weekly_volume(
     db: Any,
     user_id: int,
@@ -162,9 +227,8 @@ def compute_weekly_volume(
     """Compute hard-set counts per muscle group over the last `days`
     days ending on `end_date` (default today).
 
-    Only counts sets where `completed=True` AND `set_type != 'warmup'`.
-    Missing set_type is treated as a working set (historically most
-    rows don't stamp it).
+    Only counts completed effortful sets. Missing effort data is treated
+    as a working set for backwards compatibility with older logs.
     """
     if end_date is None:
         end_date = date.today()
@@ -206,10 +270,16 @@ def compute_weekly_volume(
             WorkoutExercise.id,
             Exercise.primary_muscle,
             Exercise.secondary_muscles,
+            Exercise.emphasis,
+            WorkoutExercise.name,
             WorkoutExercise.primary_muscle_snapshot,
             WorkoutExercise.secondary_muscles_snapshot,
             ExerciseSet.completed,
             ExerciseSet.set_type,
+            ExerciseSet.actual_reps,
+            ExerciseSet.actual_weight_lbs,
+            ExerciseSet.actual_rir,
+            ExerciseSet.rpe,
         )
         .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
         .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
@@ -222,7 +292,10 @@ def compute_weekly_volume(
     secondary_counts: dict[str, float] = defaultdict(float)
     total_hard_sets = 0.0
 
-    for we_id, pm, sm, pm_snapshot, sm_snapshot, completed, set_type in joined_rows:
+    for (
+        we_id, pm, sm, stored_emphasis, exercise_name, pm_snapshot, sm_snapshot,
+        completed, set_type, actual_reps, actual_weight_lbs, actual_rir, rpe,
+    ) in joined_rows:
         # Build muscle map lazily on first encounter for this workout_exercise.
         if we_id not in we_muscle:
             prim_str = _muscle_to_str(pm) or _muscle_to_str(pm_snapshot)
@@ -233,10 +306,14 @@ def compute_weekly_volume(
 
         if we_id not in we_muscle:
             continue
-        if not completed:
-            continue
-        st = (set_type or "working").lower()
-        if st in ("warmup", "warm_up", "mobility", "recovery"):
+        if not _is_countable_hard_set(
+            completed=bool(completed),
+            set_type=set_type,
+            actual_reps=actual_reps,
+            actual_weight_lbs=actual_weight_lbs,
+            actual_rir=actual_rir,
+            rpe=rpe,
+        ):
             continue
 
         prim_str, sec_list = we_muscle[we_id]
@@ -285,6 +362,43 @@ def compute_weekly_volume(
             spike_ratio=ratio,
         )
 
+    emphasis_counts: dict[str, float] = defaultdict(float)
+    emphasis_exercises: dict[str, set[int]] = defaultdict(set)
+    we_emphasis: dict[int, list[str]] = {}
+    for (
+        we_id, pm, sm, stored_emphasis, exercise_name, pm_snapshot, sm_snapshot,
+        completed, set_type, actual_reps, actual_weight_lbs, actual_rir, rpe,
+    ) in joined_rows:
+        if we_id not in we_emphasis:
+            prim_str = _muscle_to_str(pm) or _muscle_to_str(pm_snapshot)
+            sec_list = _muscles_to_list(sm) or _muscles_to_list(sm_snapshot)
+            we_emphasis[we_id] = detail_tags_for_exercise(
+                name=exercise_name,
+                primary_muscle=prim_str,
+                secondary_muscles=sec_list,
+                stored_emphasis=stored_emphasis,
+            )
+        tags = we_emphasis.get(we_id) or []
+        if not tags:
+            continue
+        if not _is_countable_hard_set(
+            completed=bool(completed),
+            set_type=set_type,
+            actual_reps=actual_reps,
+            actual_weight_lbs=actual_weight_lbs,
+            actual_rir=actual_rir,
+            rpe=rpe,
+        ):
+            continue
+        for tag in tags:
+            emphasis_counts[tag] += 1.0
+            emphasis_exercises[tag].add(int(we_id))
+
+    by_emphasis = {
+        tag: EmphasisVolume(tag, total, exercise_count=len(emphasis_exercises.get(tag, set())))
+        for tag, total in emphasis_counts.items()
+    }
+
     return WeeklyVolumeSnapshot(
         user_id=user_id,
         window_start=start,
@@ -292,6 +406,7 @@ def compute_weekly_volume(
         total_hard_sets=total_hard_sets,
         sessions_counted=len(sessions),
         by_muscle=by_muscle,
+        by_emphasis=by_emphasis,
     )
 
 
@@ -328,6 +443,10 @@ def _compute_prior_weeks_avg(
             WorkoutExercise.primary_muscle_snapshot,
             ExerciseSet.completed,
             ExerciseSet.set_type,
+            ExerciseSet.actual_reps,
+            ExerciseSet.actual_weight_lbs,
+            ExerciseSet.actual_rir,
+            ExerciseSet.rpe,
         )
         .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
         .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
@@ -335,7 +454,7 @@ def _compute_prior_weeks_avg(
     ).all()
     we_muscle: dict[int, str] = {}
     totals: dict[str, float] = {}
-    for we_id, pm, pm_snapshot, completed, set_type in rows:
+    for we_id, pm, pm_snapshot, completed, set_type, actual_reps, actual_weight_lbs, actual_rir, rpe in rows:
         if we_id not in we_muscle:
             muscle = _muscle_to_str(pm) or _muscle_to_str(pm_snapshot)
             if not muscle:
@@ -343,10 +462,14 @@ def _compute_prior_weeks_avg(
             we_muscle[we_id] = muscle
         if we_id not in we_muscle:
             continue
-        if not completed:
-            continue
-        st = (set_type or "working").lower()
-        if st in ("warmup", "warm_up", "mobility", "recovery"):
+        if not _is_countable_hard_set(
+            completed=bool(completed),
+            set_type=set_type,
+            actual_reps=actual_reps,
+            actual_weight_lbs=actual_weight_lbs,
+            actual_rir=actual_rir,
+            rpe=rpe,
+        ):
             continue
         m = we_muscle[we_id]
         totals[m] = totals.get(m, 0.0) + 1.0

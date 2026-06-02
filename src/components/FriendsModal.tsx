@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -12,9 +12,12 @@ import {
   AppState,
   LayoutAnimation,
   Share,
+  Switch,
 } from 'react-native';
 import FadeInView from './FadeInView';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import QRCode from 'react-native-qrcode-svg';
 import { getContrastingTextColor, getTheme, radius, spacing } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import { dynamicTextProps } from '../utils/dynamicType';
@@ -56,6 +59,8 @@ interface Props {
   inline?: boolean;
   onViewFriend?: (userId: number, displayName: string, digestFriend?: import('../services/api').SocialDigestFriend) => void;
   onSocialCountsChange?: (counts: { friends: number; pending: number; unread: number }) => void;
+  initialSearchUsername?: string | null;
+  onInitialSearchConsumed?: () => void;
 }
 
 const goalLabel = (g: string | null | undefined): string => {
@@ -71,6 +76,15 @@ function e2eId(value: string | number | null | undefined): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function normalizeInviteUsername(value: string | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^a-zA-Z0-9_.-]/g, '')
+    .slice(0, 40)
+    .toLowerCase();
 }
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
@@ -94,6 +108,7 @@ function notificationIconName(n: SocialNotification): IoniconName {
   if (n.notification_type === 'friend_request') return 'person-add-outline';
   if (n.notification_type === 'friend_accept') return 'people-outline';
   if (n.notification_type === 'feed_like') return 'heart-outline';
+  if (n.notification_type === 'feed_comment') return 'chatbubble-outline';
   return 'notifications-outline';
 }
 
@@ -102,6 +117,7 @@ function notificationTitle(n: SocialNotification): string {
   if (n.notification_type === 'friend_request') return `${name} sent you a friend request`;
   if (n.notification_type === 'friend_accept') return `${name} accepted your request`;
   if (n.notification_type === 'feed_like') return `${name} liked your workout`;
+  if (n.notification_type === 'feed_comment') return `${name} commented on your workout`;
   return 'New social update';
 }
 
@@ -111,6 +127,10 @@ function notificationBody(n: SocialNotification): string {
   if (n.notification_type === 'feed_like') {
     const focus = n.payload?.focus;
     return focus ? `${focus} got some love.` : 'Tap to jump back to Activity.';
+  }
+  if (n.notification_type === 'feed_comment') {
+    const comment = n.payload?.comment;
+    return comment ? `"${comment}"` : 'Tap to jump back to Activity.';
   }
   return 'Tap to view Social.';
 }
@@ -123,6 +143,8 @@ export default function FriendsModal({
   inline,
   onViewFriend,
   onSocialCountsChange,
+  initialSearchUsername,
+  onInitialSearchConsumed,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -142,15 +164,32 @@ export default function FriendsModal({
   const [searching, setSearching] = useState(false);
   const [requestPending, setRequestPending] = useState<string | null>(null);
   const [showOptIn, setShowOptIn] = useState(false);
+  const [profileNameDraft, setProfileNameDraft] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [avatarSaving, setAvatarSaving] = useState(false);
   // Feed is the default tab so users land on activity immediately.
   // Friends tab lazy-renders on first switch (no extra cost on open).
   const [activeTab, setActiveTab] = useState<SocialTab>(
     SOCIAL_ACTIVITY_FEED_ENABLED ? 'activity' : 'friends',
   );
-  const [initialRequestsFocused, setInitialRequestsFocused] = useState(false);
+  const initialRequestsFocusedRef = useRef(false);
   // Bumped to force the activity view to re-fetch (e.g., after share).
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   void setFeedRefreshKey;
+
+  useEffect(() => {
+    if (!me) return;
+    setProfileNameDraft(me.display_name ?? '');
+  }, [me?.display_name, me?.user_id]);
+
+  useEffect(() => {
+    const username = normalizeInviteUsername(initialSearchUsername);
+    if (!username) return;
+    setActiveTab('friends');
+    setNotificationTrayOpen(false);
+    setSearch(username);
+    onInitialSearchConsumed?.();
+  }, [initialSearchUsername, onInitialSearchConsumed]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -165,11 +204,11 @@ export default function FriendsModal({
       if (l.status === 'fulfilled') {
         setList(l.value);
         const incomingCount = l.value.pending.filter(p => p.direction === 'incoming').length;
-        if (incomingCount > 0 && !initialRequestsFocused) {
+        if (incomingCount > 0 && !initialRequestsFocusedRef.current) {
           setActiveTab('profile');
-          setInitialRequestsFocused(true);
-        } else if (incomingCount === 0 && initialRequestsFocused) {
-          setInitialRequestsFocused(false);
+          initialRequestsFocusedRef.current = true;
+        } else if (incomingCount === 0 && initialRequestsFocusedRef.current) {
+          initialRequestsFocusedRef.current = false;
         }
       }
       if (d.status === 'fulfilled') setDigest(d.value);
@@ -189,7 +228,7 @@ export default function FriendsModal({
     } finally {
       setLoading(false);
     }
-  }, [authToken, initialRequestsFocused, onSocialCountsChange]);
+  }, [authToken, onSocialCountsChange]);
 
   useEffect(() => {
     if (!visible && !inline) return;
@@ -399,16 +438,74 @@ export default function FriendsModal({
     [onRemove, onBlock, onReport],
   );
 
-  const onTurnOnSharing = useCallback(async () => {
+  const onSetSharing = useCallback(async (enabled: boolean) => {
     try {
-      const updated = await updateSocialMe(authToken, { share_activity_enabled: true });
+      const updated = await updateSocialMe(authToken, { share_activity_enabled: enabled });
       setMe(updated);
       setShowOptIn(false);
-      // Refresh digest so the user sees their own sessions reflected.
       const d = await getSocialDigest(authToken);
       setDigest(d);
     } catch (e: any) {
       Alert.alert('Could not update', e?.message ?? 'Try again');
+    }
+  }, [authToken]);
+
+  const onTurnOnSharing = useCallback(async () => {
+    await onSetSharing(true);
+  }, [onSetSharing]);
+
+  const onSaveSocialProfile = useCallback(async () => {
+    const displayName = profileNameDraft.trim();
+    setProfileSaving(true);
+    try {
+      const updated = await updateSocialMe(authToken, { display_name: displayName || null });
+      setMe(updated);
+      setProfileNameDraft(updated.display_name ?? '');
+      import('../utils/feedback').then(f => f.hapticSuccess?.()).catch(() => {});
+    } catch (e: any) {
+      Alert.alert('Could not save profile', e?.message ?? 'Try again');
+    } finally {
+      setProfileSaving(false);
+    }
+  }, [authToken, profileNameDraft]);
+
+  const onPickAvatar = useCallback(async () => {
+    setAvatarSaving(true);
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission needed', 'Please allow photo library access to choose a profile photo.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        quality: 0.45,
+        base64: true,
+        exif: false,
+        mediaTypes: ['images'] as any,
+        allowsEditing: true,
+        aspect: [1, 1],
+      });
+      const asset = result.assets?.[0];
+      if (result.canceled || !asset?.base64) return;
+      const mime = asset.mimeType || 'image/jpeg';
+      const updated = await updateSocialMe(authToken, { avatar_url: `data:${mime};base64,${asset.base64}` });
+      setMe(updated);
+    } catch (e: any) {
+      Alert.alert('Could not update photo', e?.message ?? 'Try again');
+    } finally {
+      setAvatarSaving(false);
+    }
+  }, [authToken]);
+
+  const onRemoveAvatar = useCallback(async () => {
+    setAvatarSaving(true);
+    try {
+      const updated = await updateSocialMe(authToken, { avatar_url: null });
+      setMe(updated);
+    } catch (e: any) {
+      Alert.alert('Could not remove photo', e?.message ?? 'Try again');
+    } finally {
+      setAvatarSaving(false);
     }
   }, [authToken]);
 
@@ -417,9 +514,10 @@ export default function FriendsModal({
       Alert.alert('Username unavailable', 'Open Friends again after your profile finishes loading.');
       return;
     }
+    const inviteLink = `thallo://friend/${encodeURIComponent(me.username)}`;
     try {
       await Share.share({
-        message: `Add me on Thallo: @${me.username}`,
+        message: `Add me on Thallo: @${me.username}\n\nOpen in app: ${inviteLink}`,
       });
     } catch (e: any) {
       Alert.alert('Could not share invite', e?.message ?? 'Try again');
@@ -429,6 +527,7 @@ export default function FriendsModal({
   const incoming = list?.pending.filter((p) => p.direction === 'incoming') ?? [];
   const outgoing = list?.pending.filter((p) => p.direction === 'outgoing') ?? [];
   const friends = list?.friends ?? [];
+  const inviteLink = me?.username ? `thallo://friend/${encodeURIComponent(me.username)}` : '';
   const hasUnreadSocial = unreadNotifications > 0;
   const hasUnreadFriendRequests = notifications.some(
     (n) => !n.read_at && n.notification_type === 'friend_request',
@@ -593,6 +692,103 @@ export default function FriendsModal({
     </TouchableOpacity>
   ) : null;
 
+  const profileEditSection = me ? (
+    <View style={styles.section}>
+      <Text style={styles.sectionLabel}>SOCIAL PROFILE</Text>
+      <View style={styles.profileEditCard}>
+        <View style={styles.profileEditTopRow}>
+          <TouchableOpacity
+            style={styles.profileAvatarButton}
+            onPress={onPickAvatar}
+            disabled={avatarSaving}
+            activeOpacity={0.78}
+            accessibilityRole="button"
+            accessibilityLabel="Choose social profile photo"
+          >
+            <SocialAvatar
+              avatarUrl={me.avatar_url}
+              name={me.display_name}
+              username={me.username}
+              size={54}
+              backgroundColor={colors.primary + '22'}
+              borderColor={colors.primary + '55'}
+              textColor={colors.primary}
+            />
+            <View style={styles.profileAvatarBadge}>
+              {avatarSaving ? (
+                <ActivityIndicator size="small" color={getContrastingTextColor(colors.primary)} />
+              ) : (
+                <Ionicons name="camera-outline" size={13} color={getContrastingTextColor(colors.primary)} />
+              )}
+            </View>
+          </TouchableOpacity>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.profileEditTitle}>@{me.username}</Text>
+            <Text style={styles.profileEditMeta}>
+              {me.share_activity_enabled ? 'Sharing on' : 'Sharing off'}
+            </Text>
+          </View>
+          {me.avatar_url ? (
+            <TouchableOpacity
+              style={styles.avatarRemoveBtn}
+              onPress={onRemoveAvatar}
+              disabled={avatarSaving}
+              activeOpacity={0.78}
+              accessibilityRole="button"
+              accessibilityLabel="Remove social profile photo"
+            >
+              <Ionicons name="trash-outline" size={15} color={colors.textMuted} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+        <View style={styles.profileFieldWrap}>
+          <Text style={styles.profileFieldLabel}>Display name</Text>
+          <TextInput
+            style={styles.profileNameInput}
+            placeholder={me.username}
+            placeholderTextColor={colors.textMuted}
+            maxLength={40}
+            value={profileNameDraft}
+            onChangeText={setProfileNameDraft}
+          />
+        </View>
+        <View style={styles.shareToggleRow}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.shareToggleTitle}>Workout sharing</Text>
+            <Text style={styles.shareToggleBody}>
+              Friends see sessions, streaks, exercises, set load, time, and distance.
+            </Text>
+          </View>
+          <Switch
+            value={!!me.share_activity_enabled}
+            onValueChange={onSetSharing}
+            trackColor={{ false: colors.border, true: colors.primary + '77' }}
+            thumbColor={me.share_activity_enabled ? colors.primary : colors.textMuted}
+            ios_backgroundColor={colors.border}
+          />
+        </View>
+        <TouchableOpacity
+          style={[
+            styles.profileSaveBtn,
+            (profileSaving || profileNameDraft.trim() === (me.display_name ?? '')) && styles.profileSaveBtnDisabled,
+          ]}
+          onPress={onSaveSocialProfile}
+          disabled={profileSaving || profileNameDraft.trim() === (me.display_name ?? '')}
+          activeOpacity={0.82}
+        >
+          {profileSaving ? (
+            <ActivityIndicator size="small" color={colors.textMuted} />
+          ) : (
+            <>
+              <Ionicons name="checkmark-outline" size={15} color={colors.primary} />
+              <Text style={styles.profileSaveText}>Save profile</Text>
+            </>
+          )}
+        </TouchableOpacity>
+      </View>
+    </View>
+  ) : null;
+
   const profileInviteSection = me?.username ? (
     <View style={styles.section}>
       <Text style={styles.sectionLabel}>YOUR HANDLE</Text>
@@ -601,10 +797,10 @@ export default function FriendsModal({
           <Ionicons name="person-add-outline" size={18} color={colors.primary} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.inviteTitle}>Invite by username</Text>
+          <Text style={styles.inviteTitle}>Invite link</Text>
           <Text style={styles.inviteHandle}>@{me.username}</Text>
           <Text style={styles.inviteBody}>
-            Friends can search this handle, or you can share it directly.
+            {inviteLink}
           </Text>
         </View>
         <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
@@ -612,8 +808,46 @@ export default function FriendsModal({
           <Text style={styles.btnPrimaryText}>Share</Text>
         </TouchableOpacity>
       </View>
+      <View style={styles.qrInviteCard}>
+        <View style={styles.qrCodeWrap}>
+          <QRCode
+            value={inviteLink}
+            size={116}
+            color="#111827"
+            backgroundColor="#FFFFFF"
+            quietZone={8}
+          />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.qrInviteTitle}>Scan to add</Text>
+          <Text style={styles.qrInviteBody}>
+            Opens Thallo to your friend search handle.
+          </Text>
+        </View>
+      </View>
     </View>
   ) : null;
+
+  // Single privacy summary that used to live above every post on the
+  // Activity feed. Moved here so the info is visible without nagging
+  // the user every time they scroll the feed. Read-only static copy.
+  const privacyInfoSection = (
+    <View style={styles.section}>
+      <Text style={styles.sectionLabel}>WHAT FRIENDS SEE</Text>
+      <View style={[styles.card, { flexDirection: 'row', gap: 10, alignItems: 'flex-start' }]}>
+        <View style={{
+          width: 32, height: 32, borderRadius: 16,
+          backgroundColor: colors.primary + '22',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Ionicons name="shield-checkmark-outline" size={17} color={colors.primary} />
+        </View>
+        <Text style={[styles.cardBody, { flex: 1, lineHeight: 18 }]}>
+          Friends see workout activity, including recorded load, time, and distance. Calories, macros, meals, body weight, and measurements stay private.
+        </Text>
+      </View>
+    </View>
+  );
 
   const sharingReminder = me && !me.share_activity_enabled && friends.length > 0 ? (
     <TouchableOpacity
@@ -730,6 +964,19 @@ export default function FriendsModal({
               <Text style={styles.friendCircleHandle} numberOfLines={1}>
                 @{f.username}
               </Text>
+              {/* Visible "···" affordance for Remove / Block / Report.
+                  Anchored top-right inside the existing card so the
+                  3-column grid layout (width: 33.333%) is preserved.
+                  Long-press still fires the same sheet for users who
+                  already learned that gesture. */}
+              <TouchableOpacity
+                testID={`social-friend-options-${e2eId(f.username)}`}
+                accessibilityLabel={`Friend options for ${f.display_name ?? f.username}`}
+                onPress={() => onFriendOptions(f)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={styles.friendCircleOptionsBtn}>
+                <Ionicons name="ellipsis-horizontal" size={14} color={colors.textSecondary} />
+              </TouchableOpacity>
             </TouchableOpacity>
           ))}
         </View>
@@ -948,10 +1195,13 @@ export default function FriendsModal({
             themeName={themeName}
             bottomPadding={inline ? 116 : 8}
             refreshKey={feedRefreshKey}
-            shareEnabled={me?.share_activity_enabled ?? false}
-            myActivity={digest?.you ?? null}
-            myDisplayName={me?.display_name ?? me?.username ?? ''}
-            myAvatarUrl={me?.avatar_url ?? null}
+            digest={digest}
+            friendCount={friends.length}
+            sharingEnabled={!!me?.share_activity_enabled}
+            currentUserId={me?.user_id ?? null}
+            onOpenFriends={() => setActiveTab('friends')}
+            onTurnOnSharing={onTurnOnSharing}
+            onShareInvite={onShareInvite}
             onViewAuthor={(uid, displayName) => {
               // Reuse the existing friend-detail surface — find the
               // matching digest entry so the parent can render their
@@ -982,6 +1232,10 @@ export default function FriendsModal({
               { paddingBottom: inline ? 128 : 24 },
             ]}>
             {friendSearchSection}
+            {/* Pending friend requests live on the Friends tab so a new
+                request is impossible to miss — most users never visit
+                the Profile tab where this used to be the only home. */}
+            {incoming.length > 0 ? incomingRequestsSection : null}
             {friendsListSection}
           </ScrollView>
         ) : (
@@ -993,11 +1247,14 @@ export default function FriendsModal({
               inline && styles.inlineScrollContent,
               { paddingBottom: inline ? 128 : 24 },
             ]}>
-            {incoming.length > 0 ? incomingRequestsSection : null}
+            {/* Incoming requests now live on the Friends tab — kept off
+                the Profile tab to avoid duplicate inbox surfaces. */}
             {outgoingPendingSection}
+            {profileEditSection}
             {myProfileSection}
             {profileInviteSection}
             {sharingReminder}
+            {privacyInfoSection}
           </ScrollView>
         )}
       </FadeInView>
@@ -1087,12 +1344,7 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       flexDirection: 'row',
       alignItems: 'stretch',
       flex: 1,
-      gap: 2,
-      padding: 4,
-      borderRadius: radius.full,
-      borderWidth: 1,
-      borderColor: colors.border,
-      backgroundColor: colors.surface,
+      gap: 8,
     },
     tab: {
       flex: 1,
@@ -1102,14 +1354,15 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       justifyContent: 'center',
       gap: 6,
       paddingHorizontal: 8,
-      paddingVertical: 8,
+      paddingVertical: 9,
       borderRadius: radius.full,
       borderWidth: 1,
-      borderColor: 'transparent',
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
     },
     tabActive: {
-      backgroundColor: colors.primary + '1A',
-      borderColor: colors.primary + '33',
+      backgroundColor: colors.primary + '22',
+      borderColor: colors.primary,
     },
     tabLabelRow: {
       flexDirection: 'row',
@@ -1309,6 +1562,92 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       color: colors.textMuted,
       marginTop: 2,
     },
+    profileEditCard: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      gap: spacing.md,
+    },
+    profileEditTopRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    profileAvatarButton: {
+      width: 62,
+      height: 62,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    profileAvatarBadge: {
+      position: 'absolute',
+      right: 0,
+      bottom: 0,
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.primary,
+      borderWidth: 2,
+      borderColor: colors.surface,
+    },
+    profileEditTitle: { fontSize: 14, fontWeight: '900', color: colors.textPrimary },
+    profileEditMeta: { fontSize: 11, fontWeight: '700', color: colors.textMuted, marginTop: 2 },
+    avatarRemoveBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceRaised,
+    },
+    profileFieldWrap: { gap: 6 },
+    profileFieldLabel: { fontSize: 11, fontWeight: '800', color: colors.textMuted },
+    profileNameInput: {
+      minHeight: 42,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceRaised,
+      paddingHorizontal: spacing.md,
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    shareToggleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceRaised,
+      padding: spacing.md,
+    },
+    shareToggleTitle: { fontSize: 13, fontWeight: '900', color: colors.textPrimary },
+    shareToggleBody: { fontSize: 11, fontWeight: '600', color: colors.textMuted, lineHeight: 15, marginTop: 2 },
+    profileSaveBtn: {
+      minHeight: 38,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      borderRadius: radius.full,
+      borderWidth: 1,
+      borderColor: colors.primary + '33',
+      backgroundColor: colors.primary + '12',
+    },
+    profileSaveBtnDisabled: {
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceRaised,
+      opacity: 0.72,
+    },
+    profileSaveText: { fontSize: 12, fontWeight: '900', color: colors.primary },
     section: { marginBottom: spacing.lg },
     sectionLabel: {
       fontSize: 11,
@@ -1370,6 +1709,22 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       color: colors.textMuted,
       textAlign: 'center',
     },
+    friendCircleOptionsBtn: {
+      position: 'absolute',
+      // Sit just inside the card padding (paddingHorizontal: 4) at the
+      // top-right corner so the dot doesn't overlap the avatar but is
+      // still obviously part of the card.
+      top: 0,
+      right: 4,
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
     btnPrimary: {
       backgroundColor: colors.primary,
       paddingHorizontal: spacing.md,
@@ -1423,6 +1778,23 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       paddingVertical: 8,
       borderRadius: radius.full,
     },
+    qrInviteCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    qrCodeWrap: {
+      padding: 8,
+      borderRadius: radius.md,
+      backgroundColor: '#FFFFFF',
+    },
+    qrInviteTitle: { fontSize: 13, fontWeight: '900', color: colors.textPrimary },
+    qrInviteBody: { fontSize: 11, fontWeight: '600', color: colors.textMuted, lineHeight: 15, marginTop: 2 },
     searchRow: {
       flexDirection: 'row',
       alignItems: 'center',

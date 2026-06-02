@@ -10,6 +10,7 @@ interface Props {
   onUseLighterWorkout: () => Promise<void> | void;
   onUseRecoveryDay: () => Promise<void> | void;
   onAddHydration: () => Promise<void> | void;
+  authToken?: string | null;
 }
 
 export default function CycleGuidanceSection({
@@ -21,6 +22,7 @@ export default function CycleGuidanceSection({
   onUseLighterWorkout,
   onUseRecoveryDay,
   onAddHydration,
+  authToken,
 }: Props) {
   if (!visible) return null;
   return (
@@ -32,6 +34,7 @@ export default function CycleGuidanceSection({
       onUseLighterWorkout={onUseLighterWorkout}
       onUseRecoveryDay={onUseRecoveryDay}
       onAddHydration={onAddHydration}
+      authToken={authToken}
     />
   );
 }

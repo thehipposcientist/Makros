@@ -18,6 +18,13 @@ import {
   classifyFood,
   validUnitsForFood,
   normalizeServingUnit,
+  preferredAmountForFoodServing,
+  gramsFromFoodAmount,
+  gramsFromFoodServing,
+  macroTotalsFromItems,
+  macroTotalsFromMeal,
+  scaleMealItem,
+  splitMealItemByFraction,
 } from '../mealItems.ts';
 
 describe('convertQuantity — same unit', () => {
@@ -139,6 +146,32 @@ describe('parseAmountString — unit aliases + edge cases', () => {
     const r = parseAmountString('5 widgets');
     expect(r?.quantity).toBe(5);
     expect(r?.unit).toBe('serving');
+  });
+});
+
+describe('preferredAmountForFoodServing', () => {
+  it('prefers serving grams over generic count labels for solid foods', () => {
+    expect(preferredAmountForFoodServing('ground beef', '1 patty', 113)).toEqual({ quantity: 4, unit: 'oz' });
+    expect(preferredAmountForFoodServing('ground beef', '1 serving', 453.592)).toEqual({ quantity: 16, unit: 'oz' });
+  });
+
+  it('extracts embedded grams when serving_grams is absent', () => {
+    expect(preferredAmountForFoodServing('protein bar', '1 bar (60g)', null)).toEqual({ quantity: 2.12, unit: 'oz' });
+  });
+
+  it('keeps explicit recognized serving units', () => {
+    expect(preferredAmountForFoodServing('cheddar cheese', '1 slice (21g)', 21)).toEqual({ quantity: 1, unit: 'slice' });
+    expect(preferredAmountForFoodServing('ground beef', '4 oz patty', 113)).toEqual({ quantity: 4, unit: 'oz' });
+    expect(gramsFromFoodServing('1 slice (21g)', null)).toBe(21);
+  });
+
+  it('uses provider grams without food-name classification when only grams are known', () => {
+    expect(preferredAmountForFoodServing('orange juice', '1 bottle', 240)).toEqual({ quantity: 8.47, unit: 'oz' });
+  });
+
+  it('returns exact grams for weight amounts', () => {
+    expect(Math.abs((gramsFromFoodAmount(1, 'lb') ?? 0) - 453.592) < 0.01).toBe(true);
+    expect(gramsFromFoodAmount(1, 'piece')).toBe(null);
   });
 });
 
@@ -310,6 +343,80 @@ describe('syncLegacyFieldsFromItems', () => {
   });
 });
 
+describe('macro totals helpers', () => {
+  it('uses structured item macros before stale meal-level totals', () => {
+    const meal = {
+      meal: 'Lunch', foods: [], amounts: [],
+      calories: 999, protein: 99, carbs: 99, fat: 99,
+      items: [
+        { name: 'rice', quantity: 1, unit: 'cup', calories: 200, protein: 4, carbs: 45, fat: 0 } as any,
+        { name: 'chicken', quantity: 3, unit: 'oz', calories: 140, protein: 26, carbs: 0, fat: 3 } as any,
+      ],
+    } as any;
+    expect(macroTotalsFromMeal(meal)).toEqual({ calories: 340, protein: 30, carbs: 45, fat: 3 });
+  });
+
+  it('falls back to meal-level macros for legacy meals without items', () => {
+    const meal = { meal: 'Snack', foods: ['banana'], calories: 105, protein: 1, carbs: 27, fat: 0 } as any;
+    expect(macroTotalsFromItems([], meal)).toEqual({ calories: 105, protein: 1, carbs: 27, fat: 0 });
+  });
+
+  it('keeps intentional zero-macro item lists at zero', () => {
+    const meal = {
+      meal: 'Coffee', foods: [], amounts: [],
+      calories: 0, protein: 0, carbs: 0, fat: 0,
+      items: [{ name: 'black coffee', quantity: 1, unit: 'cup', calories: 0, protein: 0, carbs: 0, fat: 0 } as any],
+    } as any;
+    expect(macroTotalsFromMeal(meal)).toEqual({ calories: 0, protein: 0, carbs: 0, fat: 0 });
+  });
+});
+
+describe('meal item scale/split helpers', () => {
+  it('scales quantity, macros, base values, serving grams, and micros together', () => {
+    const item = {
+      name: 'rice',
+      quantity: 2,
+      unit: 'cup',
+      serving_grams: 370,
+      calories: 410,
+      protein: 8,
+      carbs: 90,
+      fat: 1,
+      baseQuantity: 2,
+      baseCalories: 410,
+      baseProtein: 8,
+      baseCarbs: 90,
+      baseFat: 1,
+      micronutrients: { fiber: 2.4, sodium: 12 },
+    } as any;
+    const half = scaleMealItem(item, 0.5);
+    expect(half.quantity).toBe(1);
+    expect(half.serving_grams).toBe(185);
+    expect(half.calories).toBe(205);
+    expect(half.protein).toBe(4);
+    expect(half.carbs).toBe(45);
+    expect(half.baseQuantity).toBe(1);
+    expect(half.baseCalories).toBe(205);
+    expect(half.micronutrients).toEqual({ fiber: 1.2, sodium: 6 });
+  });
+
+  it('splits one item into two scaled items', () => {
+    const [first, second] = splitMealItemByFraction({
+      name: 'chicken',
+      quantity: 6,
+      unit: 'oz',
+      calories: 280,
+      protein: 52,
+      carbs: 0,
+      fat: 6,
+    } as any, 0.25);
+    expect(first.quantity).toBe(1.5);
+    expect(first.calories).toBe(70);
+    expect(second.quantity).toBe(4.5);
+    expect(second.calories).toBe(210);
+  });
+});
+
 describe('formatItemAmount', () => {
   it('drops the "piece" unit (eggs not piece eggs)', () => {
     expect(formatItemAmount({ name: 'egg', quantity: 2, unit: 'piece', calories: 140, protein: 12, carbs: 0, fat: 10 } as any)).toBe('2');
@@ -317,19 +424,23 @@ describe('formatItemAmount', () => {
   it('keeps a real unit', () => {
     expect(formatItemAmount({ name: 'rice', quantity: 1, unit: 'cup', calories: 200, protein: 4, carbs: 45, fat: 0 } as any)).toBe('1 cup');
   });
-  it('annotates "serving" with estimated grams when in range', () => {
+  it('turns a generic serving into an estimated concrete amount', () => {
     const r = formatItemAmount({ name: 'mystery', quantity: 1, unit: 'serving', calories: 300, protein: 0, carbs: 0, fat: 0 } as any);
-    expect(r.includes('1 serving')).toBe(true);
-    // 300 / 1.5 = 200g estimate
-    expect(r.includes('200g')).toBe(true);
+    expect(r).toBe('7 oz');
   });
-  it('annotates "scoop" with calorie context', () => {
+  it('keeps scoop quantities clean', () => {
     const r = formatItemAmount({ name: 'protein', quantity: 1, unit: 'scoop', calories: 120, protein: 24, carbs: 3, fat: 1 } as any);
-    expect(r.includes('1 scoop')).toBe(true);
-    expect(r.includes('120 cal')).toBe(true);
+    expect(r).toBe('1 scoop');
   });
   it('formats fractional quantities cleanly', () => {
     expect(formatItemAmount({ name: 'cup', quantity: 0.5, unit: 'cup', calories: 100, protein: 5, carbs: 10, fat: 2 } as any)).toBe('0.5 cup');
+  });
+  it('derives a sensible unit for zero-cal serving items instead of bare quantity', () => {
+    // Water + coffee come through with unit='serving' and 0 calories.
+    // We don't want them rendering as just "1" — pull a unit from the
+    // food classification.
+    expect(formatItemAmount({ name: 'water', quantity: 1, unit: 'serving', calories: 0, protein: 0, carbs: 0, fat: 0 } as any)).toBe('1 cup');
+    expect(formatItemAmount({ name: 'black coffee', quantity: 2, unit: 'serving', calories: 0, protein: 0, carbs: 0, fat: 0 } as any)).toBe('2 cup');
   });
 });
 

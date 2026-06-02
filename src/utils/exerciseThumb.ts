@@ -1,12 +1,28 @@
-// Single source of truth for exercise thumbnails app-wide.
+// Single source of truth for image thumbnail fallbacks app-wide.
+// Move Kit MP4 previews are rendered by ExerciseThumbMedia because
+// `<Image>` cannot consume video sources.
 //
-// Every exercise uses a YouTube thumbnail — no stick-figure / wger
-// static images (they look amateurish next to real video thumbnails).
-// Exercises without a curated video_id show a branded placeholder
-// until the server's background YouTube resolver populates one.
+// Preference order:
+//   1. free-exercise-db lockout frame (when `demo_exercise_db_id` is set)
+//      — clean side-view of the lift itself, no channel branding.
+//   2. YouTube thumbnail (when `video_id` is set) — channel preview.
+//   3. null → caller renders a branded placeholder.
+//
+// Returns an `ImageSourcePropType` so callers can pass the result
+// directly into `<Image source={...} />` without caring whether the
+// thumbnail is a bundled local require() (demo) or a remote URI
+// (YouTube).
+//
+// Demo IDs are populated server-side at seed time. Existing exercises
+// without a demo match still get a YouTube thumbnail when curated.
+
+import { ImageSourcePropType } from 'react-native';
+
+import { demoLockoutSource } from './exerciseDemo';
 
 interface ExerciseLike {
   video_id?: string | null;
+  demo_exercise_db_id?: string | null;
   slug?: string | null;
   name?: string | null;
 }
@@ -62,17 +78,21 @@ function resolveVideoId(ex: ExerciseLike | null | undefined): string | null {
   return null;
 }
 
-/** Small YouTube thumbnail URL (320×180). Used for exercise rows and
- *  list cells. Returns null when the exercise has no video_id. */
-export function exerciseThumbSmall(ex: ExerciseLike | null | undefined): string | null {
+/** Small thumbnail. Prefers the bundled free-exercise-db lockout frame,
+ *  falls back to the YouTube `mqdefault` thumbnail, then null. */
+export function exerciseThumbSmall(ex: ExerciseLike | null | undefined): ImageSourcePropType | null {
+  const demo = demoLockoutSource(ex?.demo_exercise_db_id ?? null);
+  if (demo) return demo;
   const id = resolveVideoId(ex);
   if (!id) return null;
-  return `https://img.youtube.com/vi/${id}/mqdefault.jpg`;
+  return { uri: `https://img.youtube.com/vi/${id}/mqdefault.jpg` };
 }
 
-/** Medium thumbnail (480×360). Used for the library detail card. */
-export function exerciseThumbMedium(ex: ExerciseLike | null | undefined): string | null {
+/** Medium thumbnail. Same preference order as small. */
+export function exerciseThumbMedium(ex: ExerciseLike | null | undefined): ImageSourcePropType | null {
+  const demo = demoLockoutSource(ex?.demo_exercise_db_id ?? null);
+  if (demo) return demo;
   const id = resolveVideoId(ex);
   if (!id) return null;
-  return `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+  return { uri: `https://img.youtube.com/vi/${id}/hqdefault.jpg` };
 }

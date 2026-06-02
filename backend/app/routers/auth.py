@@ -9,33 +9,46 @@ from urllib.request import urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from jose import JWTError, jwt
+from google.auth.transport import requests as google_auth_requests
+from google.oauth2 import id_token as google_id_token
 from pydantic import BaseModel
 from sqlalchemy import func as sa_func
 from sqlmodel import Session, select
 
 from app.database import get_session
-from app.entitlements import beta_full_access_enabled, default_subscription_tier
+from app.entitlements import (
+    default_subscription_tier,
+    entitlement_payload,
+    initialize_signup_entitlement,
+    refresh_user_entitlement,
+)
 from app.limiter import limiter
 from app.logging_setup import get_logger, set_request_context
-from app.models import User, UserCreate, UserRead, LoginRequest, Token
+from app.models import LegalAcceptanceEvent, User, UserCreate, UserRead, LoginRequest, Token, UserProfile, WatchDevice
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
 from app.services.email_delivery import send_password_reset_email, send_verification_email
+from app.watch_auth import hash_watch_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = get_logger("app.auth")
-LEGAL_VERSION = "2026-05-06.2"
+LEGAL_VERSION = os.getenv("LEGAL_VERSION", "2026-05-31.1")
 TOKEN_TTL_MINUTES = 30
+WATCH_TOKEN_TTL_DAYS = int(os.getenv("WATCH_TOKEN_TTL_DAYS", "90"))
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
 APPLE_JWKS_TTL_SECONDS = 6 * 60 * 60
 GOOGLE_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
-GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
-GOOGLE_JWKS_TTL_SECONDS = 6 * 60 * 60
+DEFAULT_GOOGLE_WEB_CLIENT_ID = "592286949926-tt77lik8cldc7dnccdetfgdd0kqntgcr.apps.googleusercontent.com"
+DEFAULT_GOOGLE_IOS_CLIENT_ID = "592286949926-7h0niho86jnes9bbqrd2gsske9h5ohmc.apps.googleusercontent.com"
 _apple_jwks_cache: dict[str, Any] | None = None
-_google_jwks_cache: dict[str, Any] | None = None
+# Shared transport for google-auth — handles cert fetching + caching.
+# google-auth's verify_oauth2_token reuses the cert cache via this request
+# instance, avoiding a fresh JWKS fetch on every login attempt.
+_google_auth_request = google_auth_requests.Request()
 
 
 def _user_read(user: User) -> UserRead:
+    entitlement = entitlement_payload(user)
     return UserRead(
         id=user.id,
         email=user.email,
@@ -56,20 +69,8 @@ def _user_read(user: User) -> UserRead:
         privacy_version=user.privacy_version,
         health_disclaimer_version=user.health_disclaimer_version,
         ai_disclaimer_version=user.ai_disclaimer_version,
-        subscription_tier=user.subscription_tier or "free",
+        **entitlement,
     )
-
-
-def _ensure_beta_subscription_tier(user: User, session: Session) -> User:
-    if not beta_full_access_enabled():
-        return user
-    if (user.subscription_tier or "").strip().lower() == "pro":
-        return user
-    user.subscription_tier = "pro"
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
 
 
 def _normalize_answer(ans: str) -> str:
@@ -86,6 +87,45 @@ def _client_ip(request: Request) -> str:
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "-"
+
+
+def _public_api_base_url(request: Request) -> str:
+    configured = (
+        os.getenv("WATCH_API_BASE_URL")
+        or os.getenv("PUBLIC_API_BASE_URL")
+        or os.getenv("API_BASE_URL")
+        or ""
+    ).strip()
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _record_legal_acceptance(
+    session: Session,
+    user: User,
+    *,
+    legal_version: str,
+    source: str,
+    request: Request,
+) -> None:
+    if user.id is None:
+        session.flush()
+    if user.id is None:
+        raise HTTPException(status_code=500, detail="Could not record legal acceptance")
+    session.add(
+        LegalAcceptanceEvent(
+            user_id=user.id,
+            legal_version=legal_version,
+            source=source,
+            accepted_terms=True,
+            accepted_privacy=True,
+            accepted_health_disclaimer=True,
+            accepted_ai_disclaimer=True,
+            client_ip=_client_ip(request),
+            user_agent=(request.headers.get("user-agent") or "")[:512] or None,
+        )
+    )
 
 
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
@@ -178,6 +218,8 @@ def _google_audiences() -> list[str]:
         os.getenv("GOOGLE_WEB_CLIENT_ID"),
         os.getenv("GOOGLE_IOS_CLIENT_ID"),
         os.getenv("GOOGLE_ANDROID_CLIENT_ID"),
+        DEFAULT_GOOGLE_WEB_CLIENT_ID,
+        DEFAULT_GOOGLE_IOS_CLIENT_ID,
     ]
     audiences: list[str] = []
     for raw in values:
@@ -218,28 +260,6 @@ def _apple_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
     return keys
 
 
-def _google_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
-    global _google_jwks_cache
-    now = time.time()
-    if (
-        not force_refresh
-        and _google_jwks_cache
-        and _google_jwks_cache.get("expires_at", 0) > now
-    ):
-        return list(_google_jwks_cache.get("keys", []))
-    try:
-        with urlopen(GOOGLE_JWKS_URL, timeout=5) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        logger.warning("auth_google_jwks_failed", extra={"error": str(e)})
-        raise HTTPException(status_code=503, detail="Unable to verify Google sign-in right now")
-    keys = payload.get("keys") or []
-    if not keys:
-        raise HTTPException(status_code=503, detail="Unable to verify Google sign-in right now")
-    _google_jwks_cache = {"keys": keys, "expires_at": now + GOOGLE_JWKS_TTL_SECONDS}
-    return keys
-
-
 def _verify_apple_identity_token(identity_token: str) -> dict[str, Any]:
     token = (identity_token or "").strip()
     if not token:
@@ -277,69 +297,90 @@ def _verify_apple_identity_token(identity_token: str) -> dict[str, Any]:
 
 
 def _verify_google_identity_token(identity_token: str) -> dict[str, Any]:
+    # Verification is delegated to google-auth's verify_oauth2_token,
+    # which is the library Google maintains for exactly this purpose.
+    # It handles cert fetching, key rotation, RS256 + recent algorithm
+    # support, and clock skew. We pass audience=None to skip its
+    # built-in single-audience check because we accept tokens for any
+    # of our configured client IDs (web + iOS); the manual check below
+    # walks the configured list.
+    #
+    # Each failure path tags a short reason code in the response detail
+    # so a TestFlight error toast can tell us which check tripped
+    # without needing log access.
     token = (identity_token or "").strip()
     if not token:
         raise HTTPException(status_code=422, detail="Google identity token is required")
     audiences = _google_audiences()
     if not audiences:
-        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured (no_audiences_configured)")
+
+    # Pre-parse to surface diagnostics on malformed tokens.
     try:
         unverified_claims = jwt.get_unverified_claims(token)
     except JWTError:
-        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
-    issuer = str(unverified_claims.get("iss") or "")
-    if issuer not in GOOGLE_ISSUERS:
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid (malformed_jwt)")
+
+    try:
+        claims = google_id_token.verify_oauth2_token(
+            token,
+            _google_auth_request,
+            audience=None,
+            clock_skew_in_seconds=10,
+        )
+    except ValueError as e:
+        raw_error_message = str(e)
+        message = raw_error_message.lower()
+        if "expired" in message or "exp" in message and "claim" in message:
+            reason_code = "token_expired"
+        elif "signature" in message or "verify" in message:
+            reason_code = "bad_signature"
+        elif "issuer" in message or "iss" in message:
+            reason_code = "bad_issuer"
+        else:
+            reason_code = "decode_failed"
+        safe_raw = "".join(ch for ch in raw_error_message if ch.isprintable() and ord(ch) < 128)
+        safe_raw = safe_raw.replace(";", ",").replace("(", "[").replace(")", "]")[:120]
+        aud_claim = unverified_claims.get("aud")
+        aud_short = aud_claim if isinstance(aud_claim, str) else "list"
         logger.warning(
             "auth_google_token_failed",
             extra={
-                "error": "Invalid issuer",
-                "aud": unverified_claims.get("aud"),
+                "error": raw_error_message,
+                "reason_code": reason_code,
+                "aud": aud_claim,
                 "azp": unverified_claims.get("azp"),
                 "iss": unverified_claims.get("iss"),
                 "accepted_audiences": audiences,
             },
         )
-        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
-    try:
-        header = jwt.get_unverified_header(token)
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
-    kid = header.get("kid")
-    if not kid:
-        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+        detail = f"Google sign-in token is invalid ({reason_code}; aud={aud_short}"
+        if safe_raw:
+            detail += f"; raw={safe_raw}"
+        detail += ")"
+        raise HTTPException(status_code=401, detail=detail)
 
-    key = next((k for k in _google_jwks() if k.get("kid") == kid), None)
-    if key is None:
-        key = next((k for k in _google_jwks(force_refresh=True) if k.get("kid") == kid), None)
-    if key is None:
-        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
-
-    last_error: Exception | None = None
-    try:
-        claims = jwt.decode(
-            token,
-            key,
-            algorithms=["RS256"],
-            issuer=issuer,
-            options={"verify_aud": False},
+    if not _claim_matches_audience(claims.get("aud"), audiences):
+        aud_claim = claims.get("aud")
+        aud_short = aud_claim if isinstance(aud_claim, str) else "list"
+        logger.warning(
+            "auth_google_token_failed",
+            extra={
+                "error": "Invalid audience",
+                "reason_code": "audience_mismatch",
+                "aud": aud_claim,
+                "azp": claims.get("azp"),
+                "iss": claims.get("iss"),
+                "accepted_audiences": audiences,
+            },
         )
-        if not _claim_matches_audience(claims.get("aud"), audiences):
-            last_error = JWTError("Invalid audience")
-        elif claims.get("sub"):
-            return claims
-    except JWTError as e:
-        last_error = e
-    logger.warning(
-        "auth_google_token_failed",
-        extra={
-            "error": str(last_error or "missing_sub"),
-            "aud": unverified_claims.get("aud"),
-            "azp": unverified_claims.get("azp"),
-            "iss": unverified_claims.get("iss"),
-            "accepted_audiences": audiences,
-        },
-    )
-    raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+        raise HTTPException(
+            status_code=401,
+            detail=f"Google sign-in token is invalid (audience_mismatch; aud={aud_short})",
+        )
+    if not claims.get("sub"):
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid (missing_sub)")
+    return claims
 
 
 def _apple_email_verified(claims: dict[str, Any]) -> bool:
@@ -376,6 +417,66 @@ def _unique_oauth_username(session: Session, email: str) -> str:
     return candidate
 
 
+def _is_recyclable_email_signup(session: Session, user: User) -> bool:
+    if user.id is None or not user.is_active or user.account_deleted_at is not None:
+        return False
+    if user.apple_sub or user.google_sub:
+        return False
+    paid_statuses = {"active", "grace_period", "cancelled", "promotional", "temporary"}
+    if (user.subscription_source or "").strip().lower() == "revenuecat":
+        return False
+    if (user.subscription_status or "").strip().lower() in paid_statuses:
+        return False
+    profile = session.exec(select(UserProfile).where(UserProfile.user_id == user.id)).first()
+    return profile is None
+
+
+def _reset_recycled_signup(
+    user: User,
+    body: UserCreate,
+    *,
+    email: str,
+    username: str,
+    first_name: str,
+    last_name: str,
+    legal_version: str,
+    email_token: str,
+    now: datetime,
+) -> None:
+    user.email = email
+    user.username = username
+    user.hashed_password = hash_password(body.password)
+    user.first_name = first_name
+    user.last_name = last_name
+    user.recovery_question = None
+    user.recovery_answer_hash = None
+    user.email_verified_at = None
+    user.email_verification_token_hash = hash_password(email_token)
+    user.email_verification_expires_at = _token_expiry()
+    user.password_reset_token_hash = None
+    user.password_reset_expires_at = None
+    user.terms_accepted_at = now
+    user.terms_version = legal_version
+    user.privacy_accepted_at = now
+    user.privacy_version = legal_version
+    user.health_disclaimer_accepted_at = now
+    user.health_disclaimer_version = legal_version
+    user.ai_disclaimer_accepted_at = now
+    user.ai_disclaimer_version = legal_version
+    user.subscription_product_id = None
+    user.subscription_entitlement_id = None
+    user.subscription_store = None
+    user.subscription_environment = None
+    user.subscription_expires_at = None
+    user.trial_started_at = None
+    user.trial_ends_at = None
+    user.revenuecat_original_app_user_id = None
+    user.revenuecat_original_transaction_id = None
+    user.plan_cadence_anchor = None
+    user.token_version = int(user.token_version or 0) + 1
+    initialize_signup_entitlement(user, now=now)
+
+
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
@@ -388,36 +489,66 @@ def register(body: UserCreate, request: Request, session: Session = Depends(get_
     _require_legal_acceptance(body)
     ip = _client_ip(request)
     # Check email not taken
-    if session.exec(select(User).where(User.email == email)).first():
+    existing_email_user = session.exec(select(User).where(User.email == email)).first()
+    recycled_user = (
+        existing_email_user
+        if existing_email_user and _is_recyclable_email_signup(session, existing_email_user)
+        else None
+    )
+    if existing_email_user and recycled_user is None:
         logger.info("auth_register_rejected", extra={"email": email, "ip": ip, "reason": "email_taken"})
         raise HTTPException(status_code=400, detail="Email already registered")
     # Check username not taken
-    if session.exec(select(User).where(sa_func.lower(User.username) == username)).first():
+    existing_username_user = session.exec(select(User).where(sa_func.lower(User.username) == username)).first()
+    if existing_username_user and (recycled_user is None or existing_username_user.id != recycled_user.id):
         logger.info("auth_register_rejected", extra={"email": email, "ip": ip, "reason": "username_taken"})
         raise HTTPException(status_code=400, detail="Username already taken")
 
     now = datetime.now(timezone.utc)
     email_token = _new_token()
     legal_version = (body.legal_version or LEGAL_VERSION).strip() or LEGAL_VERSION
-    user = User(
-        email=email,
-        username=username,
-        hashed_password=hash_password(body.password),
-        first_name=first_name,
-        last_name=last_name,
-        terms_accepted_at=now,
-        terms_version=legal_version,
-        privacy_accepted_at=now,
-        privacy_version=legal_version,
-        health_disclaimer_accepted_at=now,
-        health_disclaimer_version=legal_version,
-        ai_disclaimer_accepted_at=now,
-        ai_disclaimer_version=legal_version,
-        email_verification_token_hash=hash_password(email_token),
-        email_verification_expires_at=_token_expiry(),
-        subscription_tier=default_subscription_tier(),
-    )
+    if recycled_user is not None:
+        user = recycled_user
+        _reset_recycled_signup(
+            user,
+            body,
+            email=email,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            legal_version=legal_version,
+            email_token=email_token,
+            now=now,
+        )
+        logger.info("auth_register_recycled", extra={"user_id": user.id, "email": email, "ip": ip})
+    else:
+        user = User(
+            email=email,
+            username=username,
+            hashed_password=hash_password(body.password),
+            first_name=first_name,
+            last_name=last_name,
+            terms_accepted_at=now,
+            terms_version=legal_version,
+            privacy_accepted_at=now,
+            privacy_version=legal_version,
+            health_disclaimer_accepted_at=now,
+            health_disclaimer_version=legal_version,
+            ai_disclaimer_accepted_at=now,
+            ai_disclaimer_version=legal_version,
+            email_verification_token_hash=hash_password(email_token),
+            email_verification_expires_at=_token_expiry(),
+            subscription_tier=default_subscription_tier(),
+        )
+        initialize_signup_entitlement(user, now=now)
     session.add(user)
+    _record_legal_acceptance(
+        session,
+        user,
+        legal_version=legal_version,
+        source="email_signup",
+        request=request,
+    )
     session.commit()
     session.refresh(user)
     set_request_context(user_id=user.id)
@@ -453,10 +584,10 @@ class AppleAuthRequest(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     legal_version: str | None = None
-    accepted_terms: bool = True
-    accepted_privacy: bool = True
-    accepted_health_disclaimer: bool = True
-    accepted_ai_disclaimer: bool = True
+    accepted_terms: bool = False
+    accepted_privacy: bool = False
+    accepted_health_disclaimer: bool = False
+    accepted_ai_disclaimer: bool = False
 
 
 class GoogleAuthRequest(BaseModel):
@@ -464,10 +595,10 @@ class GoogleAuthRequest(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     legal_version: str | None = None
-    accepted_terms: bool = True
-    accepted_privacy: bool = True
-    accepted_health_disclaimer: bool = True
-    accepted_ai_disclaimer: bool = True
+    accepted_terms: bool = False
+    accepted_privacy: bool = False
+    accepted_health_disclaimer: bool = False
+    accepted_ai_disclaimer: bool = False
 
 
 class OAuthToken(Token):
@@ -568,7 +699,15 @@ def login_with_apple(
         email_verified_at=now,
         subscription_tier=default_subscription_tier(),
     )
+    initialize_signup_entitlement(user, now=now)
     session.add(user)
+    _record_legal_acceptance(
+        session,
+        user,
+        legal_version=legal_version,
+        source="apple_signup",
+        request=request,
+    )
     session.commit()
     session.refresh(user)
     token = create_access_token(user.id, token_version=user.token_version)
@@ -651,7 +790,15 @@ def login_with_google(
         email_verified_at=now,
         subscription_tier=default_subscription_tier(),
     )
+    initialize_signup_entitlement(user, now=now)
     session.add(user)
+    _record_legal_acceptance(
+        session,
+        user,
+        legal_version=legal_version,
+        source="google_signup",
+        request=request,
+    )
     session.commit()
     session.refresh(user)
     token = create_access_token(user.id, token_version=user.token_version)
@@ -665,7 +812,60 @@ def me(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    return _user_read(_ensure_beta_subscription_tier(current_user, session))
+    return _user_read(refresh_user_entitlement(current_user, session))
+
+
+class WatchTokenRequest(BaseModel):
+    device_id: str | None = None
+    app_version: str | None = None
+
+
+class WatchTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: datetime
+    api_base_url: str
+    user_id: int
+
+
+@router.post("/watch-token", response_model=WatchTokenResponse)
+def issue_watch_token(
+    body: WatchTokenRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    device_id = (body.device_id or "paired-watch").strip()[:128] or "paired-watch"
+    token = secrets.token_urlsafe(48)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=WATCH_TOKEN_TTL_DAYS)
+    existing = session.exec(
+        select(WatchDevice)
+        .where(WatchDevice.user_id == current_user.id)
+        .where(WatchDevice.device_id == device_id)
+    ).first()
+    device = existing or WatchDevice(
+        user_id=current_user.id,
+        device_id=device_id,
+        token_hash=hash_watch_token(token),
+        expires_at=expires_at,
+    )
+    device.token_hash = hash_watch_token(token)
+    device.issued_token_version = int(current_user.token_version or 0)
+    device.issued_at = now
+    device.expires_at = expires_at
+    device.revoked_at = None
+    device.last_app_version = (body.app_version or "").strip()[:64] or None
+    device.last_seen_ip = _client_ip(request)
+    session.add(device)
+    session.commit()
+    logger.info("auth_watch_token_issued", extra={"user_id": current_user.id, "device_id": device_id})
+    return WatchTokenResponse(
+        access_token=token,
+        expires_at=expires_at,
+        api_base_url=_public_api_base_url(request),
+        user_id=current_user.id,
+    )
 
 
 class UpdateEmailBody(BaseModel):
@@ -1030,15 +1230,16 @@ def logout(
 
 class AcceptLegalRequest(BaseModel):
     legal_version: str
-    accepted_terms: bool = True
-    accepted_privacy: bool = True
-    accepted_health_disclaimer: bool = True
-    accepted_ai_disclaimer: bool = True
+    accepted_terms: bool = False
+    accepted_privacy: bool = False
+    accepted_health_disclaimer: bool = False
+    accepted_ai_disclaimer: bool = False
 
 
 @router.post("/accept-legal", response_model=UserRead)
 def accept_legal(
     body: AcceptLegalRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
@@ -1063,6 +1264,13 @@ def accept_legal(
     current_user.ai_disclaimer_accepted_at = now
     current_user.ai_disclaimer_version = version
     session.add(current_user)
+    _record_legal_acceptance(
+        session,
+        current_user,
+        legal_version=version,
+        source="re_acceptance",
+        request=request,
+    )
     session.commit()
     session.refresh(current_user)
     logger.info("auth_legal_re_accepted", extra={"user_id": current_user.id, "version": version})

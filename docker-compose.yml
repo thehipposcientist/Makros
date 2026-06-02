@@ -29,6 +29,9 @@ services:
     environment:
       # Override DATABASE_URL to use the Docker network hostname
       DATABASE_URL: postgresql://thallo:thallo@db:5432/thallo
+      # Local dev only: enables /billing/mock-checkout and
+      # /billing/mock-downgrade so the app can test Free/Pro transitions.
+      DUMMY_BILLING_ENABLED: "1"
     depends_on:
       db:
         condition: service_healthy

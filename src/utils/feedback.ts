@@ -7,8 +7,9 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform, Vibration } from 'react-native';
+import { STORAGE_KEYS } from './storageKeys.ts';
 
-const SETTINGS_KEY = 'appSettings';
+const SETTINGS_KEY = STORAGE_KEYS.app.settings;
 
 export type RestTimerSound = 'chime' | 'beep' | 'ping' | 'double';
 
@@ -16,16 +17,21 @@ export interface AppSettings {
   hapticsEnabled: boolean;
   soundsEnabled: boolean;
   vibrationEnabled: boolean;
-  /** Whether the local notification scheduled for the rest timer's
-   *  end plays a sound when the app is backgrounded. iOS notification
-   *  sounds DUCK other audio (music / podcasts) for ~1-2s, which the
-   *  user feels as "Spotify pauses for too long". Default OFF — the
-   *  in-app chime mixes with music; the background notification still
-   *  vibrates + shows a banner, just silently. */
+  /** Optional silent audio keepalive for rest timers. The scheduled
+   *  completion notification handles background sounds; this only tries
+   *  to keep JS awake for live countdown/watch cleanup while backgrounded. */
   restNotificationSoundEnabled: boolean;
   /** Which sound plays when the rest timer ends. Defaults to 'chime'
    *  (the original bell tone). Options: chime, beep, ping, double. */
   restTimerSound: RestTimerSound;
+  /** Dedicated toggle for the rest-timer END chime (foreground in-app
+   *  sound, and — once synced — the Apple Watch ding). Independent of the
+   *  global soundsEnabled so users can keep UI sounds on but silence the
+   *  rest ding, or vice-versa. */
+  restSoundEnabled: boolean;
+  /** Dedicated toggle for the rest-timer END haptic/vibration on the
+   *  phone (and, once synced, the watch). Independent of global vibration. */
+  restHapticEnabled: boolean;
 }
 
 const DEFAULTS: AppSettings = {
@@ -34,6 +40,8 @@ const DEFAULTS: AppSettings = {
   vibrationEnabled: true,
   restNotificationSoundEnabled: false,
   restTimerSound: 'chime',
+  restSoundEnabled: true,
+  restHapticEnabled: true,
 };
 
 let _cached: AppSettings = { ...DEFAULTS };
@@ -205,12 +213,13 @@ export async function preloadRestTimerSound(): Promise<void> {
 
 export async function playRestTimerDone() {
   const s = await loadSettings();
-  // Vibration runs unconditionally when enabled — it's the user's
-  // backup if their phone is on silent + headphones disconnected.
-  if (s.vibrationEnabled) {
+  // Vibration runs when enabled — it's the user's backup if their phone
+  // is on silent + headphones disconnected. Gated by the dedicated rest
+  // haptic toggle so it can be silenced independently of app vibration.
+  if (s.vibrationEnabled && s.restHapticEnabled) {
     Vibration.vibrate([0, 200, 100, 200, 100, 400]);
   }
-  if (!s.soundsEnabled) return;
+  if (!s.soundsEnabled || !s.restSoundEnabled) return;
   try {
     const Audio = await getAudio();
     if (!Audio) return;

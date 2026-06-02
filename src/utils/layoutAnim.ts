@@ -14,12 +14,12 @@ import { LayoutAnimation } from 'react-native';
 export function configureExpandAnimation(duration: number = 350) {
   LayoutAnimation.configureNext({
     duration,
+    // All three phases share easeInEaseOut so create/update/delete move
+    // in lockstep — no overshoot, no curve mismatch between content
+    // fading in and the surrounding card resizing. Replaced the prior
+    // spring update (springDamping 0.7) which read as jittery on expand.
     create:  { type: 'easeInEaseOut', property: 'opacity' },
-    // Spring update gives the expand a livelier settle — feels like the
-    // card "snaps" into its new size rather than creeping to it. Matches
-    // the native-modal motion used elsewhere in the app. `springDamping`
-    // is required when type is 'spring'; ~0.7 = moderate bounce.
-    update:  { type: 'spring', springDamping: 0.7 },
+    update:  { type: 'easeInEaseOut' },
     delete:  { type: 'easeInEaseOut', property: 'opacity' },
   });
 }

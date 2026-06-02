@@ -394,7 +394,7 @@ def test_decide_core_skips_short_session_non_metabolic():
         is_recovery_day=False, remaining_weekly_budget=3,
     )
     assert not decision.add
-    assert "short" in decision.reason
+    assert decision.reason == "time_cap"
     _ok("short session + non-metabolic → skip")
 
 

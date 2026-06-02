@@ -32,11 +32,11 @@ from app.models import (
 
 @dataclass
 class FlagThresholds:
-    # low_adherence_7d: days within ±15% of target kcal
+    # low_adherence_7d: days within +/-5% of target kcal
     low_adherence_med_days: int = 5       # < 5/7 days is med
     low_adherence_high_days: int = 3      # < 3/7 days is high
     # low_protein_7d
-    low_protein_min_days: int = 4         # number of days below 85% target
+    low_protein_min_days: int = 4         # number of days below 95% target
     # calorie_drift_7d
     calorie_drift_pct_med: float = 8.0    # |7d avg - target| > 8% is med
     calorie_drift_pct_high: float = 15.0  # |7d avg - target| > 15% is high
@@ -118,14 +118,14 @@ def flag_low_adherence_7d(db: Session, user_id: int, as_of: date) -> dict | None
     if len(target_days) < 5:
         return None
     ok_days = sum(
-        1 for r in target_days if abs(r.kcal - r.kcal_target) <= 0.15 * r.kcal_target
+        1 for r in target_days if abs(r.kcal - r.kcal_target) <= 0.05 * r.kcal_target
     )
     if ok_days >= FLAG_CONFIG.low_adherence_med_days:
         return None
     severity = "high" if ok_days < FLAG_CONFIG.low_adherence_high_days else "med"
     return {
         "severity": severity,
-        "value": f"{ok_days}/{len(target_days)} days within ±15% of target",
+        "value": f"{ok_days}/{len(target_days)} days within +/-5% of target",
         "details": {"ok_days": ok_days, "logged_days": len(target_days)},
     }
 
@@ -135,7 +135,7 @@ def flag_low_protein_7d(db: Session, user_id: int, as_of: date) -> dict | None:
     target_days = [r for r in daily if r.protein_target_g]
     if len(target_days) < 5:
         return None
-    misses = sum(1 for r in target_days if r.protein_g < 0.85 * r.protein_target_g)
+    misses = sum(1 for r in target_days if r.protein_g < 0.95 * r.protein_target_g)
     if misses < FLAG_CONFIG.low_protein_min_days:
         return None
     # Compute avg adherence for the human-readable value

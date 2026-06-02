@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sqlmodel import SQLModel, Session, create_engine, select
 
-from app.models import User
+from app.models import LegalAcceptanceEvent, User
 from app.routers import auth as auth_router
 
 
@@ -25,7 +25,7 @@ class _Request:
 
 def _engine():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine, tables=[User.__table__])
+    SQLModel.metadata.create_all(engine, tables=[User.__table__, LegalAcceptanceEvent.__table__])
     return engine
 
 
@@ -56,6 +56,22 @@ def _restore_beta_full_access(previous: str | None) -> None:
         os.environ["BETA_FULL_ACCESS_ENABLED"] = previous
 
 
+def _set_signup_trial_days(value: str | None):
+    previous = os.environ.get("SIGNUP_TRIAL_DAYS")
+    if value is None:
+        os.environ.pop("SIGNUP_TRIAL_DAYS", None)
+    else:
+        os.environ["SIGNUP_TRIAL_DAYS"] = value
+    return previous
+
+
+def _restore_signup_trial_days(previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop("SIGNUP_TRIAL_DAYS", None)
+    else:
+        os.environ["SIGNUP_TRIAL_DAYS"] = previous
+
+
 def test_google_login_creates_new_user():
     engine = _engine()
     previous_beta = _set_beta_full_access(None)
@@ -72,6 +88,10 @@ def test_google_login_creates_new_user():
                 auth_router.GoogleAuthRequest(
                     identity_token="signed.google.jwt",
                     legal_version="2026-04-29.2",
+                    accepted_terms=True,
+                    accepted_privacy=True,
+                    accepted_health_disclaimer=True,
+                    accepted_ai_disclaimer=True,
                 ),
                 session,
             )
@@ -85,6 +105,12 @@ def test_google_login_creates_new_user():
             assert user.email_verified_at is not None
             assert user.terms_version == "2026-04-29.2"
             assert user.subscription_tier == "pro"
+            assert user.subscription_status == "trialing"
+            assert user.trial_ends_at is not None
+            event = session.exec(select(LegalAcceptanceEvent).where(LegalAcceptanceEvent.user_id == user.id)).first()
+            assert event is not None
+            assert event.legal_version == "2026-04-29.2"
+            assert event.source == "google_signup"
     finally:
         auth_router._verify_google_identity_token = original
         _restore_beta_full_access(previous_beta)
@@ -95,6 +121,7 @@ def test_google_login_creates_new_user():
 def test_google_login_beta_opt_out_creates_free_user():
     engine = _engine()
     previous_beta = _set_beta_full_access("0")
+    previous_trial = _set_signup_trial_days("0")
     original = _with_google_claims({
         "sub": "google-sub-beta",
         "email": "beta-google@example.com",
@@ -106,6 +133,10 @@ def test_google_login_beta_opt_out_creates_free_user():
                 auth_router.GoogleAuthRequest(
                     identity_token="signed.google.jwt",
                     legal_version="2026-04-29.2",
+                    accepted_terms=True,
+                    accepted_privacy=True,
+                    accepted_health_disclaimer=True,
+                    accepted_ai_disclaimer=True,
                 ),
                 session,
             )
@@ -114,9 +145,38 @@ def test_google_login_beta_opt_out_creates_free_user():
             assert user.subscription_tier == "free"
     finally:
         auth_router._verify_google_identity_token = original
+        _restore_signup_trial_days(previous_trial)
         _restore_beta_full_access(previous_beta)
         engine.dispose()
     print("PASS test_google_login_beta_opt_out_creates_free_user")
+
+
+def test_google_login_rejects_new_user_without_legal_acceptance():
+    engine = _engine()
+    original = _with_google_claims({
+        "sub": "google-sub-no-legal",
+        "email": "no-legal-google@example.com",
+        "email_verified": True,
+    })
+    try:
+        with Session(engine) as session:
+            try:
+                _login_with_google(
+                    auth_router.GoogleAuthRequest(
+                        identity_token="signed.google.jwt",
+                        legal_version="2026-04-29.2",
+                    ),
+                    session,
+                )
+            except Exception as exc:
+                assert getattr(exc, "status_code", None) == 422
+            else:
+                raise AssertionError("expected missing OAuth legal acceptance to be rejected")
+            assert session.exec(select(User).where(User.google_sub == "google-sub-no-legal")).first() is None
+    finally:
+        auth_router._verify_google_identity_token = original
+        engine.dispose()
+    print("PASS test_google_login_rejects_new_user_without_legal_acceptance")
 
 
 def test_google_login_links_existing_email_user():

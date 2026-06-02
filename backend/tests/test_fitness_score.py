@@ -208,6 +208,63 @@ def test_cardio_half_baseline():
     _ok(f"half baseline → cardio {cardio.score:.0f}")
 
 
+def test_cardio_uses_vo2_when_available():
+    print("\n[test] cardio: VO2 max alone can score cardio fitness")
+    s = compute_fitness_score(
+        profiles={},
+        bodyweight_lbs=180,
+        recent_completions=[],
+        session_count_14d=0,
+        days_per_week=3,
+        vo2_max=50.0,
+    )
+    cardio = s.pillars[1]
+    assert cardio.score >= 90, f"expected strong VO2 score, got {cardio.score}"
+    assert cardio.data_quality == "full"
+    _ok(f"VO2-only cardio → {cardio.score:.0f}")
+
+
+def test_cardio_walk_distance_only_is_capped():
+    print("\n[test] cardio: unlabeled walks do not carry cardio score")
+    s = compute_fitness_score(
+        profiles={},
+        bodyweight_lbs=180,
+        recent_completions=[
+            {'focus': 'Walking', 'duration_seconds': 60 * 60, 'distance_miles': 3.0},
+            {'focus': 'Walking', 'duration_seconds': 60 * 60, 'distance_miles': 3.0},
+            {'focus': 'Walking', 'duration_seconds': 60 * 60, 'distance_miles': 3.0},
+            {'focus': 'Walking', 'duration_seconds': 60 * 60, 'distance_miles': 3.0},
+        ],
+        session_count_14d=4,
+        days_per_week=3,
+    )
+    cardio = s.pillars[1]
+    assert cardio.score <= 55, f"expected weak-proxy cap, got {cardio.score}"
+    _ok(f"walking-only cardio capped at {cardio.score:.0f}")
+
+
+def test_cardio_prefers_hr_zone_minutes():
+    print("\n[test] cardio: HR zone minutes beat text heuristics")
+    s = compute_fitness_score(
+        profiles={},
+        bodyweight_lbs=180,
+        recent_completions=[
+            {
+                'focus': 'Cardio',
+                'duration_seconds': 45 * 60,
+                'activity_category': 'cardio',
+                'hr_summary': {'zoneMinutes': [5, 35, 4, 1, 0]},
+            },
+        ],
+        session_count_14d=1,
+        days_per_week=3,
+    )
+    cardio = s.pillars[1]
+    assert 10 <= cardio.score <= 20, f"expected actual 35 Z2 min, got {cardio.score}"
+    assert "35 min aerobic base" in cardio.reason
+    _ok("HR zones drive Z2 credit")
+
+
 # ── Consistency pillar ──────────────────────────────────────────────
 
 def test_consistency_full_target():
@@ -358,6 +415,81 @@ def test_composite_balanced_user():
     _ok(f"balanced user → total {s.total:.1f} ({s.rating})")
 
 
+# ── Adaptive windows (sparse-history users) ────────────────────────
+#
+# `history_days` = days since the user's first logged workout. When it
+# is shorter than a pillar's 14-/28-day window, the pillar target
+# scales down so a strong first week isn't scored against a full bar.
+# Omitting `history_days` keeps the original full-window behavior.
+
+def test_effective_window_days_helper():
+    print("\n[test] adaptive: _effective_window_days clamps + floors")
+    from app.services.workout.fitness_score import _effective_window_days
+    assert _effective_window_days(None, 14) == 14   # no history → full window
+    assert _effective_window_days(28, 14) == 14     # clamps to full window
+    assert _effective_window_days(7, 14) == 7       # sparse → shrinks
+    assert _effective_window_days(0, 14) == 1       # floored at 1
+    assert _effective_window_days(1, 28) == 1
+    _ok("effective window clamps to full window + floors at 1")
+
+
+def test_consistency_full_window_unchanged():
+    print("\n[test] adaptive: no history_days → full 2-week target (3/6 → 50)")
+    s = compute_fitness_score(
+        profiles={}, bodyweight_lbs=180, recent_completions=[],
+        session_count_14d=3, days_per_week=3,  # history_days omitted
+    )
+    consistency = s.pillars[2]
+    assert consistency.score == 50.0, f"expected 50, got {consistency.score}"
+    _ok("established user → full 14-day consistency target")
+
+
+def test_consistency_adaptive_window_sparse_user():
+    print("\n[test] adaptive: 7-day-old user, 3 of 3 sessions → consistency 100")
+    s = compute_fitness_score(
+        profiles={}, bodyweight_lbs=180, recent_completions=[],
+        session_count_14d=3, days_per_week=3, history_days=7,
+    )
+    consistency = s.pillars[2]
+    # Target scales to 3 sessions/week, not 6 over 2 weeks — a full
+    # first week scores 100 instead of being penalized down to 50.
+    assert consistency.score == 100.0, f"expected 100, got {consistency.score}"
+    _ok("sparse user's full first week → consistency 100 (not 50)")
+
+
+def test_cardio_adaptive_window_sparse_user():
+    print("\n[test] adaptive: 7-day-old user, 150 min Z2 + 2 intervals → cardio 100")
+    s = compute_fitness_score(
+        profiles={}, bodyweight_lbs=180,
+        recent_completions=[
+            {'focus': 'Zone 2', 'duration_seconds': 90 * 60},
+            {'focus': 'Zone 2', 'duration_seconds': 60 * 60},
+            {'focus': 'Short Intervals', 'duration_seconds': 30 * 60},
+            {'focus': 'Short Intervals', 'duration_seconds': 30 * 60},
+        ],
+        session_count_14d=4, days_per_week=3, history_days=7,
+    )
+    cardio = s.pillars[1]
+    # 1-week window: 150 min Z2 + 2 intervals clears the scaled target.
+    # The same inputs over a full 14-day window would score ~50.
+    assert cardio.score == 100.0, f"expected 100, got {cardio.score}"
+    _ok("sparse user's first-week cardio scored against a 1-week target")
+
+
+def test_strength_variety_adaptive_window():
+    print("\n[test] adaptive: 7-day-old user, 3 exercises → full variety credit")
+    s = compute_fitness_score(
+        profiles={}, bodyweight_lbs=180, recent_completions=[],
+        session_count_14d=0, days_per_week=3,
+        distinct_exercises=3, history_days=7,
+    )
+    strength = s.pillars[0]
+    # Variety full-credit shrinks to 12 × (7/28) = 3 exercises, so 3
+    # distinct exercises in week one earns the full 15-point sub-score.
+    assert strength.score == 15.0, f"expected 15 (variety only), got {strength.score}"
+    _ok("sparse user's 3 exercises in 1 week → full variety credit")
+
+
 # ─── Runner ──────────────────────────────────────────────────────────────────
 
 def _run_all() -> int:
@@ -371,6 +503,9 @@ def _run_all() -> int:
         test_cardio_no_sessions,
         test_cardio_meets_acsm_baseline,
         test_cardio_half_baseline,
+        test_cardio_uses_vo2_when_available,
+        test_cardio_walk_distance_only_is_capped,
+        test_cardio_prefers_hr_zone_minutes,
         test_consistency_full_target,
         test_consistency_capped,
         test_consistency_zero,
@@ -379,6 +514,11 @@ def _run_all() -> int:
         test_recovery_poor_sleep_high_rpe,
         test_composite_weighted_average,
         test_composite_balanced_user,
+        test_effective_window_days_helper,
+        test_consistency_full_window_unchanged,
+        test_consistency_adaptive_window_sparse_user,
+        test_cardio_adaptive_window_sparse_user,
+        test_strength_variety_adaptive_window,
     ]
     failed = 0
     for t in tests:

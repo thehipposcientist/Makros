@@ -16,16 +16,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { getTheme, radius } from '../constants/theme';
-import { HEALTH_PLATFORM_LABEL, HEALTH_WEARABLE_LABEL } from '../constants/platformHealth';
-import { AppThemeName, HealthSummary } from '../types';
+import { HEALTH_PLATFORM_LABEL } from '../constants/platformHealth';
+import { AppThemeName, HealthSummary, UserProfile } from '../types';
 import { scorePreparedness, PreparednessResult } from '../services/preparedness';
 import { loadPreparednessInputs } from '../services/preparednessLoader';
-import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
+import {
+  getPlatformCycleStatus,
+  isPlatformHealthAvailable,
+  readPlatformHealthSummary,
+} from '../services/platformHealth';
 import { getFatigueScore, FatigueScore } from '../services/api';
 import { getCachedReadinessToday } from '../services/readinessCache';
-import { loadHealthSummary, saveHealthSummary } from '../utils/workoutHistory';
+import { loadHealthSummary, saveHealthSummary, todayKey } from '../utils/workoutHistory';
+import { buildTodayReadinessDecision } from '../utils/todayReadinessDecision';
+import {
+  readinessHrvMsFromSummary,
+  readinessSleepHoursFromSummary,
+  readinessSleepScoreFromSummary,
+} from '../utils/readinessHealthSignals';
 import FadeInView from './FadeInView';
+import LifestyleFactorsCard from './LifestyleFactorsCard';
+import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from './ScoreInfoModal';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -176,7 +189,7 @@ interface Props {
   /** Called with the computed score after every load so the parent
    *  can use the SAME number for watch pushes. Eliminates phone vs.
    *  watch drift caused by independent compute calls. */
-  onScoreComputed?: (score: number, label: string) => void;
+  onScoreComputed?: (score: number, label: string, signals?: { present: number; total: number }) => void;
   /** Called after load with the full result — lets a parent seed a second
    *  card instance (e.g. modal) so it renders immediately without a blank flash. */
   onDataComputed?: (prep: PreparednessResult) => void;
@@ -188,16 +201,22 @@ interface Props {
   /** When true the card reframes from "are you ready?" to "how is recovery
    *  going?" — different dial label, copy, and muscle-bar framing. */
   workoutDone?: boolean;
+  /** Optional nutrition support mode that nudges readiness copy toward
+   *  protein-first fueling, hydration, and lower-volume choices. */
+  glp1Support?: UserProfile['glp1Support'];
   /** When true the card still mounts + fetches + fires callbacks but
    *  renders nothing. Lets a parent host the data pipeline (badge, watch
    *  push) without showing a second visible card. Used pre-workout where
    *  the readiness badge inside the workout card already conveys the
    *  signal — a duplicate card below felt like noise. */
   hidden?: boolean;
+  /** Hide the editable lifestyle logger on condensed surfaces that should
+   *  only explain the readiness score. */
+  showLifestyleContext?: boolean;
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, lockedExpanded, workoutDone, hidden,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, lockedExpanded, workoutDone, glp1Support, hidden, showLifestyleContext = true,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -207,6 +226,7 @@ export default function TrainingReadinessCard({
   const [hasAppleHealth, setHasAppleHealth] = useState(false);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const isExpanded = lockedExpanded ? true : expanded;
+  const [infoOpen, setInfoOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -232,26 +252,26 @@ export default function TrainingReadinessCard({
       //   3. Last-resort fall back to the AsyncStorage cache so the card
       //      shows *something* if HK throws (permissions revoked, etc.).
       let summary = parentSummary ?? null;
-      if (!summary && isHealthKitAvailable()) {
+      if (!summary && isPlatformHealthAvailable()) {
         try {
-          const fresh = await readHealthSummary({ age: age ?? null });
+          const fresh = await readPlatformHealthSummary({ age: age ?? null });
           if (fresh) {
             summary = fresh;
             // Warm the AsyncStorage cache so other screens benefit until
-            // they next call readHealthSummary themselves.
+            // they next call the platform-health reader themselves.
             saveHealthSummary(fresh).catch(() => null);
           }
         } catch (err) {
-          // HK throwing is otherwise silent — surface to dev logs so we
+          // Health reads throwing are otherwise silent — surface to dev logs so we
           // can diagnose "no HR data" reports without a remote session.
-          console.warn('[readiness] HK readHealthSummary failed:', err);
+          console.warn('[readiness] platform health summary failed:', err);
         }
       }
       if (!summary) {
         summary = await loadHealthSummary().catch(() => null);
       }
-      const ahAvailable = isHealthKitAvailable() && summary != null;
-      setHasAppleHealth(ahAvailable);
+      const healthAvailable = isPlatformHealthAvailable() && summary != null;
+      setHasAppleHealth(healthAvailable);
 
       let serverResp: import('../services/api').ReadinessTodayResponse | null = null;
       try {
@@ -259,13 +279,12 @@ export default function TrainingReadinessCard({
         // softly penalizes luteal phase, validating "feels harder
         // today" rather than letting a low score look unexplained.
         // Silent for users without HK menstrual data.
-        const { getCycleStatus } = await import('../services/appleHealth');
-        const cycle = await getCycleStatus().catch(() => null);
+        const cycle = await getPlatformCycleStatus().catch(() => null);
         serverResp = await getCachedReadinessToday(authToken, {
-          avgSleepHours: summary?.lastNightSleepHours ?? null,
+          avgSleepHours: readinessSleepHoursFromSummary(summary),
           avgRestingHr: summary?.restingHeartRate ?? null,
-          avgHrvMs: summary?.hrvAvg ?? null,
-          lastNightSleepScore: summary?.sleepScore?.score ?? null,
+          avgHrvMs: readinessHrvMsFromSummary(summary),
+          lastNightSleepScore: readinessSleepScoreFromSummary(summary),
           plannedFocus: todaysFocus ?? null,
           cyclePhase: cycle?.phase ?? null,
           dayOfCycle: cycle?.dayOfCycle ?? null,
@@ -318,7 +337,14 @@ export default function TrainingReadinessCard({
         if (!serverResp.missing.includes('nutrition')) serverPresent.nutrition = true;
         if (!serverResp.missing.includes('rhr')) serverPresent.restingHr = true;
         if (serverResp.factors.some(f => f.label === 'Wellness')) serverPresent.wellness = true;
-        const serverRecs = derivePillarRecommendations(serverPillars, serverPresent);
+        const lifestyleContext = (serverResp.explanations ?? [])
+          .filter(item => item.type === 'lifestyle_context')
+          .map(item => item.message)
+          .slice(0, 2);
+        const serverRecs = [
+          ...derivePillarRecommendations(serverPillars, serverPresent),
+          ...lifestyleContext,
+        ];
         displayResult = {
           score: displayScore,
           label: displayLabel,
@@ -353,7 +379,12 @@ export default function TrainingReadinessCard({
       }
 
       if (displayLabel !== '—') {
-        try { onScoreComputed?.(displayScore, displayLabel); } catch {}
+        try {
+          onScoreComputed?.(displayScore, displayLabel, {
+            present: displayResult.signalsPresent,
+            total: displayResult.signalsTotal,
+          });
+        } catch {}
       }
       try { onDataComputed?.(displayResult); } catch {}
 
@@ -364,11 +395,29 @@ export default function TrainingReadinessCard({
       // overwrite a fresher value.
       try {
         const { pushReadinessToWatch } = await import('../utils/watchSync');
+        const { maybeNotifyReadinessNudge } = await import('../utils/readinessNotifications');
+        const watchDecision = buildTodayReadinessDecision({
+          score: displayResult.score,
+          label: displayResult.label,
+          pillars: displayResult.pillars,
+          missing: displayResult.missing,
+          signalsPresent: displayResult.signalsPresent,
+          signalsTotal: displayResult.signalsTotal,
+          todaysFocus,
+          workoutDone,
+          hasAppleHealth: healthAvailable,
+          glp1Support,
+        });
+        maybeNotifyReadinessNudge({
+          decision: watchDecision,
+          score: displayResult.score,
+          label: displayResult.label,
+        }).catch(() => {});
         if (serverResp) {
           await pushReadinessToWatch({
             score: serverResp.score,
             label: serverResp.label,
-            summary: serverResp.summary,
+            summary: watchDecision.watchSummary || serverResp.summary,
             factors: serverResp.factors as any,
             // Pass the server's stamp so the watch's ordering check
             // ignores any older push that lands after this one.
@@ -378,9 +427,7 @@ export default function TrainingReadinessCard({
           await pushReadinessToWatch({
             score: displayResult.score,
             label: displayResult.label,
-            summary: displayResult.score >= 75 ? 'Solid recovery — train as planned.'
-              : displayResult.score >= 50 ? 'Moderate. Standard intensity is fine.'
-              : 'Low. Consider lighter loads today.',
+            summary: watchDecision.watchSummary,
             factors: [],
           }).catch(() => {});
         }
@@ -388,7 +435,7 @@ export default function TrainingReadinessCard({
     } catch {
       setPrep(null);
     }
-  }, [authToken, parentSummary, age, proteinTarget, calorieTarget, todaysFocus]);
+  }, [authToken, parentSummary, age, proteinTarget, calorieTarget, todaysFocus, workoutDone, glp1Support]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -468,23 +515,35 @@ export default function TrainingReadinessCard({
   if (prep.pillars.wellness != null && prep.pillars.wellness > 0) pillarRows.push(['Wellness', prep.pillars.wellness, 10]);
   pillarRows.push(['Yesterday\'s load', prep.pillars.yesterdayStrain, 5]);
 
-  // Pillars the server said were missing AND are AH-derived. Surfaced
-  // as inline grey rows so the user knows the score excludes them
-  // rather than silently hiding (the previous behavior, which made
-  // "no HR data" reports impossible to debug from the user side).
-  // Only shown when AH is connected — otherwise the "Connect Apple
-  // Health" footer covers the same ground.
-  const missingHkRows: Array<[string, string]> = [];
-  if (hasAppleHealth) {
-    if (!isPresent('sleep')) missingHkRows.push(['Sleep', `No sleep recorded last night - ${HEALTH_WEARABLE_LABEL} may not have synced.`]);
-    if (!isPresent('hrv')) missingHkRows.push(['HRV', `No HRV reading yet today - usually arrives after ${HEALTH_WEARABLE_LABEL} sync.`]);
-    if (!isPresent('rhr')) missingHkRows.push(['Resting HR', `No resting HR reading today - ${HEALTH_WEARABLE_LABEL} may not have synced.`]);
-  }
+  const hiddenHealthDriverCount = hasAppleHealth
+    ? ['sleep', 'hrv', 'rhr'].filter(key => !isPresent(key)).length
+    : 0;
+  const displayedDriverLabels = pillarRows.map(([label]) => String(label).toLowerCase());
+  const sleepPct = hasAppleHealth && isPresent('sleep')
+    ? Math.max(0, Math.min(1, prep.pillars.sleep / 30))
+    : null;
+  const sleepAccent = sleepPct == null
+    ? labelColor
+    : sleepPct >= 0.78
+      ? tc.success
+      : sleepPct >= 0.55
+        ? tc.primary
+        : sleepPct >= 0.35
+          ? tc.warning
+          : tc.error;
+  const sleepLabel = sleepPct == null
+    ? null
+    : sleepPct >= 0.78
+      ? 'Rested'
+      : sleepPct >= 0.55
+        ? 'Adequate'
+        : sleepPct >= 0.35
+          ? 'Light'
+          : 'Poor';
 
   const focusLabel = todaysFocus
     ? todaysFocus.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
     : null;
-
   return (
     <TouchableOpacity
       activeOpacity={lockedExpanded ? 1 : 0.85}
@@ -501,6 +560,14 @@ export default function TrainingReadinessCard({
         overflow: 'hidden',
       }}
     >
+      <LinearGradient
+        pointerEvents="none"
+        colors={[labelColor + '24', sleepAccent + '14', 'transparent'] as any}
+        locations={[0, 0.52, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}
+      />
       {/* Left accent strip — subtle theme anchor. 3px wide on the leading edge. */}
       <View style={{
         position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
@@ -563,6 +630,13 @@ export default function TrainingReadinessCard({
             </Text>
           )}
         </View>
+        <TouchableOpacity
+          accessibilityLabel="How training readiness is calculated"
+          onPress={(e) => { e.stopPropagation(); setInfoOpen(true); }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ padding: 2 }}>
+          <Ionicons name="information-circle-outline" size={16} color={tc.textMuted} />
+        </TouchableOpacity>
         {!lockedExpanded ? (
           <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
         ) : null}
@@ -601,8 +675,28 @@ export default function TrainingReadinessCard({
           <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
             DRIVERS
           </Text>
+          {sleepPct != null && (
+            <View style={{
+              alignSelf: 'flex-start',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              marginBottom: 8,
+              paddingHorizontal: 9,
+              paddingVertical: 5,
+              borderRadius: radius.full,
+              backgroundColor: sleepAccent + '14',
+              borderWidth: 1,
+              borderColor: sleepAccent + '40',
+            }}>
+              <Ionicons name="moon-outline" size={12} color={sleepAccent} />
+              <Text style={{ fontSize: 10, fontWeight: '900', color: sleepAccent }}>
+                Sleep {sleepLabel} · {Math.round(sleepPct * 100)}%
+              </Text>
+            </View>
+          )}
           <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 13, marginBottom: 6 }}>
-            Biggest drivers: last night's sleep, HRV trend, muscle recovery, nutrition, resting HR, wellness notes, and yesterday's load.
+            Displayed drivers: {displayedDriverLabels.join(', ')}.
           </Text>
           {/* Per-pillar bars only — the long-form descriptions were
               removed per UX feedback. The DRIVERS heading above already
@@ -626,21 +720,10 @@ export default function TrainingReadinessCard({
             );
           })}
 
-          {missingHkRows.length > 0 && (
-            <View style={{ marginTop: 4 }}>
-              {missingHkRows.map(([label, hint]) => (
-                <View key={label} style={{ marginBottom: 6 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textMuted }}>{label}</Text>
-                    <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border, opacity: 0.4 }} />
-                    <Text style={{ width: 42, fontSize: 10, fontWeight: '700', color: tc.textMuted, textAlign: 'right' }}>—</Text>
-                  </View>
-                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2, lineHeight: 13, fontStyle: 'italic' }}>
-                    {hint}
-                  </Text>
-                </View>
-              ))}
-            </View>
+          {hiddenHealthDriverCount > 0 && (
+            <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4, lineHeight: 13, fontStyle: 'italic' }}>
+              {hiddenHealthDriverCount} Apple Health driver{hiddenHealthDriverCount === 1 ? '' : 's'} hidden until recent samples arrive.
+            </Text>
           )}
 
           {!hasAppleHealth && (
@@ -657,6 +740,17 @@ export default function TrainingReadinessCard({
               ))}
             </View>
           )}
+
+          {authToken && showLifestyleContext ? (
+            <LifestyleFactorsCard
+              authToken={authToken}
+              dateISO={todayKey()}
+              themeName={themeName}
+              title="Lifestyle context"
+              variant="inline"
+              compact
+            />
+          ) : null}
 
           {/* Recovery recommendations — actionable copy when a pillar comes
               back weak. Sleep tips lead because it's the largest pillar
@@ -687,6 +781,40 @@ export default function TrainingReadinessCard({
           )}
         </View>
       )}
+      <ScoreInfoModal
+        visible={infoOpen}
+        onClose={() => setInfoOpen(false)}
+        eyebrow="TRAINING READINESS"
+        title="How readiness is scored"
+        iconName="flash-outline"
+        iconColor={tc.primary}
+        themeName={themeName}>
+        <ScoreInfoBody themeName={themeName}>
+          A daily 0–100 estimate of how prepared your body is for today's
+          focus. Combines overnight recovery signals with how recently each
+          muscle worked — so a heavy leg day yesterday tempers a quad
+          push today, even when sleep is great.
+        </ScoreInfoBody>
+        <ScoreInfoSection title="What goes in" themeName={themeName}>
+          <ScoreInfoRow label="Sleep (30)" value="last night's sleep score" themeName={themeName} />
+          <ScoreInfoRow label="HRV (20)" value="vs your 14d baseline" themeName={themeName} />
+          <ScoreInfoRow label="Muscle recovery (20)" value="fatigue across today's focus" themeName={themeName} />
+          <ScoreInfoRow label="Nutrition (15)" value="7d protein + calorie hit-rate" themeName={themeName} />
+          <ScoreInfoRow label="Resting HR (10)" value="elevated vs baseline penalizes" themeName={themeName} />
+          <ScoreInfoRow label="Yesterday's load (5)" value="long session yesterday dampens today" themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoSection title="Rating bands" themeName={themeName}>
+          <ScoreInfoRow label="80+" value="Primed" valueColor={tc.success} themeName={themeName} />
+          <ScoreInfoRow label="65–79" value="Ready" valueColor={tc.primary} themeName={themeName} />
+          <ScoreInfoRow label="45–64" value="Moderate" valueColor={tc.warning} themeName={themeName} />
+          <ScoreInfoRow label="Below 45" value="Fatigued" valueColor={tc.error} themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoBody themeName={themeName} muted>
+          Server-computed so phone and watch always agree. Missing
+          signals lower confidence (the "X/Y signals" tag) rather than
+          your score.
+        </ScoreInfoBody>
+      </ScoreInfoModal>
     </TouchableOpacity>
   );
 }

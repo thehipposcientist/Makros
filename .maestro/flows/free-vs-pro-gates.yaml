@@ -3,10 +3,11 @@
 # Requires:
 #   make seed-e2e
 #   backend + Metro/dev client running
-#   EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1 npx expo start --dev-client
+#   npx expo start --dev-client
 #
-# The extra env flag is intentional: app.json enables full beta access by
-# default, which makes even seeded free users behave as Pro unless disabled.
+# If you intentionally enable beta full access for a build, also run this
+# flow with EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1 so seeded free users
+# remain genuinely free during the gate check.
 
 appId: com.thallo.app
 name: free-vs-pro-gates

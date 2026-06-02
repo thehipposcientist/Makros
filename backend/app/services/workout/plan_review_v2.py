@@ -21,14 +21,16 @@ whether to surface to the user, schedule a check-in, or auto-apply.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Literal
 
+from sqlalchemy import func
 from sqlmodel import select
 
 from app.models import (
-    BodyScan, DailyNutritionMetrics, DailyRollup, PlanDay, PlanWeek, UserGoal,
+    BodyScan, DailyNutritionMetrics, DailyRollup, Meal, MealItem, PlanDay, PlanWeek, UserGoal,
     UserProfile, UserRollup,
     WorkoutCompletion, WorkoutExercise, WorkoutPlan, WorkoutSession, ExerciseSet,
 )
@@ -36,6 +38,7 @@ from app.services.workout.weekly_volume import (
     WeeklyVolumeSnapshot, compute_weekly_volume,
 )
 from app.services.workout.goals import effective_goal_id, goal_bucket as canonical_goal_bucket
+from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 
 Priority = Literal["info", "suggest", "warn"]
 Area = Literal["workout", "nutrition", "recovery", "cardio"]
@@ -84,6 +87,7 @@ class WeeklyReview:
     days_logged: int = 0
     avg_calories: float = 0.0
     avg_protein_g: float = 0.0
+    protein_target_g: float | None = None
     avg_fiber_g: float = 0.0
     calorie_target_adherence_pct: float | None = None
     protein_target_adherence_pct: float | None = None
@@ -125,6 +129,10 @@ class WeeklyReview:
             "days_logged": self.days_logged,
             "avg_calories": round(self.avg_calories, 1),
             "avg_protein_g": round(self.avg_protein_g, 1),
+            "protein_target_g": (
+                round(self.protein_target_g, 1)
+                if self.protein_target_g is not None else None
+            ),
             "avg_fiber_g": round(self.avg_fiber_g, 1),
             "calorie_target_adherence_pct": (
                 round(self.calorie_target_adherence_pct, 1)
@@ -188,6 +196,102 @@ _CARDIO_RECOMMENDATION_GOALS = {
 _LOW_ADHERENCE_PCT = 65.0
 
 
+@dataclass
+class NutritionWindowFacts:
+    days_logged: int = 0
+    avg_calories: float = 0.0
+    avg_protein_g: float = 0.0
+    avg_fiber_g: float = 0.0
+
+
+def _daily_metric_has_nutrition(row: DailyNutritionMetrics) -> bool:
+    protein = (row.plant_protein_g or 0) + (row.animal_protein_g or 0)
+    return any(float(v or 0) > 0 for v in (
+        row.calories_total,
+        protein,
+        row.fiber_total_g,
+        row.added_sugar_g,
+        row.sodium_mg,
+        row.micronutrient_item_count,
+    ))
+
+
+def _facts_from_daily_metrics(rows: list[DailyNutritionMetrics]) -> NutritionWindowFacts:
+    active = [row for row in rows if _daily_metric_has_nutrition(row)]
+    days_logged = len({row.metric_date for row in active})
+    if days_logged <= 0:
+        return NutritionWindowFacts()
+    return NutritionWindowFacts(
+        days_logged=days_logged,
+        avg_calories=sum(row.calories_total or 0 for row in active) / days_logged,
+        avg_protein_g=sum((row.plant_protein_g or 0) + (row.animal_protein_g or 0) for row in active) / days_logged,
+        avg_fiber_g=sum(row.fiber_total_g or 0 for row in active) / days_logged,
+    )
+
+
+def _facts_from_daily_rollups(rows: list[DailyRollup]) -> NutritionWindowFacts:
+    active = [
+        row for row in rows
+        if (row.meals_logged or 0) > 0
+        or float(row.kcal or 0) > 0
+        or float(row.protein_g or 0) > 0
+    ]
+    days_logged = len({row.day for row in active})
+    if days_logged <= 0:
+        return NutritionWindowFacts()
+    return NutritionWindowFacts(
+        days_logged=days_logged,
+        avg_calories=sum(row.kcal or 0 for row in active) / days_logged,
+        avg_protein_g=sum(row.protein_g or 0 for row in active) / days_logged,
+        avg_fiber_g=0.0,
+    )
+
+
+def _facts_from_meal_history(db: Any, user_id: int, *, start: date, end_date: date) -> NutritionWindowFacts:
+    meals = db.exec(
+        select(Meal)
+        .where(Meal.user_id == user_id)
+        .where(Meal.meal_date >= start)
+        .where(Meal.meal_date <= end_date)
+        .order_by(Meal.meal_date.asc(), Meal.created_at.asc())
+    ).all()
+    if not meals:
+        return NutritionWindowFacts()
+
+    meal_ids = [meal.id for meal in meals if meal.id is not None]
+    all_items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all() if meal_ids else []
+    items_by_meal: dict[int, list[MealItem]] = defaultdict(list)
+    for item in all_items:
+        items_by_meal[item.meal_id].append(item)
+
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
+
+    daily: dict[date, dict[str, float]] = defaultdict(lambda: {
+        "calories": 0.0,
+        "protein_g": 0.0,
+        "fiber_g": 0.0,
+        "meal_count": 0.0,
+    })
+    for meal in meals:
+        day_data = daily[meal.meal_date]
+        day_data["meal_count"] += 1
+        for item in items_by_meal.get(meal.id, []):
+            day_data["calories"] += float(item.calories or 0)
+            day_data["protein_g"] += float(item.protein_g or 0)
+            day_data["fiber_g"] += float(item.fiber_g or 0)
+
+    logged_days = [data for data in daily.values() if data["meal_count"] > 0]
+    days_logged = len(logged_days)
+    if days_logged <= 0:
+        return NutritionWindowFacts()
+    return NutritionWindowFacts(
+        days_logged=days_logged,
+        avg_calories=sum(data["calories"] for data in logged_days) / days_logged,
+        avg_protein_g=sum(data["protein_g"] for data in logged_days) / days_logged,
+        avg_fiber_g=sum(data["fiber_g"] for data in logged_days) / days_logged,
+    )
+
+
 def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, float]:
     """Total cardio minutes + zone-2 minutes in the window.
 
@@ -221,6 +325,7 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
                 token in focus
                 for token in (
                     "zone 2", "zone2", "z2", "cardio", "conditioning",
+                    "hiit", "bootcamp", "tabata",
                     "tempo", "interval", "run", "bike", "cycle", "row",
                     "swim", "elliptical", "stair", "treadmill",
                 )
@@ -232,7 +337,7 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
             cardio_mins = mins
         elif category in {"sport", "active"} and (
             "cardio" in focus
-            or subtype in {"soccer", "basketball", "tennis", "pickleball", "boxing", "kickboxing", "martial_arts", "dancing"}
+            or subtype in {"soccer", "basketball", "tennis", "pickleball", "volleyball", "beach_volleyball", "boxing", "kickboxing", "martial_arts", "dancing"}
         ):
             cardio_mins = mins
         elif is_lift_plus_cardio or style in {"steady", "intervals", "easy", "recovery", "class"}:
@@ -288,6 +393,7 @@ def _weekly_training_signals(
         .where(WorkoutSession.workout_date <= end_date)
         .where(ExerciseSet.completed == True)  # noqa: E712
         .where(ExerciseSet.actual_rir != None)  # noqa: E711
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     ).all()
     rir_values = [float(v) for v in rir_rows if v is not None]
     avg_rir = sum(rir_values) / len(rir_values) if rir_values else None
@@ -483,6 +589,7 @@ def compute_weekly_review(
         100.0 * completed_for_adherence / planned
         if planned > 0 else 0.0
     )
+    workout_mins = sum((c.duration_seconds or 0) / 60.0 for c in completions)
     cardio_mins, zone2_mins = _sum_cardio_minutes(completions)
     volume = compute_weekly_volume(db, user_id, end_date=end_date, days=days)
     avg_rir, soreness_areas = _weekly_training_signals(
@@ -498,38 +605,38 @@ def compute_weekly_review(
     except Exception:
         plateaus = []
 
-    # Nutrition signals — averaged over the window from DailyNutritionMetrics.
+    # Nutrition signals — meals are the source of truth; DailyNutritionMetrics
+    # is a derived cache and may be missing/stale for older or burst-saved logs.
     nutrition_rows = db.exec(
         select(DailyNutritionMetrics)
         .where(DailyNutritionMetrics.user_id == user_id)
         .where(DailyNutritionMetrics.metric_date >= start)
         .where(DailyNutritionMetrics.metric_date <= end_date)
     ).all()
-    days_logged = len(nutrition_rows)
-    avg_calories = (
-        sum(r.calories_total or 0 for r in nutrition_rows) / days_logged
-        if days_logged > 0 else 0.0
-    )
-    avg_protein = (
-        sum((r.plant_protein_g or 0) + (r.animal_protein_g or 0) for r in nutrition_rows) / days_logged
-        if days_logged > 0 else 0.0
-    )
-    avg_fiber = (
-        sum(r.fiber_total_g or 0 for r in nutrition_rows) / days_logged
-        if days_logged > 0 else 0.0
-    )
-    # Nutrition logging coverage = % of days with meal-derived metrics.
-    # Keep the legacy `nutrition_adherence_pct` response field as an alias
-    # for now, but UI should label this as logging coverage unless target
-    # adherence fields below are populated.
-    nutrition_logging_pct = 100.0 * days_logged / days if days > 0 else 0.0
-
     daily_rollups = db.exec(
         select(DailyRollup)
         .where(DailyRollup.user_id == user_id)
         .where(DailyRollup.day >= start)
         .where(DailyRollup.day <= end_date)
     ).all()
+    metric_facts = _facts_from_daily_metrics(nutrition_rows)
+    rollup_facts = _facts_from_daily_rollups(daily_rollups)
+    meal_facts = _facts_from_meal_history(db, user_id, start=start, end_date=end_date)
+    nutrition_facts = (
+        meal_facts if meal_facts.days_logged > 0
+        else rollup_facts if rollup_facts.days_logged > 0
+        else metric_facts
+    )
+    days_logged = nutrition_facts.days_logged
+    avg_calories = nutrition_facts.avg_calories
+    avg_protein = nutrition_facts.avg_protein_g
+    avg_fiber = nutrition_facts.avg_fiber_g or metric_facts.avg_fiber_g
+    # Nutrition logging coverage = % of days with meal-derived metrics.
+    # Keep the legacy `nutrition_adherence_pct` response field as an alias
+    # for now, but UI should label this as logging coverage unless target
+    # adherence fields below are populated.
+    nutrition_logging_pct = 100.0 * days_logged / days if days > 0 else 0.0
+
     kcal_target_days = [
         r for r in daily_rollups
         if (r.kcal_target or 0) > 0 and (r.kcal or 0) > 0
@@ -546,12 +653,27 @@ def compute_weekly_review(
         if (r.protein_target_g or 0) > 0 and (r.protein_g or 0) > 0
     ]
     protein_target_adherence_pct = None
+    protein_target_g = None
     if protein_target_days:
+        protein_target_g = (
+            sum(float(r.protein_target_g or 0) for r in protein_target_days)
+            / len(protein_target_days)
+        )
         hits = [
             r for r in protein_target_days
             if float(r.protein_g or 0) >= float(r.protein_target_g or 0) * 0.85
         ]
         protein_target_adherence_pct = 100.0 * len(hits) / len(protein_target_days)
+    if protein_target_g is None:
+        try:
+            from app.services.nutrition.targets import resolve_targets_for_user
+            resolved_targets = resolve_targets_for_user(
+                db, user_id, as_of=end_date, include_health=False,
+            )
+            if resolved_targets and resolved_targets.protein_g > 0:
+                protein_target_g = float(resolved_targets.protein_g)
+        except Exception:
+            protein_target_g = None
 
     nutrition_summary, nutrition_notes = _build_nutrition_summary(
         days=days,
@@ -559,6 +681,7 @@ def compute_weekly_review(
         logging_pct=nutrition_logging_pct,
         avg_calories=avg_calories,
         avg_protein=avg_protein,
+        protein_target_g=protein_target_g,
         avg_fiber=avg_fiber,
         calorie_target_adherence_pct=calorie_target_adherence_pct,
         protein_target_adherence_pct=protein_target_adherence_pct,
@@ -706,15 +829,16 @@ def compute_weekly_review(
                 ),
                 action={"type": "hold_muscle_volume", "muscle": muscle},
             ))
-        elif mv.status == "high" and mv.range_max is not None:
+        elif mv.status == "high" and mv.range_max is not None and poor_recovery:
             recs.append(Recommendation(
                 key=f"reduce_volume_{muscle}",
                 area="workout",
                 priority="suggest",
-                title=f"Reduce {muscle} volume",
+                title=f"Hold back {muscle} volume",
                 detail=(
                     f"{mv.total_sets:.0f} hard sets this week is above the "
-                    f"{mv.range_min}–{mv.range_max} range. Drop one accessory."
+                    f"{mv.range_min}–{mv.range_max} range while recovery is strained. "
+                    "Drop one accessory next week."
                 ),
                 action={"type": "reduce_muscle_volume", "muscle": muscle, "pct": 15},
             ))
@@ -832,16 +956,31 @@ def compute_weekly_review(
     if days_logged >= 3:
         # Only nag when there's enough data. Below 3 days logged this
         # week we trust nothing.
-        if avg_protein > 0 and avg_protein < 100:
+        protein_below_target = (
+            avg_protein > 0
+            and (
+                (protein_target_g is not None and avg_protein < protein_target_g * 0.85)
+                or (protein_target_g is None and avg_protein < 100)
+            )
+        )
+        if protein_below_target:
+            target_text = (
+                f" vs your {protein_target_g:.0f}g target"
+                if protein_target_g is not None else ""
+            )
+            aim_text = (
+                "Aim for your plan target to protect muscle."
+                if protein_target_g is not None
+                else "Aim for 0.8-1g per lb of bodyweight to protect muscle."
+            )
             recs.append(Recommendation(
                 key="raise_protein",
                 area="nutrition",
                 priority="info",
                 title="Protein below target",
                 detail=(
-                    f"Averaging {avg_protein:.0f}g protein/day over "
-                    f"{days_logged} logged days. Aim for 0.8–1g per lb of "
-                    "bodyweight to protect muscle."
+                    f"Averaging {avg_protein:.0f}g protein/day{target_text} over "
+                    f"{days_logged} logged days. {aim_text}"
                 ),
                 action={"type": "raise_protein_target"},
             ))
@@ -917,12 +1056,14 @@ def compute_weekly_review(
             sessions_completed=completed_for_adherence,
             sessions_planned=planned,
             workout_adherence_pct=adherence_pct,
+            workout_minutes=workout_mins,
             cardio_minutes=cardio_mins,
             zone2_minutes=zone2_mins,
             days_logged=days_logged,
             days=days,
             nutrition_logging_pct=nutrition_logging_pct,
             avg_protein_g=avg_protein,
+            protein_target_g=protein_target_g,
             calorie_target_adherence_pct=calorie_target_adherence_pct,
             protein_target_adherence_pct=protein_target_adherence_pct,
             weekly_nutrition_score=weekly_nutrition_score,
@@ -963,6 +1104,7 @@ def compute_weekly_review(
         days_logged=days_logged,
         avg_calories=avg_calories,
         avg_protein_g=avg_protein,
+        protein_target_g=protein_target_g,
         avg_fiber_g=avg_fiber,
         calorie_target_adherence_pct=calorie_target_adherence_pct,
         protein_target_adherence_pct=protein_target_adherence_pct,
@@ -989,6 +1131,7 @@ def _build_nutrition_summary(
     logging_pct: float,
     avg_calories: float,
     avg_protein: float,
+    protein_target_g: float | None,
     avg_fiber: float,
     calorie_target_adherence_pct: float | None,
     protein_target_adherence_pct: float | None,
@@ -1003,7 +1146,10 @@ def _build_nutrition_summary(
 
     notes.append(f"{days_logged}/{days} days logged ({logging_pct:.0f}% coverage).")
     if avg_protein > 0:
-        notes.append(f"Protein averaged {avg_protein:.0f}g/day.")
+        if protein_target_g:
+            notes.append(f"Protein averaged {avg_protein:.0f}g/day vs {protein_target_g:.0f}g target.")
+        else:
+            notes.append(f"Protein averaged {avg_protein:.0f}g/day.")
     if avg_fiber > 0:
         notes.append(f"Fiber averaged {avg_fiber:.0f}g/day.")
     if calorie_target_adherence_pct is not None:
@@ -1055,10 +1201,11 @@ def _build_headline(
             + (f"sleep averaged {avg_sleep_hours:.1f}h" if avg_sleep_hours else "readiness is low")
             + ". Hold the plan — recover first."
         )
-    if volume.muscles_high():
+    severe_volume = _severe_volume_muscles(volume)
+    if severe_volume:
         return (
             f"Strong week ({sessions_completed}/{sessions_planned}). "
-            f"Volume for {', '.join(volume.muscles_high())} is running high — ease off one accessory."
+            f"Volume for {', '.join(severe_volume)} needs a check — ease off one accessory."
         )
     if adherence_pct >= 85:
         if weight_trend_direction == "flat" and goal_bucket in ("muscle_gain", "body_recomp"):
@@ -1070,3 +1217,11 @@ def _build_headline(
             "Consider dropping one day so the plan fits your real week."
         )
     return f"{sessions_completed}/{sessions_planned} sessions this week."
+
+
+def _severe_volume_muscles(volume: WeeklyVolumeSnapshot) -> list[str]:
+    return [
+        muscle
+        for muscle, row in volume.by_muscle.items()
+        if getattr(row, "status", "") in {"excessive", "spike"}
+    ]

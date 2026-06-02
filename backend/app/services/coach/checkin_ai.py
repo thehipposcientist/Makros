@@ -91,6 +91,10 @@ class CheckinAIError(Exception):
     pass
 
 
+def _configured_checkin_model(model: str | None = None) -> str:
+    return model or os.getenv("MODEL_CHECKIN") or os.getenv("MODEL_WEEKLY_CHECKIN") or model_chat()
+
+
 def _redacted_payload_for_openai(payload: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
     """Strip direct account identifiers before sending check-in context."""
     user_id = None
@@ -113,7 +117,7 @@ def call_checkin_llm(payload: dict[str, Any], model: str | None = None) -> dict[
         raise CheckinAIError("OPENAI_API_KEY not configured")
 
     client = OpenAI(api_key=api_key)
-    model_name = model or os.getenv("MODEL_CHECKIN", model_chat())
+    model_name = _configured_checkin_model(model)
 
     openai_payload, user_id = _redacted_payload_for_openai(payload)
     user_content = json.dumps(openai_payload, default=str, separators=(",", ":"))

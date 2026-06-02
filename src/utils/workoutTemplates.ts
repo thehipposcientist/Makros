@@ -1,6 +1,8 @@
 import type { SavedWorkoutTemplate, WorkoutDay } from '../types';
+import { FREE_WORKOUT_TEMPLATE_LIMIT } from './subscriptionCore.ts';
+import { STORAGE_KEYS } from './storageKeys.ts';
 
-export const WORKOUT_TEMPLATES_KEY = 'workoutTemplates';
+export const WORKOUT_TEMPLATES_KEY = STORAGE_KEYS.workouts.templates;
 
 export interface WorkoutTemplateStorage {
   getItem(key: string): Promise<string | null>;
@@ -73,7 +75,7 @@ export async function upsertWorkoutTemplateInStorage(
     }
     if (!options.canCreateWorkoutTemplate(profile, templates.length)) {
       throw new Error(
-        `Free accounts can save up to ${options.freeWorkoutTemplateLimit ?? 3} workout templates. Upgrade to Pro for unlimited.`,
+        `Free accounts can save up to ${options.freeWorkoutTemplateLimit ?? FREE_WORKOUT_TEMPLATE_LIMIT} workout templates. Upgrade to Pro for unlimited.`,
       );
     }
   }

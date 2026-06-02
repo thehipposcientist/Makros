@@ -2,7 +2,7 @@
 
 1. **Run tests after backend changes**: `make test` or `docker exec thallo-backend python -m tests.run_all`. Fix new failures before marking work done.
 
-2. **21 pre-existing failures are the baseline**: If you see exactly 21 failures and you didn't touch those test areas, the suite is clean.
+2. **No fixed pass count — compare before/after**: A handful of failures are flaky / environment-dependent (FatSecret network search, account-deletion DB state) and vary run to run. Run the suite before and after your change; only a NEW failure in an area you touched is a regression to fix.
 
 3. **Register new test modules**: Add to `backend/tests/run_all.py`. Tests not in `run_all.py` will not run in CI.
 

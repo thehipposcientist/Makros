@@ -12,6 +12,25 @@ function configured(...values) {
   return undefined;
 }
 
+function envBoolean(value) {
+  const cleaned = (value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(cleaned)) return true;
+  if (['0', 'false', 'no', 'off'].includes(cleaned)) return false;
+  return undefined;
+}
+
+function setBillingFeatureFlag(expo, flagName, envValue) {
+  const parsed = envBoolean(envValue);
+  if (parsed === undefined) return;
+  expo.extra.featureFlags = {
+    ...(expo.extra.featureFlags ?? {}),
+    billing: {
+      ...((expo.extra.featureFlags ?? {}).billing ?? {}),
+      [flagName]: parsed,
+    },
+  };
+}
+
 module.exports = ({ config }) => {
   const expo = {
     ...appJson.expo,
@@ -39,6 +58,18 @@ module.exports = ({ config }) => {
   if (googleWebClientId) expo.extra.googleWebClientId = googleWebClientId;
   if (googleIosClientId) expo.extra.googleIosClientId = googleIosClientId;
   if (googleAndroidClientId) expo.extra.googleAndroidClientId = googleAndroidClientId;
+
+  if (process.env.EXPO_PUBLIC_REVENUECAT_IOS_API_KEY) {
+    expo.extra.revenueCatIosApiKey = process.env.EXPO_PUBLIC_REVENUECAT_IOS_API_KEY;
+  }
+  if (process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY) {
+    expo.extra.revenueCatAndroidApiKey = process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY;
+  }
+  if (process.env.EXPO_PUBLIC_REVENUECAT_PRO_ENTITLEMENT_ID) {
+    expo.extra.revenueCatProEntitlementId = process.env.EXPO_PUBLIC_REVENUECAT_PRO_ENTITLEMENT_ID;
+  }
+  setBillingFeatureFlag(expo, 'revenueCat', process.env.EXPO_PUBLIC_BILLING_REVENUECAT);
+  setBillingFeatureFlag(expo, 'dummyPayment', process.env.EXPO_PUBLIC_BILLING_DUMMY_PAYMENT);
 
   return expo;
 };

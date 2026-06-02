@@ -5,6 +5,13 @@
  */
 import type { FoodUnit, MealItem, MealSuggestion } from '../types';
 
+export interface MealMacroTotals {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}
+
 /** Alias map so we recognize common typo / plural / synonym forms. */
 const UNIT_ALIASES: Record<string, FoodUnit> = {
   // Weight
@@ -57,6 +64,8 @@ const WEIGHT_TO_G: Partial<Record<FoodUnit, number>> = {
   lb: 453.592,
 };
 
+const GRAMS_PER_OZ = 28.3495;
+
 /** Convert a quantity from one unit to another, preserving the physical
  *  amount. Returns null when the conversion crosses systems
  *  (volume↔weight, count↔volume, etc.) and a single number can't be
@@ -92,13 +101,30 @@ function normalizeUnit(raw: string | undefined | null): FoodUnit | null {
   return UNIT_ALIASES[key] ?? UNIT_ALIASES[key.replace(' ', '_')] ?? null;
 }
 
-/** Parse a stand-alone amount string like "3 oz", "1 cup", "200g", "2".
- *  Returns null if nothing parseable. Unit defaults to 'serving' when a
- *  number is present but no unit can be identified. */
+// Unicode-fraction → decimal map. Includes the common vulgar fractions
+// produced by `niceFraction` in planGenerator (½ ¼ ¾) plus a few others
+// for completeness. Without this mapping, "1½ oz" parsed as quantity=1
+// and the unit regex (which expects a letter next) failed to match,
+// silently defaulting the unit to 'serving' — that was the
+// "Generate / Fill the gaps shows servings instead of useable amounts"
+// bug.
+const UNICODE_FRACTIONS: Record<string, number> = {
+  '½': 0.5, '⅓': 1 / 3, '⅔': 2 / 3,
+  '¼': 0.25, '¾': 0.75,
+  '⅕': 0.2, '⅖': 0.4, '⅗': 0.6, '⅘': 0.8,
+  '⅙': 1 / 6, '⅚': 5 / 6,
+  '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875,
+};
+const UNICODE_FRACTION_CHARS = Object.keys(UNICODE_FRACTIONS).join('');
+
+/** Parse a stand-alone amount string like "3 oz", "1 cup", "200g", "2",
+ *  "1½ oz", "½ cup", "1/2 cup". Returns null if nothing parseable. Unit
+ *  defaults to 'serving' when a number is present but no unit can be
+ *  identified. */
 export function parseAmountString(str: string): { quantity: number; unit: FoodUnit } | null {
   if (!str) return null;
   const s = str.trim().replace(/^about\s+/i, '');
-  // Handle fractions: "1/2 cup", "1/4 cup", "3/4 lb"
+  // Handle ASCII fractions: "1/2 cup", "1/4 cup", "3/4 lb"
   const fracMatch = s.match(/^(\d+)\/(\d+)\s*([a-zA-Z.]+(?:\s+[a-zA-Z.]+)?)?/);
   if (fracMatch) {
     const num = parseInt(fracMatch[1], 10);
@@ -109,6 +135,18 @@ export function parseAmountString(str: string): { quantity: number; unit: FoodUn
       return { quantity, unit };
     }
   }
+  // Handle unicode fractions: "1½ oz", "½ cup", "2¾ tbsp".
+  const uniRe = new RegExp(`^(\\d*)([${UNICODE_FRACTION_CHARS}])\\s*([a-zA-Z.]+(?:\\s+[a-zA-Z.]+)?)?`);
+  const uniMatch = s.match(uniRe);
+  if (uniMatch) {
+    const whole = uniMatch[1] ? parseInt(uniMatch[1], 10) : 0;
+    const fracVal = UNICODE_FRACTIONS[uniMatch[2]] ?? 0;
+    const quantity = whole + fracVal;
+    if (quantity > 0) {
+      const unit = normalizeUnit(uniMatch[3]) ?? 'serving';
+      return { quantity, unit };
+    }
+  }
   // Match "<num><optional space><optional unit>" — everything after is ignored.
   const m = s.match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z.]+(?:\s+[a-zA-Z.]+)?)?/);
   if (!m) return null;
@@ -116,6 +154,60 @@ export function parseAmountString(str: string): { quantity: number; unit: FoodUn
   if (Number.isNaN(quantity)) return null;
   const unit = normalizeUnit(m[2]) ?? 'serving';
   return { quantity, unit };
+}
+
+function roundPortionQuantity(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const roundedWhole = Math.round(value);
+  if (Math.abs(value - roundedWhole) < 0.03) return roundedWhole;
+  return Math.round(value * 100) / 100;
+}
+
+function positiveNumber(raw: unknown): number | null {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function gramsFromServingText(label: string | undefined | null): number | null {
+  if (!label) return null;
+  const matches = [...label.matchAll(/(\d+(?:\.\d+)?)\s*(kg|kilogram|kilograms|g|gram|grams|oz|ounce|ounces|lb|lbs|pound|pounds)\b/gi)];
+  if (matches.length === 0) return null;
+  const match = matches[matches.length - 1];
+  const qty = positiveNumber(match[1]);
+  if (qty == null) return null;
+  const unit = match[2].toLowerCase();
+  if (unit === 'kg' || unit === 'kilogram' || unit === 'kilograms') return qty * 1000;
+  if (unit === 'g' || unit === 'gram' || unit === 'grams') return qty;
+  if (unit === 'oz' || unit === 'ounce' || unit === 'ounces') return qty * GRAMS_PER_OZ;
+  if (unit === 'lb' || unit === 'lbs' || unit === 'pound' || unit === 'pounds') return qty * 453.592;
+  return null;
+}
+
+export function gramsFromFoodAmount(quantity: number, unit: FoodUnit): number | null {
+  return convertQuantity(quantity, unit, 'g');
+}
+
+export function gramsFromFoodServing(
+  serving?: string | null,
+  servingGrams?: number | null,
+): number | null {
+  return positiveNumber(servingGrams) ?? gramsFromServingText(serving);
+}
+
+export function preferredAmountForFoodServing(
+  foodName: string,
+  serving?: string | null,
+  servingGrams?: number | null,
+): { quantity: number; unit: FoodUnit } {
+  const parsed = serving ? parseAmountString(serving) : null;
+  if (parsed && parsed.unit !== 'serving') return parsed;
+
+  const grams = gramsFromFoodServing(serving, servingGrams);
+  if (grams != null) {
+    return { quantity: roundPortionQuantity(grams / GRAMS_PER_OZ), unit: 'oz' };
+  }
+
+  return parsed ?? guessUnitForFood(foodName);
 }
 
 /** Split a food string that may have an embedded quantity — "2 eggs",
@@ -222,6 +314,85 @@ export function ensureItems(meal: MealSuggestion): MealSuggestion {
   return { ...meal, items };
 }
 
+export function macroTotalsFromItems(
+  items: MealItem[] = [],
+  fallback?: Partial<MealSuggestion>,
+): MealMacroTotals {
+  if (items.length === 0) {
+    return {
+      calories: Math.round(fallback?.calories ?? 0),
+      protein:  Math.round(fallback?.protein ?? 0),
+      carbs:    Math.round(fallback?.carbs ?? 0),
+      fat:      Math.round(fallback?.fat ?? 0),
+    };
+  }
+  const totals = items.reduce(
+    (acc, i) => ({
+      calories: acc.calories + (i.calories ?? 0),
+      protein:  acc.protein  + (i.protein ?? 0),
+      carbs:    acc.carbs    + (i.carbs ?? 0),
+      fat:      acc.fat      + (i.fat ?? 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0 },
+  );
+  return {
+    calories: Math.round(totals.calories),
+    protein:  Math.round(totals.protein),
+    carbs:    Math.round(totals.carbs),
+    fat:      Math.round(totals.fat),
+  };
+}
+
+export function macroTotalsFromMeal(meal: MealSuggestion): MealMacroTotals {
+  const withItems = ensureItems(meal);
+  return macroTotalsFromItems(withItems.items ?? [], withItems);
+}
+
+function roundScaled(value: number | null | undefined, factor: number, decimals = 2): number | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined;
+  const scale = 10 ** decimals;
+  return Math.round(value * factor * scale) / scale;
+}
+
+function scaleMicronutrients(micros: Record<string, number> | undefined, factor: number): Record<string, number> | undefined {
+  if (!micros) return undefined;
+  return Object.fromEntries(
+    Object.entries(micros).map(([key, value]) => [
+      key,
+      typeof value === 'number' ? Math.round(value * factor * 100) / 100 : value,
+    ]),
+  ) as Record<string, number>;
+}
+
+/** Scale one food item by a quantity fraction. Used by duplicate/split
+ *  controls and kept here so UI actions preserve the same macro math as
+ *  normal quantity editing. */
+export function scaleMealItem(item: MealItem, factor: number): MealItem {
+  const safeFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  const scaledServingGrams = roundScaled(item.serving_grams ?? undefined, safeFactor);
+  const scaled: MealItem = {
+    ...item,
+    quantity: roundScaled(item.quantity, safeFactor) ?? item.quantity,
+    calories: Math.round((item.calories ?? 0) * safeFactor),
+    protein: Math.round((item.protein ?? 0) * safeFactor),
+    carbs: Math.round((item.carbs ?? 0) * safeFactor),
+    fat: Math.round((item.fat ?? 0) * safeFactor),
+    baseQuantity: roundScaled(item.baseQuantity ?? item.quantity, safeFactor),
+    baseCalories: Math.round((item.baseCalories ?? item.calories ?? 0) * safeFactor),
+    baseProtein: Math.round((item.baseProtein ?? item.protein ?? 0) * safeFactor),
+    baseCarbs: Math.round((item.baseCarbs ?? item.carbs ?? 0) * safeFactor),
+    baseFat: Math.round((item.baseFat ?? item.fat ?? 0) * safeFactor),
+    ...(scaledServingGrams != null ? { serving_grams: scaledServingGrams } : {}),
+    ...(item.micronutrients ? { micronutrients: scaleMicronutrients(item.micronutrients, safeFactor) } : {}),
+  };
+  return scaled;
+}
+
+export function splitMealItemByFraction(item: MealItem, fraction = 0.5): [MealItem, MealItem] {
+  const keep = Math.max(0.05, Math.min(0.95, Number.isFinite(fraction) ? fraction : 0.5));
+  return [scaleMealItem(item, keep), scaleMealItem(item, 1 - keep)];
+}
+
 /** Write legacy `foods`/`amounts` arrays from `items`. Used at save time so
  *  old readers (and the backend) still see something.
  *
@@ -252,28 +423,70 @@ export function syncLegacyFieldsFromItems(meal: MealSuggestion): MealSuggestion 
   };
 }
 
-/** "2 piece" → "2", "3 oz" → "3 oz", "1 serving" → "1 serving". The piece
- *  unit collapses because it's implicit — "2 eggs" not "2 piece eggs". */
+/** Format an item's quantity + unit for display. The "piece" unit
+ *  collapses because it's implicit — "2 eggs" not "2 piece eggs".
+ *
+ *  When the underlying unit is the meaningless "serving", substitute a
+ *  useable unit derived from the food name: oz for solids, fl oz for
+ *  liquids, tbsp for spreadables, scoop for powders, piece for whole
+ *  foods. Quantity is back-calculated from calories so the displayed
+ *  amount actually represents the macros. The data-layer `item.unit`
+ *  stays "serving" so backend payloads don't shift; this is display
+ *  cosmetics only. */
 export function formatItemAmount(item: MealItem): string {
   const qty = formatQty(item.quantity);
   if (item.unit === 'piece') return qty;
 
-  const label = `${qty} ${item.unit}`;
-
-  // For vague units, show gram/oz equivalent or calorie context
-  if (item.unit === 'serving' && item.calories > 0) {
-    // Estimate grams from calories using ~1.5 cal/g average for mixed food
-    const estGrams = Math.round(item.calories / 1.5);
-    if (estGrams >= 20 && estGrams <= 1000) {
-      return `${label} (~${estGrams}g)`;
-    }
-    return `${label} (${Math.round(item.calories)} cal)`;
-  }
-  if (item.unit === 'scoop' && item.calories > 0) {
-    return `${label} (${Math.round(item.calories)} cal)`;
+  if (item.unit === 'serving') {
+    const display = displayForServing(item);
+    if (display) return display;
+    // Calorie-less item under the meaningless "serving" unit (water,
+    // coffee, tea). Derive a real unit from the food class so the row
+    // reads "1 cup" instead of bare "1".
+    const guess = guessUnitForFood(item.name);
+    const guessQty = item.quantity > 0 ? item.quantity : guess.quantity;
+    if (guess.unit === 'piece') return formatQty(guessQty);
+    return `${formatQty(guessQty)} ${guess.unit}`;
   }
 
-  return label;
+  return `${qty} ${item.unit}`;
+}
+
+/** Convert a `unit: 'serving'` item into a sensible display string by
+ *  classifying the food and back-calculating the amount from calories.
+ *  Returns null when the food is calorie-less (caller decides what to do). */
+function displayForServing(item: MealItem): string | null {
+  const cal = item.calories ?? 0;
+  if (cal <= 0) return null;
+  const cls = classifyFood(item.name);
+  // Rough calorie densities by food class. These are intentionally on
+  // the conservative side so the displayed number errs slightly
+  // generous rather than underselling portion size.
+  if (cls === 'liquid') {
+    // Liquids vary wildly (water vs whole milk vs juice). Anchor to a
+    // mid-density beverage (~12 cal / fl oz, e.g. milk).
+    const flOz = Math.max(1, Math.round(cal / 12));
+    return `${flOz} fl oz`;
+  }
+  if (cls === 'powder') {
+    // Most protein/supplement powders are ~120 cal / scoop. One scoop
+    // is the natural display unit.
+    const scoops = Math.max(1, Math.round(cal / 120));
+    return `${scoops} scoop${scoops !== 1 ? 's' : ''}`;
+  }
+  if (cls === 'spreadable') {
+    // Oils / nut butters / sauces — ~100 cal / tbsp.
+    const tbsp = Math.max(1, Math.round(cal / 100));
+    return `${tbsp} tbsp`;
+  }
+  if (cls === 'countable') {
+    // Eggs, bread slices, pieces of fruit, etc — fall back to piece.
+    return formatQty(item.quantity);
+  }
+  // solid — proteins, grains, veg. ~28g per oz, ~1.5 cal/g for mixed
+  // solids → ~42 cal / oz.
+  const oz = Math.max(1, Math.round(cal / 42));
+  return `${oz} oz`;
 }
 
 function formatQty(n: number): string {

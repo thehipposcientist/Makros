@@ -317,9 +317,12 @@ CHEST = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "chest_fly_cable",
         "description": "Constant tension chest isolation on cable",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "dual_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -381,8 +384,16 @@ BACK = [
     {
         "slug": "deadlift",
         "name": "Deadlift",
-        "primary_muscle": "back",
-        "secondary_muscles": ["hamstrings", "glutes", "core"],
+        # 2026-05 audit fix: was primary→back, secondary→[hamstrings,
+        # glutes, core]. The deadlift is a hip-hinge lift; the prime
+        # movers are the glutes and hamstrings (hip extension), with
+        # the back acting isometrically as a stabilizer. Marking back
+        # as primary inflated the Relative Strength Radar's `back`
+        # score for users who only deadlifted (and never rowed or
+        # pulled), which was the user-reported bug. Aligning with
+        # Romanian Deadlift's existing classification (line ~404).
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["glutes", "back", "core"],
         "equipment_bucket": "gym",
         "movement_pattern": "hinge",
         "exercise_type": "strength",
@@ -397,7 +408,7 @@ BACK = [
     },
     {
         "slug": "romanian_deadlift",
-        "name": "Romanian Deadlift",
+        "name": "Barbell Romanian Deadlift",
         "primary_muscle": "hamstrings",
         "secondary_muscles": ["glutes", "back"],
         "equipment_bucket": "gym",
@@ -406,7 +417,9 @@ BACK = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
-        "description": "Hip-hinge pattern targeting hamstrings",
+        "laterality": "bilateral",
+        "aliases": ["Romanian Deadlift", "RDL", "Barbell RDL"],
+        "description": "Barbell hip-hinge pattern targeting hamstrings",
         "equipment": [
             {"slug": "barbell", "role": "primary", "required": True},
         ],
@@ -554,6 +567,7 @@ BACK = [
         "is_compound": True,
         "is_machine": True,
         "is_unilateral": False,
+        "load_semantics": "assistance",
         "description": "Machine-assisted pull-up for beginners building lat strength",
         "equipment": [
             {"slug": "assisted_pullup_machine", "role": "primary", "required": True},
@@ -570,9 +584,12 @@ BACK = [
         "is_compound": True,
         "is_machine": True,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "aliases": ["Lat Pull Down", "Cable Lat Pulldown", "Cable Lat Pull Down"],
         "description": "Cable pull-down for lat width",
         "equipment": [
             {"slug": "lat_pulldown_machine", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -586,9 +603,11 @@ BACK = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
         "description": "Horizontal cable pull for mid-back thickness",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "v_bar_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -602,9 +621,11 @@ BACK = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
         "description": "Lat isolation keeping arms straight on cable",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -618,9 +639,10 @@ BACK = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
         "description": "Rear delt and rotator cuff health with cable rope",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
             {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
@@ -755,6 +777,25 @@ SHOULDERS = [
         ],
     },
     {
+        "slug": "dumbbell_push_press",
+        "name": "Dumbbell Push Press",
+        "aliases": ["DB Push Press"],
+        "primary_muscle": "shoulders",
+        "secondary_muscles": ["triceps", "quads"],
+        "equipment_bucket": "dumbbells",
+        "movement_pattern": "vertical_press",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": False,
+        "laterality": "bilateral",
+        "power_type": "power",
+        "description": "Explosive dumbbell overhead press using leg drive",
+        "equipment": [
+            {"slug": "dumbbells", "role": "primary", "required": True},
+        ],
+    },
+    {
         "slug": "dumbbell_shoulder_press",
         "name": "Dumbbell Shoulder Press",
         "primary_muscle": "shoulders",
@@ -862,9 +903,12 @@ SHOULDERS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "lateral_raise_cable_unilateral",
         "description": "Constant-tension side delt work on cable",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -1063,9 +1107,10 @@ BICEPS = [
         "description": "Isolates biceps with preacher bench support",
         "equipment": [
             {"slug": "preacher_bench", "role": "support", "required": True},
-            # Either an EZ bar OR dumbbells — model both as primary so the
-            # planner picks whichever the user has.
+            # Any one curl implement works with the pad. Model them as
+            # primary alternatives so the planner picks whichever the user has.
             {"slug": "ez_curl_bar", "role": "primary", "required": False},
+            {"slug": "barbell",     "role": "primary", "required": False},
             {"slug": "dumbbells",   "role": "primary", "required": False},
         ],
     },
@@ -1080,9 +1125,12 @@ BICEPS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "bicep_curl_cable",
         "description": "Constant tension curl on cable machine",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
         ],
     },
 ]
@@ -1118,9 +1166,12 @@ TRICEPS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "tricep_pushdown",
         "description": "Cable pushdown for tricep isolation",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -1134,9 +1185,11 @@ TRICEPS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "tricep_pushdown",
         "description": "Cable rope pushdown for full lockout and flare",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
             {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
@@ -1632,9 +1685,12 @@ GLUTES = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "glute_kickback_cable",
         "description": "Cable kickback for isolated glute contraction",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "ankle_strap", "role": "support", "required": True},
         ],
     },
     {
@@ -1912,9 +1968,12 @@ CORE = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "core_flexion",
         "description": "Weighted kneeling crunch using cable machine",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -1992,9 +2051,12 @@ CORE = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "core_rotation",
         "description": "Rotational cable pull for anti-rotation and oblique strength",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -2008,9 +2070,12 @@ CORE = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "core_anti_rotation",
         "description": "Anti-rotation cable press — builds lateral core stability",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
 ]
@@ -2721,7 +2786,7 @@ SEED_EQUIPMENT = [
     {"slug": "adjustable_dumbbells","name": "Adjustable dumbbells",    "category": "Free Weights", "icon": "\U0001f39b\ufe0f"},
     {"slug": "barbell",            "name": "Barbell",                  "category": "Free Weights", "icon": "\U0001f3cb\ufe0f"},
     {"slug": "kettlebell",         "name": "Kettlebell",               "category": "Free Weights", "icon": "\U0001f514"},
-    {"slug": "ez_curl_bar",        "name": "EZ curl bar",              "category": "Free Weights", "icon": "\u3030\ufe0f"},
+    {"slug": "ez_curl_bar",        "name": "EZ curl bar",              "category": "Free Weights", "icon": "\u3030\ufe0f", "aliases": ["EZ bar", "Curl bar", "Curling bar"]},
     {"slug": "weight_plates",      "name": "Weight plates",            "category": "Free Weights", "icon": "\u2b55"},
     {"slug": "trap_bar",           "name": "Trap bar",                 "category": "Free Weights", "icon": "\u2b21"},
     {"slug": "medicine_ball",      "name": "Medicine ball",            "category": "Free Weights", "icon": "\u26bd"},
@@ -2739,9 +2804,11 @@ SEED_EQUIPMENT = [
     {"slug": "landmine_attachment","name": "Landmine attachment",       "category": "Benches & Racks", "icon": "\U0001f527"},
 
     # Gym Machines
-    {"slug": "cable_machine",          "name": "Cable machine",            "category": "Gym Machines", "icon": "\U0001f517"},
+    {"slug": "cable_machine",          "name": "Cable machine",            "category": "Gym Machines", "icon": "\U0001f517", "aliases": ["Cable machine (unspecified)", "Cable station"]},
+    {"slug": "single_cable_station",   "name": "Single cable station",     "category": "Gym Machines", "icon": "\U0001f517", "aliases": ["Single cable machine", "Cable column", "Single cable column", "Single pulley station", "Single adjustable pulley"]},
+    {"slug": "dual_cable_station",     "name": "Dual cable station",       "category": "Gym Machines", "icon": "\U0001f517", "aliases": ["Dual cable machine", "Functional trainer", "Cable crossover", "Cable crossover station", "Dual adjustable pulley", "Dual pulley station"]},
     {"slug": "leg_press_machine",      "name": "Leg press",                "category": "Gym Machines", "icon": "\U0001f9b5"},
-    {"slug": "lat_pulldown_machine",   "name": "Lat pulldown",             "category": "Gym Machines", "icon": "\u2b07\ufe0f"},
+    {"slug": "lat_pulldown_machine",   "name": "Lat pulldown",             "category": "Gym Machines", "icon": "\u2b07\ufe0f", "aliases": ["Lat pulldown machine", "Pulldown station"]},
     {"slug": "chest_press_machine",    "name": "Chest press machine",      "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["machine chest press", "selectorized chest press"]},
     {"slug": "seated_row_machine",     "name": "Seated row machine",       "category": "Gym Machines", "icon": "\U0001f519"},
     {"slug": "leg_extension_machine",  "name": "Leg extension",            "category": "Gym Machines", "icon": "\U0001f9b5"},
@@ -2757,7 +2824,7 @@ SEED_EQUIPMENT = [
     # used as a catch-all for pec deck, preacher bench, hyperextension,
     # and calf machines — four physically distinct pieces of equipment
     # that a gym may or may not have independently.
-    {"slug": "preacher_bench",             "name": "Preacher curl bench",      "category": "Gym Machines", "icon": "\U0001f4aa"},
+    {"slug": "preacher_bench",             "name": "Preacher curl bench",      "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["Preacher bench", "Preacher curl station"]},
     {"slug": "pec_deck_machine",           "name": "Pectoral fly / pec deck machine", "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["Pec deck machine", "Pectoral fly machine", "Chest fly machine", "Pec fly machine"]},
     {"slug": "hyperextension_bench",       "name": "Hyperextension bench",     "category": "Gym Machines", "icon": "\U0001f4d0"},
     {"slug": "standing_calf_raise_machine","name": "Standing calf raise machine","category": "Gym Machines", "icon": "\U0001f9b5"},
@@ -2766,10 +2833,10 @@ SEED_EQUIPMENT = [
     # Cable attachments are modeled as separate equipment so the planner
     # can require a specific handle ("rope for tricep pushdown", "D-handle
     # for single-arm row") instead of a generic `cable_machine` reference.
-    {"slug": "rope_attachment",            "name": "Cable rope attachment",    "category": "Gym Machines", "icon": "\U0001f517"},
-    {"slug": "straight_bar_attachment",    "name": "Cable straight bar",       "category": "Gym Machines", "icon": "\U0001f4cf"},
-    {"slug": "d_handle",                   "name": "Cable D-handle",           "category": "Gym Machines", "icon": "\U0001f3f9"},
-    {"slug": "v_bar_attachment",           "name": "Cable V-bar / triangle",   "category": "Gym Machines", "icon": "\U0001f53b"},
+    {"slug": "rope_attachment",            "name": "Cable rope attachment",    "category": "Gym Machines", "icon": "\U0001f517", "aliases": ["Cable rope", "Rope handle", "Triceps rope"]},
+    {"slug": "straight_bar_attachment",    "name": "Cable straight bar",       "category": "Gym Machines", "icon": "\U0001f4cf", "aliases": ["Straight bar attachment", "Lat bar", "Pulldown bar"]},
+    {"slug": "d_handle",                   "name": "Cable D-handle",           "category": "Gym Machines", "icon": "\U0001f3f9", "aliases": ["Cable handle", "Single cable handle", "Single-arm cable handle", "D-handle attachment", "Pair of D-handles"]},
+    {"slug": "v_bar_attachment",           "name": "Cable V-bar / triangle",   "category": "Gym Machines", "icon": "\U0001f53b", "aliases": ["Cable V-bar", "Triangle row handle", "Close-grip row handle"]},
     {"slug": "ankle_strap",                "name": "Cable ankle strap",        "category": "Gym Machines", "icon": "\U0001f9b5"},
     {"slug": "captain_chair",              "name": "Captain's chair",          "category": "Gym Machines", "icon": "\U0001fa91"},
     {"slug": "ghd",                        "name": "Glute-ham developer",      "category": "Gym Machines", "icon": "\U0001f9b5"},
@@ -2873,10 +2940,11 @@ _NEW_2026_04_13 = [
         "is_machine": False,
         "is_unilateral": True,
         "laterality": "unilateral",
-        "substitution_group": "horizontal_pull_cable",
+        "substitution_group": "horizontal_pull_cable_unilateral",
         "description": "Strict unilateral cable row with full scapular ROM",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -2891,10 +2959,11 @@ _NEW_2026_04_13 = [
         "is_machine": False,
         "is_unilateral": True,
         "laterality": "unilateral",
-        "substitution_group": "horizontal_press_cable",
+        "substitution_group": "horizontal_press_cable_unilateral",
         "description": "Standing cable press, one side at a time — adds anti-rotation core demand",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -2999,7 +3068,11 @@ _NEW_2026_04_13_PASS_2 = [
         "name": "Weighted Push-up",
         "primary_muscle": "chest",
         "secondary_muscles": ["triceps", "shoulders"],
-        "equipment_bucket": "other",
+        # 2026-05 audit fix: base movement is a bodyweight push-up — the
+        # weight vest/plate is optional load. Was incorrectly bucketed
+        # as "other"; bodyweight matches the equipment_bucket conventions
+        # the planner uses for substitution + filtering.
+        "equipment_bucket": "bodyweight",
         "movement_pattern": "horizontal_press",
         "exercise_type": "strength",
         "is_compound": True, "is_machine": False, "is_unilateral": False,
@@ -3057,7 +3130,7 @@ _NEW_2026_04_13_PASS_2 = [
         "substitution_group": "chest_fly_cable",
         "description": "Cable fly arcing from low pulley to upper chest height",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "dual_cable_station", "role": "primary", "required": True},
             {"slug": "d_handle",      "role": "support", "required": True},
         ],
     },
@@ -3074,7 +3147,7 @@ _NEW_2026_04_13_PASS_2 = [
         "substitution_group": "chest_fly_cable",
         "description": "Cable fly arcing from high pulley down to belt height — lower chest emphasis",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "dual_cable_station", "role": "primary", "required": True},
             {"slug": "d_handle",      "role": "support", "required": True},
         ],
     },
@@ -3088,10 +3161,10 @@ _NEW_2026_04_13_PASS_2 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
-        "substitution_group": "chest_fly_cable",
+        "substitution_group": "chest_fly_cable_unilateral",
         "description": "One-arm cable fly with full ROM and anti-rotation core demand",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
             {"slug": "d_handle",      "role": "support", "required": True},
         ],
     },
@@ -3111,7 +3184,7 @@ _NEW_2026_04_13_PASS_2 = [
         "description": "Pulldown with wide overhand grip — lat width emphasis",
         "equipment": [
             {"slug": "lat_pulldown_machine",   "role": "primary", "required": True},
-            {"slug": "straight_bar_attachment","role": "support", "required": False},
+            {"slug": "straight_bar_attachment","role": "support", "required": True},
         ],
     },
     {
@@ -3128,7 +3201,7 @@ _NEW_2026_04_13_PASS_2 = [
         "description": "Pulldown with palms facing each other — lat thickness and bicep emphasis",
         "equipment": [
             {"slug": "lat_pulldown_machine", "role": "primary", "required": True},
-            {"slug": "v_bar_attachment",     "role": "support", "required": False},
+            {"slug": "v_bar_attachment",     "role": "support", "required": True},
         ],
     },
     {
@@ -3188,7 +3261,7 @@ _NEW_2026_04_13_PASS_2 = [
         "substitution_group": "rear_delt",
         "description": "Cable cross-body rear delt fly with D-handles",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "dual_cable_station", "role": "primary", "required": True},
             {"slug": "d_handle",      "role": "support", "required": True},
         ],
     },
@@ -3308,7 +3381,7 @@ _NEW_2026_04_13_PASS_2 = [
         "substitution_group": "tricep_overhead",
         "description": "Long-head emphasis overhead extension with cable rope",
         "equipment": [
-            {"slug": "cable_machine",   "role": "primary", "required": True},
+            {"slug": "single_cable_station",   "role": "primary", "required": True},
             {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
@@ -3322,10 +3395,10 @@ _NEW_2026_04_13_PASS_2 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
-        "substitution_group": "tricep_pushdown",
+        "substitution_group": "tricep_pushdown_unilateral",
         "description": "One-arm reverse-grip cable pushdown — strict tricep isolation",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
             {"slug": "d_handle",      "role": "support", "required": True},
         ],
     },
@@ -3361,7 +3434,7 @@ _NEW_2026_04_13_PASS_2 = [
         "substitution_group": "hinge_bilateral",
         "description": "Standing cable hip hinge using rope attachment between the legs",
         "equipment": [
-            {"slug": "cable_machine",   "role": "primary", "required": True},
+            {"slug": "single_cable_station",   "role": "primary", "required": True},
             {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
@@ -3839,6 +3912,7 @@ _LEGACY_SUBSTITUTION_GROUPS: dict[str, str] = {
     # ── Vertical press ────────────────────────────────────────────────────
     "overhead_press":          "vertical_press_barbell",
     "push_press":              "vertical_press_barbell",
+    "dumbbell_push_press":     "vertical_press_dumbbell",
     "dumbbell_shoulder_press": "vertical_press_dumbbell",
     "arnold_press":            "vertical_press_dumbbell",
     "machine_shoulder_press":  "vertical_press_machine",
@@ -4383,6 +4457,7 @@ _NEW_2026_04_27 = [
         "laterality": "bilateral",
         "difficulty": "beginner",
         "substitution_group": "dip",
+        "load_semantics": "assistance",
         "description": "Counterweighted dip machine for beginners building pressing strength",
         "equipment": [{"slug": "assisted_pullup_machine", "role": "primary", "required": True}],
     },
@@ -4417,7 +4492,10 @@ _NEW_2026_04_27 = [
         "difficulty": "intermediate",
         "substitution_group": "horizontal_press_cable",
         "description": "Both arms press simultaneously from a cable stack",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "dual_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
+        ],
     },
 
     # ── BACK / PULLING ────────────────────────────────────────────────
@@ -4447,11 +4525,11 @@ _NEW_2026_04_27 = [
         "is_compound": True, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
         "difficulty": "intermediate",
-        "substitution_group": "lat_pulldown",
+        "substitution_group": "lat_pulldown_unilateral",
         "description": "Unilateral cable pulldown for balanced lat development",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
-            {"slug": "d_handle", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -4467,7 +4545,10 @@ _NEW_2026_04_27 = [
         "difficulty": "intermediate",
         "substitution_group": "lat_pulldown",
         "description": "Kneeling pulldown forces core stabilization and reduces cheating",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
+        ],
     },
     {
         "slug": "band_assisted_pullup",
@@ -4660,11 +4741,11 @@ _NEW_2026_04_27 = [
         "is_compound": False, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
         "difficulty": "intermediate",
-        "substitution_group": "lateral_raise",
+        "substitution_group": "lateral_raise_cable_unilateral",
         "description": "Side-leaning cable raise maintains tension through full ROM",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
-            {"slug": "d_handle", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -4680,7 +4761,10 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "front_raise",
         "description": "Anterior delt isolation with constant cable tension",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
+        ],
     },
     {
         "slug": "rear_delt_row",
@@ -4726,7 +4810,10 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "rear_delt",
         "description": "Face pull finishing with external rotation — shoulder health staple",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
+        ],
     },
 
     # ── BICEPS ────────────────────────────────────────────────────────
@@ -4759,11 +4846,11 @@ _NEW_2026_04_27 = [
         "is_compound": False, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
         "difficulty": "intermediate",
-        "substitution_group": "bicep_curl_cable",
+        "substitution_group": "bicep_curl_cable_unilateral",
         "description": "Single-arm cable curl with arm behind body for long-head stretch",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
-            {"slug": "d_handle", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -4795,7 +4882,10 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "bicep_curl_cable",
         "description": "Neutral-grip cable curl for brachialis and forearm thickness",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
+        ],
     },
     {
         "slug": "drag_curl",
@@ -4858,7 +4948,10 @@ _NEW_2026_04_27 = [
         "difficulty": "intermediate",
         "substitution_group": "tricep_extension_overhead",
         "description": "Lying cable skull crusher — constant tension version",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "straight_bar_attachment", "role": "support", "required": True},
+        ],
     },
     {
         "slug": "cross_body_cable_tricep_extension",
@@ -4871,11 +4964,11 @@ _NEW_2026_04_27 = [
         "is_compound": False, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
         "difficulty": "intermediate",
-        "substitution_group": "tricep_pushdown",
+        "substitution_group": "tricep_pushdown_unilateral",
         "description": "Single-arm cable extension across body for long-head emphasis",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
-            {"slug": "d_handle", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
         ],
     },
     {
@@ -5096,6 +5189,7 @@ _NEW_2026_04_27 = [
         "laterality": "bilateral",
         "difficulty": "intermediate",
         "substitution_group": "squat_free",
+        "load_semantics": "band_resistance",
         "description": "Band-anchored squat keeping shins vertical — great for knee rehab",
         "equipment": [{"slug": "resistance_bands", "role": "primary", "required": True}],
     },
@@ -5334,6 +5428,10 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "glute_abductor",
         "description": "Forward and backward diagonal banded walk for glute activation",
+        # Tracked by time, not load — band-only glute activation.
+        # Without this tag the planner emits a rep target and the
+        # client requests a weight recommendation that has no meaning.
+        "default_tracking_mode": "time",
         "equipment": [{"slug": "resistance_bands", "role": "primary", "required": True}],
     },
     {
@@ -5365,8 +5463,8 @@ _NEW_2026_04_27 = [
         "substitution_group": "glute_abductor",
         "description": "Standing cable leg raise to the side for glute medius",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
-            {"slug": "ankle_strap", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "ankle_strap", "role": "support", "required": True},
         ],
     },
     {
@@ -5416,8 +5514,8 @@ _NEW_2026_04_27 = [
         "substitution_group": "adductor_isolation",
         "description": "Standing cable leg cross for inner thigh through full ROM",
         "equipment": [
-            {"slug": "cable_machine", "role": "primary", "required": True},
-            {"slug": "ankle_strap", "role": "primary", "required": True},
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "ankle_strap", "role": "support", "required": True},
         ],
     },
     {
@@ -5715,7 +5813,10 @@ _NEW_2026_04_27 = [
         "default_tracking_mode": "time",
         "substitution_group": "core_anti_rotation",
         "description": "Static isometric hold against cable pull — anti-rotation stability",
-        "equipment": [{"slug": "cable_machine", "role": "primary", "required": True}],
+        "equipment": [
+            {"slug": "single_cable_station", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
+        ],
     },
     {
         "slug": "landmine_rotation",
@@ -6310,17 +6411,19 @@ _NEW_2026_04_29 = [
         "slug": "band_squat",
         "name": "Band Squat",
         "primary_muscle": "quads",
-        "secondary_muscles": ["glutes", "core"],
-        "equipment_bucket": "home",
+        "secondary_muscles": ["glutes", "hamstrings", "core"],
+        "equipment_bucket": "gym",
         "movement_pattern": "squat",
         "exercise_type": "strength",
         "is_compound": True, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
-        "difficulty": "beginner",
-        "substitution_group": "squat_bodyweight",
-        "description": "Stand on band and press overhead handles — ascending resistance squat",
+        "difficulty": "intermediate",
+        "substitution_group": "squat_barbell",
+        "description": "Barbell squat with bands anchored to the rack for accommodating resistance",
         "equipment": [
-            {"slug": "resistance_bands", "role": "primary", "required": True},
+            {"slug": "barbell", "role": "primary", "required": True},
+            {"slug": "resistance_bands", "role": "support", "required": True},
+            {"slug": "squat_rack", "role": "support", "required": True},
         ],
     },
     {
@@ -6431,7 +6534,7 @@ _NEW_2026_04_29 = [
         "primary_muscle": "glutes",
         "secondary_muscles": ["hamstrings"],
         "equipment_bucket": "home",
-        "movement_pattern": "hinge",
+        "movement_pattern": "isolation",
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": True,
         "laterality": "unilateral",
@@ -6566,6 +6669,7 @@ _NEW_2026_04_30 = [
         "difficulty": "beginner",
         "substitution_group": "glute_abductor",
         "description": "Forward and backward diagonal steps against loop-band tension",
+        "default_tracking_mode": "time",
         "equipment": [{"slug": "mini_band", "role": "primary", "required": True}],
     },
     {
@@ -7728,6 +7832,374 @@ _NEW_2026_05_08_MACHINE_NAMING = [
 ]
 
 
+_NEW_2026_05_10_GUIDED_FLOW = [
+    # Yoga / stretch poses for the guided-flow session UI. Each pose carries
+    # a `flow_category` so generate_yoga_day can order them warm → standing
+    # → floor → cool → breath. Existing poses (downward_dog, pigeon_pose,
+    # warrior_one/two, etc.) are tagged via _GUIDED_FLOW_CATEGORY below.
+    {
+        "slug": "easy_seated_twist",
+        "name": "Easy Seated Twist",
+        "primary_muscle": "back",
+        "secondary_muscles": ["core"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "warm",
+        "substitution_group": "spinal_mobility",
+        "description": "Seated cross-legged spinal twist — gentle thoracic warm-up",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "supine_knee_hugs",
+        "name": "Supine Knee Hugs",
+        "primary_muscle": "back",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "warm",
+        "substitution_group": "spinal_mobility",
+        "description": "On back, knees pulled to chest — lumbar decompression and warm-up",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "mountain_pose",
+        "name": "Mountain Pose",
+        "primary_muscle": "full_body",
+        "secondary_muscles": ["core"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "standing",
+        "substitution_group": "full_body_mobility",
+        "description": "Standing tall with arms at sides — postural reset and grounding",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "forward_fold",
+        "name": "Standing Forward Fold",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["back", "calves"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "standing",
+        "substitution_group": "hamstring_mobility",
+        "description": "Hinge forward from hips, hands toward floor — full posterior chain stretch",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "low_lunge",
+        "name": "Low Lunge",
+        "primary_muscle": "hip_flexors",
+        "secondary_muscles": ["quads", "glutes"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "standing",
+        "substitution_group": "hip_mobility",
+        "description": "Back knee on mat, front knee 90°, arms overhead — deep hip flexor opener",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "high_lunge",
+        "name": "High Lunge",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "hip_flexors"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "standing",
+        "substitution_group": "hip_mobility",
+        "description": "Back leg straight, front knee bent — hip flexor and quad stretch",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "triangle_pose",
+        "name": "Triangle Pose",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["adductors", "back"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "standing",
+        "substitution_group": "hip_mobility",
+        "description": "Wide-leg side bend with extended arms — hamstring and side-body opener",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "butterfly_stretch",
+        "name": "Butterfly Stretch",
+        "primary_muscle": "adductors",
+        "secondary_muscles": ["hip_flexors"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "floor",
+        "substitution_group": "hip_mobility",
+        "description": "Soles of feet together, knees out — inner-thigh and groin stretch",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "happy_baby",
+        "name": "Happy Baby",
+        "primary_muscle": "glutes",
+        "secondary_muscles": ["hip_flexors", "back"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "floor",
+        "substitution_group": "hip_mobility",
+        "description": "On back, hold outsides of feet — opens hips and decompresses spine",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "seated_forward_fold",
+        "name": "Seated Forward Fold",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["back", "calves"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "floor",
+        "substitution_group": "hamstring_mobility",
+        "description": "Sit tall, fold over straight legs — hamstring and lower-back stretch",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "reclined_spinal_twist",
+        "name": "Reclined Spinal Twist",
+        "primary_muscle": "back",
+        "secondary_muscles": ["glutes", "core"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": True,
+        "laterality": "alternating",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "floor",
+        "substitution_group": "spinal_mobility",
+        "description": "On back, drop knees to one side — gentle thoracic and lumbar twist",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "bridge_pose",
+        "name": "Bridge Pose",
+        "primary_muscle": "glutes",
+        "secondary_muscles": ["hamstrings", "back"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "floor",
+        "substitution_group": "hip_mobility",
+        "description": "On back, hips lifted — opens chest and hips, activates glutes",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "cobra_pose",
+        "name": "Cobra Pose",
+        "primary_muscle": "back",
+        "secondary_muscles": ["chest", "shoulders"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "floor",
+        "substitution_group": "spinal_mobility",
+        "description": "Prone press-up with relaxed hips — opens chest and extends spine",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "legs_up_wall",
+        "name": "Legs Up the Wall",
+        "primary_muscle": "hamstrings",
+        "secondary_muscles": ["calves"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "cool",
+        "substitution_group": "lower_body_release",
+        "description": "On back with legs vertical against wall — passive lower-body recovery",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "savasana",
+        "name": "Savasana",
+        "primary_muscle": "full_body",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "cool",
+        "substitution_group": "full_body_mobility",
+        "description": "Lie flat on back, palms up, eyes closed — full-body relaxation and integration",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "reclined_bound_angle",
+        "name": "Reclined Bound Angle",
+        "primary_muscle": "adductors",
+        "secondary_muscles": ["hip_flexors"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "cool",
+        "substitution_group": "hip_mobility",
+        "description": "On back, soles of feet together, knees out — passive groin and hip release",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "knees_to_chest",
+        "name": "Knees to Chest",
+        "primary_muscle": "back",
+        "secondary_muscles": ["glutes"],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "cool",
+        "substitution_group": "spinal_mobility",
+        "description": "On back, knees pulled into chest — lumbar decompression cooldown",
+        "equipment": [{"slug": "yoga_mat", "role": "support", "required": False}],
+    },
+    {
+        "slug": "box_breathing",
+        "name": "Box Breathing",
+        "primary_muscle": "full_body",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "breath",
+        "substitution_group": "breathwork",
+        "description": "4-second inhale, 4 hold, 4 exhale, 4 hold — parasympathetic reset",
+        "equipment": [],
+    },
+    {
+        "slug": "four_seven_eight_breath",
+        "name": "4-7-8 Breath",
+        "primary_muscle": "full_body",
+        "secondary_muscles": [],
+        "equipment_bucket": "bodyweight",
+        "movement_pattern": "mobility",
+        "exercise_type": "mobility",
+        "is_compound": False, "is_machine": False, "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "default_tracking_mode": "time",
+        "flow_category": "breath",
+        "substitution_group": "breathwork",
+        "description": "4-second inhale, 7-second hold, 8-second exhale — downregulation breath",
+        "equipment": [],
+    },
+]
+
+
+# Slug → flow_category map for poses already defined elsewhere in this file.
+# Tagging via post-processing keeps the original entries untouched and keeps
+# all guided-flow ordering decisions in one place.
+_GUIDED_FLOW_CATEGORY: dict[str, str] = {
+    # Warm-up
+    "cat_cow": "warm",
+    "thread_the_needle": "warm",
+    "thoracic_rotation": "warm",
+    "ankle_mobility_drill": "warm",
+    "wall_slides": "warm",
+    "childs_pose": "warm",
+    # Standing
+    "downward_dog": "standing",
+    "worlds_greatest_stretch": "standing",
+    "deep_squat_hold": "standing",
+    "warrior_one": "standing",
+    "warrior_two": "standing",
+    "lizard_pose": "standing",
+    "sun_salutation": "standing",
+    "hip_airplane": "standing",
+    # Floor
+    "pigeon_pose": "floor",
+    "pigeon_stretch": "floor",
+    "hip_90_90_switch": "floor",
+    "hamstring_floss": "floor",
+    "couch_stretch": "floor",
+    # Cool-down
+    "calf_wall_stretch": "cool",
+    # Foam roll
+    "foam_roller_t_spine_extension": "foam_roll",
+    "foam_roller_lat_release": "foam_roll",
+    "foam_roller_quad_release": "foam_roll",
+    "foam_roller_glute_release": "foam_roll",
+    "foam_roller_calf_release": "foam_roll",
+}
+
+
 SEED_EXERCISES: list[dict] = (
     CHEST
     + BACK
@@ -7754,6 +8226,7 @@ SEED_EXERCISES: list[dict] = (
     + _NEW_2026_05_01
     + _NEW_2026_05_03_CORE_FLOOR
     + _NEW_2026_05_08_MACHINE_NAMING
+    + _NEW_2026_05_10_GUIDED_FLOW
 )
 
 # Apply the legacy substitution-group backfill in-place. Done as a single
@@ -7765,4 +8238,8 @@ for _ex in SEED_EXERCISES:
         _grp = _LEGACY_SUBSTITUTION_GROUPS.get(_ex.get("slug", ""))
         if _grp:
             _ex["substitution_group"] = _grp
+    if "flow_category" not in _ex:
+        _fc = _GUIDED_FLOW_CATEGORY.get(_ex.get("slug", ""))
+        if _fc:
+            _ex["flow_category"] = _fc
 del _ex  # don't leak loop var into module namespace

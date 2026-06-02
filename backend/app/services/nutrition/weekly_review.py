@@ -77,8 +77,8 @@ class WeeklyNutritionReview:
     protein_delta_daily_avg: float
 
     # Adherence
-    kcal_adherence_pct: float      # % of logged days within ±15% of kcal target
-    protein_hit_pct: float         # % of logged days protein ≥ 85% of target
+    kcal_adherence_pct: float      # % of logged days within ±5% of kcal target
+    protein_hit_pct: float         # % of logged days protein ≥95% of target
 
     # Meal type breakdown: {meal_type_str → {"days_logged": int, "avg_calories": float}}
     meal_type_breakdown: dict[str, dict]
@@ -124,8 +124,8 @@ class WeeklyNutritionReview:
 
 # ── Calorie adherence tolerance ────────────────────────────────────────────────
 # A day is "on target" when actual kcal is within this band of the planned target.
-_KCAL_ADHERENCE_BAND = 0.15   # ±15%
-_PROTEIN_HIT_FLOOR   = 0.85   # 85% of target counts as a protein hit
+_KCAL_ADHERENCE_BAND = 0.05   # ±5%; ±10% is close, not fully on target
+_PROTEIN_HIT_FLOOR   = 0.95   # 95% of target counts as a protein hit
 
 # Days with no logged meals are "unlogged" — not penalised, but counted.
 _MIN_DAYS_FOR_COACHING = 3    # below this, only fire a logging nudge

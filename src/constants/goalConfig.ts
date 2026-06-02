@@ -144,7 +144,7 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
   { id: 'minimal_equipment',   label: 'Minimal Equipment Fitness',  category: 'lifestyle_consistency', description: 'Just a pair of dumbbells or a pull-up bar. Smart programming to get real results with very little gear.',  launch: false },
   { id: 'habit_building',      label: 'Habit Building',             category: 'lifestyle_consistency', description: 'Focus on consistency over intensity. Even 10 minutes counts. Builds the daily exercise habit that everything else depends on.',  launch: false },
   { id: 'sustainable_routine', label: 'Sustainable Fitness Routine', category: 'lifestyle_consistency', description: 'A balanced, moderate programme you can stick with for years. Not extreme, not easy — just right for long-term health.',  launch: false },
-  { id: 'maintain',            label: 'Maintain',                   category: 'lifestyle_consistency', description: 'Keep your current fitness level with minimal effort. 2-3 sessions/week at moderate intensity. No progression pressure.',  launch: true },
+  { id: 'maintain',            label: 'General Health',             category: 'lifestyle_consistency', description: 'Stay active and healthy with balanced training, nutrition, and recovery. 2-3 sessions/week at moderate intensity. No progression pressure.',  launch: true },
 ];
 
 // ─── Quick-launch goals (shown prominently in onboarding step 1) ─────────────

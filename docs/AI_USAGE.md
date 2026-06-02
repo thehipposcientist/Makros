@@ -1,6 +1,6 @@
 # AI Usage & Cost
 
-Last updated: 2026-05-06
+Last updated: 2026-05-19
 
 Pricing below reflects current OpenAI list prices used for internal planning. Thallo is deterministic first: AI adds content, classification, or coaching, but it does not drive workout-plan structure.
 
@@ -10,7 +10,8 @@ Pricing below reflects current OpenAI list prices used for internal planning. Th
 |---|---|---|
 | Trainer chat / workout coach / check-in coach | `gpt-4o-mini` | Text-first coaching and structured JSON responses; routed through the shared chat wrapper |
 | Meal parsing and text fallback search | `gpt-4o-mini` | Text-only parsing and fallback interpretation |
-| Food enrichment / classification fallback | `gpt-4o-mini` | Cached or one-time enrichment paths |
+| Phone speech-to-meal transcription | `gpt-4o-mini-transcribe` | Audio-to-text stage before meal parsing; configured via `MODEL_TRANSCRIPTION` |
+| Food classification fallback | `gpt-4o-mini` | Live, user-triggered cold-miss classification paths only |
 | Dedicated image-analysis endpoints | `gpt-5.4-mini` | Food photo, multi-food scan, supplement photo, multi-supplement scan, equipment scan, form photo, body scan |
 | Workout planner structure | None | Fully deterministic |
 
@@ -49,10 +50,10 @@ These flows are not affected by the `MODEL_IMAGE` switch:
 - Home trainer chat
 - Weekly/daily check-in coach
 - Text-only meal parsing and search fallback
-- Food enrichment / classification fallback
+- Food classification fallback
 - In-workout next-set review (deterministic reviewer)
 
-One nuance: `POST /ai/workout-question` can accept an attached image, but it still runs on `MODEL_CHAT` today rather than `MODEL_IMAGE`.
+One nuance: `POST /coach/workout-question` (`/ai/workout-question` compatibility alias) can accept an attached image, but it still runs on `MODEL_CHAT` today rather than `MODEL_IMAGE`.
 
 ## Current Flag State
 
@@ -60,7 +61,9 @@ One nuance: `POST /ai/workout-question` can accept an attached image, but it sti
 |---|---|---|
 | `PLAN_REVIEW_ENABLED=0` | Disabled no-op | Legacy workout AI review path is effectively off |
 | `NUTRITION_REVIEW_ENABLED=0` | Disabled no-op | Legacy nutrition review path is effectively off |
-| `STARTUP_ENRICH_FOODS_ENABLED=0` | Off by default | Food enrichment is an explicit maintenance job, not a boot-time OpenAI call |
+| Startup / deploy AI backfills | Removed | Backend startup no longer exposes env flags that can launch OpenAI enrichment or historical classification jobs; non-AI startup backfills are also explicit opt-in |
+| Lazy micronutrient backfill | Removed | Nutrition plan reads/generation no longer top up thin foods via background-style AI calls |
+| Backend test runner | Live OpenAI disabled by default | `python -m tests.run_all` strips `OPENAI_API_KEY`; set `ALLOW_LIVE_OPENAI_TESTS=1` only for deliberate live-model checks |
 | Missing `OPENAI_API_KEY` | Graceful degradation | Deterministic paths still work |
 | `AI_DAILY_CALL_LIMIT_PER_USER` | Default `120` | Per-user daily cap for tagged OpenAI calls |
 | `AI_DAILY_IMAGE_SCAN_LIMIT_PER_USER` | Default `40` | Per-user daily cap for image/vision scan calls |
@@ -88,7 +91,7 @@ These systems remain fully deterministic and have no model cost:
 
 ## Practical Cost Read
 
-The image-model switch raises the cost ceiling of photo-driven features, but it does not change the cost of the app's core planner, chat, or weekly coaching flows. If AI cost starts climbing after this change, the most likely source will be higher volume in food scans, supplement scans, form-photo analysis, body scans, or gear identification rather than routine text chat.
+The image-model switch raises the cost ceiling of photo-driven features, but it does not change the cost of the app's core planner, chat, or weekly coaching flows. Deploys and backend restarts should not generate OpenAI traffic. If AI cost climbs after this change, the most likely source is real request volume in scans, chat/check-ins, meal parsing/search fallback, or log-time cold-miss food classification.
 
 ## Estimated Monthly Cost Per User
 

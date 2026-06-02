@@ -6,13 +6,13 @@ Thallo is a premium fitness + nutrition app. React Native (Expo) frontend, FastA
 ## Tech Stack
 - **Frontend**: React Native 0.81.5 / Expo SDK ~54 / expo-router v6 / TypeScript
 - **Backend**: FastAPI + SQLModel + PostgreSQL 16 (Docker)
-- **AI**: OpenAI `gpt-4o-mini` — meal skeletons, coach chat, food scanning, in-workout set review, food classification fallback, first-time weight rec. **Workout planner is fully deterministic.**
+- **AI**: OpenAI `gpt-4o-mini` — meal skeletons, coach chat, food scanning, in-workout set review, food classification (NOVA processing tier + quality flags, authoritative), first-time weight rec. **Workout planner is fully deterministic.**
 - **External data**: USDA FoodData Central (nutrition, incl. added sugars #1235), wger.de (exercise images/search)
 
 ## Core Invariants
 These rules apply to every change:
 
-1. **Workout planner is deterministic.** No AI in exercise selection, split logic, or weekly recipe. AI plan review is PERMANENTLY DISABLED (`PLAN_REVIEW_ENABLED=0` is a no-op).
+1. **Workout planner is deterministic.** No AI in exercise selection, split logic, or weekly recipe. AI plan review is REMOVED — the former `plan_review.py` / `plan_ai_regenerate.py` were deleted; `PLAN_REVIEW_ENABLED` is a no-op.
 2. **DB is source of truth.** Front-page schedule = active `PlanWeek` + 7 `PlanDay` rows. Legacy `WorkoutPlan` / `NutritionPlan` tables remain for the AI artifact + nutrition templates. AsyncStorage is a hot cache only used when backend is unreachable; on conflict, DB wins.
 3. **PlanWeek is fixed for 7 days.** No mid-week regeneration. Past days accumulate as done / skipped, today is highlighted, forward days remain queued. New PlanWeek auto-generates only when `end_date < today` (auto-renew). The legacy daily fresh-day regen on app open is **removed**.
 4. **AI can only do what the user can do.** Recommendations mutate `UserPreferences` / `UserCoachingState` / `UserDayState` — never the active `PlanWeek` directly. All AI actions route through `POST /coach/apply-action`.
@@ -23,6 +23,7 @@ These rules apply to every change:
 9. **Fatigue system**: 12 muscle groups, decay-based, recovery/mobility days have NEGATIVE fatigue.
 10. **Warmup prescription is always short + dynamic.** Never long yoga/stretch blocks before heavy lifts.
 11. **PLUS_CARDIO archetypes are injected AFTER adjacency repair** — they share `focus_family` with base lift so adjacency is always preserved.
+12. **Form demos are bundled, not hot-linked.** `assets/exercise-demos/<id>/{0,1}.jpg` ships in the ipa. Resolver runs server-side at seed time, populates `Exercise.demo_exercise_db_id`. Client reads via `src/utils/exerciseDemo.ts` → `src/utils/exerciseDemoAssets.ts` static `require()` map. Never re-introduce `raw.githubusercontent.com` hot-links — they silently fail in production builds.
 
 ## Dev Commands
 ```bash
@@ -44,7 +45,8 @@ USDA_FDC_API_KEY=...
 MODEL_CHAT=gpt-4o-mini
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
-PLAN_REVIEW_ENABLED=0       # no-op — AI plan review permanently disabled
+MODEL_TRANSCRIPTION=gpt-4o-mini-transcribe
+PLAN_REVIEW_ENABLED=0       # no-op — AI plan review removed
 NUTRITION_REVIEW_ENABLED=0  # no-op
 ```
 
@@ -54,8 +56,14 @@ app/                          # Expo router root (_layout.tsx, index.tsx)
 src/
   screens/                    # Auth, Onboarding, Home, ActiveWorkout, Progress, Supplements
   components/                 # NutritionCard, WorkoutCard, FuelingRecoveryCard, FriendsModal, ...
-  utils/                      # swapScoring.ts, nutritionScore.ts, planCacheReset.ts, ...
+  utils/                      # swapScoring.ts, nutritionScore.ts, planCacheReset.ts, exerciseDemo*.ts, ...
+  utils/exerciseDemoAssets.ts # AUTO-GENERATED require() map for bundled form demos — regen via scripts/sync-exercise-demos.sh
   services/api.ts             # All backend API calls
+assets/
+  exercise-demos/             # Bundled free-exercise-db form-demo frames (~21 MB, 174 ids × 2)
+  images/, sounds/            # App imagery + audio cues
+scripts/
+  sync-exercise-demos.sh      # Re-pull form demos + regen exerciseDemoAssets.ts after seed edits
 backend/
   app/
     main.py                   # FastAPI + startup migrations
@@ -63,11 +71,12 @@ backend/
     models.py                 # SQLModel tables
     routers/                  # auth, meals, meta, profile, workouts, coach, social, ai/
     services/
-      workout/                # planner, fatigue, recipes, prescriptions, archetypes, slots, ...
+      workout/                # planner, fatigue, recipes, prescriptions, archetypes, slots, demo_resolver, ...
       nutrition/              # nutrition_score, gut_health, food_classifier, recovery_flags, ...
       coach/                  # checkin_ai, decision_rules, apply_action
       social/                 # digest (pure-function, no DB writes)
-  tests/                      # run_all.py — 21 known pre-existing failures are acceptable baseline
+    data/free_exercise_db.json # Manifest for the demo_resolver (yuhonas/free-exercise-db dump)
+  tests/                      # run_all.py — a few flaky/env-dependent failures vary per run; compare before/after, fix only new failures you introduce
 targets/thallo-watch/         # Apple Watch SwiftUI app
 modules/thallo-watch-bridge/  # WCSession phone bridge
 modules/thallo-healthkit/     # Apple Health read/write
@@ -91,6 +100,8 @@ Read before editing these areas — do not auto-import, consult manually:
 | Nutrition scoring, food classifier, flags | `docs/architecture/nutrition-system.md` |
 | AI coaches, apply-action, intent router | `docs/architecture/ai-coach-system.md` |
 | Apple Watch sync, complications, Siri | `docs/architecture/apple-watch.md` |
+| Wearables — coverage matrix, integration cost | `docs/architecture/wearable-integrations.md` |
+| Importing data from competitor apps | `docs/architecture/data-import.md` |
 | Social / friends / digest | `docs/architecture/social-system.md` |
 | Apple Health / HealthKit / HKDataSummary | `docs/architecture/healthkit.md` |
 | Plan persistence, AsyncStorage, cache | `docs/architecture/plan-persistence.md` |

@@ -36,7 +36,7 @@ def _make_mem_engine():
         UserState, WorkoutPlan, NutritionPlan, FoodMetadata,
         DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal,
         SupplementIngredient, SupplementProduct, SupplementProductIngredient,
-        UserSupplementStack, SupplementLog, SleepLog, SupplementAICache,
+        UserSupplementStack, SupplementLog, SleepLog,
         DailyHealthSnapshot,
     )
     from sqlalchemy.pool import StaticPool
@@ -228,6 +228,25 @@ def test_low_inputs_produce_fatigued_label():
         avg_hrv_ms=20,
     )
     assert r.score < 50, f"expected Fatigued-tier score, got {r.score}"
+
+
+def test_low_sleep_and_hrv_cap_ready_label():
+    """Bad overnight recovery should not still publish as Ready just
+    because nutrition/rest-day/RHR pillars are strong."""
+    print("\n[test] readiness: low sleep + low HRV cap headline")
+    from app.services.readiness.compute import compute_readiness
+    _, s, u = _setup()
+    r = compute_readiness(
+        s, u.id,
+        last_night_sleep_score=45,
+        avg_hrv_ms=20,
+        avg_resting_hr=52,
+        nutrition_adherence_pct=100,
+        use_cache=False,
+    )
+    assert r.score <= 55, f"overnight cap should hold score <=55, got {r.score}"
+    assert r.label != "Ready", f"low sleep+HRV should not label Ready, got {r.label}"
+    assert any(e.get("type") == "overnight_recovery_cap" for e in r.explanations), r.explanations
 
 
 def test_yesterday_strain_credits_rest_day():
@@ -428,15 +447,14 @@ def test_old_sleeplog_row_does_not_count_as_last_night():
 
 
 def test_last_night_sleeplog_row_is_used():
-    """SleepLog row from yesterday's date is the correct source for
+    """SleepLog row from today's waking date is the correct source for
     last night's sleep score."""
-    print("\n[test] readiness: last-night SleepLog row used")
+    print("\n[test] readiness: today's waking-date SleepLog row used")
     from app.services.readiness.compute import compute_readiness
     from app.models import SleepLog
-    from datetime import date, timedelta
+    from datetime import date
     _, s, u = _setup()
-    last_night = date.today() - timedelta(days=1)
-    s.add(SleepLog(user_id=u.id, night_date=last_night, score=82))
+    s.add(SleepLog(user_id=u.id, night_date=date.today(), score=82))
     s.commit()
     # Add another health pillar so we clear the gate.
     r = compute_readiness(s, u.id, avg_hrv_ms=55)

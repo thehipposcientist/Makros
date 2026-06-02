@@ -1,7 +1,7 @@
-.PHONY: start tunnel stop reset-db wait-backend test dev maintenance maintenance-food-micros seed-e2e seed-e2e-recovery-apply \
+.PHONY: start start-fresh tunnel stop reset-db wait-backend test dev maintenance seed-e2e seed-e2e-recovery-apply \
         deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
         smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates \
-        smoke-mobile-plan-adaptation smoke-mobile-preflight smoke-mobile-preflight-fast smoke-mobile-preflight-parallel
+        smoke-mobile-plan-adaptation smoke-mobile-android-platform smoke-mobile-preflight smoke-mobile-preflight-fast smoke-mobile-preflight-parallel
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -19,6 +19,12 @@ MAESTRO_PARALLEL_DEVICE_ARG = $(if $(MAESTRO_PARALLEL_DEVICES),--device "$(MAEST
 # and tools like `npx` / `node` are on PATH.
 SHELL := /bin/zsh
 .SHELLFLAGS := -l -c
+
+# Flags for `npx expo start`. `make start` runs Expo Go over a tunnel with a
+# warm cache (fast, and reaches the phone across networks). `make start-fresh`
+# adds `--clear` for a cold rebuild; `make tunnel` / `make dev` cover the other
+# modes. Drop `--tunnel` here if your phone + Mac are always on the same WiFi.
+EXPO_START_FLAGS ?= --go --tunnel
 
 start:
 	@echo ""
@@ -39,11 +45,15 @@ start:
 	@$(MAKE) wait-backend
 	@echo "      Done."
 	@echo ""
-	@echo "[3/3] Starting Expo (LAN mode)..."
-	@echo "      Scan the QR code with Expo Go on your phone."
-	@echo "      Both devices must be on the same WiFi network."
+	@echo "[3/3] Starting Expo (flags: $(EXPO_START_FLAGS))..."
+	@echo "      Clearing any stale Metro / Expo servers first..."
+	@pkill -f "expo start" 2>/dev/null || true
+	@echo "      Scan the QR with Expo Go (tunnel reaches across networks)."
 	@echo ""
-	npx expo start --clear
+	npx expo start $(EXPO_START_FLAGS)
+
+start-fresh:
+	@$(MAKE) start EXPO_START_FLAGS="--go --clear"
 
 tunnel:
 	@echo ""
@@ -133,12 +143,6 @@ maintenance:
 	@echo ""
 	@docker exec thallo-backend python -m app.maintenance_jobs --all
 
-maintenance-food-micros:
-	@echo ""
-	@echo "Running food micronutrient enrichment..."
-	@echo ""
-	@docker exec thallo-backend python enrich_food_micros.py
-
 seed-e2e:
 	@echo ""
 	@echo "Seeding deterministic E2E personas..."
@@ -184,7 +188,10 @@ deploy-ios:
 	@echo "Building iOS locally..."
 	@echo "(~15-25 min depending on machine. No EAS build credits used.)"
 	@echo ""
-	@eas build --platform ios --profile production --local --non-interactive --output build-latest.ipa
+	@# EAS_SKIP_AUTO_FINGERPRINT: the bare-workflow fingerprint step traverses
+	@# node_modules + native autolinking and stalls for 20+ min on this project.
+	@# We don't use a fingerprint runtimeVersion policy, so skipping is safe.
+	@EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --output build-latest.ipa
 	@echo ""
 	@echo "Build finished. Submitting to TestFlight..."
 	@eas submit --platform ios --path build-latest.ipa --non-interactive
@@ -198,7 +205,7 @@ deploy-ios-clean:
 	@echo "Building iOS locally with --clear-cache (fresh entitlements)..."
 	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"
 	@echo ""
-	@eas build --platform ios --profile production --local --non-interactive --clear-cache --output build-latest.ipa
+	@EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --clear-cache --output build-latest.ipa
 	@echo ""
 	@echo "Build finished. Submitting to TestFlight..."
 	@eas submit --platform ios --path build-latest.ipa --non-interactive
@@ -248,6 +255,14 @@ smoke-mobile-plan-adaptation: seed-e2e-recovery-apply
 	@$(MAESTRO) test .maestro/flows/ppl-history-ordering.yaml
 	@$(MAESTRO) test .maestro/flows/recovery-recommendation-apply.yaml
 
+smoke-mobile-android-platform: seed-e2e
+	@echo "Running Android platform parity Maestro flow (requires backend + Metro or installed Android build)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAESTRO) test .maestro/flows/android-platform-parity.yaml
+
 smoke-mobile-state: seed-e2e
 	@echo "Running Maestro state-mutation E2E flows (requires backend + Metro running)..."
 	@command -v maestro >/dev/null 2>&1 || { \
@@ -269,7 +284,7 @@ smoke-mobile-social: seed-e2e
 
 smoke-mobile-free-gates: seed-e2e
 	@echo "Running Maestro free/pro gate flow."
-	@echo "Make sure Metro was started with: EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1 npx expo start --dev-client"
+	@echo "If beta full access is enabled for this build, start Metro with EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1."
 	@command -v maestro >/dev/null 2>&1 || { \
 	  echo "ERROR: maestro not found. Install with:"; \
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \

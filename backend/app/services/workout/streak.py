@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 
@@ -107,13 +108,23 @@ def compute_streak_summary(
     current_streak = 0
     longest_streak = 0
     run = 0
+    rest_gap = 0
     d = window_start
     while d <= today:
         if d in skipped and d not in completed:
             run = 0
+            rest_gap = 0
         elif d in completed:
             run += 1
-        # else: rest day — no change
+            rest_gap = 0
+        else:
+            # Rest day. Mirror the current_streak walk's gap heuristic
+            # so 3+ consecutive non-completion days break the run — this
+            # prevents an imported Feb streak + 2-month gap + April
+            # streak from collapsing into one continuous run.
+            rest_gap += 1
+            if rest_gap >= 3:
+                run = 0
         if run > longest_streak:
             longest_streak = run
         d = d + timedelta(days=1)
@@ -176,6 +187,7 @@ def _volume_for_week(
         .where(WorkoutSession.workout_date >= start)
         .where(WorkoutSession.workout_date <= end)
         .where(ExerciseSet.completed == True)  # noqa: E712
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     ).all()
     total = 0.0
     for weight, reps in rows:

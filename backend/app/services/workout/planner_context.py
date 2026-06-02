@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from app.models import UserCoachingState
 from app.services.workout.equipment import resolve_owned_equipment_slugs
 from app.services.workout.planner import PlannerInputs
 
@@ -48,6 +50,33 @@ def _resting_hr_int(value: float | int | None) -> int | None:
         return None
 
 
+def _coaching_adjustments_for_planner(db: Session, user_id: int) -> tuple[int, dict | None, int, str | None]:
+    state = db.exec(
+        select(UserCoachingState).where(UserCoachingState.user_id == user_id)
+    ).first()
+    if not state:
+        return 0, None, 0, None
+
+    volume_pct = int(getattr(state, "volume_adjustment_pct", 0) or 0)
+    if state.deload_until_date and state.deload_until_date < date.today():
+        volume_pct = 0
+
+    raw_muscle = getattr(state, "muscle_volume_adjustments", None) or None
+    muscle_adjustments = raw_muscle if isinstance(raw_muscle, dict) else None
+    focused_muscle = None
+    if muscle_adjustments:
+        positive: list[tuple[str, int]] = []
+        for muscle, data in muscle_adjustments.items():
+            pct = int((data or {}).get("pct") or 0) if isinstance(data, dict) else int(data or 0)
+            if pct > 0:
+                positive.append((str(muscle), pct))
+        if positive:
+            focused_muscle = sorted(positive, key=lambda item: item[1], reverse=True)[0][0]
+
+    intensity_pct = int(getattr(state, "intensity_adjustment_pct", 0) or 0)
+    return volume_pct, muscle_adjustments, intensity_pct, focused_muscle
+
+
 def build_planweek_planner_context(
     db: Session,
     user_id: int,
@@ -79,7 +108,21 @@ def build_planweek_planner_context(
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = resolve_owned_equipment_slugs(equipment)
     injuries = active_injury_tokens(profile, prefs)
+    # Severity-aware structured records, if the prefs row carries them.
+    # Filter out any entry without a body part or marked resolved — the
+    # planner ignores those anyway, but keeping the input clean makes
+    # logging less noisy.
+    injuries_structured_raw = getattr(prefs, "injuries_structured", None) or []
+    injuries_structured = [
+        rec for rec in injuries_structured_raw
+        if isinstance(rec, dict)
+        and rec.get("bodyPart")
+        and (rec.get("status") or "active") != "resolved"
+    ]
     disliked = list(getattr(prefs, "disliked_exercises", []) or [])
+    volume_adjustment_pct, muscle_volume_adjustments, intensity_adjustment_pct, coaching_focus = (
+        _coaching_adjustments_for_planner(db, user_id)
+    )
 
     recent_focus_buckets: tuple[str, ...] = ()
     recent_focus_families: tuple[str, ...] = ()
@@ -128,7 +171,9 @@ def build_planweek_planner_context(
         experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
         equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=preferred_split,
+        focused_muscle=getattr(prefs, "focused_muscle", None) or getattr(profile, "focused_muscle", None) or coaching_focus,
         injuries=tuple(injuries),
+        injuries_structured=tuple(injuries_structured),
         disliked_exercises=tuple(disliked),
         rng_seed=user_id,
         recent_focus_buckets=recent_focus_buckets,
@@ -139,6 +184,9 @@ def build_planweek_planner_context(
         day_of_cycle=day_of_cycle,
         cardio_baseline=getattr(prefs, "cardio_baseline", None),
         load_equipment_settings=getattr(prefs, "equipment_settings", None),
+        volume_adjustment_pct=volume_adjustment_pct,
+        muscle_volume_adjustments=muscle_volume_adjustments,
+        intensity_adjustment_pct=intensity_adjustment_pct,
     )
     return PlannerBuildContext(
         inputs=inputs,

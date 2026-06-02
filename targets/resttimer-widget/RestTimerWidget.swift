@@ -78,37 +78,154 @@ private struct LockScreenView: View {
     var accent: Color { Color(hex: state.themeColorHex) }
 
     var body: some View {
-        HStack(spacing: 14) {
-            TimerCircle(state: state, accent: accent)
+        if isCardioMode(state) {
+            CardioLockScreenView(state: state, accent: accent)
+        } else {
+            HStack(spacing: 14) {
+                TimerCircle(state: state, accent: accent)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(isElapsedWorkout(state) ? "WORKOUT" : "REST")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isElapsedWorkout(state) ? "WORKOUT" : "REST")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundStyle(accent)
+                        .tracking(1.5)
+                    Text(state.exerciseName)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(setProgressText(state))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .lineLimit(1)
+                    if hasHeartRateZone(state) {
+                        HeartRateZoneBadge(state: state)
+                    }
+                    Text(statusText(state))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    if #available(iOSApplicationExtension 17.0, *), isRestTimer(state) {
+                        RestAdjustControls(workoutId: workoutId, accent: accent)
+                            .padding(.top, 2)
+                    }
+                }
+                Spacer()
+            }
+        }
+    }
+}
+
+// ─── Cardio lock-screen layout ─────────────────────────────────────
+//
+// Used when state.mode == "cardio". Big elapsed time + distance row
+// up top; pace + HR + calories chips underneath. Designed to read at a
+// glance from the lock screen while the user is running/biking and
+// shouldn't be tapping the screen.
+
+private struct CardioLockScreenView: View {
+    let state: RestTimerAttributes.ContentState
+    let accent: Color
+
+    private var startDate: Date { Date(timeIntervalSince1970: state.startedAtMs / 1000.0) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header row — focus name + sport badge.
+            HStack(spacing: 6) {
+                Text(state.exerciseName.isEmpty ? "CARDIO" : state.exerciseName.uppercased())
                     .font(.system(size: 11, weight: .heavy))
                     .foregroundStyle(accent)
-                    .tracking(1.5)
-                Text(state.exerciseName)
-                    .font(.headline)
-                    .foregroundStyle(.white)
+                    .tracking(1.4)
                     .lineLimit(1)
-                Text(setProgressText(state))
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
+                Spacer()
                 if hasHeartRateZone(state) {
                     HeartRateZoneBadge(state: state)
                 }
-                Text(statusText(state))
-                    .font(.caption.weight(.semibold))
+            }
+
+            // Big elapsed time + distance.
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text(timerInterval: startDate...Date(timeIntervalSinceNow: 60_000),
+                     pauseTime: nil,
+                     countsDown: false,
+                     showsHours: true)
+                    .font(.system(size: 32, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
                     .foregroundStyle(.white)
-                    .lineLimit(2)
-                if #available(iOSApplicationExtension 17.0, *), isRestTimer(state) {
-                    RestAdjustControls(workoutId: workoutId, accent: accent)
-                        .padding(.top, 2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer()
+                Text(distanceLabel(state))
+                    .font(.system(size: 26, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+
+            // Pace + calories chips. Pace honors the user's distance unit
+            // preference (per-mi or per-km).
+            HStack(spacing: 8) {
+                metricChip(label: "PACE", value: paceLabel(state), accent: accent)
+                metricChip(label: "KCAL", value: caloriesLabel(state), accent: .orange)
+                if let bpm = state.heartRate, bpm > 0 {
+                    metricChip(label: "HR", value: "\(bpm)", accent: Color(hex: state.hrZoneColorHex ?? zoneColorHex(state.hrZone)))
                 }
             }
-            Spacer()
         }
     }
+
+    private func metricChip(label: String, value: String, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.system(size: 9, weight: .heavy))
+                .tracking(0.6)
+                .foregroundStyle(.white.opacity(0.6))
+            Text(value)
+                .font(.system(size: 14, weight: .heavy, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(accent)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private func isCardioMode(_ state: RestTimerAttributes.ContentState) -> Bool {
+    return (state.mode ?? "") == "cardio"
+}
+
+private func distanceLabel(_ state: RestTimerAttributes.ContentState) -> String {
+    let meters = state.distanceMeters ?? 0
+    if meters <= 0 { return "—" }
+    let unit = state.distanceUnit ?? "mi"
+    let km = meters / 1000.0
+    let value = unit == "km" ? km : km * 0.6213711922
+    let suffix = unit == "km" ? "km" : "mi"
+    if value < 100 {
+        return String(format: "%.2f %@", value, suffix)
+    }
+    return String(format: "%.0f %@", value, suffix)
+}
+
+private func paceLabel(_ state: RestTimerAttributes.ContentState) -> String {
+    guard let pace = state.paceSecPerKm, pace > 0 else { return "—" }
+    let unit = state.distanceUnit ?? "mi"
+    // sec/km → sec/mi: a mile is 1/0.6213 ≈ 1.609 km, so per-mile pace
+    // is the per-km pace divided by miles-per-km.
+    let secForUnit = unit == "km" ? pace : (pace / 0.6213711922)
+    let minutes = Int(secForUnit) / 60
+    let seconds = Int(secForUnit) % 60
+    let suffix = unit == "km" ? "/km" : "/mi"
+    return String(format: "%d:%02d%@", minutes, seconds, suffix)
+}
+
+private func caloriesLabel(_ state: RestTimerAttributes.ContentState) -> String {
+    let cals = state.activeCalories ?? 0
+    if cals <= 0 { return "—" }
+    return "\(Int(cals.rounded()))"
 }
 
 private struct TimerCircle: View {

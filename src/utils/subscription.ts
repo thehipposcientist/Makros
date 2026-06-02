@@ -6,30 +6,54 @@
 //
 // FREE — manual tracking and starter tools:
 //   - Manual workouts + custom activity logging
-//   - Manual meals, hydration, and meal routines
+//   - Manual meals, hydration, saved meals, meal routines, and supplements
 //   - Weight + body measurements
-//   - Basic history / progress views
-//   - Up to 3 saved workout templates
+//   - Basic history / progress views + friends
+//   - Up to 5 saved workout templates, unlimited saved meals, 7 meal routines
 //
 // PRO — guided planning, AI help, and deeper insights:
-//   - Visible generated workout PlanWeeks + day rebuilds
-//   - AI meal plans, meal swaps, and food lookup
-//   - Food/body/form photo analysis
+//   - Visible generated workout PlanWeeks + day rebuilds + manual week planning
+//   - AI meal plans, meal swaps, food lookup, and supplement lookup
+//   - Food/supplement/equipment/body/form photo analysis
 //   - Coach chat for training + nutrition
-//   - Nutrition scoring, gut insights, weekly digest
+//   - Nutrition scoring, gut/supplement insights, weekly digest
 //   - Readiness, fatigue, sleep, and recovery cards
 
 import type { UserProfile } from '../types';
 import Constants from 'expo-constants';
 import * as core from './subscriptionCore';
-import { FEATURE_LABEL, FREE_MEAL_ROUTINE_LIMIT, FREE_SAVED_MEAL_LIMIT, FREE_WORKOUT_TEMPLATE_LIMIT, type ProFeature, type Tier } from './subscriptionCore';
+import {
+  FEATURE_LABEL,
+  FREE_MEAL_ROUTINE_LIMIT,
+  FREE_SAVED_MEAL_LIMIT,
+  FREE_TIER_CAPABILITIES,
+  FREE_TIER_SUMMARY,
+  FREE_WORKOUT_TEMPLATE_LIMIT,
+  PRO_TIER_CAPABILITIES,
+  PRO_TIER_SUMMARY,
+  SIGNUP_TRIAL_DAYS,
+  isTrialing as coreIsTrialing,
+  subscriptionStatusLabel as coreSubscriptionStatusLabel,
+  trialDaysRemaining as coreTrialDaysRemaining,
+  type ProFeature,
+  type SubscriptionStatus,
+  type Tier,
+  type TierCapability,
+} from './subscriptionCore';
 
 export {
   FREE_MEAL_ROUTINE_LIMIT,
   FREE_SAVED_MEAL_LIMIT,
+  FREE_TIER_CAPABILITIES,
+  FREE_TIER_SUMMARY,
   FREE_WORKOUT_TEMPLATE_LIMIT,
+  PRO_TIER_CAPABILITIES,
+  PRO_TIER_SUMMARY,
+  SIGNUP_TRIAL_DAYS,
   type ProFeature,
+  type SubscriptionStatus,
   type Tier,
+  type TierCapability,
 };
 
 declare const require: (moduleName: string) => any;
@@ -63,8 +87,8 @@ export function canCreateWorkoutTemplate(
   return currentCount < workoutTemplateLimit(profile);
 }
 
-export function savedMealLimit(profile: UserProfile | null | undefined): number {
-  return isPro(profile) ? Infinity : FREE_SAVED_MEAL_LIMIT;
+export function savedMealLimit(_profile: UserProfile | null | undefined): number {
+  return Number.POSITIVE_INFINITY;
 }
 
 export function canCreateSavedMeal(
@@ -90,6 +114,18 @@ export function canUse(profile: UserProfile | null | undefined, _feature: ProFea
 }
 
 export const labelFor = core.labelFor;
+
+export function trialDaysRemaining(profile: UserProfile | null | undefined, nowMs = Date.now()): number {
+  return coreTrialDaysRemaining(profile, nowMs);
+}
+
+export function isTrialing(profile: UserProfile | null | undefined, nowMs = Date.now()): boolean {
+  return !isBetaFullAccessEnabled() && coreIsTrialing(profile, nowMs);
+}
+
+export function subscriptionStatusLabel(profile: UserProfile | null | undefined, nowMs = Date.now()): string {
+  return isBetaFullAccessEnabled() ? 'Pro beta' : coreSubscriptionStatusLabel(profile, nowMs);
+}
 
 /** Gate a pro feature. Returns true if the user can proceed; returns false
  *  AND shows an upgrade alert when they can't. Caller should short-circuit

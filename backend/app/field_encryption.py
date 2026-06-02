@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 ENCRYPTED_JSON_MARKER = "__thallo_encrypted__"
 ENCRYPTED_JSON_VERSION = 1
+ENCRYPTED_TEXT_PREFIX = "__thallo_encrypted_text__:v1:"
 
 
 class FieldEncryptionError(RuntimeError):
@@ -80,3 +81,30 @@ def decrypt_json(value: Any) -> Any:
         return json.loads(plaintext.decode("utf-8"))
     except (InvalidToken, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise FieldEncryptionError("Encrypted payload could not be decrypted") from exc
+
+
+def is_encrypted_text(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(ENCRYPTED_TEXT_PREFIX)
+
+
+def encrypt_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    fernet = _fernet()
+    if fernet is None:
+        return value
+    ciphertext = fernet.encrypt(value.encode("utf-8")).decode("utf-8")
+    return f"{ENCRYPTED_TEXT_PREFIX}{ciphertext}"
+
+
+def decrypt_text(value: str | None) -> str | None:
+    if value is None or not is_encrypted_text(value):
+        return value
+    fernet = _fernet()
+    if fernet is None:
+        raise FieldEncryptionError("Encrypted text cannot be decrypted because field encryption is unavailable")
+    ciphertext = value[len(ENCRYPTED_TEXT_PREFIX):]
+    try:
+        return fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError) as exc:
+        raise FieldEncryptionError("Encrypted text could not be decrypted") from exc

@@ -175,9 +175,18 @@ export default function BodyHeatMap({
   const statusFor = (r: number): string => {
     if (r >= 80) return 'Fresh';
     if (r >= 60) return 'Mostly recovered';
-    if (r >= 40) return 'Moderate fatigue';
-    if (r >= 20) return 'Heavy fatigue';
-    return 'Severely fatigued';
+    if (r >= 40) return 'Moderate recovery';
+    if (r >= 20) return 'Low recovery';
+    return 'Very low recovery';
+  };
+
+  const muscleAccessibilityLabel = (m: HeatMuscleKey): string => {
+    const r = recoveryFor(m);
+    return `${MUSCLE_LABEL[m]}, ${Math.round(r)} percent recovered, ${statusFor(r)}`;
+  };
+
+  const selectMuscle = (m: HeatMuscleKey) => {
+    setSelected(m);
   };
 
   const strokeColor = blend(tc.textMuted, tc.background, 0.38);
@@ -252,6 +261,9 @@ export default function BodyHeatMap({
             <TouchableOpacity
               key={s}
               onPress={() => { setSide(s); setSelected(null); }}
+              accessibilityRole="tab"
+              accessibilityLabel={`${s === 'front' ? 'Front' : 'Back'} muscle view`}
+              accessibilityState={{ selected: side === s }}
               style={{
                 paddingHorizontal: 18, paddingVertical: 6,
                 borderRadius: 7,
@@ -353,7 +365,7 @@ export default function BodyHeatMap({
                         stroke={blend(tc.textPrimary, muscleFill, 0.22)}
                         strokeWidth={1.7}
                         opacity={pulse}
-                        onPress={() => setSelected(m)}
+                        onPress={() => selectMuscle(m)}
                       />
                     </G>
                   );
@@ -366,7 +378,7 @@ export default function BodyHeatMap({
                     stroke={muscleStroke}
                     strokeWidth={strokeW}
                     opacity={0.9}
-                    onPress={() => setSelected(m)}
+                    onPress={() => selectMuscle(m)}
                   />
                 );
               })}
@@ -427,7 +439,9 @@ export default function BodyHeatMap({
           alignItems: 'center',
           borderWidth: 1,
           borderColor: selected ? fillFor(selected) : tc.border,
-        }}>
+        }}
+        accessibilityLiveRegion="polite"
+        accessibilityLabel={selected ? muscleAccessibilityLabel(selected) : 'No muscle selected'}>
           {selected ? (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
@@ -456,6 +470,48 @@ export default function BodyHeatMap({
             </View>
           )}
         </View>
+        <View
+          style={{
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            gap: 6,
+            marginTop: 10,
+            maxWidth: 320,
+          }}>
+          {regions.map(m => {
+            const isSel = selected === m;
+            const tone = fillFor(m);
+            return (
+              <TouchableOpacity
+                key={m}
+                accessibilityRole="button"
+                accessibilityLabel={muscleAccessibilityLabel(m)}
+                accessibilityState={{ selected: isSel }}
+                onPress={() => selectMuscle(m)}
+                activeOpacity={0.76}
+                style={{
+                  minHeight: 44,
+                  paddingHorizontal: 10,
+                  paddingVertical: 7,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: isSel ? tone : tc.border,
+                  backgroundColor: isSel ? tone + '22' : tc.surface,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                <Text style={{
+                  fontSize: 11,
+                  fontWeight: '800',
+                  color: isSel ? tone : tc.textSecondary,
+                }}>
+                  {MUSCLE_LABEL[m]}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
 
       {/* Legend — hidden when the heat map is rendering as an anatomy
@@ -465,7 +521,7 @@ export default function BodyHeatMap({
           {[
             { label: 'Fresh', color: tc.primary },
             { label: 'Moderate', color: tc.warning },
-            { label: 'Fatigued', color: tc.error },
+            { label: 'Low', color: tc.error },
           ].map(l => (
             <View key={l.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
               <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: l.color }} />

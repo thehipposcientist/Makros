@@ -75,12 +75,30 @@ export interface TrainingScoreInput {
 
   // ── Progression signal (optional) ──
   /** True when the user beat their last session's load or reps on at
-   *  least one set. Drives the progression pillar — when missing, that
-   *  pillar collapses to neutral and its weight redistributes. */
+   *  least one set. Used as a fallback when the granular partial-credit
+   *  fields below are not provided. When all progression signals are
+   *  missing the pillar's weight is redistributed onto the present ones. */
   progressionAchieved?: boolean | null;
   /** True when the user hit the prescribed target reps on the prescribed
    *  load at least once. Also feeds the progression pillar. */
   hitTargetLoad?: boolean | null;
+
+  // ── Partial-progression signals (optional) ──
+  // When ANY of these fine-grained signals is provided, scoreProgression
+  // composes them into a weighted score instead of using the binary
+  // progressionAchieved/hitTargetLoad flags. Missing fields fall back
+  // safely to the legacy boolean path so older callers keep working.
+  /** Fractional load increase vs the user's last session for this slot.
+   *  e.g. 0.025 = +2.5% load. Negative or zero = no load progression. */
+  loadGainRatio?: number | null;
+  /** Fractional rep increase at the same load vs last session.
+   *  e.g. 0.10 = +10% reps (e.g. 8 → 9). */
+  repGainRatio?: number | null;
+  /** Extra sets completed vs last session (positive integer). */
+  setsGain?: number | null;
+  /** Reps-in-reserve improvement vs last session (positive = lower RIR
+   *  this time = harder effort at the same prescription). */
+  rirImprovement?: number | null;
 
   // ── Interval-specific ──
   /** For HIIT/intervals: completed intervals ÷ planned intervals. Falls
@@ -314,7 +332,7 @@ export function archetypeFromWorkout(
   // Mobility / recovery — earliest exit so 'recovery + cardio' label
   // doesn't leak into a cardio archetype.
   if (s === 'recovery' || s === 'mobility' || s === 'stretch') return 'mobility_recovery';
-  if (/recover|rest|mobil|stretch|yoga|flow/.test(f)) return 'mobility_recovery';
+  if (/recover|rest|mobil|stretch|yoga|pilates|flow/.test(f)) return 'mobility_recovery';
 
   // Cardio / conditioning
   const isCardio = s === 'conditioning' || /cardio|zone|interval|sprint|tempo|run|bike|swim|row|hiit/.test(f);
@@ -355,10 +373,32 @@ function _legacyFocusKindToArchetype(
 //
 // Each scorer takes the input + the pillar's effective max (after weight
 // distribution) and returns { points, present, insight? }. `present` is
-// false when the underlying signal is missing — the engine then strips
-// the pillar and redistributes its weight.
+// false when the underlying signal is missing — the engine then collapses
+// the pillar to ZERO and redistributes its weight onto the present
+// pillars (capped). The `points` value returned for an absent pillar is
+// therefore irrelevant to the final score in the normal case (mixed
+// presence) and only matters in the rare all-absent fallback path.
 
 type PillarResult = { points: number; present: boolean; insight?: string };
+
+/** Z2 weighted compliance — Z2 drives the score, Z1 receives partial
+ *  credit, Z3+ subtracts. Returns a value in [0, 1] suitable for
+ *  multiplying by a pillar max. The composition is deliberately strict
+ *  because a "Zone 2" session that's actually mostly Z1 is a leisure
+ *  walk and a "Zone 2" session that's actually mostly Z3+ is a tempo —
+ *  neither should score like proper Zone 2. */
+function weightedZ2Compliance(zones: [number, number, number, number, number] | null | undefined): number | null {
+  if (!zones) return null;
+  const total = zones.reduce((a, b) => a + b, 0);
+  if (total <= 0) return null;
+  const z1 = zones[0] / total;
+  const z2 = zones[1] / total;
+  const z3plus = (zones[2] + zones[3] + zones[4]) / total;
+  // Z2 = 1.0 weight, Z1 = 0.4 (partial credit), Z3+ = -1.0 (penalty).
+  // Pure Z2 → 1.0; pure Z1 → 0.4; pure Z3+ → -1.0 (clamped to 0).
+  const raw = z2 * 1.0 + z1 * 0.4 - z3plus * 1.0;
+  return clamp(raw, 0, 1);
+}
 
 function scoreStimulus(input: TrainingScoreInput, archetype: TrainingScoreArchetype, max: number): PillarResult {
   // Lifting: stimulus = "did you complete the prescribed work"?
@@ -371,11 +411,16 @@ function scoreStimulus(input: TrainingScoreInput, archetype: TrainingScoreArchet
     const exRatio = (input.exercisesPlanned && input.exercisesPlanned > 0)
       ? clamp((input.exercisesCompleted ?? 0) / input.exercisesPlanned, 0, 1.1)
       : null;
-    const targetBonus = input.hitTargetLoad ? 0.1 : 0;
     if (setsRatio == null && exRatio == null) {
-      return { points: Math.round(max * 0.6), present: false };
+      // No completion data at all — defer to redistribution.
+      return { points: 0, present: false };
     }
-    const blended = ((setsRatio ?? 0.7) + (exRatio ?? 0.7)) / 2 + targetBonus;
+    // Stimulus is purely "did the prescribed work happen" — set + ex
+    // completion. The previous implementation also added a +10% bump
+    // for hitTargetLoad, but hitTargetLoad already feeds the
+    // progression pillar; folding it into stimulus too was a hidden
+    // double count that pushed mediocre PR-less sessions past Crushed.
+    const blended = ((setsRatio ?? 0.7) + (exRatio ?? 0.7)) / 2;
     return {
       points: ratioPoints(blended, max),
       present: true,
@@ -392,7 +437,7 @@ function scoreStimulus(input: TrainingScoreInput, archetype: TrainingScoreArchet
       ? clamp((input.exercisesCompleted ?? 0) / input.exercisesPlanned, 0, 1.1)
       : null;
     if (setsRatio == null && exRatio == null) {
-      return { points: Math.round(max * 0.6), present: false };
+      return { points: 0, present: false };
     }
     const blended = ((setsRatio ?? 0.7) + (exRatio ?? 0.7)) / 2;
     return { points: ratioPoints(blended, max), present: true };
@@ -413,12 +458,12 @@ function scoreStimulus(input: TrainingScoreInput, archetype: TrainingScoreArchet
   if (input.selfIntensity != null) {
     return { points: ratioPoints(clamp(input.selfIntensity, 1, 5) / 5, max), present: true };
   }
-  return { points: Math.round(max * 0.6), present: false };
+  return { points: 0, present: false };
 }
 
 function scoreVolume(input: TrainingScoreInput, max: number): PillarResult {
   if (input.setsCompleted == null || input.setsPlanned == null || input.setsPlanned <= 0) {
-    return { points: Math.round(max * 0.6), present: false };
+    return { points: 0, present: false };
   }
   const ratio = input.setsCompleted / input.setsPlanned;
   let insight: string | undefined;
@@ -429,35 +474,66 @@ function scoreVolume(input: TrainingScoreInput, max: number): PillarResult {
 }
 
 function scoreDuration(input: TrainingScoreInput, archetype: TrainingScoreArchetype, max: number): PillarResult {
+  // Duration's role is mostly defensive — it should penalize obviously
+  // too-short or extremely long sessions, NOT inflate a mediocre
+  // workout's score just because the user lasted a long time. Bands
+  // below cap the maximum duration contribution at ~0.90 × pillar_max
+  // (sweet spot only) and ~0.85 × pillar_max for the wider in-window
+  // band, leaving the last sliver of the score to be earned by the
+  // other pillars actually doing the work.
   if (!input.actualDurationSec || input.actualDurationSec <= 0) {
-    return { points: Math.round(max * 0.6), present: false };
+    return { points: 0, present: false };
   }
+  // Strength-style archetypes get more headroom on the over-side because
+  // longer rest periods are legitimate (rest 4 min between heavy triples).
+  const isStrengthLike = archetype === 'strength_lift';
   if (!input.estimatedDurationSec || input.estimatedDurationSec <= 0) {
     const min = input.actualDurationSec / 60;
-    if (min >= 45) return { points: max, present: true };
-    if (min >= 30) return { points: Math.round(max * 0.85), present: true };
-    if (min >= 15) return { points: Math.round(max * 0.6), present: true };
-    if (min >= 5)  return { points: Math.round(max * 0.3), present: true };
-    return { points: Math.round(max * 0.1), present: true };
+    if (min >= 60) return { points: Math.round(max * 0.85), present: true };
+    if (min >= 40) return { points: Math.round(max * 0.75), present: true };
+    if (min >= 25) return { points: Math.round(max * 0.65), present: true };
+    if (min >= 15) return { points: Math.round(max * 0.50), present: true };
+    if (min >= 5)  return { points: Math.round(max * 0.30), present: true };
+    return { points: Math.round(max * 0.10), present: true, insight: 'Very short session' };
   }
   const ratio = input.actualDurationSec / input.estimatedDurationSec;
-  // Strength-style archetypes don't penalize going OVER (more rest is
-  // fine if duration is reasonable).
-  const overTolerance = archetype === 'strength_lift' ? 1.40 : 1.20;
+  const longSweetUpper = isStrengthLike ? 1.10 : 1.10;
+  const longGoodUpper  = isStrengthLike ? 1.50 : 1.25;
+  const longOkUpper    = isStrengthLike ? 1.80 : 1.50;
   let insight: string | undefined;
   let pts: number;
-  if (ratio >= 0.85 && ratio <= overTolerance) pts = max;
-  else if (ratio > overTolerance) pts = Math.round(max * 0.85);
-  else if (ratio >= 0.70) pts = Math.round(max * 0.80);
-  else if (ratio >= 0.55) pts = Math.round(max * 0.55);
-  else if (ratio >= 0.40) { pts = Math.round(max * 0.30); insight = 'Cut session short'; }
-  else { pts = Math.round(max * 0.10); insight = 'Very short session'; }
+  if (ratio >= 0.95 && ratio <= longSweetUpper) {
+    // Sweet spot — but cap at 0.90 so a long workout can't carry the
+    // score by itself. The remaining 10% of this pillar's max requires
+    // the other pillars to also be present and high.
+    pts = Math.round(max * 0.90);
+  } else if (ratio >= 0.85 && ratio < 0.95) {
+    pts = Math.round(max * 0.80);
+  } else if (ratio > longSweetUpper && ratio <= longGoodUpper) {
+    pts = Math.round(max * 0.75);
+  } else if (ratio >= 0.70 && ratio < 0.85) {
+    pts = Math.round(max * 0.65);
+  } else if (ratio > longGoodUpper && ratio <= longOkUpper) {
+    pts = Math.round(max * 0.55);
+    insight = 'Session ran much longer than planned';
+  } else if (ratio >= 0.55 && ratio < 0.70) {
+    pts = Math.round(max * 0.45);
+  } else if (ratio >= 0.40 && ratio < 0.55) {
+    pts = Math.round(max * 0.25);
+    insight = 'Cut session short';
+  } else if (ratio > longOkUpper) {
+    pts = Math.round(max * 0.30);
+    insight = 'Session ran far longer than planned';
+  } else {
+    pts = Math.round(max * 0.10);
+    insight = 'Very short session';
+  }
   return { points: pts, present: true, insight };
 }
 
 function scoreConsistency(input: TrainingScoreInput, max: number): PillarResult {
   if (input.exercisesCompleted == null || input.exercisesPlanned == null || input.exercisesPlanned <= 0) {
-    return { points: Math.round(max * 0.6), present: false };
+    return { points: 0, present: false };
   }
   const ratio = input.exercisesCompleted / input.exercisesPlanned;
   let insight: string | undefined;
@@ -467,9 +543,59 @@ function scoreConsistency(input: TrainingScoreInput, max: number): PillarResult 
 }
 
 function scoreProgression(input: TrainingScoreInput, max: number): PillarResult {
-  // Both signals optional — when both null, neutral fallback.
+  // Detailed signals win when ANY of them is provided — they let us
+  // award partial credit for added load, added reps, added sets, or
+  // improved RIR rather than the binary "did you set a PR" flag.
+  // Falls back to the legacy progressionAchieved/hitTargetLoad path
+  // so callers that don't compute the granular fields keep working.
+  const hasDetailed =
+    input.loadGainRatio != null ||
+    input.repGainRatio != null ||
+    input.setsGain != null ||
+    input.rirImprovement != null;
+
+  if (hasDetailed) {
+    let score = 0;
+    // Maintaining the prescribed target is non-trivial — reward it
+    // before any PR bonuses so a user holding a tough load still
+    // scores meaningfully on this pillar.
+    if (input.hitTargetLoad === true) score += 0.40;
+    // Load gain is the most weighted signal — +1% load → +10pts,
+    // with a 50pt cap so a single PR doesn't dominate.
+    if (input.loadGainRatio != null && input.loadGainRatio > 0) {
+      score += Math.min(0.50, input.loadGainRatio * 10);
+    }
+    // Reps at the same load — +5% reps (e.g. 10 → 10.5) → +30pts.
+    if (input.repGainRatio != null && input.repGainRatio > 0) {
+      score += Math.min(0.30, input.repGainRatio * 6);
+    }
+    // Extra sets — +1 set → +5pts, capped at +15pts so a user who
+    // pads volume with extra back-off sets doesn't gain unbounded credit.
+    if (input.setsGain != null && input.setsGain > 0) {
+      score += Math.min(0.15, input.setsGain * 0.05);
+    }
+    // RIR improvement — went deeper into the tank for the same
+    // prescription. -1 RIR → +10pts, capped at +20pts.
+    if (input.rirImprovement != null && input.rirImprovement > 0) {
+      score += Math.min(0.20, input.rirImprovement * 0.10);
+    }
+    const finalScore = Math.min(1.0, score);
+    const noProgressionAtAll =
+      score === 0 ||
+      (input.hitTargetLoad === false && score < 0.05);
+    return {
+      points: Math.round(finalScore * max),
+      present: true,
+      insight: noProgressionAtAll
+        ? 'No progression vs last session'
+        : (finalScore >= 0.85 ? undefined : undefined),
+    };
+  }
+
+  // Legacy fallback — both binary flags optional. When BOTH are null,
+  // collapse the pillar so its weight redistributes onto present ones.
   if (input.progressionAchieved == null && input.hitTargetLoad == null) {
-    return { points: Math.round(max * 0.6), present: false };
+    return { points: 0, present: false };
   }
   let pts = 0;
   if (input.progressionAchieved) pts += Math.round(max * 0.6);
@@ -482,20 +608,28 @@ function scoreProgression(input: TrainingScoreInput, max: number): PillarResult 
 }
 
 function scoreZoneCompliance(input: TrainingScoreInput, max: number): PillarResult {
-  // Z2 cardio: target 70%+ of time in Z1+Z2. Going into Z3+ HURTS — the
-  // user is overshooting the prescribed easy-aerobic stimulus.
-  const lowRatio = z1z2Ratio(input.hrZoneMinutes);
-  if (lowRatio == null) {
-    return { points: Math.round(max * 0.6), present: false };
+  // Zone 2 cardio — Z2 drives the score, Z1 only receives partial
+  // credit, Z3+ subtracts. Replaces the old (Z1+Z2)/total formula
+  // which incorrectly treated a leisure walk (mostly Z1) the same
+  // as a clean Z2 base ride.
+  const compliance = weightedZ2Compliance(input.hrZoneMinutes);
+  if (compliance == null) {
+    return { points: 0, present: false };
   }
+  const zones = input.hrZoneMinutes!;
+  const total = zones.reduce((a, b) => a + b, 0);
+  const z1 = zones[0] / total;
+  const z2 = zones[1] / total;
+  const z3plus = (zones[2] + zones[3] + zones[4]) / total;
   let insight: string | undefined;
-  let pts: number;
-  if (lowRatio >= 0.85) pts = max;
-  else if (lowRatio >= 0.75) pts = Math.round(max * 0.85);
-  else if (lowRatio >= 0.65) pts = Math.round(max * 0.70);
-  else if (lowRatio >= 0.50) { pts = Math.round(max * 0.50); insight = 'Drifted out of Zone 2 — keep effort easy'; }
-  else { pts = Math.round(max * 0.30); insight = 'Too much Z3+ — this was a tempo workout, not Zone 2'; }
-  return { points: pts, present: true, insight };
+  if (z3plus >= 0.30) {
+    insight = 'Too much Z3+ — this was tempo, not Zone 2';
+  } else if (z2 < 0.50 && z1 >= 0.50) {
+    insight = 'Mostly Z1 — easier than Zone 2 should be';
+  } else if (compliance < 0.60) {
+    insight = 'Drifted out of Zone 2 — keep effort steady';
+  }
+  return { points: Math.round(compliance * max), present: true, insight };
 }
 
 function scoreIntervalIntensity(input: TrainingScoreInput, max: number): PillarResult {
@@ -511,7 +645,7 @@ function scoreIntervalIntensity(input: TrainingScoreInput, max: number): PillarR
     if (input.selfIntensity != null) {
       return { points: ratioPoints(clamp(input.selfIntensity, 1, 5) / 5, max), present: true };
     }
-    return { points: Math.round(max * 0.6), present: false };
+    return { points: 0, present: false };
   }
   const ratio = z3p / 0.45;
   if (ratio >= 1.10) return { points: max, present: true };
@@ -531,7 +665,7 @@ function scoreWorkRestCompletion(input: TrainingScoreInput, max: number): Pillar
   if (input.setsPlanned && input.setsPlanned > 0 && input.setsCompleted != null) {
     return { points: ratioPoints(input.setsCompleted / input.setsPlanned, max), present: true };
   }
-  return { points: Math.round(max * 0.6), present: false };
+  return { points: 0, present: false };
 }
 
 function scoreMovementCompletion(input: TrainingScoreInput, max: number): PillarResult {
@@ -540,16 +674,17 @@ function scoreMovementCompletion(input: TrainingScoreInput, max: number): Pillar
   if (input.exercisesPlanned && input.exercisesPlanned > 0 && input.exercisesCompleted != null) {
     return { points: ratioPoints(input.exercisesCompleted / input.exercisesPlanned, max), present: true };
   }
-  return { points: Math.round(max * 0.6), present: false };
+  return { points: 0, present: false };
 }
 
 function scoreLowIntensityCompliance(input: TrainingScoreInput, max: number): PillarResult {
   // Mobility/recovery: stay in Z1+Z2. High HR = the user didn't actually
-  // recover. When HR data is missing, give neutral credit (the user
-  // probably stayed easy).
+  // recover. When HR data is missing, the pillar's weight redistributes
+  // onto the present pillars — we don't fake a "probably stayed easy"
+  // credit because that mistakenly rewards sessions we have no data on.
   const lowRatio = z1z2Ratio(input.hrZoneMinutes);
   if (lowRatio == null) {
-    return { points: Math.round(max * 0.7), present: false };
+    return { points: 0, present: false };
   }
   if (lowRatio >= 0.90) return { points: max, present: true };
   if (lowRatio >= 0.75) return { points: Math.round(max * 0.85), present: true };
@@ -566,7 +701,7 @@ function scoreHr(input: TrainingScoreInput, max: number): PillarResult {
     if (input.selfIntensity != null) {
       return { points: ratioPoints(clamp(input.selfIntensity, 1, 5) / 5, max), present: true };
     }
-    return { points: Math.round(max * 0.6), present: false };
+    return { points: 0, present: false };
   }
   const ratio = z3p / 0.50;
   return { points: ratioPoints(ratio, max), present: true };
@@ -662,8 +797,11 @@ export function computeTrainingScore(input: TrainingScoreInput): TrainingScore {
       });
     }
   } else {
-    // Either everything's present, or everything's absent (rare). Use
-    // raw points — absent pillars already returned a 60% neutral.
+    // Either everything's present, or everything's absent. Absent
+    // pillars now return 0 points (the previous "60% neutral" was
+    // misleading — it only ever surfaced in the rare all-absent
+    // edge case, where 0 is the honest answer: we can't score what
+    // we can't measure).
     for (const s of scored) {
       total += s.result.points;
       breakdown.push({
@@ -677,8 +815,12 @@ export function computeTrainingScore(input: TrainingScoreInput): TrainingScore {
   }
 
   const score = Math.round(clamp(total, 0, 100));
+  // Crushed raised from 85 → 90 so the top tier actually means
+  // "this was a great session" rather than "you showed up and did
+  // most of the work." Solid covers the broad great-but-not-perfect
+  // range (65-89), Light is a mild day, Below is mostly missed work.
   const rating: TrainingScore['rating'] =
-    score >= 85 ? 'Crushed' :
+    score >= 90 ? 'Crushed' :
     score >= 65 ? 'Solid' :
     score >= 45 ? 'Light' : 'Below';
 
@@ -741,7 +883,7 @@ export function focusKindFromName(focus: string | null | undefined, stimulus?: s
   }
   const f = (focus || '').toLowerCase();
   if (/recover|rest/.test(f)) return 'recovery';
-  if (/mobil|stretch|yoga|flow/.test(f)) return 'mobility';
+  if (/mobil|stretch|yoga|pilates|flow/.test(f)) return 'mobility';
   if (/cardio|zone|interval|sprint|tempo|run|bike|swim|row/.test(f)) {
     if (/\+/.test(f)) return 'mixed';
     return 'cardio';

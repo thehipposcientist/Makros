@@ -71,14 +71,14 @@ def _make_mem_engine():
     return engine
 
 
-def _insert_user(session, *, email: str = "injury_http@example.com"):
+def _insert_user(session, *, email: str = "injury_http@example.com", subscription_tier: str = "pro"):
     from app.models import User
 
     user = User(
         email=email,
         username=email.split("@")[0],
         hashed_password="x",
-        subscription_tier="pro",
+        subscription_tier=subscription_tier,
     )
     session.add(user)
     session.commit()
@@ -309,6 +309,33 @@ def test_start_new_week_http_uses_stored_injuries_for_plan_days() -> None:
     )
 
     _ok("stored injuries flow into PlanWeek generation and persisted PlanDays")
+
+
+def test_injury_conflicts_blocks_free_users_before_plan_lookup() -> None:
+    print("\n[test] HTTP /workouts/injury-conflicts blocks free users")
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    engine = _make_mem_engine()
+    with Session(engine) as session:
+        user = _insert_user(
+            session,
+            email="injury_conflict_free@example.com",
+            subscription_tier="free",
+        )
+        user_id = user.id
+
+    client = TestClient(_make_test_app(engine, user_id))
+    response = client.post(
+        "/workouts/injury-conflicts",
+        json={"structured_injuries": [], "legacy_injuries": ["shoulder"]},
+    )
+
+    assert response.status_code == 403, (
+        f"expected free injury-conflicts call to be gated, got {response.status_code}: "
+        f"{response.text[:300]}"
+    )
+    _ok("free users are blocked before active PlanWeek conflict lookup")
 
 
 if __name__ == "__main__":

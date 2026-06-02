@@ -657,6 +657,39 @@ def test_equipment_label_for_loaded_movement_with_optional_required_flag() -> No
     _ok("pushups → bodyweight (correctly)")
 
 
+def test_preacher_curl_label_selects_owned_implement() -> None:
+    """Supported curl-pad movements need both the support and a concrete
+    implement in the planned label so users know what to pick up."""
+    print("\n[test] preacher curl label chooses owned implement")
+    from app.services.workout.planner import _equipment_label, build_planner_exercise
+    from app.services.workout.prescriptions import Prescription
+
+    preacher = next(e for e in SEED_EXERCISES if e.get("slug") == "preacher_curl")
+
+    db_label = _equipment_label(preacher, {"preacher_bench", "dumbbells"})
+    assert db_label == "dumbbells, preacher_bench", db_label
+
+    bb_label = _equipment_label(preacher, {"preacher_bench", "barbell"})
+    assert bb_label == "barbell, preacher_bench", bb_label
+
+    ez_label = _equipment_label(preacher, {"preacher_bench", "ez_curl_bar", "dumbbells"})
+    assert ez_label == "ez_curl_bar, preacher_bench", ez_label
+
+    out = build_planner_exercise(
+        preacher,
+        prescription=Prescription(sets=3, reps="10-12", rest_seconds=60, rir_target=2.0),
+        slot_label="Biceps Isolation",
+        role="isolation",
+        archetype_value="lift_pull",
+        training_type="strength",
+        goal_bucket="muscle_gain",
+        experience="intermediate",
+        owned_equipment_slugs={"preacher_bench", "dumbbells"},
+    )
+    assert out["equipment"] == "dumbbells, preacher_bench"
+    _ok("preacher curl labels include the selected curl implement")
+
+
 # ─── Phase 2a — continuity (history familiarity) ────────────────────────────
 
 
@@ -866,6 +899,34 @@ def test_progression_anchor_uses_top_working_weight_not_last_set() -> None:
     _ok(f"225×3 + 185×2 back-off → next={weight} (anchored on top set)")
 
 
+def test_progression_reacclimates_stale_top_range_history() -> None:
+    """Top-of-range sets from two months ago should not trigger a load increase."""
+    from datetime import date, timedelta
+    print("\n[test] stale top-range history → reacclimation, not progression")
+    plan_ex = {
+        "name": "Barbell Squat",
+        "sets": 3,
+        "reps": "6-8",
+        "_slug": "barbell_squat",
+        "_role": "primary",
+    }
+    prescription = _build_synthetic_prescription(plan_ex)
+    performed_on = date.today() - timedelta(days=60)
+    last_sets = [
+        SetResult(set_number=1, weight_lbs=225.0, reps=8, performed_on=performed_on),
+        SetResult(set_number=2, weight_lbs=225.0, reps=8, performed_on=performed_on),
+        SetResult(set_number=3, weight_lbs=225.0, reps=8, performed_on=performed_on),
+    ]
+    weight, action, reason = recommend_next_session_load(
+        WorkoutProgressionEngine(), _profile(), _ctx(), prescription, last_sets,
+        prescribed_rep_range=(6, 8),
+    )
+    assert action == "decrease", f"expected reacclimation decrease, got {action} — {reason}"
+    assert weight is not None and weight < 225.0, f"stale top sets should not increase, got {weight}"
+    assert "reacclimation" in reason.lower(), reason
+    _ok(f"225 lb from 60d ago → {weight} lb ({reason})")
+
+
 def test_progression_safety_override_on_pain() -> None:
     """A pain feedback flag overrides everything else and reduces 10%."""
     print("\n[test] PAIN feedback → 10% reduction safety override")
@@ -1048,6 +1109,182 @@ def test_recommender_confidence_single_session_below_075() -> None:
     _ok(f"1-session exact_history confidence={rec.confidence}")
 
 
+def test_recommender_downshifts_two_month_old_exact_history() -> None:
+    """A stale exact lift should be a reacclimation anchor, not a current max."""
+    from datetime import date, timedelta
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.performance import ExercisePerformance
+    print("\n[test] two-month-old exact history → lighter reacclimation load")
+    target = {
+        "slug": "barbell_back_squat",
+        "name": "Barbell Back Squat",
+        "primary_muscle": "quads",
+        "movement_pattern": "squat",
+        "equipment_bucket": "barbell",
+        "is_compound": True,
+        "is_machine": False,
+    }
+    fresh = ExercisePerformance(
+        slug="barbell_back_squat",
+        name="Barbell Back Squat",
+        session_count=4,
+        recent_top_weight_lbs=225.0,
+        recent_top_reps=8,
+        estimated_1rm_lbs=285.0,
+        recent_volume_load=5400.0,
+        last_performed_on=date.today(),
+        confidence=0.67,
+    )
+    stale = ExercisePerformance(
+        **{**fresh.__dict__, "last_performed_on": date.today() - timedelta(days=60)}
+    )
+    fresh_rec = recommend_starting_weight(
+        target,
+        profiles={"barbell_back_squat": fresh},
+        all_exercises_by_slug={"barbell_back_squat": target},
+        target_reps="6-8",
+        experience="intermediate",
+    )
+    stale_rec = recommend_starting_weight(
+        target,
+        profiles={"barbell_back_squat": stale},
+        all_exercises_by_slug={"barbell_back_squat": target},
+        target_reps="6-8",
+        experience="intermediate",
+    )
+    assert stale_rec.source == "exact_history"
+    assert stale_rec.weight_lbs < fresh_rec.weight_lbs, (fresh_rec, stale_rec)
+    assert stale_rec.confidence <= 0.55, stale_rec
+    assert "reacclimation" in stale_rec.reason.lower(), stale_rec.reason
+    _ok(f"fresh {fresh_rec.weight_lbs} lb → stale {stale_rec.weight_lbs} lb")
+
+
+def test_lat_pull_down_alias_resolves_to_lat_pulldown() -> None:
+    """Gym-floor spelling with a space ("pull down") should resolve to the
+    canonical lat pulldown seed row so history does not fragment."""
+    from app.services.workout.exercise_metadata import resolve_seed_exercise_slug
+    print("\n[test] Lat Pull Down alias → lat_pulldown")
+    assert resolve_seed_exercise_slug("Lat Pull Down") == "lat_pulldown"
+    _ok("Lat Pull Down resolves to canonical lat_pulldown")
+
+
+def test_assisted_pullup_weight_does_not_transfer_to_lat_pulldown() -> None:
+    """Assisted pull-up stack weight is assistance, not resistance. It must
+    not transfer through vertical_pull into a lat pulldown recommendation."""
+    from datetime import date
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.performance import ExercisePerformance
+    print("\n[test] assisted pull-up assistance load does not transfer to lat pulldown")
+    target = {
+        "slug": "lat_pulldown",
+        "name": "Lat Pulldown",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "vertical_pull",
+        "is_compound": True,
+        "is_machine": True,
+        "substitution_group": "vertical_pull_machine",
+    }
+    assisted = {
+        "slug": "assisted_pullup",
+        "name": "Assisted Pull-up",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "vertical_pull",
+        "is_compound": True,
+        "is_machine": True,
+        "substitution_group": "vertical_pull_assisted",
+        "load_semantics": "assistance",
+    }
+    profile = ExercisePerformance(
+        slug="assisted_pullup",
+        name="Assisted Pull-up",
+        session_count=2,
+        recent_top_weight_lbs=125.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=166.7,
+        recent_volume_load=2500.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    rec = recommend_starting_weight(
+        target,
+        profiles={"assisted_pullup": profile},
+        all_exercises_by_slug={
+            "lat_pulldown": target,
+            "assisted_pullup": assisted,
+        },
+        target_reps="8-12",
+        experience="intermediate",
+    )
+    assert rec.source == "default", f"assistance load leaked via {rec.source}: {rec}"
+    _ok("assisted pull-up assistance ignored as a lat pulldown anchor")
+
+
+def test_band_only_spanish_squat_has_no_numeric_load_recommendation() -> None:
+    """Band-only movements should not inherit squat pounds or emit weighted
+    set schemes even when stale plan/history anchors are present."""
+    from datetime import date
+    from app.services.workout.exercise_metadata import set_programming_exercise_metadata, uses_numeric_load
+    from app.services.workout.performance import ExercisePerformance
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.set_programming import build_set_scheme, load_increment_for
+    print("\n[test] Spanish Squat is band-only, no numeric load")
+    spanish = set_programming_exercise_metadata(
+        None,
+        "Spanish Squat",
+        "spanish_squat",
+        "resistance_bands",
+        "quads",
+    )
+    barbell_squat = {
+        "slug": "barbell_back_squat",
+        "name": "Barbell Back Squat",
+        "primary_muscle": "quads",
+        "equipment_bucket": "barbell",
+        "movement_pattern": "squat",
+        "is_compound": True,
+    }
+    profile = ExercisePerformance(
+        slug="barbell_back_squat",
+        name="Barbell Back Squat",
+        session_count=4,
+        recent_top_weight_lbs=185.0,
+        recent_top_reps=8,
+        estimated_1rm_lbs=234.3,
+        recent_volume_load=4440.0,
+        last_performed_on=date.today(),
+        confidence=0.77,
+    )
+    rec = recommend_starting_weight(
+        spanish,
+        profiles={"barbell_back_squat": profile},
+        all_exercises_by_slug={
+            "spanish_squat": spanish,
+            "barbell_back_squat": barbell_squat,
+        },
+        target_reps="10-15",
+        experience="intermediate",
+    )
+    scheme = build_set_scheme(
+        spanish,
+        total_sets=3,
+        reps="10-15",
+        rir_target=2.0,
+        target_weight_lbs=140.0,
+        goal_bucket="muscle_gain",
+        role="primary",
+        experience="intermediate",
+    )
+    assert uses_numeric_load(spanish) is False
+    assert load_increment_for(spanish) == 0.0
+    assert rec.weight_lbs == 0.0, rec
+    assert all(s.target_weight_lbs is None for s in scheme), scheme
+    _ok("Spanish Squat ignores transferred squat loads and stale 140 lb targets")
+
+
 def test_recommender_uses_signup_strength_anchor_for_exact_lift() -> None:
     """Signup strength baselines should beat generic category defaults while
     staying labeled separately from real workout history."""
@@ -1161,6 +1398,169 @@ def test_recommender_converts_row_loads_between_total_and_per_dumbbell() -> None
     _ok(f"T-bar 110 total -> DB {db_from_tbar.weight_lbs} each; DB 55 each -> T-bar {tbar_from_db.weight_lbs} total")
 
 
+def test_recommender_converts_single_arm_cable_row_per_side() -> None:
+    """Single-arm cable rows use one handle/side, while seated cable rows
+    use the bilateral stack total. They must not direct-swap the same load."""
+    from datetime import date
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.performance import ExercisePerformance
+
+    print("\n[test] cable row transfer separates bilateral stack vs single-handle load")
+    seated = {
+        "slug": "seated_cable_row",
+        "name": "Seated Cable Row",
+        "primary_muscle": "back",
+        "movement_pattern": "horizontal_pull",
+        "equipment_bucket": "gym",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": False,
+        "laterality": "bilateral",
+        "substitution_group": "horizontal_pull_cable",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "v_bar_attachment", "role": "support", "required": True},
+        ],
+    }
+    single = {
+        "slug": "single_arm_cable_row",
+        "name": "Single-Arm Cable Row",
+        "primary_muscle": "back",
+        "movement_pattern": "horizontal_pull",
+        "equipment_bucket": "gym",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "laterality": "unilateral",
+        "substitution_group": "horizontal_pull_cable",
+        "equipment": [
+            {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "d_handle", "role": "support", "required": True},
+        ],
+    }
+
+    seated_profile = ExercisePerformance(
+        slug="seated_cable_row",
+        name="Seated Cable Row",
+        session_count=2,
+        recent_top_weight_lbs=100.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=133.3,
+        recent_volume_load=2000.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    single_from_seated = recommend_starting_weight(
+        single,
+        profiles={"seated_cable_row": seated_profile},
+        all_exercises_by_slug={"seated_cable_row": seated, "single_arm_cable_row": single},
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert single_from_seated.source == "movement_pattern", single_from_seated
+    assert 35.0 <= single_from_seated.weight_lbs <= 55.0, single_from_seated
+
+    single_profile = ExercisePerformance(
+        slug="single_arm_cable_row",
+        name="Single-Arm Cable Row",
+        session_count=2,
+        recent_top_weight_lbs=50.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=66.7,
+        recent_volume_load=1000.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    seated_from_single = recommend_starting_weight(
+        seated,
+        profiles={"single_arm_cable_row": single_profile},
+        all_exercises_by_slug={"seated_cable_row": seated, "single_arm_cable_row": single},
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert seated_from_single.source == "movement_pattern", seated_from_single
+    assert seated_from_single.weight_lbs >= 80.0, seated_from_single
+    _ok(
+        f"seated 100 total -> single-arm {single_from_seated.weight_lbs} each; "
+        f"single-arm 50 each -> seated {seated_from_single.weight_lbs} total"
+    )
+
+
+def test_recommender_converts_rdl_between_barbell_total_and_dumbbell_each() -> None:
+    """Barbell RDL and dumbbell RDL share a movement family, but their
+    displayed loads are different units: barbell total vs one dumbbell."""
+    from datetime import date
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.performance import ExercisePerformance
+
+    print("\n[test] RDL transfer normalizes barbell-total vs dumbbell-each load")
+    barbell_rdl = {
+        "slug": "romanian_deadlift",
+        "name": "Barbell Romanian Deadlift",
+        "primary_muscle": "hamstrings",
+        "movement_pattern": "hinge",
+        "equipment_bucket": "gym",
+        "is_compound": True,
+        "is_machine": False,
+        "substitution_group": "hinge_bilateral",
+        "equipment": [{"slug": "barbell", "role": "primary", "required": True}],
+    }
+    dumbbell_rdl = {
+        "slug": "dumbbell_rdl",
+        "name": "Dumbbell Romanian Deadlift",
+        "primary_muscle": "hamstrings",
+        "movement_pattern": "hinge",
+        "equipment_bucket": "dumbbells",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": False,
+        "substitution_group": "hinge_bilateral",
+        "equipment": [{"slug": "dumbbells", "role": "primary", "required": True}],
+    }
+    db_profile = ExercisePerformance(
+        slug="dumbbell_rdl",
+        name="Dumbbell Romanian Deadlift",
+        session_count=2,
+        recent_top_weight_lbs=50.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=66.7,
+        recent_volume_load=1000.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    bar_from_db = recommend_starting_weight(
+        barbell_rdl,
+        profiles={"dumbbell_rdl": db_profile},
+        all_exercises_by_slug={"romanian_deadlift": barbell_rdl, "dumbbell_rdl": dumbbell_rdl},
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert bar_from_db.source == "substitution_group"
+    assert bar_from_db.weight_lbs >= 90.0, bar_from_db
+
+    bar_profile = ExercisePerformance(
+        slug="romanian_deadlift",
+        name="Barbell Romanian Deadlift",
+        session_count=2,
+        recent_top_weight_lbs=135.0,
+        recent_top_reps=8,
+        estimated_1rm_lbs=171.0,
+        recent_volume_load=2160.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    db_from_bar = recommend_starting_weight(
+        dumbbell_rdl,
+        profiles={"romanian_deadlift": bar_profile},
+        all_exercises_by_slug={"romanian_deadlift": barbell_rdl, "dumbbell_rdl": dumbbell_rdl},
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert db_from_bar.source == "substitution_group"
+    assert 45.0 <= db_from_bar.weight_lbs <= 70.0, db_from_bar
+    _ok(f"DB 50 each -> barbell {bar_from_db.weight_lbs} total; barbell 135 total -> DB {db_from_bar.weight_lbs} each")
+
+
 def test_dumbbell_compound_defaults_are_per_dumbbell() -> None:
     from app.services.workout.recommendation import recommend_starting_weight
 
@@ -1181,9 +1581,81 @@ def test_dumbbell_compound_defaults_are_per_dumbbell() -> None:
     _ok(f"dumbbell row default={rec.weight_lbs} lb each")
 
 
+def test_dumbbell_push_press_resolves_to_dumbbell_seed() -> None:
+    from app.services.workout.exercise_metadata import (
+        resolve_seed_exercise_slug,
+        set_programming_exercise_metadata,
+    )
+    from app.services.workout.set_programming import load_increment_for
+
+    print("\n[test] Dumbbell Push Press resolves as dumbbells, not barbell Push Press")
+    assert resolve_seed_exercise_slug("Dumbbell Push Press") == "dumbbell_push_press"
+    assert resolve_seed_exercise_slug("DB Push Press") == "dumbbell_push_press"
+    meta = set_programming_exercise_metadata(
+        None,
+        "Dumbbell Push Press",
+        None,
+        "dumbbells",
+        "shoulders",
+    )
+    assert meta["slug"] == "dumbbell_push_press", meta
+    assert meta["equipment_bucket"] == "dumbbell", meta
+    assert load_increment_for(meta) == 5.0, meta
+    _ok("Dumbbell Push Press metadata uses dumbbell per-hand load semantics")
+
+
+def test_dumbbell_push_press_default_is_conservative_each() -> None:
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.recommendation import recommend_starting_weight
+
+    print("\n[test] Dumbbell Push Press default is conservative per dumbbell")
+    by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+    rec = recommend_starting_weight(
+        by_slug["dumbbell_push_press"],
+        profiles={},
+        all_exercises_by_slug=by_slug,
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert rec.source == "default", rec
+    assert 15.0 <= rec.weight_lbs <= 25.0, rec
+    _ok(f"Dumbbell Push Press default={rec.weight_lbs} lb each")
+
+
+def test_dumbbell_push_press_transfers_from_dumbbell_shoulder_press_each() -> None:
+    from datetime import date
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.performance import ExercisePerformance
+    from app.services.workout.recommendation import recommend_starting_weight
+
+    print("\n[test] Dumbbell Push Press transfers from Dumbbell Shoulder Press per dumbbell")
+    by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+    profile = ExercisePerformance(
+        slug="dumbbell_shoulder_press",
+        name="Dumbbell Shoulder Press",
+        session_count=3,
+        recent_top_weight_lbs=15.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=20.0,
+        recent_volume_load=450.0,
+        last_performed_on=date.today(),
+        confidence=0.50,
+    )
+    rec = recommend_starting_weight(
+        by_slug["dumbbell_push_press"],
+        profiles={"dumbbell_shoulder_press": profile},
+        all_exercises_by_slug=by_slug,
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert rec.source == "substitution_group", rec
+    assert 10.0 <= rec.weight_lbs <= 20.0, rec
+    _ok(f"DB shoulder 15 each -> DB push press {rec.weight_lbs} each")
+
+
 def test_default_category_differentiates_by_pattern() -> None:
-    """Category defaults should distinguish squat, hinge, upper_push,
-    upper_pull rather than lump all compounds into one number."""
+    """Category defaults should distinguish squat, hinge, vertical push,
+    and upper pull rather than lump all compounds into one number."""
     from app.services.workout.recommendation import recommend_starting_weight
     print("\n[test] category defaults differentiate by pattern")
     squat_target = {
@@ -1417,9 +1889,18 @@ if __name__ == "__main__":
         test_injury_free_form_phrase_resolves_via_substring,
         test_accessory_host_prefers_secondary_touch_day,
         test_recommender_confidence_single_session_below_075,
+        test_recommender_downshifts_two_month_old_exact_history,
+        test_lat_pull_down_alias_resolves_to_lat_pulldown,
+        test_assisted_pullup_weight_does_not_transfer_to_lat_pulldown,
+        test_band_only_spanish_squat_has_no_numeric_load_recommendation,
         test_recommender_uses_signup_strength_anchor_for_exact_lift,
         test_recommender_converts_row_loads_between_total_and_per_dumbbell,
+        test_recommender_converts_single_arm_cable_row_per_side,
+        test_recommender_converts_rdl_between_barbell_total_and_dumbbell_each,
         test_dumbbell_compound_defaults_are_per_dumbbell,
+        test_dumbbell_push_press_resolves_to_dumbbell_seed,
+        test_dumbbell_push_press_default_is_conservative_each,
+        test_dumbbell_push_press_transfers_from_dumbbell_shoulder_press_each,
         test_default_category_differentiates_by_pattern,
         test_full_body_3_day_rotates_slots,
         test_full_plan_intermediate_muscle_gain,
@@ -1438,6 +1919,7 @@ if __name__ == "__main__":
         test_minimal_equipment_user_still_gets_bodyweight_fallback,
         test_general_health_does_not_get_load_penalty,
         test_equipment_label_for_loaded_movement_with_optional_required_flag,
+        test_preacher_curl_label_selects_owned_implement,
         # Phase 2a — continuity across regenerations
         test_continuity_biases_toward_familiar_exercise,
         test_continuity_keeps_core_exercises_stable_on_regen,
@@ -1445,6 +1927,7 @@ if __name__ == "__main__":
         test_progression_increases_when_all_sets_top_of_range,
         test_progression_holds_when_partial,
         test_progression_decreases_when_majority_missed,
+        test_progression_reacclimates_stale_top_range_history,
         test_progression_safety_override_on_pain,
         test_propagate_session_targets_walks_a_full_plan,
         test_propagate_session_targets_no_history_is_noop,

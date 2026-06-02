@@ -1,0 +1,20 @@
+706:function buildBiometricHistoryPoints(
+1476:function buildCardioTrendSummary(
+1935:  const volumeTrend = buildStrengthVolumeTrend(history, { bucketMode: 'rolling', windowDays: 14, weekCount: 2 });
+2886:    loadBalance: buildStrengthLoadBalance(history),
+2887:    tonnage: buildStrengthVolumeTrend(history, { weekStartDate: weekStartDate ?? undefined }),
+2945:    trendMap: buildExerciseTrendMap(history),
+3355:  const summary = buildStrengthTrendSummary(history, {
+3415:  const loadBalance = buildStrengthLoadBalance(history);
+3420:    const volumeTrend = buildStrengthVolumeTrend(history, {
+3518:  const recentLoadBalance = buildStrengthLoadBalance(history, {
+8364:    () => buildCardioTrendSummary(paceHistory, summaries, healthSummary, progressWeekWindow),
+8690:    () => showMixedGoalProgress ? buildGoalForecast({
+8823:    () => buildBiometricHistoryPoints('vo2', sleepHistory, dailyHealthHistory, healthSummary, GOAL_EXECUTION_BLOCK_DAYS),
+9338:    () => (mealHistory == null ? null : aggregateDailyFromHistory(mealHistory as any)),
+10420:  const recompTrajectory = computeRecompTrajectory(goalProgressProfile, meta.goalConfig, bodyScanHistory);
+10440:  const strengthScoreSummary = computeStrengthScore({
+10711:    ? buildBiometricHistoryPoints(selectedBiometric, sleepHistory, dailyHealthHistory, healthSummary, biometricHistoryWindow)
+12446:            const matchedHistory = filterWorkoutHistory(history, {
+15595:              const detail = computeStrengthScore({
+15734:              const summary = buildStrengthTrendSummary(history, {

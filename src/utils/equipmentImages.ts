@@ -264,7 +264,7 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
     source: require('../../assets/images/equipment/ghd.png'),
   },
   {
-    keys: ['leverage_machines', 'leverage machines', 'plate loaded shoulder press machine'],
+    keys: ['plate_loaded_shoulder_press_machine', 'plate loaded shoulder press machine'],
     source: require('../../assets/images/equipment/leverage_shoulder_press_machine.png'),
   },
   {
@@ -312,7 +312,18 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
     source: require('../../assets/images/equipment/hip_adduction_machine.png'),
   },
   {
-    keys: ['cable_machine', 'cable machine', 'functional trainer', 'dual adjustable pulley'],
+    keys: [
+      'cable_machine',
+      'cable machine',
+      'single_cable_station',
+      'single cable station',
+      'cable column',
+      'dual_cable_station',
+      'dual cable station',
+      'functional trainer',
+      'cable crossover',
+      'dual adjustable pulley',
+    ],
     source: require('../../assets/images/equipment/cable_machine.png'),
   },
   {
@@ -324,20 +335,12 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
     source: require('../../assets/images/equipment/pullover_machine.png'),
   },
   {
-    keys: ['high_row_machine', 'high row machine', 'iso lateral high row', 'plate loaded high row'],
-    source: require('../../assets/images/equipment/high_row_machine.png'),
-  },
-  {
     keys: ['rotary_torso_machine', 'rotary torso machine', 'torso rotation machine', 'rotary trunk machine'],
     source: require('../../assets/images/equipment/rotary_torso_machine.png'),
   },
   {
     keys: ['ab_crunch_machine', 'ab crunch machine', 'crunch machine', 'seated crunch machine'],
     source: require('../../assets/images/equipment/ab_crunch_machine.png'),
-  },
-  {
-    keys: ['glute_kickback_machine', 'glute kickback machine', 'kickback machine'],
-    source: require('../../assets/images/equipment/glute_kickback_machine.png'),
   },
   {
     keys: ['preacher_curl_machine', 'preacher curl machine', 'machine preacher curl'],
@@ -350,10 +353,6 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
   {
     keys: ['chest_press_machine', 'chest press machine', 'machine chest press', 'selectorized chest press'],
     source: require('../../assets/images/equipment/chest_press_machine.png'),
-  },
-  {
-    keys: ['hip_thrust_machine', 'hip thrust machine', 'glute drive machine'],
-    source: require('../../assets/images/equipment/hip_thrust_machine.png'),
   },
   {
     keys: ['tibialis_raise_machine', 'tibialis raise machine', 'tib raise machine'],
@@ -450,15 +449,16 @@ function exerciseEquipmentHaystack(exercise: ExerciseEquipmentMatchInput): strin
   return values.map(normalizeEquipmentKey).filter(Boolean);
 }
 
-export function equipmentMatchesExercise(
-  equipment: EquipmentVisualInput,
-  exercise: ExerciseEquipmentMatchInput,
-): boolean {
-  const needles = equipmentNeedles(equipment);
-  if (needles.length === 0) return false;
-  const haystack = exerciseEquipmentHaystack(exercise);
-  if (haystack.length === 0) return false;
+export function equipmentMatchNeedles(input: EquipmentVisualInput): string[] {
+  return equipmentNeedles(input);
+}
 
+export function exerciseEquipmentMatchKeys(exercise: ExerciseEquipmentMatchInput): string[] {
+  return exerciseEquipmentHaystack(exercise);
+}
+
+export function equipmentKeySetsMatch(needles: string[], haystack: string[]): boolean {
+  if (needles.length === 0 || haystack.length === 0) return false;
   for (const hay of haystack) {
     for (const needle of needles) {
       if (hay === needle) return true;
@@ -467,6 +467,15 @@ export function equipmentMatchesExercise(
     }
   }
   return false;
+}
+
+export function equipmentMatchesExercise(
+  equipment: EquipmentVisualInput,
+  exercise: ExerciseEquipmentMatchInput,
+): boolean {
+  const needles = equipmentNeedles(equipment);
+  const haystack = exerciseEquipmentHaystack(exercise);
+  return equipmentKeySetsMatch(needles, haystack);
 }
 
 export function matchesEquipmentSearch(equipment: EquipmentVisualInput, query: string): boolean {

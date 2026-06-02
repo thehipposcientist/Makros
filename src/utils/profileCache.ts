@@ -1,3 +1,5 @@
+import { mergeCustomExercises } from './customExercises.ts';
+
 function parseJsonIfString(value: unknown): unknown {
   if (typeof value !== 'string') return value;
   try {
@@ -25,10 +27,10 @@ function timeValue(value: unknown): number {
 function latestWeightEvidence(profile: unknown): { weightLbs: number; sortMs: number } | null {
   const parsed = parseJsonIfString(profile);
   if (!isRecord(parsed)) return null;
-  const rows = [
-    ...(Array.isArray(parsed.weightEntries) ? parsed.weightEntries : []),
-    ...(Array.isArray(parsed.weightHistory) ? parsed.weightHistory : []),
-  ];
+  // SavedDatabaseEntity weight history is DB-canonical. Only the
+  // backend-shaped weightEntries cache can influence profile weight;
+  // legacy weightHistory blobs are ignored as local-only stale data.
+  const rows = Array.isArray(parsed.weightEntries) ? parsed.weightEntries : [];
   let latest: { weightLbs: number; sortMs: number } | null = null;
   for (const row of rows) {
     if (!isRecord(row)) continue;
@@ -47,6 +49,22 @@ function freshestWeightFromProfiles(pulledProfile: unknown, currentProfile: unkn
   if (pulled) return pulled.weightLbs;
   if (current) return current.weightLbs;
   return null;
+}
+
+function mergedCustomExercisesIfPresent(
+  pulledProfile: Record<string, any>,
+  currentProfile: unknown,
+): { customExercises: unknown[] } | {} {
+  const pulledExercises = Array.isArray(pulledProfile.customExercises)
+    ? pulledProfile.customExercises
+    : null;
+  const currentExercises = isRecord(currentProfile) && Array.isArray(currentProfile.customExercises)
+    ? currentProfile.customExercises
+    : null;
+  if (!pulledExercises && !currentExercises) return {};
+  return {
+    customExercises: mergeCustomExercises(pulledExercises ?? [], currentExercises ?? []),
+  };
 }
 
 const VALID_PREFERRED_SPLITS = new Set([
@@ -91,7 +109,10 @@ export function mergePulledUserProfileWithCurrentStats(
         weightLbs: freshestWeightLbs,
       },
     };
-    return preserveLocalPreferredSplitWhenRemoteMissing(merged, currentProfile);
+    return preserveLocalPreferredSplitWhenRemoteMissing({
+      ...merged,
+      ...mergedCustomExercisesIfPresent(pulledProfile, currentProfile),
+    }, currentProfile);
   }
 
   const mergedPhysicalStats = {
@@ -103,6 +124,7 @@ export function mergePulledUserProfileWithCurrentStats(
   return preserveLocalPreferredSplitWhenRemoteMissing({
     ...pulledProfile,
     physicalStats: mergedPhysicalStats,
+    ...mergedCustomExercisesIfPresent(pulledProfile, currentProfile),
   }, currentProfile);
 }
 

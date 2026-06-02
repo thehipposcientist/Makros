@@ -41,8 +41,8 @@ export async function maybeNotifyWeeklyCheckinDue(params: {
 
   await Notifications.scheduleNotificationAsync({
     content: {
-      title: 'Weekly check-in ready',
-      body: `Review ${formatDateRange(params.weekStart, params.weekEnd)} with your coach before the next plan builds.`,
+      title: 'Weekly review ready',
+      body: `Review ${formatDateRange(params.weekStart, params.weekEnd)} and optionally adjust future plan setup.`,
       sound: true,
       data: { kind: 'weekly_checkin', planWeekId: params.planWeekId },
     },

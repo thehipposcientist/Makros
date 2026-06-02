@@ -107,19 +107,21 @@ def _add_session_with_sets(
     return ws
 
 
-def _bulk_compute(user_id: int, db) -> dict[str, float]:
+def _bulk_compute(user_id: int, db, *, days: int = 365) -> dict[str, float]:
     """Reproduces the body of get_all_e1rm without the auth dependency.
     Keep in sync with backend/app/routers/workouts.py:get_all_e1rm."""
     from sqlmodel import select
     from app.models import ExerciseSet, WorkoutExercise, WorkoutSession
     from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
 
+    cutoff = date.today() - timedelta(days=days)
     rows = db.exec(
         select(ExerciseSet, WorkoutExercise, WorkoutSession)
         .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
         .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
         .where(
             WorkoutSession.user_id == user_id,
+            WorkoutSession.workout_date >= cutoff,
             ExerciseSet.completed == True,  # noqa: E712
         )
     ).all()
@@ -384,6 +386,22 @@ def test_completed_at_fallback_to_workout_date() -> None:
     _ok("missing completed_at → workout_date fallback works")
 
 
+def test_default_window_omits_stale_sets() -> None:
+    print("\n[test] bulk e1RM ignores sets outside the default recent window")
+    from sqlmodel import Session
+    engine = _make_mem_engine()
+    with Session(engine) as s:
+        user = _insert_user(s)
+        for i in range(3):
+            _add_session_with_sets(s, user.id, "Deadlift", [(315.0, 3, 2.0)],
+                                   workout_date=date.today() - timedelta(days=420 + i))
+        out_default = _bulk_compute(user.id, s)
+        out_wide = _bulk_compute(user.id, s, days=500)
+    assert "deadlift" not in out_default, out_default
+    assert "deadlift" in out_wide, out_wide
+    _ok("365-day default omits stale sets; wider window can include them")
+
+
 cases = [
     test_empty_user_returns_empty_map,
     test_under_three_sets_omitted,
@@ -397,6 +415,7 @@ cases = [
     test_values_rounded_to_one_decimal,
     test_invalid_rir_filtered,
     test_completed_at_fallback_to_workout_date,
+    test_default_window_omits_stale_sets,
 ]
 
 

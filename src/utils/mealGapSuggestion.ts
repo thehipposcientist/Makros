@@ -28,6 +28,14 @@ const MACRO_KEYS: Array<keyof MacroTotals> = ['calories', 'protein', 'carbs', 'f
 const MAX_SUGGESTED_MEAL_CALORIES = 1200;
 const PANTRY_CALORIE_OVERSHOOT_LIMIT = 1.08;
 const SAVED_MEAL_CALORIE_OVERSHOOT_LIMIT = 1.15;
+const QUALITY_MICRO_TARGETS: Record<string, number> = {
+  calcium: 1000,
+  iron: 18,
+  potassium: 4700,
+  magnesium: 420,
+  vitamin_d: 20,
+  vitamin_b12: 2.4,
+};
 const UNIT_ALIASES: Record<string, FoodUnit> = {
   g: 'g', gram: 'g', grams: 'g',
   kg: 'kg', kilogram: 'kg', kilograms: 'kg',
@@ -79,7 +87,7 @@ function targetFromGap(gap: MacroTotals): MacroTotals {
   const macroCalories = (gap.protein * 4) + (gap.carbs * 4) + (gap.fat * 9);
   const targetCalories = Math.min(
     MAX_SUGGESTED_MEAL_CALORIES,
-    Math.max(160, gap.calories || macroCalories),
+    Math.max(160, gap.calories, macroCalories),
   );
   return {
     calories: targetCalories,
@@ -112,7 +120,8 @@ function density(value: number, calories: number, kcalPerGram: number): number {
 
 function isPlantLike(food: FoodItem): boolean {
   const name = normalizeFoodName(food.name);
-  return /broccoli|spinach|kale|lettuce|greens|zucchini|asparagus|pepper|carrot|tomato|cucumber|cauliflower|berry|berries|apple|banana|orange|grape|melon|kiwi|mango/.test(name);
+  const category = String((food as any).category ?? '').toLowerCase();
+  return category === 'vegetables' || category === 'fruits' || Number((food as any).plant_count ?? 0) > 0 || /broccoli|spinach|kale|lettuce|greens|zucchini|asparagus|pepper|carrot|tomato|cucumber|cauliflower|berry|berries|apple|banana|orange|grape|melon|kiwi|mango/.test(name);
 }
 
 function roleFor(food: FoodItem): 'protein' | 'carb' | 'fat' | 'plant' {
@@ -125,6 +134,50 @@ function roleFor(food: FoodItem): 'protein' | 'carb' | 'fat' | 'plant' {
   if ((food.fat ?? 0) >= 6 && fatDensity >= proteinDensity && fatDensity >= carbDensity) return 'fat';
   if ((food.carbs ?? 0) >= 12) return 'carb';
   return isPlantLike(food) ? 'plant' : 'carb';
+}
+
+function numericFoodField(food: FoodItem, ...keys: string[]): number {
+  for (const key of keys) {
+    const value = Number((food as any)[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
+function foodQualityScore(food: FoodItem): number {
+  const calories = Math.max(1, Number(food.calories ?? 0));
+  const fiber = numericFoodField(food, 'fiber', 'fiber_g');
+  const addedSugar = numericFoodField(food, 'added_sugar_g', 'added_sugar', 'added_sugars_g');
+  const saturatedFat = numericFoodField(food, 'saturated_fat', 'saturated_fat_g', 'sat_fat_g');
+  const sodium = numericFoodField(food, 'sodium', 'sodium_mg');
+  const omega3 = numericFoodField(food, 'omega_3', 'omega_3_g');
+  const plantCount = Math.max(
+    Number((food as any).plant_count ?? 0) || 0,
+    isPlantLike(food) ? 1 : 0,
+  );
+  const bucket = String((food as any).processing_bucket ?? (food as any).food_quality ?? '').toLowerCase();
+
+  let score = 45;
+  score += Math.min(18, ((fiber / calories) * 1000 / 14) * 18);
+  score += Math.min(12, plantCount * 3);
+  if ((food as any).omega3_rich || (food as any).omega3_flag || omega3 >= 0.25) score += 10;
+  else if (omega3 > 0) score += 5;
+  if (bucket === 'minimally_processed' || bucket === 'whole') score += 8;
+  else if (bucket === 'processed') score += 2;
+  else if (bucket === 'ultra_processed') score -= 16;
+
+  for (const [key, target] of Object.entries(QUALITY_MICRO_TARGETS)) {
+    const amount = numericFoodField(food, key, `${key}_mg`, `${key}_mcg`);
+    if (amount > 0) score += Math.min(4, (amount / Math.max(1, target * 0.25)) * 4);
+  }
+
+  const addedSugarPct = (addedSugar * 4 / calories) * 100;
+  const satFatPct = (saturatedFat * 9 / calories) * 100;
+  const sodiumDensity = (sodium / calories) * 1000;
+  score -= Math.min(18, Math.max(0, addedSugarPct - 5) * 1.4);
+  score -= Math.min(14, Math.max(0, satFatPct - 10) * 1.0);
+  score -= Math.min(12, Math.max(0, sodiumDensity - 1100) / 250);
+  return Math.max(0, Math.min(100, score));
 }
 
 function hash(input: string): number {
@@ -151,19 +204,23 @@ function pickFood(
       const fat = Number(food.fat ?? 0);
       const score =
         role === 'protein'
-          ? protein * 3 + density(protein, calories, 4) * 35 - fat
+          ? protein * 3 + density(protein, calories, 4) * 35 - fat + foodQualityScore(food) * 0.35
           : role === 'carb'
-            ? carbs * 2 + density(carbs, calories, 4) * 25 - fat * 0.5
+            ? carbs * 2 + density(carbs, calories, 4) * 25 - fat * 0.5 + foodQualityScore(food) * 0.4
             : role === 'fat'
-              ? fat * 4 + density(fat, calories, 9) * 25
-              : (isPlantLike(food) ? 40 : 0) - calories * 0.08 + carbs * 0.2;
+              ? fat * 4 + density(fat, calories, 9) * 25 + foodQualityScore(food) * 0.25
+              : (isPlantLike(food) ? 40 : 0) - calories * 0.08 + carbs * 0.2 + foodQualityScore(food) * 0.55;
       return { food, score };
     })
     .filter(x => Number.isFinite(x.score))
     .sort((a, b) => b.score - a.score || a.food.name.localeCompare(b.food.name));
 
   if (!scored.length) return null;
-  const top = scored.slice(0, Math.min(3, scored.length));
+  const bestScore = scored[0].score;
+  const nearBestCutoff = bestScore > 0 ? bestScore * 0.96 : bestScore - 0.01;
+  const top = scored
+    .filter(x => x.score >= nearBestCutoff)
+    .slice(0, Math.min(3, scored.length));
   return top[hash(`${seed}|${role}`) % top.length].food;
 }
 
@@ -254,7 +311,14 @@ function itemTotals(items: MealItem[]): MacroTotals {
 
 function fitScore(macros: MacroTotals, target: MacroTotals): number {
   return MACRO_KEYS.reduce((score, key) => {
-    const weight = key === 'calories' ? 1 : key === 'protein' ? 1.5 : 1;
+    const shortfall = Math.max(0, target[key] - macros[key]);
+    if (key === 'protein') {
+      const overshoot = Math.max(0, macros.protein - target.protein);
+      return score
+        + (shortfall / Math.max(12, target.protein)) * 5
+        + (overshoot / Math.max(18, target.protein)) * 0.6;
+    }
+    const weight = key === 'calories' ? 0.7 : 1;
     const unit = key === 'calories' ? 180 : 18;
     return score + (Math.abs(macros[key] - target[key]) / Math.max(unit, target[key])) * weight;
   }, 0);
@@ -379,11 +443,24 @@ function buildPantryCandidate(
   }
 
   const calorieCap = target.calories * PANTRY_CALORIE_OVERSHOOT_LIMIT;
-  if (totals.calories > calorieCap) {
+  if (totals.calories > calorieCap && totals.protein >= target.protein) {
     const ratio = calorieCap / Math.max(1, totals.calories);
     itemScales = itemScales.map(scale => scale * ratio);
     items = selected.map((entry, index) => scaleFood(entry.food, itemScales[index]));
     totals = itemTotals(items);
+  }
+
+  if (target.protein > 0 && totals.protein < target.protein) {
+    const proteinIdx = selected.findIndex(entry => entry.role === 'protein' && Number(entry.food.protein ?? 0) > 0);
+    if (proteinIdx >= 0) {
+      const entry = selected[proteinIdx];
+      for (let guard = 0; guard < 4 && totals.protein < target.protein; guard += 1) {
+        const gramsShort = target.protein - totals.protein + 2;
+        itemScales[proteinIdx] += gramsShort / Math.max(1, Number(entry.food.protein ?? 0));
+        items[proteinIdx] = scaleFood(entry.food, itemScales[proteinIdx]);
+        totals = itemTotals(items);
+      }
+    }
   }
 
   const meal = syncMealFromItems({

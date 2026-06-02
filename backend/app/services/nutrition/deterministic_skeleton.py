@@ -11,9 +11,9 @@ Pipeline
 
     PlanRequest ── archetype rotation ── pantry resolver ── MealSkeleton[]
 
-    1. Clamp mealsPerDay, variety_n.
+    1. Normalize variety_n.
     2. For each day 0..variety_n-1:
-         for each meal slot 0..mealsPerDay-1:
+         for each generated meal archetype:
              a. pick an archetype row (rotated by day_index, offset by slot).
              b. for every role in that archetype (protein/carb/veg/fat):
                   pick the best pantry food matching the role keywords that
@@ -56,8 +56,8 @@ from .meal_assembler import (
     _FAT_KEYWORDS,
     _PROTEIN_KEYWORDS,
     _VEG_KEYWORDS,
-    _clamp_meals_per_day,
     _food_matches_keywords,
+    _is_low_utility_beverage,
 )
 
 if TYPE_CHECKING:
@@ -99,6 +99,76 @@ _PLANT_KEYWORDS = _VEG_KEYWORDS | {
     "grapefruit", "melon", "pineapple", "mango", "pear", "peach",
 }
 _ROLE_KEYWORDS["plant"] = _PLANT_KEYWORDS
+
+# ─── Slot-specific keyword overrides ───────────────────────────────────────
+# Breakfast proteins: morning-appropriate sources only. Meat (chicken, beef,
+# pork) picked for breakfast is the most common "odd combination" complaint.
+# This list tries the restricted set first; if the pantry has none of these,
+# _build_meal falls back to the full _PROTEIN_KEYWORDS.
+_BREAKFAST_PROTEIN_KEYWORDS: set[str] = {
+    "egg", "eggs", "greek yogurt", "yogurt", "cottage cheese", "whey",
+    "protein powder", "casein", "skyr", "quark", "smoked salmon", "lox",
+    "ricotta",
+}
+
+# Breakfast fats: nut-based spreads, avocado, and butter are natural at
+# breakfast. Savory oils (olive oil), mayo, tahini, and most cheese types
+# are not — they produce "chicken + oats + parmesan" style oddities.
+_BREAKFAST_FAT_KEYWORDS: set[str] = {
+    "peanut butter", "almond butter", "nut butter", "almond", "almonds",
+    "walnut", "walnuts", "cashew", "cashews", "peanut", "avocado",
+    "butter", "ghee", "coconut", "cream cheese",
+}
+
+# Snack fats: finger-food safe — nut butters and whole nuts only.
+_SNACK_FAT_KEYWORDS: set[str] = {
+    "peanut butter", "almond butter", "nut butter", "almond", "almonds",
+    "walnut", "walnuts", "cashew", "cashews", "peanut", "cheese", "cheddar",
+}
+
+# Dinner / lunch proteins: prefer whole-food animal and plant proteins.
+# Whey, protein powder, greek yogurt, cottage cheese are breakfast/snack
+# foods — they should only land at dinner when no real-food protein exists
+# in the pantry (handled by the fallback in _build_meal).
+_DINNER_PROTEIN_KEYWORDS: set[str] = {
+    "chicken", "beef", "steak", "turkey", "pork", "fish", "salmon", "tuna",
+    "shrimp", "tilapia", "cod", "tempeh", "seitan", "tofu",
+    "lentil", "lentils", "chickpea", "chickpeas", "black bean", "edamame",
+}
+
+# Dinner / lunch carbs: exclude oats and oatmeal — those are breakfast
+# staples. When the pantry has rice, potato, quinoa, etc., those should
+# always land before oats at a dinner slot.
+_DINNER_CARB_KEYWORDS: set[str] = {
+    "rice", "pasta", "noodle", "potato", "sweet potato", "quinoa",
+    "bread", "tortilla", "wrap", "couscous", "barley", "bulgur",
+}
+_DINNER_CARB_WHOLE_KEYWORDS: set[str] = {
+    "brown rice", "quinoa", "sweet potato", "barley", "bulgur", "farro",
+    "buckwheat", "wild rice", "whole wheat", "whole grain",
+}
+
+# Per-slot role overrides. _build_meal tries these first; falls back to the
+# default _ROLE_KEYWORDS if the pantry has no matching food.
+_SLOT_ROLE_KEYWORD_OVERRIDES: dict[str, dict[str, set[str]]] = {
+    "breakfast": {
+        "protein": _BREAKFAST_PROTEIN_KEYWORDS,
+        "fat": _BREAKFAST_FAT_KEYWORDS,
+    },
+    "lunch": {
+        "protein": _DINNER_PROTEIN_KEYWORDS,
+        "carb": _DINNER_CARB_KEYWORDS,
+        "carb_whole": _DINNER_CARB_WHOLE_KEYWORDS,
+    },
+    "dinner": {
+        "protein": _DINNER_PROTEIN_KEYWORDS,
+        "carb": _DINNER_CARB_KEYWORDS,
+        "carb_whole": _DINNER_CARB_WHOLE_KEYWORDS,
+    },
+    "snack": {
+        "fat": _SNACK_FAT_KEYWORDS,
+    },
+}
 
 # Archetype shape: list of roles that the pantry resolver will fill.
 # The resolver walks roles in order and returns as many filled picks as
@@ -150,23 +220,9 @@ _SNACK_ARCHETYPES: list[list[str]] = [
     ["protein", "carb_whole", "fat"],        # greek yogurt + oats + almonds
 ]
 
-# Meal-slot type by position — breakfast always first, snack pattern for
-# meals beyond 3, dinner always last. For mealsPerDay=1 we default to a
-# "dinner" archetype (most likely to be a full plate).
-#
-# Returned list length always equals `meals_per_day`.
-_SLOT_TYPE_BY_POSITION: dict[int, list[str]] = {
-    1: ["dinner"],
-    2: ["breakfast", "dinner"],
-    3: ["breakfast", "lunch", "dinner"],
-    4: ["breakfast", "lunch", "snack", "dinner"],
-    5: ["breakfast", "snack", "lunch", "snack", "dinner"],
-    6: ["breakfast", "snack", "lunch", "snack", "dinner", "snack"],
-    7: ["breakfast", "snack", "lunch", "snack", "dinner", "snack", "snack"],
-    8: ["breakfast", "snack", "snack", "lunch", "snack", "dinner", "snack", "snack"],
-    9: ["breakfast", "snack", "snack", "lunch", "snack", "snack", "dinner", "snack", "snack"],
-    10: ["breakfast", "snack", "snack", "lunch", "snack", "snack", "dinner", "snack", "snack", "snack"],
-}
+# Default generated archetypes. These are presentation slots for the
+# generated template, not a user-configurable meals-per-day target.
+_DEFAULT_SLOT_TYPES: list[str] = ["breakfast", "lunch", "dinner"]
 
 _ARCHETYPES_BY_SLOT: dict[str, list[list[str]]] = {
     "breakfast": _BREAKFAST_ARCHETYPES,
@@ -271,21 +327,28 @@ def _pick_role(
     used_in_template: set[str],
     rotation_offset: int,
     preferred_foods: set[str] | None = None,
+    food_quality_scores: dict[str, float] | None = None,
+    keywords_override: set[str] | None = None,
 ) -> str | None:
     """Return a food from `pantry` matching `role`, biased away from
     `used_in_template`. `rotation_offset` shifts the starting scan index
     so consecutive calls with the same pantry don't land on the same pick.
 
     `preferred_foods` — lower-cased names the caller wants biased up.
-    Currently used to give user-added custom foods priority over seed
-    foods for the same role ("I took the time to add this — use it").
-    Custom foods float to the top of the rotation list while still
-    respecting density rank among themselves for the protein role.
+    User-added custom foods get a small bonus, but the primary objective is
+    still the score-input quality ranking so generation does not pick a
+    weaker food just because it is custom or because the day rotated.
+
+    `keywords_override` — when provided, restricts matching to this keyword
+    set instead of the default `_ROLE_KEYWORDS[role]`. Used for slot-aware
+    picks (e.g. breakfast proteins limited to eggs/yogurt/whey). The caller
+    is responsible for falling back to the full keyword set when this returns
+    None.
 
     Deterministic: identical (role, pantry, used, offset, preferred)
     always returns the same food.
     """
-    keywords = _ROLE_KEYWORDS.get(role)
+    keywords = keywords_override if keywords_override is not None else _ROLE_KEYWORDS.get(role)
     if not keywords or not pantry:
         return None
 
@@ -293,33 +356,49 @@ def _pick_role(
     if not matches:
         return None
 
-    if role == "protein":
-        matches = sorted(
-            matches,
-            key=lambda name: _PROTEIN_DENSITY_RANK.get(
-                _canonical_protein_key(name), 99,
-            ),
-        )
-
-    # Custom-food bias: stable-partition so preferred foods come first
-    # while preserving the role-specific order (protein-density, etc)
-    # within each partition. Users who add "Kirkland pea protein" get
-    # it picked over generic seed "Whey Protein" for the same slot.
+    quality_scores = food_quality_scores or {}
     if preferred_foods:
         prefs = {p.lower() for p in preferred_foods}
-        preferred_match = [m for m in matches if m.lower() in prefs]
-        other_match = [m for m in matches if m.lower() not in prefs]
-        matches = preferred_match + other_match
+    else:
+        prefs = set()
 
-    # Rotate the match list so day_index / slot_index pick different items.
-    start = rotation_offset % len(matches)
-    rotated = matches[start:] + matches[:start]
+    if not quality_scores and not prefs:
+        original_order = {name: idx for idx, name in enumerate(matches)}
+        matches = sorted(
+            matches,
+            key=lambda name: (
+                _PROTEIN_DENSITY_RANK.get(_canonical_protein_key(name), 99)
+                if role == "protein" else 0,
+                original_order.get(name, 0),
+            ),
+        )
+        start = rotation_offset % len(matches)
+        rotated = matches[start:] + matches[:start]
+        for f in rotated:
+            if f.lower() not in used_in_template:
+                return f
+        return rotated[0]
 
-    # Prefer a food that hasn't been used yet in this template.
-    for f in rotated:
-        if f.lower() not in used_in_template:
-            return f
-    return rotated[0]
+    def candidate_score(name: str) -> float:
+        score = float(quality_scores.get(name.lower(), 0.0))
+        if name.lower() in prefs:
+            score += 4.0
+        if role == "protein":
+            density_rank = _PROTEIN_DENSITY_RANK.get(_canonical_protein_key(name), 99)
+            score += max(0.0, (20.0 - min(density_rank, 20)) * 0.2)
+        return score
+
+    available = [f for f in matches if f.lower() not in used_in_template] or matches
+    best_score = max(candidate_score(f) for f in available)
+    # Preserve deterministic variety only among foods that are essentially tied
+    # for score. A lower-score food should not win just because the day rotated.
+    top_band = [
+        f for f in available
+        if best_score - candidate_score(f) <= 3.0
+    ]
+    top_band.sort(key=lambda name: (name.lower() not in prefs, name.lower()))
+    start = rotation_offset % len(top_band)
+    return (top_band[start:] + top_band[:start])[0]
 
 
 # Hard-coded rank table for protein density (higher protein-per-serving
@@ -327,24 +406,24 @@ def _pick_role(
 # magnitude. Keeping it here (rather than computing from the enrichment
 # table) lets the skeleton stage run without a food lookup.
 _PROTEIN_DENSITY_RANK: dict[str, int] = {
-    "chicken":   1,
-    "turkey":    2,
-    "tuna":      3,
-    "whey":      4,
-    "salmon":    5,
+    "chicken":        1,
+    "turkey":         2,
+    "tuna":           3,
+    "whey":           4,
+    "protein powder": 4,   # same tier as whey — generic pantry name for same food
+    "salmon":         5,
     "cottage cheese": 6,
-    "tempeh":    7,
-    "tofu":      8,
-    "beef":      9,
-    "pork":     10,
-    "greek yogurt": 11,
-    "lentils":  12,
-    "chickpeas": 13,
-    "black bean": 14,
-    "edamame":  15,
-    "eggs":     16,   # deliberately ranked low for muscle-gain meals
-    "jerky":    17,
-    "protein powder": 18,
+    "tempeh":         7,
+    "tofu":           8,
+    "beef":           9,
+    "pork":          10,
+    "greek yogurt":  11,
+    "eggs":          12,   # solid whole-food protein — previously ranked too low
+    "lentils":       13,
+    "chickpeas":     14,
+    "black bean":    15,
+    "edamame":       16,
+    "jerky":         17,
 }
 
 
@@ -388,6 +467,7 @@ def _append_missing_role(
     meal_used: set[str],
     rotation_offset: int,
     preferred_foods: set[str] | None,
+    food_quality_scores: dict[str, float] | None,
 ) -> None:
     if _meal_has_role(picks, role):
         return
@@ -397,6 +477,7 @@ def _append_missing_role(
         used_in_template | meal_used,
         rotation_offset,
         preferred_foods=preferred_foods,
+        food_quality_scores=food_quality_scores,
     )
     if food and food.lower() not in meal_used:
         picks.append(food)
@@ -411,16 +492,17 @@ def _ensure_full_meal_balance(
     rotation_offset: int,
     slot_type: str,
     preferred_foods: set[str] | None,
+    food_quality_scores: dict[str, float] | None,
 ) -> None:
     if slot_type not in {"breakfast", "lunch", "dinner"}:
         return
     _append_missing_role(
         picks, "protein", pantry, used_in_template, meal_used,
-        rotation_offset + 17, preferred_foods,
+        rotation_offset + 17, preferred_foods, food_quality_scores,
     )
     _append_missing_role(
         picks, "plant", pantry, used_in_template, meal_used,
-        rotation_offset + 19, preferred_foods,
+        rotation_offset + 19, preferred_foods, food_quality_scores,
     )
     if any(_meal_has_role(picks, role) for role in ("carb_whole", "carb", "fat")):
         return
@@ -428,7 +510,7 @@ def _ensure_full_meal_balance(
         before = len(picks)
         _append_missing_role(
             picks, role, pantry, used_in_template, meal_used,
-            rotation_offset + 23, preferred_foods,
+            rotation_offset + 23, preferred_foods, food_quality_scores,
         )
         if len(picks) > before:
             break
@@ -442,6 +524,7 @@ def _build_meal(
     meal_index: int,
     slot_type: str,
     preferred_foods: set[str] | None = None,
+    food_quality_scores: dict[str, float] | None = None,
 ) -> MealSkeleton:
     """Turn one archetype row into one `MealSkeleton`.
 
@@ -451,16 +534,33 @@ def _build_meal(
     """
     picks: list[str] = []
     meal_used: set[str] = set()  # dedupe within the meal itself
+    slot_overrides = _SLOT_ROLE_KEYWORD_OVERRIDES.get(slot_type, {})
     for slot_i, role in enumerate(archetype):
-        food = _pick_role(
-            role,
-            pantry,
-            # Bias picks away from both template-wide and meal-local
-            # duplicates so a single meal doesn't list chicken twice.
-            used_in_template | meal_used,
-            rotation_offset + slot_i,
-            preferred_foods=preferred_foods,
-        )
+        food = None
+        # Try slot-specific keywords first (e.g. breakfast restricts protein
+        # to eggs/yogurt/whey so chicken doesn't appear at breakfast).
+        if role in slot_overrides:
+            food = _pick_role(
+                role,
+                pantry,
+                used_in_template | meal_used,
+                rotation_offset + slot_i,
+                preferred_foods=preferred_foods,
+                food_quality_scores=food_quality_scores,
+                keywords_override=slot_overrides[role],
+            )
+        # Fall back to full role keywords when pantry has no slot-appropriate match.
+        if not food:
+            food = _pick_role(
+                role,
+                pantry,
+                # Bias picks away from both template-wide and meal-local
+                # duplicates so a single meal doesn't list chicken twice.
+                used_in_template | meal_used,
+                rotation_offset + slot_i,
+                preferred_foods=preferred_foods,
+                food_quality_scores=food_quality_scores,
+            )
         if food and food.lower() not in meal_used:
             picks.append(food)
             meal_used.add(food.lower())
@@ -477,6 +577,7 @@ def _build_meal(
         rotation_offset,
         slot_type,
         preferred_foods,
+        food_quality_scores,
     )
 
     # Human-readable name built from the slot type + meal index. Downstream
@@ -498,23 +599,16 @@ def _build_meal(
     )
 
 
-def _slot_types_for(meals_per_day: int) -> list[str]:
-    """Return the sequence of slot types for a given mealsPerDay.
-
-    For values outside the pre-computed table we synthesize a sequence
-    that still respects breakfast-first / dinner-last. `_clamp_meals_per_day`
-    already keeps the input in 1-10.
-    """
-    fixed = _SLOT_TYPE_BY_POSITION.get(meals_per_day)
-    if fixed is not None:
-        return list(fixed)
-    # Synthesised path — sandwich breakfast/dinner around lunch + snacks.
-    if meals_per_day <= 0:
-        return []
-    if meals_per_day == 1:
-        return ["dinner"]
-    out = ["breakfast"] + ["snack"] * (meals_per_day - 2) + ["dinner"]
-    return out
+def _slot_types_for_request(req: "PlanRequest") -> list[str]:
+    """Return generated archetype slots, excluding routine-owned slots."""
+    routine_slots = {
+        str(slot or "").strip().lower()
+        for slot in (getattr(req, "routineSlots", None) or [])
+        if str(slot or "").strip()
+    }
+    if not routine_slots:
+        return list(_DEFAULT_SLOT_TYPES)
+    return [slot for slot in _DEFAULT_SLOT_TYPES if slot not in routine_slots]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -531,6 +625,7 @@ def generate_deterministic_skeleton(
     user_id: int | None = None,
     preferred_foods: list[str] | None = None,
     recent_meal_names: list[str] | None = None,
+    food_quality_scores: dict[str, float] | None = None,
 ) -> tuple[list[TemplateSkeleton], str, list[dict]]:
     """Deterministic drop-in for `call_skeleton_ai`.
 
@@ -543,10 +638,10 @@ def generate_deterministic_skeleton(
     Parameters
     ----------
     req
-        The PlanRequest — only `mealsPerDay`, `dietaryPreference`, and
-        `allergies` are consulted. Everything else (goal, macros) is the
-        caller's concern because the SKELETON is just names + food_refs;
-        macros are calculated later in the pipeline.
+        The PlanRequest — only diet, allergies, and routine slots are
+        consulted. Everything else (goal, macros) is the caller's concern
+        because the SKELETON is just names + food_refs; macros are
+        calculated later in the pipeline.
     variety_n
         Number of daily templates to emit (1-7 typical).
     allowed_foods
@@ -560,13 +655,16 @@ def generate_deterministic_skeleton(
         Food names from the last 3-5 days of plans. These are seeded into
         the per-template `used_in_template` set so the resolver biases away
         from them, improving day-to-day variety.
+    food_quality_scores
+        Optional name -> score map from the assembler's enrichment pass.
+        Used only to rank same-role candidates; portion math still enforces
+        calorie/protein/carb/fat alignment downstream.
     """
     # Unused kwargs — declared for signature parity with call_skeleton_ai.
     _ = (db, user_id)
 
-    meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     variety_n = max(1, min(7, int(variety_n or 1)))
-    if meals_per_day <= 0 or not allowed_foods:
+    if not allowed_foods:
         return [TemplateSkeleton(meals=[]) for _ in range(variety_n)], "", []
 
     # Build the preferred-food bias set once per call so _build_meal /
@@ -586,7 +684,8 @@ def generate_deterministic_skeleton(
         getattr(req, "dietaryPreference", None),
         getattr(req, "allergies", None) or [],
     )
-    slot_types = _slot_types_for(meals_per_day)
+    planning_pantry = [f for f in pantry if not _is_low_utility_beverage(f)] or pantry
+    slot_types = _slot_types_for_request(req)
 
     _recent_set: set[str] = {
         n.lower().strip() for n in (recent_meal_names or []) if n
@@ -614,19 +713,20 @@ def generate_deterministic_skeleton(
 
             meal = _build_meal(
                 archetype,
-                pantry,
+                planning_pantry,
                 used_in_template,
                 rotation_offset,
                 slot_idx,
                 slot_type,
                 preferred_foods=_preferred_set,
+                food_quality_scores=food_quality_scores,
             )
             meals.append(meal)
             used_in_template.update(f.lower() for f in meal.food_refs)
 
-        # Assign target_fraction uniformly — the solver / assembler will
-        # re-normalize if routine overlays adjust it.
-        frac = 1.0 / meals_per_day if meals_per_day > 0 else 0.0
+        # Assign target_fraction uniformly across the meals we actually
+        # generated.
+        frac = 1.0 / len(meals) if meals else 0.0
         for i, m in enumerate(meals):
             m.index = i
             m.target_fraction = frac

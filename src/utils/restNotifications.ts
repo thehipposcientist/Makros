@@ -1,11 +1,15 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import { loadSettings } from './feedback';
 
 type RestNotificationIds = {
   startId?: string;
   warningId?: string;
   completeId?: string;
 };
+
+const REST_TIMER_CHANNEL_ID = 'rest-timer';
+const REST_TIMER_SILENT_CHANNEL_ID = 'rest-timer-silent';
 
 let configured = false;
 let permissionsRequested = false;
@@ -14,11 +18,9 @@ export async function configureWorkoutNotifications() {
   if (configured) return;
 
   Notifications.setNotificationHandler({
-    // shouldPlaySound: false avoids doubling up with the in-app chime
-    // (feedback.ts::playRestTimerDone) when the app is foregrounded.
-    // Background notifications still play their sound natively because
-    // iOS handles the system sound outside this handler. Net effect:
-    // one brief sound per rest-end regardless of app state.
+    // Foreground rest completion uses feedback.ts::playRestTimerDone so
+    // the user-selected in-app sound plays once. Background/killed
+    // delivery bypasses this handler and uses the notification sound.
     handleNotification: async () => ({
       shouldShowBanner: true,
       shouldShowList: true,
@@ -28,11 +30,18 @@ export async function configureWorkoutNotifications() {
   });
 
   if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('rest-timer', {
+    await Notifications.setNotificationChannelAsync(REST_TIMER_CHANNEL_ID, {
       name: 'Rest Timer',
       importance: Notifications.AndroidImportance.HIGH,
       vibrationPattern: [0, 250, 120, 250],
       sound: 'default',
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    });
+    await Notifications.setNotificationChannelAsync(REST_TIMER_SILENT_CHANNEL_ID, {
+      name: 'Rest Timer Silent',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: [0, 250],
+      sound: null,
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     });
   }
@@ -70,11 +79,12 @@ export async function scheduleRestNotifications(params: {
   const granted = await ensureWorkoutNotificationPermission();
   if (!granted) return {};
 
-  // Always keep scheduled notifications silent. iOS notification sounds
-  // can take audio focus outside our app's mix-with-others audio session,
-  // which is what makes music/podcasts pause. The app ping in feedback.ts
-  // is the only audible rest-end sound; notifications provide banner +
-  // vibration fallback when JS is not awake.
+  // The completion notification is audible only when the app is not
+  // foregrounded. Foreground delivery is muted by the handler above so it
+  // cannot double with the in-app chime.
+  const settings = await loadSettings();
+  const playCompletionSound = settings.soundsEnabled;
+  const completeChannelId = playCompletionSound ? REST_TIMER_CHANNEL_ID : REST_TIMER_SILENT_CHANNEL_ID;
   const aiLine = params.aiCue ? `\n${params.aiCue}` : '';
   const endTime = new Date(Date.now() + params.seconds * 1000);
   const endClock = endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -89,7 +99,7 @@ export async function scheduleRestNotifications(params: {
         // Keep that notification silent so it cannot interrupt music.
         ...(Platform.OS === 'android' ? { sticky: false, ongoing: false } : {}),
       },
-      trigger: null,
+      trigger: Platform.OS === 'android' ? { channelId: REST_TIMER_SILENT_CHANNEL_ID } : null,
     });
   }
 
@@ -103,6 +113,7 @@ export async function scheduleRestNotifications(params: {
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
         seconds: params.seconds - 10,
+        ...(Platform.OS === 'android' ? { channelId: REST_TIMER_SILENT_CHANNEL_ID } : {}),
       },
     });
   }
@@ -111,10 +122,18 @@ export async function scheduleRestNotifications(params: {
     content: {
       title: 'Go! Next set ready',
       body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
+      // Native background/killed alert sound. Foreground handler suppresses
+      // this so feedback.ts can play the selected in-app sound once.
+      sound: playCompletionSound ? 'default' : false,
+      // timeSensitive bypasses Workout/DND Focus modes on both iPhone and
+      // the mirrored Watch notification — without it the ding is silenced
+      // whenever the Watch auto-activates Workout Focus.
+      ...(Platform.OS === 'ios' ? { interruptionLevel: 'timeSensitive' as const } : {}),
     },
     trigger: {
       type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
       seconds: params.seconds,
+      ...(Platform.OS === 'android' ? { channelId: completeChannelId } : {}),
     },
   });
 

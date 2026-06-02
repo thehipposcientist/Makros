@@ -572,19 +572,14 @@ export function coachingCopy(compliance_7d: number, current_streak: number): str
   return "On fire. Don't break the chain.";
 }
 
-export default function StreakConsistencyWidget({ authToken, themeName, displayName }: Props) {
+export default function StreakConsistencyWidget({ authToken, themeName }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const [data, setData] = useState<StreakSummary | null>(null);
-  const motto = getDailyMotto(displayName);
 
   const lastAnimatedStreak = useRef<number | null>(null);
   const streakScale = useRef(new Animated.Value(1)).current;
   const flamePulse = useRef(new Animated.Value(1)).current;
-  const mottoOpacity = useRef(new Animated.Value(0)).current;
-  const mottoTranslateY = useRef(new Animated.Value(6)).current;
-  const mottoRailScale = useRef(new Animated.Value(0.2)).current;
-  const quoteMarkScale = useRef(new Animated.Value(0.9)).current;
 
   useEffect(() => {
     let alive = true;
@@ -627,96 +622,35 @@ export default function StreakConsistencyWidget({ authToken, themeName, displayN
     return () => { loop.stop(); };
   }, [onFire, flamePulse]);
 
-  useEffect(() => {
-    mottoOpacity.setValue(0);
-    mottoTranslateY.setValue(6);
-    mottoRailScale.setValue(0.2);
-    quoteMarkScale.setValue(0.9);
-    Animated.sequence([
-      Animated.delay(120),
-      Animated.parallel([
-        Animated.timing(mottoOpacity, { toValue: 1, duration: 320, useNativeDriver: true }),
-        Animated.timing(mottoTranslateY, { toValue: 0, duration: 320, useNativeDriver: true }),
-        Animated.timing(mottoRailScale, { toValue: 1, duration: 380, useNativeDriver: true }),
-        Animated.spring(quoteMarkScale, { toValue: 1, friction: 6, tension: 120, useNativeDriver: true }),
-      ]),
-    ]).start();
-  }, [motto, mottoOpacity, mottoTranslateY, mottoRailScale, quoteMarkScale]);
+  // Streak below 1 day = render nothing. The widget used to also show a
+  // daily motto as fallback content, but that's been removed — so no
+  // streak means no widget, no empty box.
+  if (!data || data.current_streak < 1) return null;
 
   return (
     <View style={{
-      borderRadius: radius.md,
-      paddingHorizontal: 12, paddingVertical: 10,
-      marginBottom: 10,
+      paddingVertical: 6,
+      marginBottom: 6,
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 10,
     }}>
-      {/* Flame + streak days — only when streak > 0 */}
-      {data && data.current_streak > 0 && (
-        <View style={{
-          flexDirection: 'row', alignItems: 'center', gap: 4,
-          paddingHorizontal: 8, paddingVertical: 4,
-          borderRadius: 12,
-          backgroundColor: tc.surface,
-          borderWidth: 1, borderColor: tc.border,
-        }}>
-          <Animated.View style={{ transform: [{ scale: streakScale }, { scale: flamePulse }] }}>
-            <Ionicons name="flame" size={12} color={tc.warning} />
-          </Animated.View>
-          <Animated.Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any, transform: [{ scale: streakScale }] }}>
-            {data.current_streak}
-          </Animated.Text>
-          <Text style={{ fontSize: 10, color: tc.textSecondary }}>
-            day{data.current_streak === 1 ? '' : 's'}
-          </Text>
-        </View>
-      )}
-      {/* Daily personalized motto */}
-      <Animated.View
-        style={{
-          flex: 1,
-          minWidth: 0,
-          paddingLeft: 14,
-          opacity: mottoOpacity,
-          transform: [{ translateY: mottoTranslateY }],
-        }}
-      >
-        <Animated.View
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: 1,
-            bottom: 1,
-            width: 2,
-            borderRadius: 2,
-            backgroundColor: tc.primary + '66',
-            transform: [{ scaleY: mottoRailScale }],
-          }}
-        />
-        <Animated.Text
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: 7,
-            top: -6,
-            fontSize: 18,
-            lineHeight: 20,
-            fontWeight: '900',
-            color: tc.primary + '55',
-            transform: [{ scale: quoteMarkScale }],
-          }}
-        >
-          “
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', gap: 4,
+        paddingHorizontal: 8, paddingVertical: 4,
+        borderRadius: 12,
+        backgroundColor: tc.surface,
+        borderWidth: 1, borderColor: tc.border,
+      }}>
+        <Animated.View style={{ transform: [{ scale: streakScale }, { scale: flamePulse }] }}>
+          <Ionicons name="flame" size={12} color={tc.warning} />
+        </Animated.View>
+        <Animated.Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any, transform: [{ scale: streakScale }] }}>
+          {data.current_streak}
         </Animated.Text>
-        <Animated.Text
-          style={{ fontSize: 12, lineHeight: 17, color: tc.textSecondary, fontWeight: '600', fontStyle: 'italic' }}
-          numberOfLines={2}
-        >
-          “{motto}”
-        </Animated.Text>
-      </Animated.View>
+        <Text style={{ fontSize: 10, color: tc.textSecondary }}>
+          day{data.current_streak === 1 ? '' : 's'}
+        </Text>
+      </View>
     </View>
   );
 }

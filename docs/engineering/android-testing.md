@@ -1,6 +1,6 @@
 # Android Testing And Deployment
 
-Last updated: 2026-05-07
+Last updated: 2026-05-24
 
 ## Current Android Beta Scope
 
@@ -38,6 +38,53 @@ Run locally on an emulator or USB device:
 ```bash
 npx expo run:android
 ```
+
+The local smoke AVD is:
+
+```bash
+Thallo_API_36
+```
+
+It is a Pixel 8, Android API 36, Google APIs ARM image. Run the release APK
+launch smoke with:
+
+```bash
+npm run test:android:smoke
+```
+
+The smoke script boots/reuses the emulator, installs
+`android/app/build/outputs/apk/release/app-release.apk`, launches
+`com.thallo.app/.MainActivity`, checks for AndroidRuntime/FATAL logs, captures
+`.maestro/artifacts/android-release-launch.png`, and runs the fast Maestro
+launch assertion when Maestro is installed.
+
+## Android Coverage Without A Device
+
+These checks run on macOS without Android hardware:
+
+```bash
+npm run test:frontend
+```
+
+The frontend suite includes Android-specific static and pure-function guards:
+
+- Dev API resolution maps Android emulator localhost sessions to `10.0.2.2:8000`.
+- Android app config and checked-in manifest declare `POST_NOTIFICATIONS` for Android 13+ reminders.
+- Health Connect data permissions stay out of the manifest until the Health Connect feature ships.
+- iOS-only native modules (`thallo-healthkit`, `thallo-live-activity`, `thallo-watch-bridge`) stay iOS-only in Expo autolinking config.
+- Platform copy/capabilities keep Android on the Health Connect planned/manual path and iOS on Apple Health/Watch/Live Activities.
+
+When an Android emulator or remote tester device is available, run the Android
+platform parity Maestro flow:
+
+```bash
+make seed-e2e
+MAESTRO='maestro --device emulator-5554' make smoke-mobile-android-platform
+```
+
+That seeded flow verifies Android account/settings surfaces show Health Connect
+copy, hide the Apple Watch sync row, and present the Health Connect unavailable
+state in the health-permissions screen.
 
 ## Google Sign-In Requirement
 
@@ -99,8 +146,8 @@ npm run test:frontend
 npx expo-doctor
 JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
   ANDROID_HOME="$HOME/Library/Android/sdk" \
-  ./android/gradlew -p android assembleDebug
+  ./android/gradlew -p android assembleRelease
+npm run test:android:smoke
 ```
 
 If the local Android SDK is not installed, EAS cloud builds can still be used for distribution, but local emulator testing will be blocked until Android Studio/SDK is installed.
-

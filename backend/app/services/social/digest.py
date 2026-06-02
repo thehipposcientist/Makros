@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 from app.models import (
     User, UserSocialProfile, UserGoal, WorkoutCompletion,
 )
+from app.services.social.privacy import shareable_completion_filters
 
 
 def week_start_for(today: date) -> date:
@@ -115,6 +116,7 @@ def compute_digest(
                 col(WorkoutCompletion.user_id).in_(friend_ids),
                 WorkoutCompletion.workout_date >= window_start,
                 WorkoutCompletion.workout_date <= today,
+                *shareable_completion_filters(),
             )
         ).all()
         dates_by_user: dict[int, set[date]] = {}
@@ -193,6 +195,7 @@ def _completion_dates(db: Session, user_id: int, start: date, end: date) -> set[
             WorkoutCompletion.user_id == user_id,
             WorkoutCompletion.workout_date >= start,
             WorkoutCompletion.workout_date <= end,
+            *shareable_completion_filters(),
         )
     ).all()
     return set(rows)

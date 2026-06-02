@@ -25,6 +25,7 @@ planner expects, so the downstream serialization path doesn't change.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .archetypes import DayArchetype, ARCHETYPE_META, TrainingType
 from .cardio import (
@@ -148,10 +149,10 @@ def _prescribe_lifting(slot, exercise: dict, inputs) -> Prescription:
         sets=pres.sets, reps=pres.reps,
         rest_seconds=pres.rest_seconds, rir_target=pres.rir_target,
         prescription_type="strength",
-    ), slot, inputs)
+    ), slot, inputs, exercise)
 
 
-def _apply_lifting_session_density(prescription: Prescription, slot, inputs) -> Prescription:
+def _apply_lifting_session_density(prescription: Prescription, slot, inputs, exercise: dict | None = None) -> Prescription:
     """Scale working sets for longer lifting sessions.
 
     Slot expansion adds more exercises when the catalog can support it, but
@@ -168,18 +169,70 @@ def _apply_lifting_session_density(prescription: Prescription, slot, inputs) -> 
         session_minutes = int(getattr(inputs, "session_minutes", None) or 45)
     except (TypeError, ValueError):
         session_minutes = 45
-    if session_minutes < 75:
+    if session_minutes >= 75:
+        bonus = 2 if session_minutes >= 90 else 1
+        caps = {
+            "primary": 6 if session_minutes >= 90 else 5,
+            "secondary": 5 if session_minutes >= 90 else 4,
+            "isolation": 5 if session_minutes >= 90 else 4,
+            "accessory": 5 if session_minutes >= 90 else 4,
+        }
+        cap = caps.get(role, 4 if session_minutes < 90 else 5)
+        prescription.sets = min(cap, prescription.sets + bonus)
+    return _apply_coach_lifting_adjustments(prescription, slot, inputs, exercise)
+
+
+def _coaching_volume_pct_for_exercise(exercise: dict | None, inputs) -> int:
+    pct = int(getattr(inputs, "volume_adjustment_pct", 0) or 0)
+    adjustments = getattr(inputs, "muscle_volume_adjustments", None) or {}
+    if not isinstance(adjustments, dict) or not exercise:
+        return max(-50, min(40, pct))
+    muscles = {str(exercise.get("primary_muscle") or "").strip().lower()}
+    muscles.update(str(m or "").strip().lower() for m in (exercise.get("secondary_muscles") or []))
+    muscles.discard("")
+    for muscle in muscles:
+        data = adjustments.get(muscle)
+        if data is None:
+            continue
+        if isinstance(data, dict):
+            pct += int(data.get("pct") or 0)
+        elif isinstance(data, (int, float)):
+            pct += int(data)
+    return max(-50, min(40, pct))
+
+
+def _apply_coach_lifting_adjustments(
+    prescription: Prescription,
+    slot,
+    inputs,
+    exercise: dict | None,
+) -> Prescription:
+    if prescription.prescription_type != "strength":
+        return prescription
+    role = getattr(slot, "role", "")
+    if role in ("warmup", "core"):
         return prescription
 
-    bonus = 2 if session_minutes >= 90 else 1
-    caps = {
-        "primary": 6 if session_minutes >= 90 else 5,
-        "secondary": 5 if session_minutes >= 90 else 4,
-        "isolation": 5 if session_minutes >= 90 else 4,
-        "accessory": 5 if session_minutes >= 90 else 4,
-    }
-    cap = caps.get(role, 4 if session_minutes < 90 else 5)
-    prescription.sets = min(cap, prescription.sets + bonus)
+    volume_pct = _coaching_volume_pct_for_exercise(exercise, inputs)
+    if volume_pct > 0:
+        try:
+            session_minutes = int(getattr(inputs, "session_minutes", None) or 45)
+        except (TypeError, ValueError):
+            session_minutes = 45
+        if session_minutes < 75:
+            volume_pct = 0
+    if volume_pct:
+        factor = max(0.5, min(1.4, 1.0 + volume_pct / 100.0))
+        raw_sets = prescription.sets * factor
+        adjusted_sets = math.floor(raw_sets) if volume_pct < 0 else math.ceil(raw_sets)
+        cap = 6 if role in ("primary", "secondary") else 5
+        prescription.sets = max(1, min(cap, adjusted_sets))
+
+    intensity_pct = int(getattr(inputs, "intensity_adjustment_pct", 0) or 0)
+    if intensity_pct < 0:
+        prescription.rir_target = min(5.0, prescription.rir_target + abs(intensity_pct) / 10.0)
+    elif intensity_pct > 0:
+        prescription.rir_target = max(0.0, prescription.rir_target - intensity_pct / 10.0)
     return prescription
 
 
@@ -204,7 +257,7 @@ def _prescribe_by_stimulus(
     role = slot.role
 
     def _done(prescription: Prescription) -> Prescription:
-        return _apply_lifting_session_density(prescription, slot, inputs)
+        return _apply_lifting_session_density(prescription, slot, inputs, exercise)
 
     if training_type == "strength":
         if role == "primary":

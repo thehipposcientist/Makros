@@ -14,6 +14,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   View,
   Text,
   Modal,
@@ -22,14 +23,23 @@ import {
   StyleSheet,
   Dimensions,
   Animated,
+  ImageSourcePropType,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { APP_THEMES, THEME_PICKER_ORDER, getContrastingTextColor, getTheme, radius } from '../constants/theme';
+import { pexelsPhoto } from '../constants/stockImages';
+import {
+  HEALTH_PLATFORM_LABEL,
+  HEALTH_PLATFORM_PRO_COPY,
+  HEALTH_PLATFORM_STATUS_COPY,
+} from '../constants/platformHealth';
 import type { AppThemeName } from '../types';
+import DeviceSyncMockup from './DeviceSyncMockup';
 
 export type TutorialTier = 'free' | 'pro';
 
@@ -40,8 +50,9 @@ interface Props {
   /** Fires when the user taps Skip OR Done. Caller should mark the
    *  AsyncStorage flag completed in BOTH cases — once the user has
    *  seen the tutorial we don't want to re-prompt. */
-  onClose: (result: { completed: boolean }) => void;
+  onClose: (result: { completed: boolean; startLiveTutorial?: boolean }) => void;
   onThemeChange?: (themeName: AppThemeName) => void | Promise<void>;
+  onHealthSetup?: () => void | Promise<void>;
   /** Optional — fires when a free user taps the upsell CTA. Caller
    *  routes to the paywall / RevenueCat sheet. Tutorial closes
    *  itself first so the paywall has a clean stage. */
@@ -57,7 +68,9 @@ interface BulletItem {
 
 interface Step {
   /** Hero icon at the top of the step. */
-  icon: keyof typeof Ionicons.glyphMap;
+  icon?: keyof typeof Ionicons.glyphMap;
+  heroImages?: ImageSourcePropType[];
+  deviceShowcase?: boolean;
   iconColor?: string;
   /** Bold one-liner title. */
   title: string;
@@ -66,16 +79,34 @@ interface Step {
   /** Optional bullet list — usually 2-5 items showing what lives in
    *  this part of the app. */
   bullets?: BulletItem[];
-  /** When true, the Next button shows the upgrade copy on the LAST
-   *  step for free users. Caller wires onUpgrade. */
-  upsell?: boolean;
   themePicker?: boolean;
+  healthSetup?: boolean;
+  healthActionLabel?: string;
+  upgradeActionLabel?: string;
 }
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const WELCOME_HERO_IMAGES: ImageSourcePropType[] = [
+  { uri: pexelsPhoto('5878699', { width: 900, height: 900 }) },
+  { uri: pexelsPhoto('30635713', { width: 900, height: 900 }) },
+  { uri: pexelsPhoto('32977239', { width: 900, height: 900 }) },
+];
+const WORKOUT_HERO_IMAGES: ImageSourcePropType[] = [
+  { uri: pexelsPhoto('13993018', { width: 900, height: 900 }) },
+  { uri: pexelsPhoto('5878699', { width: 900, height: 900 }) },
+];
+const MEAL_HERO_IMAGES: ImageSourcePropType[] = [
+  { uri: pexelsPhoto('30635713', { width: 900, height: 900 }) },
+  { uri: pexelsPhoto('30635717', { width: 900, height: 900 }) },
+];
+const PROGRESS_HERO_IMAGES: ImageSourcePropType[] = [
+  { uri: pexelsPhoto('32977239', { width: 900, height: 900 }) },
+  { uri: pexelsPhoto('3999644', { width: 900, height: 900 }) },
+];
 
 export default function TutorialOverlay({
-  visible, tier, themeName, onClose, onThemeChange, onUpgrade,
+  visible, tier, themeName, onClose, onThemeChange, onHealthSetup,
+  onUpgrade,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -117,7 +148,7 @@ export default function TutorialOverlay({
     if (index >= steps.length - 1) {
       // Last step — Done button completes.
       try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
-      onClose({ completed: true });
+      onClose({ completed: true, startLiveTutorial: true });
       return;
     }
     const next = index + 1;
@@ -131,16 +162,14 @@ export default function TutorialOverlay({
     onClose({ completed: true });
   };
 
-  const handleUpgrade = () => {
+  const goUpgrade = () => {
+    try { Haptics.selectionAsync(); } catch {}
     onClose({ completed: true });
-    // Defer onUpgrade to next tick so the modal close animation
-    // doesn't fight the paywall presentation.
-    setTimeout(() => { onUpgrade?.(); }, 250);
+    onUpgrade?.();
   };
 
   const isLast = index === steps.length - 1;
-  const showUpgradeCTA = isLast && tier === 'free' && steps[index].upsell && !!onUpgrade;
-
+  const topBarOnHero = !!steps[index]?.heroImages?.length;
   return (
     <Modal visible={visible} animationType="fade" presentationStyle="overFullScreen" transparent>
       <Animated.View style={[styles.container, { opacity: fade }]}>
@@ -151,9 +180,9 @@ export default function TutorialOverlay({
             accessibilityLabel="tutorial-skip"
             onPress={goSkip}
             hitSlop={12}>
-            <Text style={styles.skipText}>Skip</Text>
+            <Text style={[styles.skipText, topBarOnHero && styles.topBarTextOnHero]}>Skip</Text>
           </TouchableOpacity>
-          <Text style={styles.counterText}>
+          <Text style={[styles.counterText, topBarOnHero && styles.topBarTextOnHero]}>
             {index + 1} of {steps.length}
           </Text>
         </View>
@@ -174,6 +203,8 @@ export default function TutorialOverlay({
               currentThemeName={theme.name}
               styles={styles}
               onThemeChange={onThemeChange}
+              onHealthSetup={onHealthSetup}
+              onUpgrade={onUpgrade ? goUpgrade : undefined}
             />
           ))}
         </ScrollView>
@@ -196,40 +227,19 @@ export default function TutorialOverlay({
 
         {/* Bottom CTA */}
         <View style={styles.ctaRow}>
-          {showUpgradeCTA ? (
-            <>
-              <TouchableOpacity
-                testID="tutorial-maybe-later"
-                accessibilityLabel="tutorial-maybe-later"
-                style={styles.secondaryBtn}
-                onPress={() => onClose({ completed: true })}>
-                <Text style={styles.secondaryBtnText}>Maybe later</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                testID="tutorial-upgrade"
-                accessibilityLabel="tutorial-upgrade"
-                style={styles.primaryBtn}
-                onPress={handleUpgrade}
-                activeOpacity={0.85}>
-                <Text style={styles.primaryBtnText}>See Pro</Text>
-                <Ionicons name="sparkles" size={14} color="#fff" style={{ marginLeft: 6 }} />
-              </TouchableOpacity>
-            </>
-          ) : (
-            <TouchableOpacity
-              testID="tutorial-next"
-              accessibilityLabel={isLast ? 'tutorial-done' : 'tutorial-next'}
-              style={styles.primaryBtn}
-              onPress={goNext}
-              activeOpacity={0.85}>
-              <Text style={styles.primaryBtnText}>
-                {isLast ? 'Get started' : 'Next'}
-              </Text>
-              {!isLast && (
-                <Ionicons name="chevron-forward" size={16} color="#fff" style={{ marginLeft: 4 }} />
-              )}
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity
+            testID="tutorial-next"
+            accessibilityLabel={isLast ? 'tutorial-done' : 'tutorial-next'}
+            style={styles.primaryBtn}
+            onPress={goNext}
+            activeOpacity={0.85}>
+            <Text style={styles.primaryBtnText}>
+              {isLast ? 'Start live tour' : 'Next'}
+            </Text>
+            {!isLast && (
+              <Ionicons name="chevron-forward" size={16} color="#fff" style={{ marginLeft: 4 }} />
+            )}
+          </TouchableOpacity>
         </View>
       </Animated.View>
     </Modal>
@@ -240,90 +250,229 @@ export default function TutorialOverlay({
 // ── Step view ─────────────────────────────────────────────────────
 
 function StepView({
-  step, tc, currentThemeName, styles, onThemeChange,
+  step, tc, currentThemeName, styles, onThemeChange, onHealthSetup, onUpgrade,
 }: {
   step: Step;
   tc: any;
   currentThemeName: AppThemeName;
   styles: any;
   onThemeChange?: (themeName: AppThemeName) => void | Promise<void>;
+  onHealthSetup?: () => void | Promise<void>;
+  onUpgrade?: () => void;
 }) {
+  const hasHeroHeader = !!step.heroImages?.length;
+  const [healthBusy, setHealthBusy] = useState(false);
+  const handleHealthSetup = async () => {
+    if (!onHealthSetup || healthBusy) return;
+    setHealthBusy(true);
+    try {
+      await onHealthSetup();
+    } finally {
+      setHealthBusy(false);
+    }
+  };
   return (
-    <View style={styles.stepFrame}>
+    <View style={[styles.stepFrame, hasHeroHeader && styles.heroStepFrame]}>
       <ScrollView
-        contentContainerStyle={styles.stepContent}
+        contentContainerStyle={[styles.stepContent, hasHeroHeader && styles.heroStepContent]}
         showsVerticalScrollIndicator={false}>
-        <View style={[styles.iconBubble, { backgroundColor: (step.iconColor ?? tc.primary) + '22' }]}>
-          <Ionicons name={step.icon} size={48} color={step.iconColor ?? tc.primary} />
-        </View>
-        <Text style={styles.stepTitle}>{step.title}</Text>
-        <Text style={styles.stepBody}>{step.body}</Text>
-        {step.bullets && step.bullets.length > 0 && (
-          <View style={styles.bulletList}>
-            {step.bullets.map((b, i) => (
-              <View key={i} style={styles.bulletRow}>
-                <View style={[styles.bulletIcon, { backgroundColor: (b.tint ?? tc.primary) + '22' }]}>
-                  <Ionicons name={b.icon} size={16} color={b.tint ?? tc.primary} />
+        {hasHeroHeader ? (
+          <CrossfadeHero images={step.heroImages!} title={step.title} styles={styles} />
+        ) : step.deviceShowcase ? (
+          <DeviceSyncMockup accent={step.iconColor ?? tc.primary} compact style={styles.deviceShowcase} />
+        ) : step.icon ? (
+          <View style={[styles.iconBubble, { backgroundColor: (step.iconColor ?? tc.primary) + '22' }]}>
+            <Ionicons name={step.icon} size={48} color={step.iconColor ?? tc.primary} />
+          </View>
+        ) : null}
+        <View style={[styles.stepCopyWrap, hasHeroHeader && styles.heroCopyWrap]}>
+          {!hasHeroHeader && <Text style={styles.stepTitle}>{step.title}</Text>}
+          <Text style={styles.stepBody}>{step.body}</Text>
+          {step.bullets && step.bullets.length > 0 && (
+            <View style={styles.bulletList}>
+              {step.bullets.map((b, i) => (
+                <View key={i} style={styles.bulletRow}>
+                  <View style={[styles.bulletIcon, { backgroundColor: (b.tint ?? tc.primary) + '22' }]}>
+                    <Ionicons name={b.icon} size={16} color={b.tint ?? tc.primary} />
+                  </View>
+                  <Text style={styles.bulletText}>{b.text}</Text>
                 </View>
-                <Text style={styles.bulletText}>{b.text}</Text>
-              </View>
-            ))}
-          </View>
-        )}
-        {step.themePicker && (
-          <View style={styles.themeGrid}>
-            {THEME_PICKER_ORDER.map((themeName) => {
-              const option = APP_THEMES[themeName];
-              const selected = option.name === currentThemeName;
-              return (
-                <TouchableOpacity
-                  key={option.name}
-                  activeOpacity={0.82}
-                  accessibilityRole="button"
-                  accessibilityLabel={`tutorial-theme-${option.name}`}
-                  accessibilityState={{ selected }}
-                  style={[
-                    styles.themeOption,
-                    {
-                      backgroundColor: option.colors.surface,
-                      borderColor: selected ? option.colors.primary : option.colors.border,
-                    },
-                  ]}
-                  onPress={() => {
-                    if (selected) return;
-                    try { Haptics.selectionAsync(); } catch {}
-                    onThemeChange?.(option.name);
-                  }}>
-                  <View style={styles.themeOptionTop}>
-                    <Text
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.82}
-                      style={[styles.themeOptionName, { color: option.colors.textPrimary }]}>
-                      {option.label}
-                    </Text>
-                    {selected && (
-                      <View style={[styles.themeCheck, { backgroundColor: option.colors.primary }]}>
-                        <Ionicons
-                          name="checkmark"
-                          size={12}
-                          color={getContrastingTextColor(option.colors.primary)}
-                        />
-                      </View>
-                    )}
-                  </View>
-                  <View style={styles.themeSwatchRow}>
-                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.background, borderColor: option.colors.border }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.surfaceRaised, borderColor: option.colors.border }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.primary, borderColor: option.colors.border }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.accent, borderColor: option.colors.border }]} />
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        )}
+              ))}
+            </View>
+          )}
+          {step.themePicker && (
+            <View style={styles.themeGrid}>
+              {THEME_PICKER_ORDER.map((themeName) => {
+                const option = APP_THEMES[themeName];
+                const selected = option.name === currentThemeName;
+                return (
+                  <TouchableOpacity
+                    key={option.name}
+                    activeOpacity={0.82}
+                    accessibilityRole="button"
+                    accessibilityLabel={`tutorial-theme-${option.name}`}
+                    accessibilityState={{ selected }}
+                    style={[
+                      styles.themeOption,
+                      {
+                        backgroundColor: option.colors.surface,
+                        borderColor: selected ? option.colors.primary : option.colors.border,
+                      },
+                    ]}
+                    onPress={() => {
+                      if (selected) return;
+                      try { Haptics.selectionAsync(); } catch {}
+                      onThemeChange?.(option.name);
+                    }}>
+                    <View style={styles.themeOptionTop}>
+                      <Text
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.82}
+                        style={[styles.themeOptionName, { color: option.colors.textPrimary }]}>
+                        {option.label}
+                      </Text>
+                      {selected && (
+                        <View style={[styles.themeCheck, { backgroundColor: option.colors.primary }]}>
+                          <Ionicons
+                            name="checkmark"
+                            size={12}
+                            color={getContrastingTextColor(option.colors.primary)}
+                          />
+                        </View>
+                      )}
+                    </View>
+                    <View style={styles.themeSwatchRow}>
+                      <View style={[styles.themeSwatch, { backgroundColor: option.colors.background, borderColor: option.colors.border }]} />
+                      <View style={[styles.themeSwatch, { backgroundColor: option.colors.surfaceRaised, borderColor: option.colors.border }]} />
+                      <View style={[styles.themeSwatch, { backgroundColor: option.colors.primary, borderColor: option.colors.border }]} />
+                      <View style={[styles.themeSwatch, { backgroundColor: option.colors.accent, borderColor: option.colors.border }]} />
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+          {step.healthSetup && onHealthSetup && (
+            <TouchableOpacity
+              testID="tutorial-health-setup"
+              accessibilityRole="button"
+              accessibilityLabel="tutorial-health-setup"
+              activeOpacity={0.86}
+              disabled={healthBusy}
+              onPress={handleHealthSetup}
+              style={[styles.stepActionButton, { backgroundColor: tc.primary }]}>
+              {healthBusy ? (
+                <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+              ) : (
+                <>
+                  <Ionicons
+                    name={Platform.OS === 'android' ? 'fitness-outline' : 'heart-outline'}
+                    size={17}
+                    color={getContrastingTextColor(tc.primary)}
+                  />
+                  <Text style={[styles.stepActionText, { color: getContrastingTextColor(tc.primary) }]}>
+                    {step.healthActionLabel ?? `Set up ${HEALTH_PLATFORM_LABEL}`}
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+          {step.upgradeActionLabel && onUpgrade && (
+            <TouchableOpacity
+              testID="tutorial-upgrade"
+              accessibilityRole="button"
+              accessibilityLabel="tutorial-upgrade"
+              activeOpacity={0.86}
+              onPress={onUpgrade}
+              style={styles.upgradeActionButton}>
+              <Ionicons name="sparkles-outline" size={17} color={tc.primary} />
+              <Text style={styles.upgradeActionText}>{step.upgradeActionLabel}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </ScrollView>
+    </View>
+  );
+}
+
+function CrossfadeHero({
+  images, title, styles,
+}: {
+  images: ImageSourcePropType[];
+  title: string;
+  styles: any;
+}) {
+  const activeIndexRef = useRef(0);
+  const animationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const opacitiesRef = useRef<Animated.Value[]>([]);
+
+  if (opacitiesRef.current.length !== images.length) {
+    opacitiesRef.current = images.map((_, i) => new Animated.Value(i === 0 ? 1 : 0));
+  }
+
+  useEffect(() => {
+    activeIndexRef.current = 0;
+    opacitiesRef.current.forEach((opacity, i) => {
+      opacity.setValue(i === 0 ? 1 : 0);
+    });
+  }, [images.length]);
+
+  useEffect(() => {
+    if (images.length < 2) return;
+    const timer = setInterval(() => {
+      const current = activeIndexRef.current;
+      const upcoming = (current + 1) % images.length;
+      const opacities = opacitiesRef.current;
+      animationRef.current?.stop();
+      opacities[upcoming].setValue(0);
+      animationRef.current = Animated.parallel([
+        Animated.timing(opacities[current], {
+          toValue: 0,
+          duration: 760,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacities[upcoming], {
+          toValue: 1,
+          duration: 760,
+          useNativeDriver: true,
+        }),
+      ]);
+      animationRef.current.start(({ finished }) => {
+        if (!finished) return;
+        activeIndexRef.current = upcoming;
+        opacities.forEach((opacity, i) => {
+          opacity.setValue(i === upcoming ? 1 : 0);
+        });
+      });
+    }, 3200);
+    return () => {
+      clearInterval(timer);
+      animationRef.current?.stop();
+    };
+  }, [images.length]);
+
+  return (
+    <View style={styles.heroHeader}>
+      {images.map((image, i) => (
+        <Animated.Image
+          key={i}
+          source={image}
+          resizeMode="cover"
+          style={[styles.heroHeaderImage, { opacity: opacitiesRef.current[i] }]}
+        />
+      ))}
+      <LinearGradient
+        colors={['rgba(5,10,14,0.12)', 'rgba(5,10,14,0.36)', 'rgba(5,10,14,0.78)']}
+        locations={[0, 0.48, 1]}
+        start={{ x: 0.12, y: 0 }}
+        end={{ x: 0.88, y: 1 }}
+        style={styles.heroHeaderShade}
+      />
+      <View style={styles.heroHeaderCopy}>
+        <Text style={styles.heroEyebrow}>Thallo</Text>
+        <Text style={styles.heroTitle}>{title}</Text>
+      </View>
     </View>
   );
 }
@@ -331,114 +480,162 @@ function StepView({
 
 // ── Step content ──────────────────────────────────────────────────
 //
-// Free and pro share the structural intro (welcome, tabs, Apple
-// Health). Free ends with a comparison upsell; pro ends with an
-// AI-features grid + watch integration.
+// Free and pro share the same short structure: welcome, theme, health
+// setup. The copy branches so Free users see manual-tracking language
+// while Pro users see generated-plan and connected-health language.
 
 function buildSteps(tier: TutorialTier, tc: any): Step[] {
-  const healthLabel = Platform.OS === 'android' ? 'Health Connect' : 'Apple Health';
-  const watchLabel = Platform.OS === 'android' ? 'wearables' : 'Watch';
+  const planCopy = tier === 'pro'
+    ? 'Your full system is ready. Pick your look, connect optional health signals, then we will walk through Today, workouts, meals, progress, and the ways you can customize the app.'
+    : 'Free is ready for workouts, nutrition, or both. Pick your look, review optional health setup, then we will walk through Today, workouts, meals, and progress.';
+  const welcomeStep: Step = {
+    heroImages: WELCOME_HERO_IMAGES,
+    title: 'Welcome to Thallo',
+    body: `${planCopy} Thallo can be a complete strength, cardio, nutrition, recovery, supplement, and health dashboard, or a focused tracker for the pieces you actually use.`,
+    bullets: tier === 'pro'
+      ? [
+        { icon: 'calendar-outline', text: 'Follow the guided PlanWeek, log your own program, or mix both.', tint: tc.primary },
+        { icon: 'restaurant-outline', text: 'Use meal guidance, manual food logs, hydration, routines, and supplements together.', tint: tc.success },
+        { icon: 'options-outline', text: 'Prefer only workouts or only nutrition? Your dashboard can hide the rest.', tint: tc.warning },
+      ]
+      : [
+        { icon: 'play-outline', text: 'Start custom strength or cardio workouts and save repeat sessions as templates.', tint: tc.primary },
+        { icon: 'restaurant-outline', text: 'Log meals, hydration, supplements, weight, and progress manually.', tint: tc.success },
+        { icon: 'options-outline', text: 'Use workouts only, nutrition only, or both from Settings.', tint: tc.warning },
+      ],
+  };
+  const todayStep: Step = {
+    icon: 'home-outline',
+    iconColor: tc.primary,
+    title: 'Today is your home base',
+    body: tier === 'pro'
+      ? 'The Today page gives you the next workout action, current macro targets, hydration, sleep, goal, nutrition, and readiness without digging through every tab.'
+      : 'The Today page still works in manual mode: start a custom workout, log a meal, add water, and see your macro goals from one clean daily view.',
+    bullets: tier === 'pro'
+      ? [
+        { icon: 'barbell-outline', text: 'Start or resume today’s planned workout from the top card.', tint: tc.primary },
+        { icon: 'restaurant-outline', text: 'Log meals and see the same adjusted macro goals used by Meals.', tint: tc.success },
+        { icon: 'moon-outline', text: 'Tap sleep or readiness when you want the deeper Progress context.', tint: tc.warning },
+      ]
+      : [
+        { icon: 'add-circle-outline', text: 'Free and manual accounts get a custom-workout start point instead of an empty plan card.', tint: tc.primary },
+        { icon: 'restaurant-outline', text: 'Use Log meal and quick water from Today before opening the full Meals tab.', tint: tc.success },
+        { icon: 'analytics-outline', text: 'Macro targets stay visible even when you are logging everything manually.', tint: tc.warning },
+      ],
+  };
+  const workoutStep: Step = {
+    heroImages: WORKOUT_HERO_IMAGES,
+    title: tier === 'pro' ? 'Guided plan or your own program' : 'Workouts stay flexible',
+    body: tier === 'pro'
+      ? 'Thallo builds a structured 7-day PlanWeek from your goal, schedule, equipment, and limits. You can follow it, run custom strength or cardio sessions, assign templates, swap exercises, or keep your own routine.'
+      : 'Free gives you the workout tracker first: start custom strength or cardio sessions, save and share templates, import detected workouts, and build useful history before turning on generated planning.',
+    bullets: tier === 'pro'
+      ? [
+        { icon: 'calendar-number-outline', text: 'Past days show done or skipped; future days stay queued until the week renews.', tint: tc.primary },
+        { icon: 'bookmark-outline', text: 'Create templates, assign them to the week, or share template codes and bundles.', tint: tc.warning },
+        { icon: 'timer-outline', text: 'Rest timers, set logging, warmups, cardio, and workout resume all live in the same flow.', tint: tc.success },
+      ]
+      : [
+        { icon: 'create-outline', text: 'Log your own program with sets, reps, weight, notes, and timers.', tint: tc.primary },
+        { icon: 'albums-outline', text: 'Save repeated workouts as templates, then reuse or share them.', tint: tc.success },
+        { icon: 'trending-up-outline', text: 'Progress history starts filling in as soon as you log sessions.', tint: tc.warning },
+      ],
+  };
+  const mealStep: Step = {
+    heroImages: MEAL_HERO_IMAGES,
+    title: tier === 'pro' ? 'Nutrition can stand alone' : 'Meals are easy to log',
+    body: tier === 'pro'
+      ? 'Use generated meal guidance, photo scans, food search, hydration, supplements, routines, and scoring to understand how today supports your goal. If you only want nutrition, hide workouts and keep the food tools front and center.'
+      : 'Manual meal logging, hydration, supplements, favorites, routines, and weight tracking are available right away. Pro adds generated nutrition guidance, photo scans, and meal scoring.',
+    bullets: tier === 'pro'
+      ? [
+        { icon: 'scan-outline', text: 'Scan food photos when typing would slow you down.', tint: tc.primary },
+        { icon: 'water-outline', text: 'Hydration, saved meals, grocery lists, supplements, and routines sit beside the daily plan.', tint: tc.success },
+        { icon: 'analytics-outline', text: 'Meal scores show how logged food supports your goal for the day.', tint: tc.warning },
+      ]
+      : [
+        { icon: 'restaurant-outline', text: 'Track meals, hydration, supplements, and body weight manually.', tint: tc.success },
+        { icon: 'bookmark-outline', text: 'Reuse favorites and common meals to keep logging quick.', tint: tc.primary },
+        { icon: 'lock-closed-outline', text: 'Pro unlocks generated nutrition guidance, scans, and meal scores.', tint: tc.warning },
+      ],
+    upgradeActionLabel: tier === 'free' ? 'See Pro options' : undefined,
+  };
+  const progressStep: Step = {
+    heroImages: PROGRESS_HERO_IMAGES,
+    title: 'Progress has context',
+    body: tier === 'pro'
+      ? 'Recovery, readiness, health signals, body trends, strength, cardio, nutrition, and weekly reviews help explain what changed instead of just showing another chart.'
+      : 'Progress starts with the workouts, meals, weight, and body entries you log. Pro layers in readiness, Apple Health signals, scans, and deeper insight cards.',
+    bullets: [
+      { icon: 'body-outline', text: 'Muscle recovery shows which areas are ready, loaded, or due for lighter work.', tint: tc.primary },
+      { icon: 'pulse-outline', text: 'Sleep, HRV, resting heart rate, steps, and activity can support readiness when connected.', tint: tc.success },
+      { icon: 'people-outline', text: 'Friends only see workout activity you share, never calories, macros, or weight.', tint: tc.warning },
+    ],
+    upgradeActionLabel: tier === 'free' ? 'Explore Pro insights' : undefined,
+  };
+  const watchStep: Step | null = Platform.OS === 'ios'
+    ? {
+      deviceShowcase: true,
+      iconColor: tc.primary,
+      title: 'iPhone and Apple Watch stay together',
+      body: tier === 'pro'
+        ? 'Start on your phone or wrist, then keep workouts, rest timers, meals, hydration, sleep, readiness, and quick actions in sync when a compatible Apple Watch is paired.'
+        : 'Manual tracking starts on your phone. When you use Thallo with a compatible Apple Watch, core workout and quick-log surfaces can mirror the day without turning the Watch into the source of truth.',
+      bullets: [
+        { icon: 'phone-portrait-outline', text: 'The phone remains the main dashboard for planning, editing, history, and review.', tint: tc.primary },
+        { icon: 'watch-outline', text: 'The Watch companion keeps active workouts, rest, hydration, meals, and readiness close by.', tint: tc.success },
+        { icon: 'sync-outline', text: 'Phone data wins on conflicts, so the weekly plan and logs stay consistent.', tint: tc.warning },
+      ],
+    }
+    : null;
   const themeStep: Step = {
     icon: 'color-palette-outline',
     title: 'Choose your theme',
     body: 'Pick the look you want before you start. You can change this later from Account and Settings.',
     themePicker: true,
   };
-  const tabsStep: Step = {
-    icon: 'apps-outline',
-    title: 'Three tabs, all you need',
-    body: 'The whole app fits in three tabs at the bottom. Swipe between them — each one has its own sub-tabs for deeper detail.',
-    bullets: [
-      { icon: 'barbell-outline', text: 'Workout — sessions, templates, exercise library, training settings', tint: tc.primary },
-      { icon: 'restaurant-outline', text: 'Meals — food logging, hydration, saved meals, supplement stack', tint: tc.success },
-      { icon: 'pulse-outline', text: 'Progress — history, PRs, weight, measurements, charts', tint: tc.warning },
-    ],
-  };
-
   const healthStep: Step = {
-    icon: 'heart-outline',
-    title: `Connect ${healthLabel}`,
-    body: Platform.OS === 'android'
-      ? 'Health Connect support is planned for Android. Until then, Thallo uses manual logs, in-app workouts, meal data, and recovery check-ins.'
-      : 'Apple Health is optional. Connect it from Account when you want sleep, HRV, weight, and workout context inside Thallo.',
-    bullets: [
-      { icon: 'moon-outline', text: 'Sleep tracking feeds your readiness score', tint: tc.primary },
-      { icon: 'fitness-outline', text: Platform.OS === 'android' ? 'Workout and activity imports are a Health Connect follow-up' : 'Workout calories from your Watch land in Progress', tint: tc.success },
-      { icon: 'scale-outline', text: 'Weight trend updates without manual logging', tint: tc.warning },
-    ],
-  };
-
-  if (tier === 'free') {
-    return [
-      {
-        icon: 'barbell-outline',
-        title: 'Start with manual tracking',
-        body: 'Free gives you the training and nutrition logbook: custom workouts, meal logging, hydration, weight, and basic progress without generated plans or AI calls.',
-      },
-      themeStep,
-      tabsStep,
-      {
-        icon: 'lock-closed-outline',
-        iconColor: tc.warning,
-        title: 'On Free, you have',
-        body: `Everything you need to log consistently. The guided planning, scans, ${healthLabel} readiness, and coaching surfaces unlock with Pro.`,
-        bullets: [
-          { icon: 'checkmark-circle', text: 'Manual workouts and custom activity logging', tint: tc.success },
-          { icon: 'checkmark-circle', text: 'Manual meals, hydration, saved meals, and meal routines', tint: tc.success },
-          { icon: 'checkmark-circle', text: 'Weight, measurements, and basic history', tint: tc.success },
-          { icon: 'sparkles-outline', text: 'Generated workout PlanWeeks and AI meal plans — Pro', tint: tc.warning },
-          { icon: 'sparkles-outline', text: 'AI Trainer chat — Pro', tint: tc.warning },
-          { icon: 'sparkles-outline', text: `Scans, readiness, ${healthLabel}, and advanced insights — Pro`, tint: tc.warning },
+    icon: Platform.OS === 'android' ? 'fitness-outline' : 'heart-outline',
+    iconColor: tc.success,
+    title: Platform.OS === 'android' ? 'Set Up Health Connect' : 'Connect Apple Health',
+    body: tier === 'free'
+      ? `Free works with manual logs and in-app tracking. ${HEALTH_PLATFORM_PRO_COPY}`
+      : Platform.OS === 'android'
+        ? HEALTH_PLATFORM_STATUS_COPY
+        : 'Apple Health is optional. Connect it now or later when you want available iPhone, Apple Watch, or source-app data to help power recovery and progress.',
+    bullets: tier === 'free'
+      ? [
+        { icon: 'create-outline', text: 'Manual workouts, meals, weight, and body history still work normally.', tint: tc.primary },
+        { icon: 'lock-closed-outline', text: HEALTH_PLATFORM_PRO_COPY, tint: tc.warning },
+        { icon: 'settings-outline', text: `Find ${HEALTH_PLATFORM_LABEL} from Account and Settings later.`, tint: tc.textMuted },
+      ]
+      : Platform.OS === 'android'
+        ? [
+          { icon: 'fitness-outline', text: 'Health Connect is the Android path for sleep, activity, weight, and nutrition signals.', tint: tc.primary },
+          { icon: 'construct-outline', text: 'Android health sync is planned; manual logs and in-app workouts still keep Thallo useful today.', tint: tc.warning },
+          { icon: 'settings-outline', text: `Check ${HEALTH_PLATFORM_LABEL} status from Account and Settings.`, tint: tc.textMuted },
+        ]
+        : [
+          { icon: 'moon-outline', text: 'Sleep, HRV, resting heart rate, steps, and activity appear only when Apple Health has samples for them.', tint: tc.primary },
+          { icon: 'fitness-outline', text: 'Imported workouts and completed Thallo sessions can sync with Apple Health.', tint: tc.success },
+          { icon: 'shield-checkmark-outline', text: 'Raw samples stay on device; daily summaries may sync for trends across devices.', tint: tc.warning },
         ],
-        upsell: true,
-      },
-    ];
-  }
-
-  // PRO tier
+    healthSetup: true,
+    healthActionLabel: tier === 'free'
+      ? 'Review health features'
+      : Platform.OS === 'android'
+        ? 'View Health Connect'
+        : 'Connect Apple Health',
+  };
   return [
-    {
-      icon: 'sparkles-outline',
-      title: 'Welcome to Thallo Pro',
-      body: 'Your plan is ready and every AI coaching feature is unlocked. Here\'s a quick tour of what you have access to so nothing stays hidden.',
-    },
+    welcomeStep,
+    todayStep,
+    workoutStep,
+    mealStep,
+    progressStep,
+    ...(watchStep ? [watchStep] : []),
     themeStep,
-    tabsStep,
-    {
-      icon: 'rocket-outline',
-      iconColor: tc.primary,
-      title: 'Your AI coach is on call',
-      body: 'Three places where AI works for you — tap into them whenever you have a question or need a quick adjustment.',
-      bullets: [
-        { icon: 'chatbubble-ellipses-outline', text: 'Ask Trainer / Ask Coach — chat from the home screen', tint: tc.primary },
-        { icon: 'flash-outline', text: 'In-workout coach — questions during a session, form cues, load tweaks', tint: tc.warning },
-        { icon: 'camera-outline', text: 'Photo food scan — snap a meal and we\'ll log it', tint: tc.success },
-        { icon: 'body-outline', text: 'Body scan — track composition over time', tint: tc.error },
-      ],
-    },
-    {
-      icon: 'analytics-outline',
-      iconColor: tc.success,
-      title: 'Smart adjustments, automatic',
-      body: 'Thallo watches your training and eating, then nudges the plan when something needs to change. You\'re always in the driver\'s seat.',
-      bullets: [
-        { icon: 'shield-checkmark-outline', text: 'Weekly check-in summarizes what worked + what to change', tint: tc.primary },
-        { icon: 'pulse-outline', text: 'Recovery tracking adapts loads to fatigue', tint: tc.success },
-        { icon: 'leaf-outline', text: 'Gut + longevity nutrition insights', tint: tc.warning },
-      ],
-    },
-    {
-      icon: Platform.OS === 'android' ? 'pulse-outline' : 'watch-outline',
-      title: `${healthLabel} + ${watchLabel}`,
-      body: Platform.OS === 'android'
-        ? 'Android health integrations are a follow-up. For now, Thallo keeps the phone app useful with manual logs, in-app workouts, and recovery check-ins.'
-        : 'Apple Health and Watch sync are optional enhancements. Connect them when you want more sleep, heart-rate, and workout context in the app.',
-      bullets: [
-        { icon: 'heart-outline', text: 'Sleep, HRV, RHR feed readiness daily', tint: tc.primary },
-        { icon: 'fitness-outline', text: Platform.OS === 'android' ? 'Health Connect can later provide heart-rate and workout context' : 'Watch tracks heart rate during sessions', tint: tc.warning },
-        { icon: 'phone-portrait-outline', text: Platform.OS === 'android' ? 'Wear OS is separate from the first Android phone beta' : 'Start workouts from your wrist', tint: tc.success },
-      ],
-    },
+    healthStep,
   ];
 }
 
@@ -451,6 +648,11 @@ function createStyles(tc: any) {
       flex: 1, backgroundColor: tc.background,
     },
     topBar: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      zIndex: 3,
       flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
       paddingHorizontal: 22, paddingTop: 60, paddingBottom: 8,
     },
@@ -462,20 +664,87 @@ function createStyles(tc: any) {
       fontSize: 11, fontWeight: '700', letterSpacing: 1,
       color: tc.textMuted,
     },
+    topBarTextOnHero: {
+      color: '#FFFFFF',
+      textShadowColor: 'rgba(0,0,0,0.45)',
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 6,
+    },
     pager: { flex: 1 },
     stepFrame: {
       width: SCREEN_W,
       paddingHorizontal: 28,
     },
+    heroStepFrame: {
+      paddingHorizontal: 0,
+    },
     stepContent: {
-      paddingTop: SCREEN_H * 0.04,
+      paddingTop: 100,
       paddingBottom: 30,
       alignItems: 'center',
+    },
+    heroStepContent: {
+      paddingTop: 0,
+    },
+    stepCopyWrap: {
+      width: '100%',
+      alignItems: 'center',
+    },
+    heroCopyWrap: {
+      paddingHorizontal: 28,
     },
     iconBubble: {
       width: 96, height: 96, borderRadius: 48,
       alignItems: 'center', justifyContent: 'center',
       marginBottom: 26,
+    },
+    deviceShowcase: {
+      marginBottom: 22,
+    },
+    heroHeader: {
+      width: '100%',
+      height: Math.max(270, SCREEN_H * 0.35),
+      marginBottom: 26,
+      overflow: 'hidden',
+      backgroundColor: '#111827',
+    },
+    heroHeaderImage: {
+      ...StyleSheet.absoluteFillObject,
+      width: '100%',
+      height: '100%',
+    },
+    heroHeaderImageOverlay: {
+      zIndex: 1,
+    },
+    heroHeaderShade: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 2,
+      backgroundColor: 'rgba(0,0,0,0.34)',
+    },
+    heroHeaderCopy: {
+      position: 'absolute',
+      left: 28,
+      right: 28,
+      bottom: 28,
+      zIndex: 3,
+    },
+    heroEyebrow: {
+      fontSize: 11,
+      lineHeight: 14,
+      fontWeight: '900',
+      letterSpacing: 1.1,
+      textTransform: 'uppercase',
+      color: 'rgba(255,255,255,0.76)',
+      marginBottom: 6,
+    },
+    heroTitle: {
+      fontSize: 34,
+      lineHeight: 39,
+      fontWeight: '900',
+      color: '#FFFFFF',
+      textShadowColor: 'rgba(0,0,0,0.45)',
+      textShadowOffset: { width: 0, height: 2 },
+      textShadowRadius: 10,
     },
     stepTitle: {
       fontSize: 26, fontWeight: '900',
@@ -545,6 +814,40 @@ function createStyles(tc: any) {
       height: 20,
       borderRadius: 10,
       borderWidth: 1,
+    },
+    stepActionButton: {
+      width: '100%',
+      minHeight: 50,
+      marginTop: 14,
+      borderRadius: radius.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      paddingHorizontal: 16,
+    },
+    stepActionText: {
+      fontSize: 14,
+      fontWeight: '900',
+    },
+    upgradeActionButton: {
+      width: '100%',
+      minHeight: 48,
+      marginTop: 12,
+      borderRadius: radius.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      paddingHorizontal: 16,
+      backgroundColor: tc.primary + '14',
+      borderWidth: 1,
+      borderColor: tc.primary + '55',
+    },
+    upgradeActionText: {
+      fontSize: 14,
+      fontWeight: '900',
+      color: tc.primary,
     },
     dotsRow: {
       flexDirection: 'row', justifyContent: 'center',

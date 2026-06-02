@@ -23,29 +23,31 @@ def _ok(label: str) -> None:
 # ─── NutritionIndicators properties ─────────────────────────────────────────
 
 def test_calorie_alignment_perfect():
-    """Within ±10% → 1.0."""
-    print("\n[test] calorie_alignment: within 10% → 1.0")
+    """Within ±5% → 1.0."""
+    print("\n[test] calorie_alignment: within 5% → 1.0")
     from app.services.nutrition.nutrition_score import NutritionIndicators
     ind = NutritionIndicators(calories_logged=2200, calories_target=2200)
     assert ind.calorie_alignment == 1.0
-    ind2 = NutritionIndicators(calories_logged=2000, calories_target=2200)
-    # 2000/2200 = 0.909, deviation = 0.091 < 0.10
+    ind2 = NutritionIndicators(calories_logged=2100, calories_target=2200)
+    # 2100/2200 = 0.955, deviation = 0.045 < 0.05
     assert ind2.calorie_alignment == 1.0, f"got {ind2.calorie_alignment}"
-    _ok("±10% → 1.0")
+    _ok("±5% → 1.0")
 
 
 def test_calorie_alignment_degrades_past_10_pct():
-    """Beyond 10% deviation, score degrades linearly to 0 at 40%."""
-    print("\n[test] calorie_alignment: degrades beyond 10%")
+    """Beyond the close band, score degrades toward 0."""
+    print("\n[test] calorie_alignment: degrades beyond close band")
     from app.services.nutrition.nutrition_score import NutritionIndicators
-    # 25% deviation → (0.25-0.10)/0.30 = 0.5 → 1-0.5 = 0.5
+    close = NutritionIndicators(calories_logged=2000, calories_target=2200)
+    assert 0.78 <= close.calorie_alignment <= 0.82, f"got {close.calorie_alignment}"
+    # 25% deviation -> roughly 0.375 after the close-band penalty.
     ind = NutritionIndicators(calories_logged=1500, calories_target=2000)
     align = ind.calorie_alignment
-    assert 0.45 <= align <= 0.55, f"25% deviation → expected ~0.5, got {align}"
+    assert 0.35 <= align <= 0.40, f"25% deviation -> expected ~0.38, got {align}"
     # 40% deviation → 0
     ind2 = NutritionIndicators(calories_logged=1200, calories_target=2000)
     assert ind2.calorie_alignment == 0.0, f"got {ind2.calorie_alignment}"
-    _ok("linear degradation 10%→40%")
+    _ok("close band partial, outside degrades to 40%")
 
 
 def test_calorie_alignment_zero_target():
@@ -439,8 +441,120 @@ def test_score_builder_prefers_projected_plan_over_logged_meals():
         assert payload["totals"]["calories"] == 2000, payload["totals"]
         assert payload["totals"]["protein_g"] == 150, payload["totals"]
         assert payload["targets"]["calories"] == 2000, payload["targets"]
-        assert payload["score_version"] == 4, payload
+        assert payload["score_version"] == 6, payload
     _ok("projected totals are scored instead of logged meal rows")
+
+
+def test_score_builder_credits_custom_fish_oil():
+    """Custom fish-oil entries should credit omega-3 with score units."""
+    print("\n[test] score builder: custom fish oil credits omega-3")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+
+    from app.models import User, UserSupplementStack, SupplementLog  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.score_builder import _add_supplement_micros, _count_supplement_logs
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+
+    with Session(engine) as s:
+        user = User(email="fish-oil-score@example.com", username="fishoilscore", hashed_password="x")
+        s.add(user)
+        s.commit()
+        s.refresh(user)
+
+        stack = UserSupplementStack(
+            user_id=user.id,
+            custom_name="NOW Fish Oil 1000 mg",
+            category="fatty_acid",
+            dose_amount=1000,
+            dose_unit="mg",
+            frequency="daily",
+        )
+        s.add(stack)
+        s.commit()
+        s.refresh(stack)
+
+        s.add(SupplementLog(
+            user_id=user.id,
+            stack_item_id=stack.id,
+            taken_at=datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc),
+            name=stack.custom_name,
+            dose_amount=1000,
+            dose_unit="mg",
+            skipped=False,
+        ))
+        s.commit()
+
+        micros: dict[str, float] = {}
+        _add_supplement_micros(s, user.id, today, micros)
+        assert abs(micros.get("omega_3_g", 0) - 1.0) < 1e-9, micros
+        assert "omega_3_mg" not in micros, micros
+        assert _count_supplement_logs(s, user.id, today, "omega_3") == 1.0
+
+    _ok("custom fish oil credits 1.0g omega-3 and counts as an omega-3 serving")
+
+
+def test_score_builder_preserves_fish_oil_identity_after_rename():
+    """Editable display names should not erase stable supplement identity."""
+    print("\n[test] score_builder: renamed fish oil still credits omega-3")
+    from datetime import date, datetime, timezone
+    from sqlmodel import SQLModel, Session, create_engine
+    from sqlalchemy.pool import StaticPool
+    from app.models import User, UserSupplementStack, SupplementLog
+    from app.services.nutrition.score_builder import _add_supplement_micros, _count_supplement_logs
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+
+    with Session(engine) as s:
+        user = User(email="fish-oil-rename@example.com", username="fishoilrename", hashed_password="x")
+        s.add(user)
+        s.commit()
+        s.refresh(user)
+
+        stack = UserSupplementStack(
+            user_id=user.id,
+            custom_name="Nordic Naturals Ultimate",
+            category="fatty_acid",
+            source_terms=["fish"],
+            dose_amount=1000,
+            dose_unit="mg",
+            frequency="daily",
+        )
+        s.add(stack)
+        s.commit()
+        s.refresh(stack)
+
+        s.add(SupplementLog(
+            user_id=user.id,
+            stack_item_id=stack.id,
+            taken_at=datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc),
+            name=stack.custom_name,
+            dose_amount=1000,
+            dose_unit="mg",
+            skipped=False,
+        ))
+        s.commit()
+
+        micros: dict[str, float] = {}
+        _add_supplement_micros(s, user.id, today, micros)
+        assert abs(micros.get("omega_3_g", 0) - 1.0) < 1e-9, micros
+        assert _count_supplement_logs(s, user.id, today, "omega_3") == 1.0
+
+    _ok("renamed fish oil keeps omega-3 credit via source_terms")
 
 
 # ─── macro_consistency_delta ───────────────────────────────────────────────
@@ -580,6 +694,8 @@ cases = [
     test_score_low_confidence_reduces_total,
     test_score_zero_calories_no_crash,
     test_score_builder_prefers_projected_plan_over_logged_meals,
+    test_score_builder_credits_custom_fish_oil,
+    test_score_builder_preserves_fish_oil_identity_after_rename,
     # Calorie calculator
     test_macro_consistency_delta_correct,
     test_reference_ranges_three_scenarios,

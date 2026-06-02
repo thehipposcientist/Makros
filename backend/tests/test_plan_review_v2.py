@@ -9,6 +9,7 @@ Coverage:
   - Low adherence → reduce_days rec fires
   - Excessive volume per muscle → deload_volume rec
   - Volume spike per muscle → spike rec
+  - Stable high volume alone is not framed as a problem
   - Poor recovery (low sleep) → suppresses "add volume" recs
   - 6+ strength days with low Zone 2 → recovery-day rec
   - Weight up vs goal weight loss → calorie adjust rec
@@ -121,6 +122,40 @@ def _seed_session_with_rir(s, user_id, *, workout_date: date, rir_values: list[f
     s.commit()
 
 
+def _seed_volume_session(s, user_id, *, workout_date: date, muscle: str, hard_sets: int, focus="Push"):
+    from app.models import WorkoutSession, WorkoutExercise, ExerciseSet, EquipmentType
+    session = WorkoutSession(
+        user_id=user_id,
+        name=focus,
+        focus=focus,
+        workout_date=workout_date,
+        completed_at=datetime.now(timezone.utc),
+    )
+    s.add(session)
+    s.flush()
+    exercise = WorkoutExercise(
+        session_id=session.id,
+        name=f"{muscle.title()} Volume",
+        order_index=0,
+        equipment=EquipmentType.GYM,
+        primary_muscle_snapshot=muscle,
+    )
+    s.add(exercise)
+    s.flush()
+    for idx in range(1, hard_sets + 1):
+        s.add(ExerciseSet(
+            workout_exercise_id=exercise.id,
+            set_number=idx,
+            set_type="working",
+            actual_reps=8,
+            actual_weight_lbs=100,
+            actual_rir=2,
+            completed=True,
+            completed_at=datetime.now(timezone.utc),
+        ))
+    s.commit()
+
+
 def _seed_active_workout_plan(s, user_id, *, days_per_week=4, days=None):
     """Persist an active WorkoutPlan row with N planned focuses."""
     from app.models import WorkoutPlan
@@ -174,6 +209,133 @@ def test_review_separates_workout_adherence_from_nutrition_logging():
     assert data["workout_adherence_pct"] == 0.0
     assert data["nutrition_logging_pct"] == 85.7
     assert "6/7 days logged" in data["nutrition_summary"]
+
+
+def test_review_uses_meal_history_when_daily_metrics_missing():
+    """Meal rows are the nutrition source of truth. Weekly review should not
+    report "no nutrition data" just because the derived metrics cache is
+    missing."""
+    print("\n[test] weekly review falls back to meal history for nutrition logging")
+    from app.enums import MealSource, MealType
+    from app.models import Meal, MealItem
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+
+    s, u = _setup_user_with_goal()
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    for i in range(4):
+        meal = Meal(
+            user_id=u.id,
+            meal_date=today - timedelta(days=i),
+            meal_type=MealType.LUNCH,
+            name=f"Logged meal {i}",
+            source=MealSource.LOGGED,
+        )
+        s.add(meal)
+        s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Chicken rice bowl",
+            quantity=1,
+            unit="serving",
+            calories=620,
+            protein_g=42,
+            carbs_g=62,
+            fat_g=18,
+            fiber_g=7,
+        ))
+    s.commit()
+
+    review = compute_weekly_review(s, u.id)
+    assert review.days_logged == 4
+    assert round(review.nutrition_logging_pct, 1) == 57.1
+    assert "4/7 days logged" in review.nutrition_summary
+    assert review.goal_forecast
+    assert "no nutrition" not in review.goal_forecast["update_reason"].lower()
+
+
+def test_review_uses_rollup_total_protein_not_classified_split():
+    """DailyRollup protein is total protein. DailyNutritionMetrics plant +
+    animal is only classified protein and can miss unknown-source foods."""
+    print("\n[test] weekly review uses total rollup protein over classified split")
+    from app.models import DailyNutritionMetrics, DailyRollup
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+
+    s, u = _setup_user_with_goal()
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    for i in range(4):
+        day = today - timedelta(days=i)
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=day,
+            calories_total=2200,
+            plant_protein_g=0,
+            animal_protein_g=0,
+            fiber_total_g=20,
+        ))
+        s.add(DailyRollup(
+            user_id=u.id,
+            day=day,
+            kcal=2200,
+            protein_g=130,
+            meals_logged=3,
+            protein_target_g=160,
+        ))
+    s.commit()
+
+    review = compute_weekly_review(s, u.id)
+    assert review.avg_protein_g == 130
+    assert review.protein_target_g == 160
+    assert "vs 160g target" in " ".join(review.nutrition_notes)
+
+
+def test_protein_warning_uses_user_target_not_100g_cutoff():
+    print("\n[test] protein warning compares against plan target")
+    from app.models import DailyRollup
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+
+    s, u = _setup_user_with_goal()
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    for i in range(4):
+        s.add(DailyRollup(
+            user_id=u.id,
+            day=today - timedelta(days=i),
+            kcal=2100,
+            protein_g=110,
+            meals_logged=3,
+            protein_target_g=160,
+        ))
+    s.commit()
+
+    review = compute_weekly_review(s, u.id)
+    rec = next((r for r in review.recommendations if r.key == "raise_protein"), None)
+    assert rec is not None, [r.key for r in review.recommendations]
+    assert "160g target" in rec.detail
+
+
+def test_protein_warning_does_not_fire_below_100_when_target_met():
+    print("\n[test] protein warning does not use hardcoded 100g threshold")
+    from app.models import DailyRollup
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+
+    s, u = _setup_user_with_goal()
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    for i in range(4):
+        s.add(DailyRollup(
+            user_id=u.id,
+            day=today - timedelta(days=i),
+            kcal=1800,
+            protein_g=92,
+            meals_logged=3,
+            protein_target_g=90,
+        ))
+    s.commit()
+
+    review = compute_weekly_review(s, u.id)
+    assert "raise_protein" not in [r.key for r in review.recommendations]
 
 
 # ── Low adherence ─────────────────────────────────────────────
@@ -480,6 +642,40 @@ def test_low_readiness_with_training_recommends_deload():
     rec = next((r for r in review.recommendations if r.key == "readiness_deload"), None)
     assert rec is not None, [r.key for r in review.recommendations]
     assert rec.action["type"] == "schedule_deload"
+
+
+def test_stable_high_volume_is_not_treated_as_bad_by_itself():
+    """Slightly-above-range volume can be a planned high-volume week.
+    Only excessive volume, spikes, or high volume plus poor recovery should
+    become a reduce-volume action."""
+    print("\n[test] stable high volume alone does not reduce volume")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(s, u.id, dates=[today - timedelta(days=i) for i in range(4)], activity_category="strength")
+    _seed_volume_session(s, u.id, workout_date=today, muscle="chest", hard_sets=20)
+
+    review = compute_weekly_review(s, u.id, avg_sleep_hours=7.5, readiness_score=80)
+    assert review.volume.by_muscle["chest"].status == "high"
+    rec_keys = [r.key for r in review.recommendations]
+    assert "reduce_volume_chest" not in rec_keys, rec_keys
+    assert "chest" not in review.headline.lower(), review.headline
+
+
+def test_high_volume_with_poor_recovery_is_actionable():
+    print("\n[test] high volume plus poor recovery reduces volume")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(s, u.id, dates=[today - timedelta(days=i) for i in range(4)], activity_category="strength")
+    _seed_volume_session(s, u.id, workout_date=today, muscle="chest", hard_sets=20)
+
+    review = compute_weekly_review(s, u.id, avg_sleep_hours=5.8)
+    rec = next((r for r in review.recommendations if r.key == "reduce_volume_chest"), None)
+    assert rec is not None, [r.key for r in review.recommendations]
+    assert rec.action["type"] == "reduce_muscle_volume"
 
 
 def test_low_rir_surfaces_reduce_intensity_rec():

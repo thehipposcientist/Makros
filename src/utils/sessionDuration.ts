@@ -11,5 +11,5 @@ export function clampDisplayedSessionMinutes(rawMinutes: number, sessionMinutes?
   const raw = Math.max(1, Math.round(Number(rawMinutes) || 1));
   const range = sessionDurationRange(sessionMinutes);
   if (range.min == null || range.max == null) return raw;
-  return Math.min(Math.max(raw, range.min), range.max);
+  return Math.max(raw, range.min);
 }

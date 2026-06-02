@@ -2,6 +2,8 @@ import {
   coachApplyNeedsDayStatusRefresh,
   isRecoverySkipReason,
   skippedDayBadgeLabel,
+  skippedDayReasonLabel,
+  skippedFocusFallbackReason,
   skippedDayTitle,
   skippedDayUndoLabel,
 } from '../coachApplyState.ts';
@@ -29,5 +31,15 @@ describe('coach apply day-state helpers', () => {
     expect(skippedDayTitle('Pull', 'Travel mode')).toBe('Pull');
     expect(skippedDayBadgeLabel('Travel mode')).toBe('Skipped');
     expect(skippedDayUndoLabel('Travel mode')).toBe('Unskip Workout');
+  });
+
+  it('does not render ordinary skipped focus as the reason line', () => {
+    expect(skippedFocusFallbackReason('Push + Cardio')).toBe(undefined);
+    expect(skippedFocusFallbackReason('travel')).toBe('Travel mode');
+    expect(skippedFocusFallbackReason('pause')).toBe('Paused');
+    expect(skippedFocusFallbackReason('recovery')).toBe('Coach swapped to recovery');
+    expect(skippedDayReasonLabel('Push + Cardio', 'Push + Cardio')).toBe(undefined);
+    expect(skippedDayReasonLabel('Push + Cardio', 'Push Cardio')).toBe(undefined);
+    expect(skippedDayReasonLabel('Push + Cardio', 'No time today')).toBe('No time today');
   });
 });

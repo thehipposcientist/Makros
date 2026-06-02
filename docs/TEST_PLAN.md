@@ -24,7 +24,7 @@ Last updated: 2026-04-18
 | `test_focus_differentiation.py` | 16 | Focus label normalization, family gating |
 | `test_set_programming.py` | 19 | Set schemes, load increments, set roles |
 | `test_plan_review.py` | 12 | AI plan review validation |
-| `test_in_workout_review.py` | 11 | Deterministic + AI set review |
+| `test_in_workout_review.py` | 11 | Deterministic set review and suspicion gating |
 | `test_fitness_score.py` | 17 | 4-pillar composite scoring |
 | **Total** | **183** | |
 
@@ -77,7 +77,6 @@ BEGINNER_MALE = {
     "equipment": ["barbell", "dumbbells", "cable_machine", "pull_up_bar", "bench"],
     "dietary_preference": "none",
     "allergies": [],
-    "meals_per_day": 3,
 }
 
 INTERMEDIATE_FEMALE = {
@@ -93,7 +92,6 @@ INTERMEDIATE_FEMALE = {
     "equipment": ["barbell", "dumbbells", "cable_machine", "pull_up_bar", "bench", "leg_press"],
     "dietary_preference": "none",
     "allergies": ["peanuts"],
-    "meals_per_day": 4,
 }
 
 ADVANCED_STRENGTH = {
@@ -109,7 +107,6 @@ ADVANCED_STRENGTH = {
     "equipment": ["barbell", "dumbbells", "cable_machine", "pull_up_bar", "bench", "squat_rack", "leg_press"],
     "dietary_preference": "none",
     "allergies": [],
-    "meals_per_day": 4,
 }
 
 SMALL_FEMALE_FAT_LOSS = {
@@ -125,7 +122,6 @@ SMALL_FEMALE_FAT_LOSS = {
     "equipment": ["dumbbells", "bodyweight"],
     "dietary_preference": "vegetarian",
     "allergies": ["gluten"],
-    "meals_per_day": 3,
 }
 
 HYROX_ATHLETE = {
@@ -141,7 +137,6 @@ HYROX_ATHLETE = {
     "equipment": ["barbell", "dumbbells", "cable_machine", "pull_up_bar", "bench", "rower", "ski_erg", "sled"],
     "dietary_preference": "none",
     "allergies": [],
-    "meals_per_day": 4,
 }
 
 ENDURANCE_RUNNER = {
@@ -157,7 +152,6 @@ ENDURANCE_RUNNER = {
     "equipment": ["bodyweight", "dumbbells", "resistance_bands"],
     "dietary_preference": "none",
     "allergies": ["dairy"],
-    "meals_per_day": 4,
 }
 
 GENERAL_HEALTH_SENIOR = {
@@ -173,7 +167,6 @@ GENERAL_HEALTH_SENIOR = {
     "equipment": ["dumbbells", "cable_machine", "bodyweight"],
     "dietary_preference": "none",
     "allergies": [],
-    "meals_per_day": 3,
 }
 ```
 
@@ -534,7 +527,7 @@ npx expo install jest-expo @testing-library/react-native @testing-library/jest-n
 | 3 | `nutritionScore.ts` | Score updates when meal is removed (removedMealIds) |
 | 4 | `nutritionScore.ts` | Tags show actual ratio: "Calories 20% under target" |
 | 5 | `nutritionScore.ts` | Protein >=90% shows "on target", <90% shows gram gap |
-| 6 | `mealTracker.ts` | computeDietConsistency with 3 meals/day |
+| 6 | `mealTracker.ts` | computeDietConsistency returns neutral server-owned state |
 | 7 | `weightHistory.ts` | Save and load weight entries round-trips correctly |
 | 8 | `exerciseGuide.ts` | humanizeToken converts slugs to readable names |
 | 9 | `WorkoutCard` | Renders exercise list with correct set/rep display |

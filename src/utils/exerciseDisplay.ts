@@ -24,20 +24,26 @@
  *  as bodyweight-only (stretches, yoga poses, mobility drills, holds).
  *  Weight input is never useful for any of these. */
 const BODYWEIGHT_NAME_RE =
-  /stretch|foam roll|cat.?cow|pigeon.?pose|child.?s pose|spinal twist|world.?s greatest|hip 90|thoracic|shoulder dislocate|downward dog|cobra|bird.?dog|dead bug|superman|glute bridge|clamshell|band pull.?apart|face pull|wall slide|butterfly|savasana|couch stretch|dead hang|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|flow|mobility|pose\b/i;
+  /stretch|foam roll|cat.?cow|pigeon.?pose|child.?s pose|spinal twist|world.?s greatest|hip 90|thoracic|shoulder dislocate|downward dog|cobra|bird.?dog|dead bug|superman|glute bridge|clamshell|band pull.?apart|wall slide|butterfly|savasana|couch stretch|dead hang|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|flow|mobility|pose\b/i;
 
 const GUIDE_NAME_RE =
-  /stretch|foam roll|cat.?cow|pigeon|child.?s pose|spinal twist|world.?s greatest|90.?90|hip 90|thoracic|shoulder dislocate|downward dog|cobra|butterfly|savasana|couch stretch|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|yin|flow|mobility|pose\b|breathwork|breathing|meditation/i;
+  /stretch|foam roll|cat.?cow|pigeon|child.?s pose|spinal twist|world.?s greatest|90.?90|hip 90|thoracic|shoulder dislocate|downward dog|cobra|butterfly|savasana|couch stretch|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|\byin\b|\bflow\b|mobility|pose\b|breathwork|breathing|meditation/i;
 
 /** Cardio modalities — treadmill, bike, rower, swimming, etc. No weight,
  *  reps are really a duration. */
 const CARDIO_NAME_RE =
-  /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|boxing|kickboxing|sparring|bag.?work|shadow.?box/i;
+  /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|boxing|kickboxing|martial.?arts|mma|sparring|bag.?work|shadow.?box/i;
 
 /** Hold-for-time exercises (plank family, wall sit, hollow hold, L-sit)
  *  plus loaded carries where weight should stay visible. */
 const HOLD_NAME_RE =
-  /plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|farmer.?carry|suitcase carry|loaded carry/i;
+  /plank|dead hang|wall sit|hollow.?hold|\bl[-\s]?sit\b|farmer.?walk|farmer.?carry|suitcase carry|loaded carry/i;
+
+/** Equipment slugs/names where load is a meaningful progression signal even
+ *  if the target is time or distance, e.g. sled pushes, weighted planks,
+ *  loaded carries, and cable isometric holds. */
+const LOADABLE_EQUIPMENT_RE =
+  /\b(barbell|dumbbells?|adjustable[ _-]?dumbbells?|ez[ _-]?curl[ _-]?bar|kettlebells?|trap[ _-]?bar|weight[ _-]?plates?|weighted[ _-]?vest|sandbag|medicine[ _-]?ball|cable[ _-]?machine|smith[ _-]?machine|landmine[ _-]?attachment|sled|ruck[ _-]?pack)\b/i;
 
 /** A reps string that's actually a time target. Matches:
  *   "60s", "60 sec", "60 seconds"
@@ -95,6 +101,70 @@ function _equipmentIsBodyweight(raw: unknown): boolean {
   return first === 'bodyweight' || first === 'none' || first === 'bw';
 }
 
+/** Equipment strings that mean "resistance band only" — e.g. monster
+ *  walks, band pull-aparts, lateral band walks. Bands don't have a
+ *  scalar weight to recommend in the way plates do, so we treat them
+ *  as bodyweight-equivalent for input rendering. Loaded band-assisted
+ *  exercises (banded squat, banded bench) declare additional loadable
+ *  equipment and won't match here. */
+function _equipmentIsBandOnly(raw: unknown): boolean {
+  if (!raw) return false;
+  let tokens: string[] = [];
+  if (Array.isArray(raw)) {
+    tokens = raw.map(item => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const slug = (item as any).slug ?? (item as any).name ?? '';
+        return String(slug);
+      }
+      return '';
+    });
+  } else {
+    tokens = String(raw).split(',');
+  }
+  const cleaned = tokens
+    .map(t => t.toLowerCase().trim())
+    .filter(t => t && t !== 'optional');
+  if (cleaned.length === 0) return false;
+  return cleaned.every(t => /resistance.?bands?\b|^bands?$|mini.?band|loop.?band/.test(t));
+}
+
+function _equipmentHasLoadable(raw: unknown): boolean {
+  if (!raw) return false;
+  if (Array.isArray(raw)) {
+    return raw.some(item => {
+      if (typeof item === 'string') return LOADABLE_EQUIPMENT_RE.test(item);
+      if (!item || typeof item !== 'object') return false;
+      const role = String((item as any).role ?? '').toLowerCase();
+      const required = (item as any).required;
+      if (required === false && role === 'optional') return false;
+      const slug = (item as any).slug ?? (item as any).name ?? '';
+      return LOADABLE_EQUIPMENT_RE.test(String(slug));
+    });
+  }
+  return String(raw)
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean)
+    .some(t => LOADABLE_EQUIPMENT_RE.test(t));
+}
+
+function _finiteNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const parsed = Number(value.replace(/[^\d.-]/g, ''));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/** Tracking modes (`default_tracking_mode` on the Exercise schema)
+ *  that imply weight is not the unit of progression. Loaded carries
+ *  are the one exception — they're tracked by time but weight matters
+ *  — so callers must check the loaded-carry name pattern first. */
+const NON_WEIGHT_TRACKING_MODES = new Set(['time', 'distance', 'calories']);
+
 /** Anything that looks time-based in the reps field. Accepts string,
  *  number, null — safely coerces. */
 export function isTimeBasedReps(reps: unknown): boolean {
@@ -148,8 +218,15 @@ export function isGuideExercise(ex: any, workout?: any): boolean {
 export function shouldHideWeight(ex: any): boolean {
   if (!ex) return false;
   const name = String(ex.name ?? '').toLowerCase();
-  // Loaded carry is an exception — it's timed but IS weighted
-  if (/farmer|suitcase carry|loaded carry/.test(name)) return false;
+  const equipment = ex.equipment ?? ex.gear ?? ex.equipment_slugs ?? ex.equipmentSlugs;
+
+  // Loaded implements are weighted even when the movement is tracked by
+  // time or distance: sled pushes, sandbag carries, weighted planks,
+  // cable holds, medicine-ball core work, etc.
+  if (_equipmentHasLoadable(equipment)) return false;
+  // Legacy cached rows may not carry equipment; keep name-only carry
+  // exceptions for older workout snapshots.
+  if (/farmer|suitcase carry|loaded carry|sandbag.*carry|ruck/.test(name)) return false;
 
   // ── Structured-field fast path (avoids regex when planner data is present) ──
   const primaryMuscle = String(ex.primaryMuscle ?? ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
@@ -160,8 +237,20 @@ export function shouldHideWeight(ex: any): boolean {
   if (trainingType && BODYWEIGHT_TRAINING_TYPES.has(trainingType)) return true;
   if (trainingType === 'cardio' || trainingType === 'conditioning') return true;
 
+  // Tracking-mode signal — once loadable implements have been ruled out,
+  // time/distance/calories tracked movements generally do not progress by
+  // numeric load. Catches Monster Walk / banded walks / cardio intervals.
+  const trackingMode = String(
+    ex.defaultTrackingMode ?? ex.default_tracking_mode ?? ex._default_tracking_mode ?? ''
+  ).toLowerCase();
+  if (trackingMode && NON_WEIGHT_TRACKING_MODES.has(trackingMode)) return true;
+
   // ── Regex fallback (for old cached data without structured fields) ──
-  if (_equipmentIsBodyweight(ex.equipment)) return true;
+  if (_equipmentIsBodyweight(equipment)) return true;
+  // Band-only equipment — bands don't have a scalar weight to log /
+  // recommend. Banded compound lifts (banded squat, banded bench)
+  // declare additional loadable equipment so they bypass this check.
+  if (_equipmentIsBandOnly(equipment)) return true;
   if (BODYWEIGHT_NAME_RE.test(name)) return true;
   if (CARDIO_NAME_RE.test(name)) return true;
   if (HOLD_NAME_RE.test(name) && !/farmer|suitcase|loaded/.test(name)) return true;
@@ -174,6 +263,20 @@ export function shouldHideWeight(ex: any): boolean {
   if (isTimeBasedReps(ex.reps ?? ex.targetReps)) return true;
 
   return false;
+}
+
+export function watchExerciseTracksWeight(exercise: any): boolean {
+  return !shouldHideWeight(exercise);
+}
+
+export function watchExerciseTargetWeightLbs(exercise: any): number | null {
+  if (!watchExerciseTracksWeight(exercise)) return null;
+  return _finiteNumber(
+    exercise?.plannedTargetWeightLbs
+      ?? exercise?.targetWeightLbs
+      ?? exercise?.recommendedWeightLbs
+      ?? exercise?.weight,
+  );
 }
 
 /** Predicate: should the UI hide the numeric reps input? True when the

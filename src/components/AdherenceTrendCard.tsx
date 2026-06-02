@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { getAdherenceTrend, getStreak, AdherenceWeek, StreakSummary } from '../services/api';
+import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from './ScoreInfoModal';
 
 /** A single week's column whose height eases up from 0 → target on mount,
  *  with a per-bar delay so the row sweeps left → right like a stadium wave. */
@@ -24,7 +26,17 @@ function AnimatedWeekBar({ height, color, delay }: { height: number; color: stri
       height: h,
       borderRadius: 4,
       backgroundColor: color,
-    }} />
+      overflow: 'hidden',
+    }}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(255,255,255,0.34)', color, 'rgba(0,0,0,0.12)'] as any}
+        locations={[0, 0.48, 1]}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+        style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}
+      />
+    </Animated.View>
   );
 }
 
@@ -69,6 +81,7 @@ export default function AdherenceTrendCard({ authToken, themeName }: Props) {
   const [weeks, setWeeks] = useState<AdherenceWeek[] | null>(null);
   const [streak, setStreak] = useState<StreakSummary | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -99,7 +112,15 @@ export default function AdherenceTrendCard({ authToken, themeName }: Props) {
       marginBottom: 14,
       borderWidth: 1,
       borderColor: tc.border,
+      overflow: 'hidden',
     }}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={[tc.primary + '18', 'transparent'] as any}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}
+      />
       <TouchableOpacity
         activeOpacity={0.7}
         onPress={() => {
@@ -125,6 +146,13 @@ export default function AdherenceTrendCard({ authToken, themeName }: Props) {
               {Math.round(compliance30)}%
             </Text>
           </View>
+          <TouchableOpacity
+            accessibilityLabel="How adherence is calculated"
+            onPress={(e) => { e.stopPropagation(); setInfoOpen(true); }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={{ padding: 2 }}>
+            <Ionicons name="information-circle-outline" size={16} color={tc.textMuted} />
+          </TouchableOpacity>
           <Ionicons
             name={expanded ? 'chevron-up' : 'chevron-down'}
             size={16}
@@ -172,6 +200,36 @@ export default function AdherenceTrendCard({ authToken, themeName }: Props) {
           </Text>
         </View>
       )}
+      <ScoreInfoModal
+        visible={infoOpen}
+        onClose={() => setInfoOpen(false)}
+        eyebrow="PLAN ADHERENCE"
+        title="How adherence is calculated"
+        iconName="bar-chart-outline"
+        iconColor={tc.primary}
+        themeName={themeName}>
+        <ScoreInfoBody themeName={themeName}>
+          The percent of planned workouts you completed in the last 30
+          days. A workout counts as completed when you log at least one
+          set against the day's plan. Rest, recovery, and mobility days
+          don't count against you.
+        </ScoreInfoBody>
+        <ScoreInfoSection title="The numbers" themeName={themeName}>
+          <ScoreInfoRow label="Big number" value="completed ÷ planned (last 30d)" themeName={themeName} />
+          <ScoreInfoRow label="Streak 🔥" value="consecutive days hit (no rest skips)" themeName={themeName} />
+          <ScoreInfoRow label="Weekly bars" value="last 8 weeks, color by hit-rate" themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoSection title="Bar colors" themeName={themeName}>
+          <ScoreInfoRow label="80%+" value="On track" valueColor="#22C55E" themeName={themeName} />
+          <ScoreInfoRow label="50–79%" value="Inconsistent" valueColor="#F59E0B" themeName={themeName} />
+          <ScoreInfoRow label="Below 50%" value="Falling behind" valueColor="#EF4444" themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoBody themeName={themeName} muted>
+          Adherence rewards consistency, not intensity. A 30-minute
+          session you actually did beats a 90-minute one you planned
+          and skipped.
+        </ScoreInfoBody>
+      </ScoreInfoModal>
     </View>
   );
 }

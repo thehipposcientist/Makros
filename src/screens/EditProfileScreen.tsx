@@ -4,10 +4,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
 import EquipmentScanModal from '../components/EquipmentScanModal';
 import FormVideoModal from '../components/FormVideoModal';
+import ExerciseDemoCard from '../components/ExerciseDemoCard';
+import EquipmentInfoSheet from '../components/EquipmentInfoSheet';
+import MyFitnessPalCard from '../components/MyFitnessPalCard';
+import BottomSheetDismissHandle from '../components/BottomSheetDismissHandle';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
-  LayoutAnimation, UIManager, Animated, Easing, useWindowDimensions,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable,
+  TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, ImageBackground, Linking, Keyboard,
+  LayoutAnimation, UIManager, Animated, Easing, useWindowDimensions, Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
@@ -27,11 +31,11 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
     },
   });
 })();
-import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender, StrengthEquipmentSettings } from '../types';
+import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender, StrengthEquipmentSettings, Glp1AppetiteLevel, Glp1SideEffect } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { useLiveFoodSearch } from '../hooks/useLiveFoodSearch';
-import { APP_THEMES, THEME_PICKER_ORDER, colors, getContrastingTextColor, getTheme, radius, resolveThemeName } from '../constants/theme';
-import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
+import { APP_THEMES, THEME_PICKER_ORDER, colors, getContrastingTextColor, getTheme, radius, resolveThemeName, toggleOffTrack } from '../constants/theme';
+import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges, setManualMode, startNewPlanWeek } from '../services/api';
 import type { FoodSearchResult } from '../services/api';
 import {
   LAUNCH_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS, goalCategory,
@@ -39,12 +43,15 @@ import {
   launchGoalIdFor,
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
+import { archiveMealRoutineInBackend, reconcileRoutinesToBackend, syncMealRoutinesFromBackend } from '../utils/mealRoutineSync';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 import { matchesExerciseSearch } from '../utils/exerciseSearch';
-import { tierOf } from '../utils/subscription';
+import { preferredExerciseVideoEquipment } from '../utils/exerciseVideoSearch';
+import { FREE_TIER_SUMMARY, PRO_TIER_SUMMARY, tierOf, isPro, requirePro } from '../utils/subscription';
 import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
 import { badgeLabelForSource } from '../utils/customFoodSearch';
+import { getGoalCardImageSource } from '../utils/goalCardImages';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -53,6 +60,7 @@ import {
   hasPlateLoadedEquipment,
   normalizeStrengthEquipmentSettings,
 } from '../utils/strengthEquipmentSettings';
+import { getEquipmentImageSource } from '../utils/equipmentImages';
 
 
 interface EditProfileScreenProps {
@@ -73,15 +81,43 @@ interface EditProfileScreenProps {
   // bottom nav already provides navigation, so the inner header is
   // redundant. Auto-saves on profile changes via the parent's onSave.
   noHeader?: boolean;
+  // Lightweight profile update for boolean toggles that don't need a
+  // full save+regen cycle (e.g. workout/meal manual-mode flags). When
+  // omitted, fields that depend on this path no-op.
+  onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
+}
+
+function normalizeEquipmentText(value: unknown): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function equipmentSearchTokenVariants(token: string): string[] {
+  const variants = new Set([token]);
+  if (token.endsWith('ies') && token.length > 3) variants.add(`${token.slice(0, -3)}y`);
+  if (token.endsWith('es') && token.length > 4) variants.add(token.slice(0, -2));
+  if (token.endsWith('s') && token.length > 3) variants.add(token.slice(0, -1));
+  return [...variants];
+}
+
+function equipmentItemMatchesSearch(item: { name: string; aliases?: string[] }, query: string): boolean {
+  const tokens = normalizeEquipmentText(query).split(' ').filter(Boolean);
+  if (tokens.length === 0) return true;
+  const haystack = normalizeEquipmentText([item.name, ...(item.aliases ?? [])].join(' '));
+  return tokens.every(token => equipmentSearchTokenVariants(token).some(variant => haystack.includes(variant)));
 }
 
 function equipmentItemNames(item: { name: string; aliases?: string[] }): Set<string> {
-  return new Set([item.name, ...(item.aliases ?? [])].map(name => name.toLowerCase()));
+  return new Set([item.name, ...(item.aliases ?? [])].map(normalizeEquipmentText));
 }
 
 function equipmentItemSelected(item: { name: string; aliases?: string[] }, selected: string[]): boolean {
   const names = equipmentItemNames(item);
-  return selected.some(name => names.has(name.toLowerCase()));
+  return selected.some(name => names.has(normalizeEquipmentText(name)));
 }
 
 interface PhotoMealDraft {
@@ -91,6 +127,7 @@ interface PhotoMealDraft {
   protein: number;
   carbs: number;
   fat: number;
+  calorie_range?: { low: number; high: number };
 }
 
 interface ScannedFoodItem {
@@ -101,6 +138,12 @@ interface ScannedFoodItem {
   carbs: number;
   fat: number;
   micronutrients?: Record<string, number>;
+  estimated_grams?: number;
+  gram_range_low?: number;
+  gram_range_high?: number;
+  portion_confidence?: string;
+  nutrition_source?: string;
+  calorie_range?: { low: number; high: number };
   selected: boolean;
 }
 
@@ -112,6 +155,19 @@ const DURATION_OPTIONS = [
   { value: 60, label: '45–60 min', desc: 'Full' },
   { value: 75, label: '60–75 min', desc: 'Extended' },
   { value: 90, label: '75–90 min', desc: 'Deep' },
+];
+
+const GLP1_APPETITE_OPTIONS: Array<{ value: Glp1AppetiteLevel; label: string; hint: string }> = [
+  { value: 'normal', label: 'Normal', hint: 'standard meals' },
+  { value: 'reduced', label: 'Reduced', hint: 'smaller meals' },
+  { value: 'very_low', label: 'Very low', hint: 'small portions' },
+];
+
+const GLP1_SIDE_EFFECT_OPTIONS: Array<{ value: Glp1SideEffect; label: string }> = [
+  { value: 'nausea', label: 'Nausea' },
+  { value: 'constipation', label: 'Constipation' },
+  { value: 'reflux', label: 'Reflux' },
+  { value: 'low_appetite', label: 'Low appetite' },
 ];
 
 const durationRangeLabel = (minutes?: number | null) => {
@@ -156,6 +212,12 @@ const calorieFormulaText = (ranges: CalorieRanges) => {
   const activity = (ranges.activity_level ?? 'moderate').replace(/_/g, ' ');
   const cutDelta = ranges.cut_adjustment_kcal ?? (ranges.cut_calories - ranges.maintenance_calories);
   const bulkDelta = ranges.bulk_adjustment_kcal ?? (ranges.bulk_calories - ranges.maintenance_calories);
+  const healthEnergy = Math.round(Number(ranges.health_energy_adjustment_kcal ?? 0));
+  if (ranges.source_tdee_kind === 'apple_health_total_energy' && healthEnergy !== 0) {
+    const total = ranges.source_tdee_kcal ?? ranges.maintenance_calories;
+    const formulaMaintenance = ranges.formula_maintenance_calories ?? (ranges.maintenance_calories - healthEnergy);
+    return `Apple Health total energy ${total} cal/day (basal + active); formula estimate ${formulaMaintenance} cal. Cut ${cutDelta > 0 ? '+' : ''}${cutDelta}, bulk ${bulkDelta > 0 ? '+' : ''}${bulkDelta} cal/day.`;
+  }
   return `${formula} BMR ${ranges.bmr} x ${ranges.activity_multiplier} ${activity} activity; cut ${cutDelta > 0 ? '+' : ''}${cutDelta}, bulk ${bulkDelta > 0 ? '+' : ''}${bulkDelta} cal/day.`;
 };
 
@@ -257,7 +319,12 @@ function InputModal({
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <TouchableOpacity style={im.backdrop} activeOpacity={0.7} onPress={onClose}>
           <View style={im.sheet}>
-            <View style={im.handle} />
+            <BottomSheetDismissHandle
+              onClose={onClose}
+              color={c.border}
+              containerStyle={im.handleTap}
+              handleStyle={im.handle}
+            />
             <Text style={im.title}>{title}</Text>
             {subtitle ? <Text style={im.subtitle}>{subtitle}</Text> : null}
             <TextInput
@@ -285,7 +352,8 @@ function InputModal({
 function createImStyles(c: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   backdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet:       { backgroundColor: c.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, padding: 24, paddingBottom: 40, gap: 14, borderTopWidth: 1, borderTopColor: c.border },
-  handle:      { width: 36, height: 4, backgroundColor: c.border, borderRadius: 2, alignSelf: 'center', marginBottom: 4 },
+  handleTap:   { minHeight: 20, marginTop: -8, marginBottom: -6 },
+  handle:      { width: 36, height: 4, borderRadius: 2 },
   title:       { fontSize: 18, fontWeight: '700', color: c.textPrimary },
   subtitle:    { fontSize: 13, color: c.textSecondary, marginTop: -6 },
   input:       { borderWidth: 1, borderColor: c.border, borderRadius: radius.md, padding: 14, fontSize: 16, backgroundColor: c.background, color: c.textPrimary },
@@ -338,7 +406,12 @@ function AddFoodModal({ visible, onAdd, onClose, themeColors: c }: AddFoodModalP
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <TouchableOpacity style={im.backdrop} activeOpacity={0.7} onPress={handleClose}>
           <View style={im.sheet}>
-            <View style={im.handle} />
+            <BottomSheetDismissHandle
+              onClose={handleClose}
+              color={c.border}
+              containerStyle={im.handleTap}
+              handleStyle={im.handle}
+            />
             <Text style={im.title}>Add Food</Text>
             <Text style={im.subtitle}>Enter the food name and its macros per serving</Text>
 
@@ -388,7 +461,7 @@ function createAfmStyles(c: ReturnType<typeof getTheme>['colors']) { return Styl
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal', onRoutinesChanged, initialMealTab, noHeader = false }: EditProfileScreenProps) {
+export default function EditProfileScreen({ authToken, profile, onSave, onCancel, mode = 'goal', onRoutinesChanged, initialMealTab, noHeader = false, onProfileUpdate }: EditProfileScreenProps) {
   const tc = getTheme(profile.themePreference).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
@@ -477,6 +550,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     profile.physicalStats.gender ?? 'prefer_not_to_say'
   );
   const [bodySaving, setBodySaving] = useState(false);
+  const [manualModeBusy, setManualModeBusy] = useState(false);
 
   // Workout prefs
   const _defaultDays = (n: number): number[] => {
@@ -501,13 +575,23 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   };
   const [duration, setDuration]       = useState(profile.workoutDurationMinutes ?? 60);
   const [preferredSplit, setPreferredSplit] = useState(profile.preferredSplit ?? 'auto');
+  // Lifestyle activity nudge — see calorie_calculator step_2b. Null is
+  // the legacy default; the value is only sent to the backend when the
+  // user makes an explicit selection so we don't overwrite stored data
+  // with a fake "sedentary" default just because the picker exists.
+  type LifestyleLevel = 'sedentary' | 'light' | 'moderate' | 'active' | 'very_active';
+  const [lifestyleActivity, setLifestyleActivity] = useState<LifestyleLevel | null>(
+    (profile as any).lifestyleActivity ?? null,
+  );
   const [splitOptions, setSplitOptions] = useState<import('../services/api').SplitOption[]>([]);
   const [splitLoading, setSplitLoading] = useState(false);
   const [splitModalVisible, setSplitModalVisible] = useState(false);
   const [mealVariety, setMealVariety] = useState<number>(profile.mealVariety ?? 5);
-  const [mealsPerDay, setMealsPerDay] = useState<number>(profile.mealsPerDay ?? 3);
   const [allergies, setAllergies] = useState<string[]>(profile.allergies ?? []);
-  // Cut/maintain/bulk calorie ranges — lazy-loaded from backend when the
+  const [glp1Enabled, setGlp1Enabled] = useState<boolean>(profile.glp1Support?.enabled === true);
+  const [glp1Appetite, setGlp1Appetite] = useState<Glp1AppetiteLevel>(profile.glp1Support?.appetite ?? 'normal');
+  const [glp1SideEffects, setGlp1SideEffects] = useState<Glp1SideEffect[]>(profile.glp1Support?.sideEffects ?? []);
+  // Cut/maintain/bulk calorie reference targets — lazy-loaded from backend when the
   // macros tab is opened so the macros section isn't waiting on an extra
   // roundtrip every time EditProfileScreen mounts.
   const [calorieRanges, setCalorieRanges] = useState<CalorieRanges | null>(null);
@@ -536,6 +620,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // the UI is just gone. Routines are now pinned per-meal from Home.
   const mealRoutine = profile.mealRoutine ?? '';
   const [injuryEntries, setInjuryEntries] = useState<InjuryEntry[]>(profile.injuryEntries ?? []);
+  // Current-week conflict warning. Populated after a NEW active injury
+  // is added — the active PlanWeek may still contain exercises that the
+  // new injury would now block. Backend computes the list (forward-only;
+  // completed days are never rewritten); we just render it.
+  const [injuryConflicts, setInjuryConflicts] = useState<{
+    items: import('../services/api').InjuryConflict[];
+    summary: string;
+    bodyPart: string;
+  } | null>(null);
   const injuryMountedRef = useRef(false);
   // Auto-save injuries on every change to AsyncStorage
   useEffect(() => {
@@ -558,8 +651,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   }, [profile.injuryEntries]);
   const [showAddInjury, setShowAddInjury] = useState(false);
-  const [equipmentExpanded, setEquipmentExpanded] = useState(false);
+  const [equipmentPickerVisible, setEquipmentPickerVisible] = useState(false);
+  const [equipmentSearch, setEquipmentSearch] = useState('');
+  const [equipmentCategoryFilter, setEquipmentCategoryFilter] = useState<string>('all');
   const [equipScanVisible, setEquipScanVisible] = useState(false);
+  // "What is this?" info popup for an equipment chip. Stores chip
+  // name + slug; null = closed. Slug improves the Wikipedia title
+  // resolution (e.g. `dumbbells` → `Dumbbell`). Sheet renders an
+  // inline image + definition fetched from Wikipedia, with Google /
+  // YouTube fallback buttons below.
+  const [equipmentInfo, setEquipmentInfo] = useState<{ name: string; slug?: string } | null>(null);
   const [foodsExpanded, setFoodsExpanded] = useState(false);
   const [injuryDesc, setInjuryDesc]   = useState('');
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
@@ -624,6 +725,22 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // Tab state for combined modes
   const [workoutTab, setWorkoutTab] = useState<'equipment' | 'exercises'>('equipment');
   const [mealplanTab, setMealplanTab] = useState<'foods' | 'supplements' | 'macros'>(initialMealTab ?? 'foods');
+  // Sync the inner mealplan tab whenever the parent passes a new
+  // `initialMealTab`. Pre-fix, HomeScreen forced a full remount of
+  // this screen via `key={`meal-${mealsSubTab}`}` on every sub-tab
+  // switch, which re-ran every mount effect (food library load,
+  // custom food list, supplement stack fetch, macros computation).
+  // Now the parent passes the desired tab as a prop and we just flip
+  // the state — no remount, no fetch churn.
+  useEffect(() => {
+    if (initialMealTab && initialMealTab !== mealplanTab) {
+      setMealplanTab(initialMealTab);
+    }
+    // Intentionally exclude `mealplanTab` from the deps — we only want
+    // to sync when the PARENT changes its choice, not when the user
+    // changes the inner tab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialMealTab]);
 
   // Exercise library
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
@@ -685,10 +802,18 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
   const [videoExerciseName, setVideoExerciseName] = useState<string | null>(null);
+  const [videoExerciseDemoId, setVideoExerciseDemoId] = useState<string | null>(null);
+  const [videoExerciseContext, setVideoExerciseContext] = useState<{
+    equipment?: string | null;
+    primaryMuscle?: string | null;
+    movementPattern?: string | null;
+  }>({});
 
   useEffect(() => {
-    loadMealRoutines().then(setMealRoutinesState);
-  }, []);
+    (authToken ? syncMealRoutinesFromBackend(authToken) : loadMealRoutines())
+      .then(setMealRoutinesState)
+      .catch(() => loadMealRoutines().then(setMealRoutinesState));
+  }, [authToken]);
 
   // Fetch split options when days or goal change (workout mode only).
   useEffect(() => {
@@ -718,7 +843,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     return () => { cancelled = true; };
   }, [selectedGoal, daysPerWeek, authToken, mode]);
 
-  // Load calorie ranges when the macros tab is opened. Cached in
+  // Load calorie reference targets when the macros tab is opened. Cached in
   // component state so switching tabs doesn't re-fetch.
   //
   // Self-healing: if the backend returns ANY error (typically 404 because
@@ -1041,6 +1166,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
     const entry: MealRoutineEntry = {
       id: editingRoutine?.id ?? Date.now().toString(),
+      backendId: editingRoutine?.backendId,
       name,
       mealType: routineMealType || 'custom',
       foods: routineFoods,
@@ -1058,6 +1184,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       : [...mealRoutines, entry];
     setMealRoutinesState(next);
     await saveMealRoutines(next);
+    if (authToken) {
+      try {
+        const reconciled = await reconcileRoutinesToBackend(authToken, next);
+        setMealRoutinesState(reconciled);
+        await saveMealRoutines(reconciled);
+      } catch (err: any) {
+        Alert.alert('Could not save routine', err?.message ?? 'Your routine changes were not saved.');
+        return;
+      }
+    }
     setRoutineModalVisible(false);
     onRoutinesChanged?.();
   };
@@ -1066,9 +1202,21 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     Alert.alert('Delete routine?', 'This cannot be undone.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: async () => {
+        const removed = mealRoutines.find(r => r.id === id) ?? null;
         const next = mealRoutines.filter(r => r.id !== id);
         setMealRoutinesState(next);
         await saveMealRoutines(next);
+        if (authToken) {
+          try {
+            const reconciled = await reconcileRoutinesToBackend(authToken, next);
+            if (removed) await archiveMealRoutineInBackend(authToken, removed);
+            setMealRoutinesState(reconciled);
+            await saveMealRoutines(reconciled);
+          } catch (err: any) {
+            Alert.alert('Could not delete routine', err?.message ?? 'Your routine changes were not saved.');
+            return;
+          }
+        }
         onRoutinesChanged?.();
       }},
     ]);
@@ -1309,15 +1457,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       const { lookupBarcode } = await import('../services/api');
       const result = await lookupBarcode(authToken, barcode.trim());
       if (result?.name) {
-        addAiFoodResult({
-          name: result.name,
-          serving: result.serving,
-          calories: result.calories,
-          protein: result.protein,
-          carbs: result.carbs,
-          fat: result.fat,
-          micronutrients: result.micronutrients,
-        });
+        addAiFoodResult(result);
         Alert.alert('Added', `${result.name} added to your food list.`);
       }
     } catch {
@@ -1361,6 +1501,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const hasPlanRelevantChanges = (): boolean => {
     const sameArr = (a?: any[], b?: any[]) =>
       JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());
+    const normalizedGlp1 = (support?: UserProfile['glp1Support'] | null) => support?.enabled ? {
+      enabled: true,
+      appetite: support.appetite ?? 'normal',
+      sideEffects: [...(support.sideEffects ?? [])].sort(),
+    } : null;
+    const nextGlp1 = glp1Enabled ? {
+      enabled: true,
+      appetite: glp1Appetite,
+      sideEffects: [...glp1SideEffects].sort(),
+    } : null;
     // Goal + goal details
     if (selectedGoal !== profile.goal) return true;
     if ((profile.goalDetails?.pace ?? null) !== pace) return true;
@@ -1370,14 +1520,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     if ((profile.daysPerWeek ?? 0) !== daysPerWeek) return true;
     if ((profile.workoutDurationMinutes ?? 60) !== duration) return true;
     if ((profile.preferredSplit ?? 'auto') !== preferredSplit) return true;
+    if (((profile as any).lifestyleActivity ?? null) !== lifestyleActivity) return true;
     if (!sameArr(profile.equipment, equipment)) return true;
     if (JSON.stringify(normalizeStrengthEquipmentSettings(profile.equipmentSettings, profile.equipment ?? [])) !== JSON.stringify(normalizeStrengthEquipmentSettings(equipmentSettings, equipment))) return true;
     // Nutrition shape
-    if ((profile.mealsPerDay ?? 3) !== mealsPerDay) return true;
     if ((profile.mealVariety ?? 5) !== mealVariety) return true;
     if (!sameArr(profile.allergies ?? [], allergies)) return true;
     if (!sameArr(profile.foodsAvailable, foods.filter(f => !f.startsWith('__supp__')))) return true;
     if ((profile.mealRoutine ?? '') !== (mealRoutine ?? '').trim()) return true;
+    if (JSON.stringify(normalizedGlp1(profile.glp1Support)) !== JSON.stringify(nextGlp1)) return true;
     // Bodyweight (affects macro targets)
     const cw = currentWeight ? parseFloat(currentWeight) : profile.physicalStats?.weightLbs;
     if (cw !== profile.physicalStats?.weightLbs) return true;
@@ -1386,6 +1537,56 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     const hadCustom = !!profile.customMacros;
     if (!!nextCustom !== hadCustom) return true;
     return false;
+  };
+
+  const cycleContextForPlanWeek = async () => {
+    try {
+      const { getCycleStatus } = await import('../services/appleHealth');
+      const cycle = await getCycleStatus();
+      return cycle && cycle.phase !== 'unknown'
+        ? { cyclePhase: cycle.phase, dayOfCycle: cycle.dayOfCycle }
+        : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const applyManualPlanningMode = async (nextManualMode: boolean) => {
+    if (!authToken || !onProfileUpdate || manualModeBusy) return;
+    setManualModeBusy(true);
+    try {
+      if (nextManualMode) {
+        const res = await setManualMode(authToken, { workout_manual_mode: true });
+        await Promise.resolve(onProfileUpdate({ workoutManualMode: res.workout_manual_mode }, true));
+        if ((res.future_days_cleared ?? 0) > 0) {
+          Alert.alert(
+            'Manual mode on',
+            `Cleared ${res.future_days_cleared} upcoming day${res.future_days_cleared === 1 ? '' : 's'}. Tap each day to assign a template or mark it as rest.`,
+          );
+        }
+        return;
+      }
+
+      const cycleContext = await cycleContextForPlanWeek();
+      const newWeek = await startNewPlanWeek(authToken, true, cycleContext);
+      const res = await setManualMode(authToken, { workout_manual_mode: false });
+      try {
+        const { workoutPlanFromPlanWeek } = await import('../utils/planWeekProjection');
+        await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(workoutPlanFromPlanWeek(newWeek)));
+      } catch {}
+      await Promise.resolve(onProfileUpdate({ workoutManualMode: res.workout_manual_mode }, true));
+      Alert.alert(
+        'Generated plan ready',
+        `Built a new 7-day plan for ${newWeek.start_date} to ${newWeek.end_date}.`,
+      );
+    } catch (e: any) {
+      Alert.alert(
+        nextManualMode ? 'Could not turn on manual planning' : 'Could not switch to generated planning',
+        e?.message ?? 'Try again later.',
+      );
+    } finally {
+      setManualModeBusy(false);
+    }
   };
 
   const handleSaveBody = async () => {
@@ -1525,8 +1726,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       trainingDays: trainingDays.length > 0 ? trainingDays : undefined,
       workoutDurationMinutes: duration,
       preferredSplit: preferredSplit === 'auto' ? undefined : preferredSplit,
+      lifestyleActivity: lifestyleActivity ?? undefined,
       mealVariety: Math.min(7, Math.max(1, mealVariety)),
-      mealsPerDay: Math.min(10, Math.max(1, mealsPerDay)),
       allergies,
       equipment,
       equipmentSettings: normalizeStrengthEquipmentSettings(equipmentSettings, equipment),
@@ -1536,6 +1737,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       savedMeals,
       supplementsAvailable: finalSupps,
       mealRoutine: mealRoutine.trim() || undefined,
+      glp1Support: glp1Enabled ? {
+        enabled: true,
+        appetite: glp1Appetite,
+        sideEffects: glp1SideEffects,
+        updatedAt: new Date().toISOString(),
+      } : undefined,
       injuryEntries: injuryEntries.length > 0 ? injuryEntries : undefined,
       physicalStats: {
         ...profile.physicalStats,
@@ -1589,8 +1796,39 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const eventCategories = new Set<string>(['strength', 'cardio_endurance', 'athletic_performance']);
   const showTargetEvent = cat ? eventCategories.has(cat) : false;
   const paceOptions    = pacesForGoal(selectedGoal, meta.paces);
-  const standardEquipNames = new Set(meta.equipmentCategories.flatMap(c => c.items.flatMap(i => [i.name, ...(i.aliases ?? [])])));
-  const customEquipItems   = equipment.filter(e => !standardEquipNames.has(e));
+  const equipmentCatalogItems = meta.equipmentCategories.flatMap(category =>
+    category.items.map(item => ({ ...item, categoryLabel: category.label, categoryIcon: category.icon }))
+  );
+  const equipmentCatalogByName = new Map<string, typeof equipmentCatalogItems[number]>();
+  equipmentCatalogItems.forEach(item => {
+    [item.name, ...(item.aliases ?? [])].forEach(name => equipmentCatalogByName.set(normalizeEquipmentText(name), item));
+  });
+  const standardEquipNames = new Set(equipmentCatalogItems.flatMap(i => [i.name, ...(i.aliases ?? [])].map(normalizeEquipmentText)));
+  const customEquipItems   = equipment.filter(e => !standardEquipNames.has(normalizeEquipmentText(e)));
+  const selectedEquipmentPreview = equipment.map(name => {
+    const catalogItem = equipmentCatalogByName.get(normalizeEquipmentText(name));
+    return {
+      key: name,
+      name: catalogItem?.name ?? name,
+      category: catalogItem?.categoryLabel ?? 'Custom',
+      item: catalogItem ?? { name },
+    };
+  });
+  const filteredEquipmentCategories = meta.equipmentCategories
+    .filter(category => equipmentCategoryFilter === 'all' || equipmentCategoryFilter === 'selected' || category.label === equipmentCategoryFilter)
+    .map(category => ({
+      ...category,
+      items: category.items.filter(item => {
+        if (equipmentCategoryFilter === 'selected' && !equipmentItemSelected(item, equipment)) return false;
+        return equipmentItemMatchesSearch(item, equipmentSearch);
+      }),
+    }))
+    .filter(category => category.items.length > 0);
+  const filteredCustomEquipItems = customEquipItems.filter(name => {
+    if (equipmentCategoryFilter !== 'all' && equipmentCategoryFilter !== 'selected' && equipmentCategoryFilter !== 'custom') return false;
+    return equipmentItemMatchesSearch({ name }, equipmentSearch);
+  });
+  const filteredEquipmentCount = filteredEquipmentCategories.reduce((sum, category) => sum + category.items.length, 0) + filteredCustomEquipItems.length;
   const standardFoodNames  = new Set(meta.allFoods.map(f => f.name));
   const selectedFoodNames = foods.filter(f => !f.startsWith('__supp__'));
   const selectedFoodNameSet = new Set(selectedFoodNames.map(f => f.toLowerCase()));
@@ -1826,13 +2064,22 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             {LAUNCH_GOALS.map((g, gIdx) => {
               const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
               const active = launchGoalIdFor(selectedGoal) === g.id;
+              const imageSource = getGoalCardImageSource(g.id, profile.physicalStats?.gender);
               return (
                 <PressableScale
                   key={g.id}
                   style={[
                     styles.goalCard,
-                    active && styles.goalCardActive,
-                    { width: screenWidth * 0.82, alignItems: 'flex-start', padding: 18 },
+                    active && { borderColor: tc.primary, backgroundColor: tc.surfaceRaised },
+                    {
+                      width: screenWidth * 0.82,
+                      alignItems: 'stretch',
+                      padding: 0,
+                      paddingHorizontal: 0,
+                      paddingVertical: 0,
+                      gap: 0,
+                      overflow: 'hidden',
+                    },
                   ]}
                   onPress={() => {
                     goalCarouselRef.current?.scrollTo({ x: gIdx * (screenWidth * 0.82 + 12), animated: true });
@@ -1844,20 +2091,33 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   }}
                   scaleDown={0.97}
                 >
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-                    <View style={{
-                      width: 38, height: 38, borderRadius: 10,
-                      backgroundColor: active ? tc.primary + '22' : tc.surfaceRaised,
-                      alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={20} color={active ? tc.primary : tc.textMuted} />
+                  <ImageBackground
+                    source={imageSource}
+                    resizeMode="cover"
+                    style={styles.goalHero}
+                    imageStyle={styles.goalHeroImage}
+                  >
+                    <View style={styles.goalHeroScrim} />
+                    <View style={[
+                      styles.goalHeroIconBubble,
+                      active && { backgroundColor: '#fff', borderColor: tc.primary },
+                    ]}>
+                      <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={20} color={active ? tc.primary : '#fff'} />
                     </View>
-                    <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }, { flex: 1 }]}>{g.label}</Text>
-                    {active && <Ionicons name="checkmark-circle" size={20} color={tc.primary} />}
+                    {active && (
+                      <View style={[styles.goalHeroCheckBubble, { backgroundColor: tc.primary }]}>
+                        <Ionicons name="checkmark" size={16} color={getContrastingTextColor(tc.primary)} />
+                      </View>
+                    )}
+                  </ImageBackground>
+                  <View style={styles.goalCardContent}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                      <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }, { flex: 1 }]}>{g.label}</Text>
+                    </View>
+                    <Text style={{ fontSize: 13, color: active ? tc.textSecondary : tc.textMuted, lineHeight: 18 }}>
+                      {g.description}
+                    </Text>
                   </View>
-                  <Text style={{ fontSize: 13, color: active ? tc.textSecondary : tc.textMuted, lineHeight: 18 }}>
-                    {g.description}
-                  </Text>
                 </PressableScale>
               );
             })}
@@ -1946,7 +2206,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     style={[styles.paceCard, selected && styles.paceCardActive]}
                     onPress={() => setPace(opt.value as GoalPace)}>
                     <View style={styles.paceTop}>
-                      {opt.icon.includes('-') ? <Ionicons name={opt.icon as any} size={20} color={colors.textPrimary} /> : <Text style={styles.paceIcon}>{opt.icon}</Text>}
+                      {/* Prefer vector Ionicons over emoji glyphs — emoji
+                          renders inconsistently across system fonts and
+                          looks unprofessional in a paid surface. When the
+                          option only carries an emoji we fall back to a
+                          neutral speedometer glyph rather than the emoji. */}
+                      <Ionicons
+                        name={(opt.icon.includes('-') ? opt.icon : 'speedometer-outline') as any}
+                        size={20}
+                        color={colors.textPrimary}
+                      />
                       <View style={{ flex: 1 }}>
                         <Text style={[styles.paceLabel, selected && styles.paceLabelActive]}>{opt.label}</Text>
                         <Text style={styles.paceRate}>{opt.rate}</Text>
@@ -2041,6 +2310,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         </>
         )}
 
+        <EquipmentInfoSheet
+          name={equipmentInfo?.name ?? null}
+          slug={equipmentInfo?.slug}
+          onClose={() => setEquipmentInfo(null)}
+          themeName={profile?.themePreference}
+        />
+
         {/* Add Injury Modal */}
         <Modal visible={showAddInjury} transparent animationType="slide" onRequestClose={() => setShowAddInjury(false)}>
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
@@ -2109,14 +2385,92 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                       reportedAt: new Date().toISOString(),
                       status: 'active',
                     };
-                    setInjuryEntries(prev => [...prev, newInjury]);
+                    const updated = [...injuryEntries, newInjury];
+                    setInjuryEntries(updated);
                     setShowAddInjury(false);
+                    // Fire-and-forget conflict check against the active
+                    // PlanWeek. Backend handles "no active week" gracefully
+                    // (returns empty list). We never block the add on this.
+                    if (authToken && isPro(profile)) {
+                      import('../services/api').then(({ detectInjuryConflicts }) =>
+                        detectInjuryConflicts(authToken, updated)
+                          .then(resp => {
+                            if (resp.conflicts.length > 0) {
+                              setInjuryConflicts({
+                                items: resp.conflicts,
+                                summary: resp.summary,
+                                bodyPart: part,
+                              });
+                            }
+                          })
+                          .catch(() => {})
+                      ).catch(() => {});
+                    }
                   }}>
                   <Text style={[styles.modalConfirmText, { color: getContrastingTextColor(tc.primary) }]}>Add</Text>
                 </TouchableOpacity>
               </View>
             </TouchableOpacity>
           </KeyboardAvoidingView>
+        </Modal>
+
+        {/* ── Current-week conflict warning ──
+            Surfaces upcoming exercises in the active plan that the
+            newly-added injury would now block. The "Open" CTA sends
+            the user to the plan tab so they can swap or skip on a
+            per-exercise basis (the existing swap path covers it).
+            Completed days are filtered server-side. */}
+        <Modal
+          visible={injuryConflicts !== null}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setInjuryConflicts(null)}
+        >
+          <TouchableOpacity
+            style={styles.modalBackdrop}
+            activeOpacity={0.7}
+            onPress={() => setInjuryConflicts(null)}
+          >
+            <TouchableOpacity activeOpacity={1} style={[styles.modalContent, { backgroundColor: tc.surface }]}>
+              <Text style={[styles.modalTitle, { color: tc.textPrimary }]}>
+                Heads up — your week has conflicting workouts
+              </Text>
+              <Text style={[styles.modalFieldLabel, { color: tc.textSecondary, marginTop: 8 }]}>
+                {injuryConflicts?.summary}
+              </Text>
+              <View style={{ marginTop: 14, gap: 8 }}>
+                {(injuryConflicts?.items ?? []).slice(0, 6).map((c, i) => (
+                  <View
+                    key={`${c.day_index}-${c.exercise_name}-${i}`}
+                    style={{
+                      paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10,
+                      borderWidth: 1, borderColor: tc.border, backgroundColor: tc.background,
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>
+                      Day {c.day_index + 1} · {c.focus || 'Workout'}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>
+                      {c.exercise_name} · {c.movement_pattern}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+              <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 12 }}>
+                Future weeks regenerate around the injury automatically. For
+                this week, open Workout {'>'}  Plan and swap or skip the
+                conflicting exercises.
+              </Text>
+              <TouchableOpacity
+                style={[styles.modalConfirmBtn, { backgroundColor: tc.primary, marginTop: 16 }]}
+                onPress={() => setInjuryConflicts(null)}
+              >
+                <Text style={[styles.modalConfirmText, { color: getContrastingTextColor(tc.primary) }]}>
+                  Got it
+                </Text>
+              </TouchableOpacity>
+            </TouchableOpacity>
+          </TouchableOpacity>
         </Modal>
 
         {/* ── WORKOUT MODE (Equipment + Exercises tabs) ── */}
@@ -2140,11 +2494,79 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {workoutTab === 'equipment' && (
         <View style={styles.section}>
+          {/* Manual planning toggle — Pro-only. Lives at the top so users
+              who want to take control of their week see it before settings
+              that the planner would otherwise consume (training days,
+              session length, equipment). Behavior is the same backend
+              endpoint that previously lived under global Settings. */}
+          <View style={[styles.chipGroup, {
+            marginBottom: 16, paddingVertical: 12, paddingHorizontal: 14,
+            borderRadius: radius.md, borderWidth: 1, borderColor: tc.border,
+            backgroundColor: tc.surface,
+          }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
+                    Manual workout planning
+                  </Text>
+                  {!isPro(profile) && (
+                    <View style={{
+                      paddingVertical: 2, paddingHorizontal: 6, borderRadius: 4,
+                      backgroundColor: tc.primary + '22',
+                    }}>
+                      <Text style={{ fontSize: 9, fontWeight: '800', color: tc.primary, letterSpacing: 0.4 }}>PRO</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4, lineHeight: 17 }}>
+                  Pause auto-generated workouts. You'll assign saved templates (or rest) per day. Future days in this week clear when you turn it on.
+                </Text>
+              </View>
+              <Switch
+                testID="edit-workout-manual-mode-toggle"
+                value={!!profile.workoutManualMode}
+                disabled={!isPro(profile) || !authToken || !onProfileUpdate || manualModeBusy}
+                onValueChange={(v) => {
+                  if (!isPro(profile)) {
+                    Alert.alert('Pro feature', 'Manual planning is a Thallo Pro feature.');
+                    return;
+                  }
+                  if (!authToken || !onProfileUpdate) return;
+                  if (v) {
+                    Alert.alert(
+                      'Turn on manual planning?',
+                      'Future un-done days in this week will be cleared so you can assign templates. Done days are kept.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Turn on', onPress: () => applyManualPlanningMode(true) },
+                      ],
+                    );
+                  } else {
+                    Alert.alert(
+                      'Switch to generated planning?',
+                      'Thallo will build a fresh deterministic 7-day plan starting today. Your completed workout history stays saved.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Generate plan', onPress: () => applyManualPlanningMode(false) },
+                      ],
+                    );
+                  }
+                }}
+                trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+              />
+              {manualModeBusy && <ActivityIndicator size="small" color={tc.primary} />}
+            </View>
+          </View>
+
           {/* Settings (training days + session length) live at the TOP of
-              the Equipment tab so they mirror the Meals tab layout, where
-              "Meals per Day" and "Meal Variety" also sit at the top of
-              the Foods sub-tab. Previously these were at the bottom and
-              the inconsistency was confusing. */}
+              the Equipment tab so planner inputs stay immediately visible.
+
+              Hidden when manual planning is on — the user is assigning
+              templates per day, so weekly cadence and target session
+              length are no longer the inputs the planner reads. */}
+          {!profile.workoutManualMode && (
+          <>
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
             <Text style={styles.chipGroupLabel}>Training Days / Week</Text>
             <View style={[styles.daysRow, { marginTop: 8 }]}>
@@ -2219,6 +2641,46 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           </View>
 
+          {/* ── Lifestyle Activity (outside training) ── */}
+          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
+            <Text style={styles.chipGroupLabel}>Outside the Gym</Text>
+            <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4, marginBottom: 10 }}>
+              Job and daily movement — not your workouts. Tunes your maintenance calorie target.
+            </Text>
+            <View style={{ flexDirection: 'column', gap: 6 }}>
+              {([
+                { value: 'sedentary',   label: 'Mostly sitting',     desc: 'Desk job, driver — little walking outside training.' },
+                { value: 'light',       label: 'On feet sometimes',  desc: 'Teacher, office with movement, light errands.' },
+                { value: 'moderate',    label: 'On feet often',      desc: 'Retail, server, nurse — moving most of the day.' },
+                { value: 'active',      label: 'Physical work',      desc: 'Trainer, landscaper, walking/biking commute.' },
+                { value: 'very_active', label: 'Heavy labor',        desc: 'Construction, mover, multi-sport athlete.' },
+              ] as Array<{ value: LifestyleLevel; label: string; desc: string }>).map(opt => {
+                const active = lifestyleActivity === opt.value;
+                return (
+                  <TouchableOpacity
+                    key={opt.value}
+                    onPress={() => setLifestyleActivity(opt.value)}
+                    testID={`edit-lifestyle-activity-${opt.value}`}
+                    accessibilityLabel={`edit-lifestyle-activity-${opt.value}`}
+                    style={{
+                      paddingVertical: 12, paddingHorizontal: 14, borderRadius: 10,
+                      backgroundColor: active ? tc.primary + '14' : tc.surfaceRaised,
+                      borderWidth: 1.5, borderColor: active ? tc.primary : tc.border,
+                    }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: active ? tc.primary : tc.textPrimary }}>
+                      {opt.label}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>
+                      {opt.desc}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+          </>
+          )}
+
           {/* ── Training Split ── */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
             <Text style={styles.chipGroupLabel}>Training Split</Text>
@@ -2246,75 +2708,87 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             })()}
           </View>
 
-          <TouchableOpacity
-            style={[styles.sectionTopRow, { backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: tc.border }]}
-            onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setEquipmentExpanded(p => !p); }}
-            activeOpacity={0.7}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-              <Ionicons name="barbell-outline" size={16} color={tc.textSecondary} style={{ marginRight: 8 }} />
-              <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>
-                Equipment{equipment.length > 0 ? `  ·  ${equipment.length} selected` : ''}
-              </Text>
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={[styles.equipmentSummaryCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+            <TouchableOpacity
+              style={styles.equipmentSummaryTop}
+              onPress={() => setEquipmentPickerVisible(true)}
+              activeOpacity={0.8}
+              testID="edit-workout-equipment-picker-open"
+              accessibilityLabel="edit-workout-equipment-picker-open">
+              <View style={[styles.equipmentSummaryIcon, { backgroundColor: tc.primary + '14', borderColor: tc.primary + '30' }]}>
+                <Ionicons name="barbell-outline" size={18} color={tc.primary} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={[styles.sectionLabel, { marginBottom: 2 }]}>Equipment</Text>
+                <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
+                  {equipment.length > 0 ? `${equipment.length} selected` : 'Tap to choose equipment'}
+                </Text>
+                <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }} numberOfLines={2}>
+                  Used for exercise selection, load targets, and current-week equipment repairs.
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
+            </TouchableOpacity>
+
+            {selectedEquipmentPreview.length > 0 ? (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.equipmentPreviewRow}>
+                {selectedEquipmentPreview.slice(0, 8).map(entry => {
+                  const source = getEquipmentImageSource(entry.item);
+                  return (
+                    <View key={entry.key} style={[styles.equipmentPreviewPill, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+                      <View style={[styles.equipmentPreviewThumb, { backgroundColor: tc.background, borderColor: tc.border }]}>
+                        {source ? (
+                          <Image source={source} style={styles.equipmentPreviewImage} resizeMode="contain" />
+                        ) : (
+                          <Ionicons name="barbell-outline" size={18} color={tc.textMuted} />
+                        )}
+                      </View>
+                      <Text style={[styles.equipmentPreviewName, { color: tc.textPrimary }]} numberOfLines={1}>
+                        {entry.name}
+                      </Text>
+                    </View>
+                  );
+                })}
+                {selectedEquipmentPreview.length > 8 ? (
+                  <TouchableOpacity
+                    style={[styles.equipmentPreviewMore, { backgroundColor: tc.surface, borderColor: tc.border }]}
+                    onPress={() => setEquipmentPickerVisible(true)}
+                    activeOpacity={0.78}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Show all ${selectedEquipmentPreview.length} selected equipment items`}>
+                    <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted }}>
+                      +{selectedEquipmentPreview.length - 8}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+              </ScrollView>
+            ) : null}
+
+            <View style={styles.equipmentSummaryActions}>
               <TouchableOpacity
-                style={[styles.sectionAddBtn, { flexDirection: 'row', alignItems: 'center', gap: 4 }]}
-                onPress={() => setEquipScanVisible(true)}>
-                <Ionicons name="camera-outline" size={12} color={tc.primary} />
-                <Text style={styles.sectionAddBtnText}>Scan</Text>
+                style={[styles.equipmentActionBtn, { backgroundColor: tc.primary, borderColor: tc.primary }]}
+                onPress={() => setEquipmentPickerVisible(true)}
+                activeOpacity={0.8}>
+                <Ionicons name="list-outline" size={14} color={getContrastingTextColor(tc.primary)} />
+                <Text style={[styles.equipmentActionText, { color: getContrastingTextColor(tc.primary) }]}>Manage</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.sectionAddBtn}
-                onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
-                <Text style={styles.sectionAddBtnText}>+ Add</Text>
+                style={[styles.equipmentActionBtn, { backgroundColor: tc.primary + '12', borderColor: tc.primary + '30' }]}
+                onPress={() => setEquipScanVisible(true)}
+                activeOpacity={0.8}>
+                <Ionicons name="camera-outline" size={14} color={tc.primary} />
+                <Text style={[styles.equipmentActionText, { color: tc.primary }]}>Scan</Text>
               </TouchableOpacity>
-              <Ionicons name={equipmentExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+              <TouchableOpacity
+                style={[styles.equipmentActionBtn, { backgroundColor: tc.surface, borderColor: tc.border }]}
+                onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}
+                activeOpacity={0.8}>
+                <Ionicons name="add" size={15} color={tc.textSecondary} />
+                <Text style={[styles.equipmentActionText, { color: tc.textSecondary }]}>Custom</Text>
+              </TouchableOpacity>
             </View>
-          </TouchableOpacity>
-          {equipmentExpanded && (meta.loading ? <ActivityIndicator color={tc.primary} /> : (
-            <>
-              <Text style={styles.sectionHint}>
-                This is the equipment your workout plan uses for exercise selection and load targets. Adjustable dumbbells live here, not in Gear Tracker.
-              </Text>
-              {meta.equipmentCategories.map(category => (
-                <View key={category.label} style={styles.chipGroup}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{category.icon}</Text>}
-                    <Text style={styles.chipGroupLabel}>{category.label}</Text>
-                  </View>
-                  <View style={styles.chips}>
-                    {category.items.map(item => {
-                      const selected = equipmentItemSelected(item, equipment);
-                      return (
-                        <TouchableOpacity
-                          key={item.name}
-                          style={[styles.chip, selected && styles.chipActive]}
-                          onPress={() => toggleEquipmentItem(item)}>
-                          <Text style={[styles.chipText, selected && styles.chipTextActive]}>{item.name}</Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-              ))}
-              {customEquipItems.length > 0 && (
-                <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>Custom</Text>
-                  <View style={styles.chips}>
-                    {customEquipItems.map(name => (
-                      <TouchableOpacity
-                        key={name}
-                        style={[styles.chip, styles.chipActive]}
-                        onPress={() => setEquipment(prev => prev.filter(e => e !== name))}>
-                        <Text style={[styles.chipText, styles.chipTextActive]}>{name}  <Ionicons name="close" size={12} /></Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </View>
-              )}
-              {renderStrengthLoadSettings()}
-            </>
-          ))}
+          </View>
+          {renderStrengthLoadSettings()}
 
           {/* ── Injuries & Limitations ── */}
           <Text style={styles.sectionLabel}>Injuries & Limitations</Text>
@@ -2436,13 +2910,51 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                             </View>
                           )}
                         </View>
-                        <TouchableOpacity
-                          style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tc.primary, paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.md, alignSelf: 'flex-start', marginTop: 4 }}
-                          onPress={() => setVideoExerciseName(selectedExercise.name)}
-                          activeOpacity={0.8}>
-                          <Text style={{ fontSize: 14, color: getContrastingTextColor(tc.primary), fontWeight: '700' }}>▶  Watch Form Video</Text>
-                        </TouchableOpacity>
                       </View>
+
+                      <ExerciseDemoCard
+                        demoExerciseDbId={selectedExercise.demo_exercise_db_id}
+                        exerciseName={selectedExercise.name}
+                        themeName={profile?.themePreference}
+                      />
+
+                      <TouchableOpacity
+                        onPress={() => {
+                          setVideoExerciseDemoId(selectedExercise.demo_exercise_db_id ?? null);
+                          setVideoExerciseContext({
+                            equipment: preferredExerciseVideoEquipment(selectedExercise),
+                            primaryMuscle: selectedExercise.primary_muscle ?? null,
+                            movementPattern: selectedExercise.movement_pattern ?? null,
+                          });
+                          setVideoExerciseName(selectedExercise.name);
+                        }}
+                        activeOpacity={0.85}
+                        style={{
+                          flexDirection: 'row', alignItems: 'center', gap: 10,
+                          backgroundColor: tc.surface,
+                          borderWidth: 1, borderColor: tc.border,
+                          borderRadius: radius.lg,
+                          paddingVertical: 12, paddingHorizontal: 14,
+                          marginTop: 4,
+                        }}
+                      >
+                        <View style={{
+                          width: 32, height: 32, borderRadius: 16,
+                          backgroundColor: tc.primary,
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <Ionicons name="play" size={17} color={getContrastingTextColor(tc.primary)} style={{ marginLeft: 2 }} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>
+                            Watch form demos
+                          </Text>
+                          <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
+                            Curated form videos for {selectedExercise.name}
+                          </Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
+                      </TouchableOpacity>
 
                       <View style={styles.guideSection}>
                         <Text style={styles.guideSectionTitle}>How To Perform It</Text>
@@ -2714,8 +3226,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
               {subscriptionTier === 'free'
-                ? 'Free: manual workouts, meals, hydration, body tracking, basic progress, and limited templates.'
-                : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
+                ? FREE_TIER_SUMMARY
+                : PRO_TIER_SUMMARY}
             </Text>
           </View>
 
@@ -2873,6 +3385,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         {mealplanTab === 'foods' && (
         <View style={styles.section}>
 
+          {/* Manual meal planning toggle removed — every user now lives in
+              the on-demand model (today/forward start empty, fill via
+              Generate / Plan / Fill buttons). The `mealManualMode` field
+              + `setManualMode` API are kept as no-ops so old clients +
+              cached payloads keep deserializing cleanly. */}
+
           {/* ── Foods in Kitchen — PRIMARY, top of tab ─────────────── */}
           <View style={{ marginBottom: 20 }}>
             {/* Header row */}
@@ -2983,7 +3501,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   style={styles.searchInput}
                   value={scanContext}
                   onChangeText={setScanContext}
-                  placeholder="Context (e.g. batch of 4, I eat 3 servings)"
+                  placeholder="Context (e.g. Cheesecake Factory plate, shared appetizer, batch of 4)"
                   placeholderTextColor={tc.textMuted}
                 />
                 <TouchableOpacity
@@ -3014,7 +3532,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                         {selectedKitchenFoodGroups.map(group => (
                           <View key={group.key}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                              {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{group.icon}</Text>}
+                              {/* Vector icon only — never render the emoji
+                                  fallback. `restaurant-outline` is a safe
+                                  generic for any food group. */}
+                              <Ionicons
+                                name={(group.icon.includes('-') ? group.icon : 'restaurant-outline') as any}
+                                size={15}
+                                color={colors.textSecondary}
+                              />
                               <Text style={styles.chipGroupLabel}>{group.label}</Text>
                             </View>
                             <View style={styles.chips}>
@@ -3118,7 +3643,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 {filteredFoodCategories.map(category => (
                   <View key={category.key} style={styles.chipGroup}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{category.icon}</Text>}
+                      <Ionicons
+                        name={(category.icon.includes('-') ? category.icon : 'restaurant-outline') as any}
+                        size={15}
+                        color={colors.textSecondary}
+                      />
                       <Text style={styles.chipGroupLabel}>{category.label}</Text>
                     </View>
                     <View style={styles.chips}>
@@ -3174,78 +3703,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           </View>
 
-          {/* ── Settings divider ─────────────────────────────────────── */}
-          <View style={{ height: 1, backgroundColor: tc.border, marginBottom: 20 }} />
-
-          {/* ── Meals per day ─────────────────────────────────────────
-              How many distinct meals the user eats per day. Drives the
-              backend assembler's `mealsPerDay`, which in turn determines
-              how many meals the algorithm generates after subtracting
-              pinned routines. Range 1–10. */}
-          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
-            <Text style={styles.chipGroupLabel}>Meals per Day</Text>
-            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
-              How many meals per day. Pinned routines count toward the total.
-            </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-              <TouchableOpacity
-                style={[styles.daysBtn, mealsPerDay <= 1 && styles.daysBtnDisabled]}
-                onPress={() => setMealsPerDay(v => Math.max(1, v - 1))}
-                disabled={mealsPerDay <= 1}>
-                <Text style={styles.daysBtnText}>−</Text>
-              </TouchableOpacity>
-              <View style={{ alignItems: 'center', minWidth: 140 }}>
-                <Text style={styles.daysValue}>{mealsPerDay}</Text>
-                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
-                  {mealsPerDay === 1 ? 'OMAD' : `${mealsPerDay} meals / day`}
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={[styles.daysBtn, mealsPerDay >= 10 && styles.daysBtnDisabled]}
-                onPress={() => setMealsPerDay(v => Math.min(10, v + 1))}
-                disabled={mealsPerDay >= 10}>
-                <Text style={styles.daysBtnText}>+</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {/* ── Meal variety ──────────────────────────────────────────
-              How many distinct daily meal templates the AI builds. The
-              app rotates these across your week. Lower = faster plan
-              generation, higher = more variety day-to-day. */}
-          <View style={[styles.chipGroup, { marginBottom: 20 }]}>
-            <Text style={styles.chipGroupLabel}>🔁  Meal Variety</Text>
-            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}>
-              Daily rotation. 1 = same plan every day. Every plan still hits your macros exactly.
-            </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-              <TouchableOpacity
-                style={[styles.daysBtn, mealVariety <= 1 && styles.daysBtnDisabled]}
-                onPress={() => setMealVariety(v => Math.max(1, v - 1))}
-                disabled={mealVariety <= 1}>
-                <Text style={styles.daysBtnText}>−</Text>
-              </TouchableOpacity>
-              <View style={{ alignItems: 'center', minWidth: 140 }}>
-                <Text style={styles.daysValue}>{mealVariety}</Text>
-                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
-                  {mealVariety === 1
-                    ? 'Same plan every day (fastest)'
-                    : mealVariety === 7
-                      ? 'Unique plan every day (slowest)'
-                      : `${mealVariety} rotating plans`}
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={[styles.daysBtn, mealVariety >= 7 && styles.daysBtnDisabled]}
-                onPress={() => setMealVariety(v => Math.min(7, v + 1))}
-                disabled={mealVariety >= 7}>
-                <Text style={styles.daysBtnText}>+</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={{ fontSize: 11, color: tc.textMuted, lineHeight: 15 }}>
-              Example at 3: Mon/Thu/Sun use Plan A, Tue/Fri use Plan B, Wed/Sat use Plan C.
-            </Text>
-          </View>
+          {/* Meal variety setting removed — was relevant when the app
+              auto-rotated N templates across the week. With on-demand
+              per-day generation, variety is implicit (each Generate /
+              Plan call seeds off the date). The mealVariety field is
+              kept on UserProfile + still saved on profile updates so
+              older clients deserialize cleanly. */}
 
           {/* ── Allergens ──────────────────────────────────────────── */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
@@ -3284,7 +3747,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             My Supplements{(profile.supplementsAvailable ?? []).length > 0 ? `  ·  ${(profile.supplementsAvailable ?? []).length} selected` : ''}
           </Text>
           <Text style={styles.sectionHint}>
-            Select supplements you take or search for any supplement.
+            Select supplements you take. AI supplement lookup unlocks with Pro.
           </Text>
           {/* AI supplement search */}
           <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
@@ -3301,6 +3764,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               returnKeyType="search"
               onSubmitEditing={async () => {
                 if (!suppSearchQuery.trim() || !authToken) return;
+                if (!requirePro(profile, 'ai_supplement_lookup')) return;
                 setSuppSearchLoading(true);
                 try {
                   const { lookupSupplement } = await import('../services/api');
@@ -3328,6 +3792,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               disabled={suppSearchLoading || !suppSearchQuery.trim()}
               onPress={async () => {
                 if (!suppSearchQuery.trim() || !authToken) return;
+                if (!requirePro(profile, 'ai_supplement_lookup')) return;
                 setSuppSearchLoading(true);
                 try {
                   const { lookupSupplement } = await import('../services/api');
@@ -3428,7 +3893,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             Informational only — doesn't change the user's actual goal.
             Lets them see where their other options would land. */}
         <View style={[styles.section, { marginBottom: 14 }]}>
-          <Text style={[styles.sectionLabel, { marginBottom: 4 }]}>Your Calorie Ranges</Text>
+          <Text style={[styles.sectionLabel, { marginBottom: 4 }]}>Calorie Reference Targets</Text>
           <Text style={styles.sectionHint}>
             Calculated from your body stats and training volume. This is informational — your current goal's target is below.
           </Text>
@@ -3461,7 +3926,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               </Text>
             </View>
           ) : (
-            <Text style={[styles.sectionHint, { marginTop: 8 }]}>Couldn't load your calorie ranges. Open the Profile tab and re-save your stats to refresh.</Text>
+            <Text style={[styles.sectionHint, { marginTop: 8 }]}>Couldn't load your calorie targets. Open the Profile tab and re-save your stats to refresh.</Text>
           )}
         </View>
 
@@ -3608,6 +4073,120 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
         </View>
 
+        {/* MyFitnessPal / Apple Health bridge. Lives next to the
+            GLP-1 card at the bottom of the Foods + Macros sub-tabs
+            because both are "external integration" surfaces — the
+            user already reads vertically down to this section. Renders
+            nothing on non-iOS / no-HK devices. */}
+        <View style={styles.section}>
+          <MyFitnessPalCard themeName={profile?.themePreference} />
+        </View>
+
+        <View style={styles.section}>
+          <View style={{
+            backgroundColor: tc.surface,
+            borderRadius: radius.lg,
+            borderWidth: 1,
+            borderColor: glp1Enabled ? tc.primary + '55' : tc.border,
+            padding: 14,
+            gap: 12,
+          }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View style={{
+                width: 34,
+                height: 34,
+                borderRadius: 17,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: tc.primary + '14',
+              }}>
+                <Ionicons name="medkit-outline" size={18} color={tc.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary }}>
+                  GLP-1 Support
+                </Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2, lineHeight: 15 }}>
+                  For users prescribed GLP-1 medication.
+                </Text>
+              </View>
+              <Switch
+                value={glp1Enabled}
+                onValueChange={setGlp1Enabled}
+                trackColor={{ false: toggleOffTrack(tc), true: tc.primary + '77' }}
+                thumbColor={glp1Enabled ? tc.primary : tc.textMuted}
+              />
+            </View>
+
+            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+              Thallo nudges meal guidance toward smaller protein-first meals, hydration, gentle fiber, and muscle-preserving training. It does not provide medication or dosing advice.
+            </Text>
+
+            {glp1Enabled && (
+              <View style={{ gap: 12 }}>
+                <View>
+                  <Text style={styles.macroFieldLabel}>Appetite</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                    {GLP1_APPETITE_OPTIONS.map(option => {
+                      const active = glp1Appetite === option.value;
+                      return (
+                        <TouchableOpacity
+                          key={option.value}
+                          style={[styles.chip, active && styles.chipActive]}
+                          onPress={() => setGlp1Appetite(option.value)}
+                          activeOpacity={0.75}>
+                          <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                            {option.label}
+                          </Text>
+                          <Text style={{ fontSize: 10, color: active ? tc.primary : tc.textMuted, marginTop: 2 }}>
+                            {option.hint}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <View>
+                  <Text style={styles.macroFieldLabel}>Signals to support</Text>
+                  <View style={styles.chips}>
+                    {GLP1_SIDE_EFFECT_OPTIONS.map(option => {
+                      const active = glp1SideEffects.includes(option.value);
+                      return (
+                        <TouchableOpacity
+                          key={option.value}
+                          style={[styles.chip, active && styles.chipActive]}
+                          onPress={() => setGlp1SideEffects(prev =>
+                            prev.includes(option.value)
+                              ? prev.filter(v => v !== option.value)
+                              : [...prev, option.value],
+                          )}
+                          activeOpacity={0.75}>
+                          <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                            {option.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <View style={{
+                  borderRadius: radius.md,
+                  backgroundColor: tc.warning + '10',
+                  borderWidth: 1,
+                  borderColor: tc.warning + '30',
+                  padding: 10,
+                }}>
+                  <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 15 }}>
+                    Follow your clinician's plan. Contact your clinician for severe or persistent GI symptoms, dehydration signs, or unusual abdominal pain.
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+        </View>
+
         {/* Meal routine section removed from the macros tab. Pinning a meal
             as a routine now happens directly from the Home screen meal card,
             which keeps macro snapshots in sync automatically. */}
@@ -3738,6 +4317,216 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </ScrollView>
           </View>
         </View>
+      </Modal>
+
+      {/* ── Equipment picker sheet ── */}
+      <Modal visible={equipmentPickerVisible} transparent animationType="slide" onRequestClose={() => setEquipmentPickerVisible(false)}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.equipmentSheetBackdrop}>
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={() => setEquipmentPickerVisible(false)}
+              accessibilityLabel="Close equipment picker"
+            />
+            <View style={[styles.equipmentSheet, { backgroundColor: tc.surface, borderTopColor: tc.border }]}>
+              <BottomSheetDismissHandle
+                onClose={() => setEquipmentPickerVisible(false)}
+                color={tc.border}
+                containerStyle={{ minHeight: 20, marginBottom: 2 }}
+                handleStyle={{ width: 38, height: 4, borderRadius: 2 }}
+              />
+              <View style={styles.equipmentSheetHeader}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={[styles.equipmentSheetTitle, { color: tc.textPrimary }]}>Equipment</Text>
+                  <Text style={[styles.equipmentSheetSubtitle, { color: tc.textMuted }]}>
+                    {equipment.length} selected
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setEquipmentPickerVisible(false)}
+                  style={[styles.equipmentDoneBtn, { backgroundColor: tc.primary }]}
+                  activeOpacity={0.85}>
+                  <Text style={[styles.equipmentDoneText, { color: getContrastingTextColor(tc.primary) }]}>Done</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={[styles.equipmentSearchBox, { backgroundColor: tc.background, borderColor: tc.border }]}>
+                <Ionicons name="search-outline" size={16} color={tc.textMuted} />
+                <TextInput
+                  value={equipmentSearch}
+                  onChangeText={setEquipmentSearch}
+                  placeholder="Search equipment"
+                  placeholderTextColor={tc.textMuted}
+                  style={[styles.equipmentSearchInput, { color: tc.textPrimary }]}
+                  returnKeyType="search"
+                />
+                {equipmentSearch.trim().length > 0 ? (
+                  <TouchableOpacity onPress={() => setEquipmentSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Ionicons name="close-circle" size={16} color={tc.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.equipmentFilterScroller}
+                contentContainerStyle={styles.equipmentFilterRow}>
+                {[
+                  { key: 'all', label: 'All', icon: 'apps-outline' },
+                  { key: 'selected', label: 'Selected', icon: 'checkmark-circle-outline' },
+                  ...meta.equipmentCategories.map(category => ({ key: category.label, label: category.label, icon: category.icon })),
+                  ...(customEquipItems.length > 0 ? [{ key: 'custom', label: 'Custom', icon: 'create-outline' }] : []),
+                ].map(filter => {
+                  const active = equipmentCategoryFilter === filter.key;
+                  return (
+                    <TouchableOpacity
+                      key={filter.key}
+                      style={[
+                        styles.equipmentFilterChip,
+                        {
+                          backgroundColor: active ? tc.primary + '14' : tc.surfaceRaised,
+                          borderColor: active ? tc.primary : tc.border,
+                        },
+                      ]}
+                      onPress={() => setEquipmentCategoryFilter(filter.key)}
+                      activeOpacity={0.8}>
+                      {String(filter.icon).includes('-') ? (
+                        <Ionicons name={filter.icon as any} size={12} color={active ? tc.primary : tc.textMuted} />
+                      ) : (
+                        <Text style={{ fontSize: 12 }}>{filter.icon}</Text>
+                      )}
+                      <Text style={[styles.equipmentFilterText, { color: active ? tc.primary : tc.textSecondary }]} numberOfLines={1}>
+                        {filter.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <ScrollView
+                style={styles.equipmentSheetScroller}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.equipmentSheetList}>
+                {meta.loading ? (
+                  <View style={[styles.equipmentEmptyState, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                    <ActivityIndicator color={tc.primary} />
+                  </View>
+                ) : filteredEquipmentCount === 0 ? (
+                  <View style={[styles.equipmentEmptyState, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                    <Ionicons name="search-outline" size={22} color={tc.textMuted} />
+                    <Text style={{ fontSize: 13, color: tc.textMuted, textAlign: 'center' }}>
+                      No equipment matches those filters.
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    {filteredEquipmentCategories.map(category => (
+                      <View key={category.label} style={styles.equipmentListSection}>
+                        <View style={styles.equipmentListSectionHeader}>
+                          {/* Equipment category headers — always use a
+                              vector icon, never an emoji. `barbell-outline`
+                              is the neutral fallback for any category
+                              whose seed `icon` is an emoji glyph. */}
+                          <Ionicons
+                            name={(category.icon.includes('-') ? category.icon : 'barbell-outline') as any}
+                            size={14}
+                            color={tc.textMuted}
+                          />
+                          <Text style={[styles.equipmentListSectionTitle, { color: tc.textSecondary }]}>{category.label}</Text>
+                        </View>
+                        {category.items.map(item => {
+                          const selected = equipmentItemSelected(item, equipment);
+                          const source = getEquipmentImageSource(item);
+                          return (
+                            <Pressable
+                              key={item.name}
+                              onPress={() => toggleEquipmentItem(item)}
+                              style={[
+                                styles.equipmentListRow,
+                                {
+                                  backgroundColor: selected ? tc.primary + '10' : tc.surfaceRaised,
+                                  borderColor: selected ? tc.primary : tc.border,
+                                },
+                              ]}>
+                              <View style={[styles.equipmentListThumb, { backgroundColor: tc.background, borderColor: tc.border }]}>
+                                {source ? (
+                                  <Image source={source} style={styles.equipmentListImage} resizeMode="contain" />
+                                ) : (
+                                  <Ionicons name="barbell-outline" size={22} color={selected ? tc.primary : tc.textMuted} />
+                                )}
+                              </View>
+                              <View style={{ flex: 1, minWidth: 0 }}>
+                                <Text style={[styles.equipmentListName, { color: selected ? tc.primary : tc.textPrimary }]} numberOfLines={1}>
+                                  {item.name}
+                                </Text>
+                                <Text style={[styles.equipmentListMeta, { color: tc.textMuted }]} numberOfLines={1}>
+                                  {category.label}
+                                </Text>
+                              </View>
+                              <Pressable
+                                onPress={(e) => { e.stopPropagation(); setEquipmentInfo({ name: item.name, slug: (item as any).slug }); }}
+                                hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                                accessibilityLabel={`What is ${item.name}?`}
+                                testID={`equipment-info-${item.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>
+                                <Ionicons name="information-circle-outline" size={18} color={tc.textMuted} />
+                              </Pressable>
+                              <View style={[
+                                styles.equipmentCheckBubble,
+                                {
+                                  backgroundColor: selected ? tc.primary : 'transparent',
+                                  borderColor: selected ? tc.primary : tc.border,
+                                },
+                              ]}>
+                                {selected ? <Ionicons name="checkmark" size={14} color={getContrastingTextColor(tc.primary)} /> : null}
+                              </View>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ))}
+
+                    {filteredCustomEquipItems.length > 0 ? (
+                      <View style={styles.equipmentListSection}>
+                        <View style={styles.equipmentListSectionHeader}>
+                          <Ionicons name="create-outline" size={14} color={tc.textMuted} />
+                          <Text style={[styles.equipmentListSectionTitle, { color: tc.textSecondary }]}>Custom</Text>
+                        </View>
+                        {filteredCustomEquipItems.map(name => {
+                          const source = getEquipmentImageSource(name);
+                          return (
+                            <Pressable
+                              key={name}
+                              onPress={() => setEquipment(prev => prev.filter(e => e !== name))}
+                              style={[
+                                styles.equipmentListRow,
+                                { backgroundColor: tc.primary + '10', borderColor: tc.primary },
+                              ]}>
+                              <View style={[styles.equipmentListThumb, { backgroundColor: tc.background, borderColor: tc.border }]}>
+                                {source ? (
+                                  <Image source={source} style={styles.equipmentListImage} resizeMode="contain" />
+                                ) : (
+                                  <Ionicons name="barbell-outline" size={22} color={tc.primary} />
+                                )}
+                              </View>
+                              <View style={{ flex: 1, minWidth: 0 }}>
+                                <Text style={[styles.equipmentListName, { color: tc.primary }]} numberOfLines={1}>{name}</Text>
+                                <Text style={[styles.equipmentListMeta, { color: tc.textMuted }]} numberOfLines={1}>Custom equipment</Text>
+                              </View>
+                              <Ionicons name="close-circle" size={20} color={tc.primary} />
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ) : null}
+                  </>
+                )}
+              </ScrollView>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ── Modals ── */}
@@ -3956,6 +4745,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   <Text style={styles.photoMacroLabel}>Fat</Text>
                 </View>
               </View>
+              {photoMealDraft?.calorie_range && (
+                <Text style={[styles.sectionHint, { textAlign: 'center', marginTop: 8 }]}>
+                  Estimated range: {Math.round(photoMealDraft.calorie_range.low)}-{Math.round(photoMealDraft.calorie_range.high)} cal
+                </Text>
+              )}
 
               <View style={styles.photoAssessmentActions}>
                 <TouchableOpacity style={styles.photoAssessmentSecondaryBtn} onPress={() => setPhotoMealDraft(null)}>
@@ -3979,7 +4773,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         exerciseName={videoExerciseName ?? ''}
         authToken={authToken}
         themeName={profile?.themePreference}
-        onClose={() => setVideoExerciseName(null)}
+        equipment={videoExerciseContext.equipment}
+        primaryMuscle={videoExerciseContext.primaryMuscle}
+        movementPattern={videoExerciseContext.movementPattern}
+        demoExerciseDbId={videoExerciseDemoId}
+        onClose={() => {
+          setVideoExerciseName(null);
+          setVideoExerciseDemoId(null);
+          setVideoExerciseContext({});
+        }}
       />
     </View>
   );
@@ -4042,6 +4844,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   addInjuryBtnText: { fontSize: 14, fontWeight: '600' },
   // Modal styles (reused for add injury)
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalContent: { borderRadius: radius.xl, borderWidth: 1, borderColor: colors.border, padding: 18, maxHeight: '86%' },
   modalSheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderTopWidth: 1, padding: 20, paddingBottom: 40 },
   modalTitle: { fontSize: 17, fontWeight: '700', marginBottom: 6 },
   modalFieldLabel: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 },
@@ -4052,6 +4855,30 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   goalCard: { width: '47%', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: colors.border, paddingVertical: 16, paddingHorizontal: 10, alignItems: 'center', gap: 6 },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.primary + '0D' },
+  goalHero: { height: 118, width: '100%', justifyContent: 'space-between', padding: 12 },
+  goalHeroImage: { borderTopLeftRadius: radius.lg - 2, borderTopRightRadius: radius.lg - 2 },
+  goalHeroScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(7, 13, 15, 0.24)' },
+  goalHeroIconBubble: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: 'rgba(7, 13, 15, 0.46)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+  },
+  goalHeroCheckBubble: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  goalCardContent: { padding: 16, paddingTop: 14 },
   goalIcon:       { fontSize: 24, marginBottom: 2 },
   goalLabel:      { fontSize: 13, color: colors.textSecondary, textAlign: 'center', fontWeight: '600' },
 
@@ -4136,6 +4963,8 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     backgroundColor: colors.surface,
     color: colors.textPrimary,
     fontSize: 16,
+    letterSpacing: 0,
+    fontWeight: '400',
     marginBottom: 10,
   },
   filterRow: { gap: 8, paddingBottom: 12 },
@@ -4165,6 +4994,141 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   chipActive:     { borderColor: colors.primary, backgroundColor: colors.primary + '12' },
   chipText:       { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
   chipTextActive: { color: colors.primary, fontWeight: '700' },
+
+  equipmentSummaryCard: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 16,
+    gap: 12,
+  },
+  equipmentSummaryTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  equipmentSummaryIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  equipmentPreviewRow: { gap: 8, paddingRight: 2 },
+  equipmentPreviewPill: {
+    width: 96,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 8,
+    gap: 6,
+  },
+  equipmentPreviewThumb: {
+    height: 52,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  equipmentPreviewImage: { width: '100%', height: '100%' },
+  equipmentPreviewName: { fontSize: 11, fontWeight: '700', textAlign: 'center' },
+  equipmentPreviewMore: {
+    width: 44,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  equipmentSummaryActions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  equipmentActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  equipmentActionText: { fontSize: 12, fontWeight: '800' },
+  equipmentSheetBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.58)', justifyContent: 'flex-end' },
+  equipmentSheet: {
+    maxHeight: '94%',
+    minHeight: '76%',
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderTopWidth: 1,
+    paddingHorizontal: 14,
+    paddingTop: 8,
+    paddingBottom: 16,
+  },
+  equipmentSheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 },
+  equipmentSheetTitle: { fontSize: 18, fontWeight: '800' },
+  equipmentSheetSubtitle: { fontSize: 12, fontWeight: '600', marginTop: 2 },
+  equipmentDoneBtn: { borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 8 },
+  equipmentDoneText: { fontSize: 12, fontWeight: '800' },
+  equipmentSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 8,
+  },
+  equipmentSearchInput: { flex: 1, minWidth: 0, fontSize: 15, paddingVertical: 0, letterSpacing: 0 },
+  equipmentFilterScroller: { flexGrow: 0, marginBottom: 8 },
+  equipmentFilterRow: { gap: 6, paddingBottom: 2 },
+  equipmentFilterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    minHeight: 30,
+    maxWidth: 128,
+  },
+  equipmentFilterText: { fontSize: 11, fontWeight: '800' },
+  equipmentSheetScroller: { flex: 1 },
+  equipmentSheetList: { paddingBottom: 18, gap: 12 },
+  equipmentListSection: { gap: 7 },
+  equipmentListSectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 2 },
+  equipmentListSectionTitle: { fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.7 },
+  equipmentListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 10,
+  },
+  equipmentListThumb: {
+    width: 58,
+    height: 58,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  equipmentListImage: { width: '100%', height: '100%' },
+  equipmentListName: { fontSize: 14, fontWeight: '800' },
+  equipmentListMeta: { fontSize: 11, fontWeight: '600', marginTop: 2 },
+  equipmentCheckBubble: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  equipmentEmptyState: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
 
   addTriggerBtn:  { alignSelf: 'flex-start', marginTop: 4, paddingVertical: 8, paddingHorizontal: 14, borderRadius: radius.full, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface },
   addTriggerText: { fontSize: 13, color: colors.primary, fontWeight: '600' },

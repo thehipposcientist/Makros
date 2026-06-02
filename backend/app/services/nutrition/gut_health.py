@@ -26,12 +26,14 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
+from app.enums import FoodSource
 from app.models import Meal, MealItem, Food, FoodNutrition, FoodMetadata, DailyNutritionMetrics
-from app.services.nutrition.ai_classify import get_or_create_metadata
+from app.services.nutrition.added_sugar import resolve_added_sugar_g
+from app.services.nutrition.ai_classify import get_or_create_metadata, insight_tags_from_metadata
 from app.services.nutrition.food_classifier import CLASSIFIER_VERSION, PLANT_CATEGORY
 from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 
-METRICS_VERSION = 3   # bumped at unified-score rewrite (v3 adds tag servings + recovery_flags)
+METRICS_VERSION = 5   # v5 adds structured Health Insight tag counts
 
 
 # ── Targets / defaults ───────────────────────────────────────────────────────
@@ -39,6 +41,18 @@ FIBER_TARGET_G = 28.0
 FIBER_TARGET_PER_1000 = 14.0
 OMEGA3_SUPPLEMENT_SLUGS = {"omega_3", "fish_oil", "epa_dha", "algae_oil"}
 OMEGA3_SUPPLEMENT_TERMS = ("omega", "fish oil", "krill oil", "cod liver", "algae oil", "epa", "dha")
+MICRONUTRIENT_FIELDS = {
+    "caffeine_mg": ("caffeine_mg", "caffeine"),
+    "potassium_mg": ("potassium_mg", "potassium"),
+    "calcium_mg": ("calcium_mg", "calcium"),
+    "magnesium_mg": ("magnesium_mg", "magnesium"),
+    "iron_mg": ("iron_mg", "iron"),
+    "vitamin_d_mcg": ("vitamin_d_mcg", "vitamin_d", "vitamin_d_iu", "vitamin_d_IU"),
+    "vitamin_b12_mcg": ("vitamin_b12_mcg", "vitamin_b12"),
+    "folate_mcg": ("folate_mcg", "folate", "folate_b9"),
+    "zinc_mg": ("zinc_mg", "zinc"),
+    "omega_3_g": ("omega_3_g", "omega_3"),
+}
 
 
 @dataclass
@@ -49,6 +63,17 @@ class DailyRawSignals:
     added_sugar_g: float
     sodium_mg: float
     saturated_fat_g: float
+    caffeine_mg: float
+    potassium_mg: float
+    calcium_mg: float
+    magnesium_mg: float
+    iron_mg: float
+    vitamin_d_mcg: float
+    vitamin_b12_mcg: float
+    folate_mcg: float
+    zinc_mg: float
+    omega_3_g: float
+    micronutrient_item_count: int
     distinct_plant_foods: int
     fermented_servings: float
     probiotic_servings: float
@@ -71,7 +96,9 @@ class DailyRawSignals:
     # contributes ~20g collagen, not just "1 serving."
     collagen_g: float = 0.0
     probiotic_cfu_billions: float = 0.0
+    prebiotic_g: float = 0.0
     per_meal_protein: dict[str, float] = field(default_factory=dict)
+    insight_tag_counts: dict[str, int] = field(default_factory=dict)
 
 
 def compute_daily_metrics(
@@ -123,12 +150,24 @@ def _apply_daily_metrics(row: DailyNutritionMetrics, raw: DailyRawSignals, now: 
     row.fiber_per_1000_kcal = raw.fiber_per_1000_kcal
     row.added_sugar_g = raw.added_sugar_g
     row.sodium_mg = raw.sodium_mg
+    row.caffeine_mg = raw.caffeine_mg
+    row.potassium_mg = raw.potassium_mg
+    row.calcium_mg = raw.calcium_mg
+    row.magnesium_mg = raw.magnesium_mg
+    row.iron_mg = raw.iron_mg
+    row.vitamin_d_mcg = raw.vitamin_d_mcg
+    row.vitamin_b12_mcg = raw.vitamin_b12_mcg
+    row.folate_mcg = raw.folate_mcg
+    row.zinc_mg = raw.zinc_mg
+    row.omega_3_g = raw.omega_3_g
+    row.micronutrient_item_count = raw.micronutrient_item_count
     row.distinct_plant_foods = raw.distinct_plant_foods
     row.fermented_servings = raw.fermented_servings
     row.probiotic_servings = raw.probiotic_servings
     row.omega3_servings = raw.omega3_servings
     row.collagen_g = raw.collagen_g
     row.probiotic_cfu_billions = raw.probiotic_cfu_billions
+    row.prebiotic_g = raw.prebiotic_g
     row.seafood_servings = raw.seafood_servings
     row.fruit_servings = raw.fruit_servings
     row.vegetable_servings = raw.vegetable_servings
@@ -141,6 +180,7 @@ def _apply_daily_metrics(row: DailyNutritionMetrics, raw: DailyRawSignals, now: 
     row.processing_counts = raw.processing_counts
     row.saturated_fat_g = raw.saturated_fat_g
     row.plant_slugs = raw.plant_slugs
+    row.insight_tag_counts = raw.insight_tag_counts
     row.item_count = raw.item_count
     row.classified_item_count = raw.classified_item_count
     # Legacy score columns stay present in DB but are no longer written. The
@@ -291,6 +331,10 @@ def compute_weekly_rollup(
             weekly_slugs.add(s)
 
     days_hitting_fiber = sum(1 for r in data_rows if r.fiber_total_g >= FIBER_TARGET_G)
+    days_hitting_fiber_density = sum(
+        1 for r in data_rows
+        if (getattr(r, "fiber_per_1000_kcal", 0) or 0) >= FIBER_TARGET_PER_1000
+    )
 
     proc_totals: dict[str, int] = {}
     for r in data_rows:
@@ -333,6 +377,7 @@ def compute_weekly_rollup(
         "avg_sodium_mg": _avg("sodium_mg"),
         "avg_saturated_fat_g": _avg("saturated_fat_g"),
         "pct_days_fiber_target": round(100 * days_hitting_fiber / n, 0),
+        "pct_days_fiber_density_target": round(100 * days_hitting_fiber_density / n, 0),
         "distinct_plant_foods_week": len(weekly_slugs),
         "fermented_servings": round(fermented_total, 1),
         "avg_fermented_servings": round(fermented_total / n, 1),
@@ -348,6 +393,8 @@ def compute_weekly_rollup(
         "avg_collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in data_rows) / n, 1),
         "probiotic_cfu_billions": round(sum((getattr(r, "probiotic_cfu_billions", 0) or 0) for r in data_rows), 1),
         "avg_probiotic_cfu_billions": round(sum((getattr(r, "probiotic_cfu_billions", 0) or 0) for r in data_rows) / n, 1),
+        "prebiotic_g": round(sum((getattr(r, "prebiotic_g", 0) or 0) for r in data_rows), 1),
+        "avg_prebiotic_g": round(sum((getattr(r, "prebiotic_g", 0) or 0) for r in data_rows) / n, 1),
         "seafood_servings": round(sum((getattr(r, "seafood_servings", 0) or 0) for r in data_rows), 1),
         "fruit_servings": round(sum((getattr(r, "fruit_servings", 0) or 0) for r in data_rows), 1),
         "vegetable_servings": round(sum((getattr(r, "vegetable_servings", 0) or 0) for r in data_rows), 1),
@@ -373,12 +420,14 @@ def _empty_rollup(days: int) -> dict:
         "avg_calories": 0.0, "avg_fiber_g": 0.0, "avg_fiber_per_1000_kcal": 0.0,
         "avg_added_sugar_g": 0.0, "avg_sodium_mg": 0.0, "avg_saturated_fat_g": 0.0,
         "pct_days_fiber_target": 0.0,
+        "pct_days_fiber_density_target": 0.0,
         "distinct_plant_foods_week": 0,
         "fermented_servings": 0.0, "probiotic_servings": 0.0, "omega3_servings": 0.0,
         "avg_fermented_servings": 0.0, "avg_probiotic_servings": 0.0, "avg_omega3_servings": 0.0,
         "omega3_food_servings": 0.0, "omega3_supplement_servings": 0.0,
         "collagen_g": 0.0, "avg_collagen_g": 0.0,
         "probiotic_cfu_billions": 0.0, "avg_probiotic_cfu_billions": 0.0,
+        "prebiotic_g": 0.0, "avg_prebiotic_g": 0.0,
         "seafood_servings": 0.0, "fruit_servings": 0.0, "vegetable_servings": 0.0,
         "alcohol_servings": 0.0, "processed_meat_servings": 0.0, "refined_grain_servings": 0.0,
         "plant_protein_g": 0.0, "animal_protein_g": 0.0,
@@ -393,12 +442,47 @@ def _empty_signals() -> DailyRawSignals:
     return DailyRawSignals(
         calories_total=0, fiber_total_g=0, fiber_per_1000_kcal=0,
         added_sugar_g=0, sodium_mg=0, saturated_fat_g=0,
+        caffeine_mg=0, potassium_mg=0, calcium_mg=0, magnesium_mg=0,
+        iron_mg=0, vitamin_d_mcg=0, vitamin_b12_mcg=0, folate_mcg=0,
+        zinc_mg=0, omega_3_g=0, micronutrient_item_count=0,
         distinct_plant_foods=0, fermented_servings=0, probiotic_servings=0,
         omega3_servings=0, seafood_servings=0, fruit_servings=0, vegetable_servings=0,
         alcohol_servings=0, processed_meat_servings=0, refined_grain_servings=0,
         processing_counts={}, plant_protein_g=0, animal_protein_g=0,
         max_meal_protein_pct=0, plant_slugs=[], item_count=0, classified_item_count=0,
+        insight_tag_counts={},
     )
+
+
+def _item_float(item: Any, attr: str) -> float | None:
+    try:
+        val = getattr(item, attr, None)
+        if val is None:
+            return None
+        return float(val)
+    except Exception:
+        return None
+
+
+def _extra_float(extras: dict, keys: tuple[str, ...], *, target: str) -> float | None:
+    for key in keys:
+        raw = extras.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if target == "vitamin_d_mcg" and key in {"vitamin_d_iu", "vitamin_d_IU"}:
+            return value / 40.0
+        return value
+    if target == "vitamin_d_mcg":
+        raw = extras.get("vitamin_d_iu")
+        try:
+            return float(raw) / 40.0 if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _gather_raw_signals(
@@ -422,20 +506,27 @@ def _gather_raw_signals(
 
     food_ids = [i.food_id for i in items if i.food_id is not None]
     nut_by_food: dict[int, FoodNutrition] = {}
+    food_by_id: dict[int, Food] = {}
     if food_ids:
         for n in db.exec(select(FoodNutrition).where(FoodNutrition.food_id.in_(food_ids))).all():
             nut_by_food[n.food_id] = n
+        for food in db.exec(select(Food).where(Food.id.in_(food_ids))).all():
+            if food.id is not None:
+                food_by_id[food.id] = food
 
     calories_total = 0.0
     fiber_total_g = 0.0
     added_sugar_g = 0.0
     sodium_mg = 0.0
     saturated_fat_g = 0.0
+    micronutrients = {field: 0.0 for field in MICRONUTRIENT_FIELDS}
+    micronutrient_item_count = 0
     fermented_servings = 0.0
     probiotic_servings = 0.0
     omega3_servings = 0.0
     collagen_g = 0.0
     probiotic_cfu_billions = 0.0
+    prebiotic_g = 0.0
     seafood_servings = 0.0
     fruit_servings = 0.0
     vegetable_servings = 0.0
@@ -446,6 +537,7 @@ def _gather_raw_signals(
     animal_protein_g = 0.0
     processing_counts: dict[str, int] = {}
     plant_slugs: set[str] = set()
+    insight_tag_counts: dict[str, int] = {}
     classified_count = 0
     # Per-meal protein totals so we can compute max_meal_protein_pct.
     per_meal_protein: dict[int, float] = {}
@@ -470,25 +562,98 @@ def _gather_raw_signals(
             and (item.calories or 0) > 0
         ):
             grams_consumed = (float(item.calories) / float(nut.calories)) * float(nut.reference_grams)
+
+        snapshot_fiber = _item_float(item, "fiber_g")
+        snapshot_sugar = _item_float(item, "sugar_g")
+        snapshot_added_sugar = _item_float(item, "added_sugar_g")
+        snapshot_sodium = _item_float(item, "sodium_mg")
+        snapshot_sat_fat = _item_float(item, "saturated_fat_g")
+        added_sugar_resolved = False
+        item_has_micronutrient = False
+        item_micronutrients: dict[str, float | None] = {
+            field: _item_float(item, field)
+            for field in MICRONUTRIENT_FIELDS
+        }
+
+        if snapshot_fiber is not None:
+            fiber_total_g += snapshot_fiber
+        if snapshot_added_sugar is not None and snapshot_added_sugar > 0:
+            added_sugar_g += snapshot_added_sugar
+            added_sugar_resolved = True
+        if snapshot_sodium is not None:
+            sodium_mg += snapshot_sodium
+        if snapshot_sat_fat is not None:
+            saturated_fat_g += snapshot_sat_fat
+        for field, value in item_micronutrients.items():
+            if value is not None:
+                micronutrients[field] += value
+                item_has_micronutrient = True
+
         if nut and grams_consumed > 0 and nut.reference_grams > 0:
             scale = grams_consumed / float(nut.reference_grams)
-            if nut.fiber is not None:
+            if snapshot_fiber is None and nut.fiber is not None:
                 fiber_total_g += float(nut.fiber) * scale
             item_added_sugar = getattr(nut, "added_sugar_g", None)
-            if item_added_sugar is not None:
+            if not added_sugar_resolved and item_added_sugar is not None and item_added_sugar > 0:
                 added_sugar_g += float(item_added_sugar) * scale
-            if nut.sodium_mg is not None:
+                added_sugar_resolved = True
+            if snapshot_sodium is None and nut.sodium_mg is not None:
                 sodium_mg += float(nut.sodium_mg) * scale
             extras = nut.extra_nutrients or {}
             sat = extras.get("saturated_fat")
-            if sat is not None:
+            if snapshot_sat_fat is None and sat is not None:
                 try: saturated_fat_g += float(sat) * scale
                 except Exception: pass
-            if item_added_sugar is None and "added_sugar" in extras:
-                try: added_sugar_g += float(extras["added_sugar"]) * scale
+            if not added_sugar_resolved and item_added_sugar is None and "added_sugar" in extras:
+                try:
+                    extra_added = float(extras["added_sugar"])
+                    if extra_added > 0:
+                        added_sugar_g += extra_added * scale
+                        added_sugar_resolved = True
                 except Exception: pass
+            if not added_sugar_resolved:
+                sugar_for_estimate = snapshot_sugar
+                if sugar_for_estimate is None and nut.sugar is not None:
+                    sugar_for_estimate = float(nut.sugar) * scale
+                estimated_added = resolve_added_sugar_g(
+                    item.food_name,
+                    reported_added_sugar_g=snapshot_added_sugar,
+                    sugar_g=sugar_for_estimate,
+                    serving_grams=grams_consumed,
+                )
+                if estimated_added is not None and estimated_added > 0:
+                    added_sugar_g += estimated_added
+                    added_sugar_resolved = True
+            for field, keys in MICRONUTRIENT_FIELDS.items():
+                if item_micronutrients[field] is not None:
+                    continue
+                value = _extra_float(extras, keys, target=field)
+                if value is not None:
+                    micronutrients[field] += value * scale
+                    item_has_micronutrient = True
+        if not added_sugar_resolved:
+            estimated_added = resolve_added_sugar_g(
+                item.food_name,
+                reported_added_sugar_g=snapshot_added_sugar,
+                sugar_g=snapshot_sugar,
+                serving_grams=grams_consumed,
+            )
+            if estimated_added is not None and estimated_added > 0:
+                added_sugar_g += estimated_added
+                added_sugar_resolved = True
+        if item_has_micronutrient:
+            micronutrient_item_count += 1
 
-        meta = get_or_create_metadata(item.food_name, db=db, allow_ai=allow_ai)
+        food = food_by_id.get(item.food_id) if item.food_id else None
+        food_source = getattr(getattr(food, "source", None), "value", getattr(food, "source", None))
+        requires_processing_bucket = bool(getattr(food, "barcode", None)) or food_source == FoodSource.BARCODE.value
+        meta = get_or_create_metadata(
+            item.food_name,
+            db=db,
+            allow_ai=allow_ai,
+            require_processing_bucket=requires_processing_bucket,
+            default_processing_bucket="processed" if requires_processing_bucket else None,
+        )
         if meta.source != "unknown" or meta.confidence > 0:
             classified_count += 1
 
@@ -510,20 +675,26 @@ def _gather_raw_signals(
         cfu_per_serving = getattr(meta, "probiotic_cfu_billions_per_serving", None)
         if cfu_per_serving is not None and cfu_per_serving > 0:
             probiotic_cfu_billions += float(cfu_per_serving) * servings_consumed
-            probiotic_servings += 1.0 * servings_consumed
+            probiotic_servings += servings_consumed
         else:
             pb_per_serving = getattr(meta, "probiotic_servings_per_serving", None)
             if pb_per_serving is not None and pb_per_serving > 0:
                 probiotic_servings += float(pb_per_serving) * servings_consumed
-                probiotic_cfu_billions += 1.0 * servings_consumed
             elif getattr(meta, "probiotic_flag", False):
-                probiotic_servings += 1.0
-                probiotic_cfu_billions += 1.0
+                probiotic_servings += servings_consumed
         # Collagen — purely AI-estimated, no legacy fallback because
         # the column didn't exist before v4.
         col_per_serving = getattr(meta, "collagen_g_per_serving", None)
         if col_per_serving is not None and col_per_serving > 0:
             collagen_g += float(col_per_serving) * servings_consumed
+        # Prebiotic fiber — fermentable fibers (inulin, FOS, GOS,
+        # resistant starch) that feed gut microbes. Populated by the
+        # curated lookup for high-confidence foods (chicory, garlic,
+        # leek, oats, legumes, etc.) and by AI classification for the
+        # tail. Distinct from total fiber — some fibers don't ferment.
+        pre_per_serving = getattr(meta, "prebiotic_g_per_serving", None)
+        if pre_per_serving is not None and pre_per_serving > 0:
+            prebiotic_g += float(pre_per_serving) * servings_consumed
         if meta.omega3_flag:
             omega3_servings += servings_consumed
         if getattr(meta, "seafood_flag", False):
@@ -556,6 +727,8 @@ def _gather_raw_signals(
         if meta.likely_plant_foods and meta.confidence >= 0.5:
             for slug in meta.likely_plant_foods:
                 plant_slugs.add(slug)
+        for tag in insight_tags_from_metadata(meta):
+            insight_tag_counts[tag] = insight_tag_counts.get(tag, 0) + 1
 
     total_protein_day = sum(per_meal_protein.values())
     max_meal_protein_pct = (
@@ -572,12 +745,24 @@ def _gather_raw_signals(
         added_sugar_g=round(added_sugar_g, 1),
         sodium_mg=round(sodium_mg, 1),
         saturated_fat_g=round(saturated_fat_g, 1),
+        caffeine_mg=round(micronutrients["caffeine_mg"], 1),
+        potassium_mg=round(micronutrients["potassium_mg"], 1),
+        calcium_mg=round(micronutrients["calcium_mg"], 1),
+        magnesium_mg=round(micronutrients["magnesium_mg"], 1),
+        iron_mg=round(micronutrients["iron_mg"], 2),
+        vitamin_d_mcg=round(micronutrients["vitamin_d_mcg"], 2),
+        vitamin_b12_mcg=round(micronutrients["vitamin_b12_mcg"], 2),
+        folate_mcg=round(micronutrients["folate_mcg"], 1),
+        zinc_mg=round(micronutrients["zinc_mg"], 2),
+        omega_3_g=round(micronutrients["omega_3_g"], 2),
+        micronutrient_item_count=micronutrient_item_count,
         distinct_plant_foods=len(plant_slugs),
         fermented_servings=fermented_servings,
         probiotic_servings=round(probiotic_servings, 2),
         omega3_servings=omega3_servings,
         collagen_g=round(collagen_g, 1),
         probiotic_cfu_billions=round(probiotic_cfu_billions, 1),
+        prebiotic_g=round(prebiotic_g, 1),
         seafood_servings=seafood_servings,
         fruit_servings=fruit_servings,
         vegetable_servings=vegetable_servings,
@@ -592,4 +777,5 @@ def _gather_raw_signals(
         item_count=len(items),
         classified_item_count=classified_count,
         per_meal_protein={str(k): round(v, 1) for k, v in per_meal_protein.items()},
+        insight_tag_counts=insight_tag_counts,
     )

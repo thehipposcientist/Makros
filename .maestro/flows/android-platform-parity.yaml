@@ -1,0 +1,107 @@
+# Android-specific platform parity smoke.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client or an installed Android release build
+#   Android emulator / device selected by Maestro
+
+appId: com.thallo.app
+name: android-platform-parity
+tags:
+  - e2e
+  - seeded
+  - android
+  - platform
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    file: dismiss-dev-client.yaml
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible:
+      id: "bottom-tab-workouts"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "open-profile-from-header"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+
+- scrollUntilVisible:
+    element:
+      id: "profile-account-open"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "profile-account-open"
+- extendedWaitUntil:
+    visible:
+      id: "account-modal"
+    timeout: 30000
+
+# Android should expose Health Connect-oriented support copy and must not
+# render the Apple Watch-only sync row.
+- swipe:
+    start: 50%,82%
+    end: 50%,42%
+    duration: 500
+- waitForAnimationToEnd:
+    timeout: 1000
+- assertVisible:
+    text: ".*Health Connect.*"
+- assertNotVisible: "Apple Watch Sync"
+
+- pressKey: back
+- scrollUntilVisible:
+    element:
+      id: "profile-settings-row"
+    direction: UP
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "profile-settings-row"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+- tapOn:
+    id: "settings-tab-privacy"
+- waitForAnimationToEnd:
+    timeout: 1000
+- scrollUntilVisible:
+    element:
+      id: "settings-open-health-permissions"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- tapOn:
+    id: "settings-open-health-permissions"
+- extendedWaitUntil:
+    visible:
+      id: "health-permissions-connect"
+    timeout: 15000
+- assertVisible: "Health Connect unavailable"
+- assertVisible:
+    text: ".*Health Connect support is coming soon.*"
+- assertNotVisible: "Connect Apple Health"

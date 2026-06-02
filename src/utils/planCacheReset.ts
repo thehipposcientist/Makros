@@ -59,6 +59,7 @@ const WORKOUT_KEY_PATTERNS: ReadonlyArray<string> = Object.freeze([
   'readinessScore',
   'routineOverlayShown_',
   'activeWorkoutSession',     // in-progress workout state
+  'activeWorkoutTimers',      // in-progress timed exercise state
   'workoutStartTime_',
 ]);
 const MEAL_KEY_PATTERNS: ReadonlyArray<string> = Object.freeze([

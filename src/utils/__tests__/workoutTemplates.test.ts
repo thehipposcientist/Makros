@@ -76,7 +76,7 @@ describe('workout template persistence', () => {
       storage,
       profile: { subscriptionTier: 'pro' },
       canCreateWorkoutTemplate: () => true,
-      freeWorkoutTemplateLimit: 3,
+      freeWorkoutTemplateLimit: 5,
     });
 
     expect(next.map(t => t.id)).toEqual(['new', 'old']);
@@ -118,25 +118,25 @@ describe('workout template persistence', () => {
   });
 
   it('blocks a new free-tier template at the cap and does not mutate storage', async () => {
-    const existing = [template('a'), template('b'), template('c')];
+    const existing = [template('a'), template('b'), template('c'), template('d'), template('e')];
     const storage = makeStorage({
       [WORKOUT_TEMPLATES_KEY]: JSON.stringify(existing),
     });
 
     let error = '';
     try {
-      await upsertWorkoutTemplateInStorage(template('d'), {
+      await upsertWorkoutTemplateInStorage(template('f'), {
         storage,
         profile: { subscriptionTier: 'free' },
-        canCreateWorkoutTemplate: (_profile, count) => count < 3,
-        freeWorkoutTemplateLimit: 3,
+        canCreateWorkoutTemplate: (_profile, count) => count < 5,
+        freeWorkoutTemplateLimit: 5,
       });
     } catch (e: any) {
       error = e?.message ?? String(e);
     }
 
-    expect(error).toContain('Free accounts can save up to 3 workout templates');
-    expect(JSON.parse(storage.data.get(WORKOUT_TEMPLATES_KEY)!).map((t: any) => t.id)).toEqual(['a', 'b', 'c']);
+    expect(error).toContain('Free accounts can save up to 5 workout templates');
+    expect(JSON.parse(storage.data.get(WORKOUT_TEMPLATES_KEY)!).map((t: any) => t.id)).toEqual(['a', 'b', 'c', 'd', 'e']);
     expect(storage.writes.length).toBe(0);
   });
 

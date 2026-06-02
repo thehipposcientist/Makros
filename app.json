@@ -8,23 +8,37 @@
     "newArchEnabled": true,
     "icon": "./assets/images/thallo-icon.png",
     "splash": {
-      "backgroundColor": "#0D0F14"
+      "backgroundColor": "#182030"
     },
     "assetBundlePatterns": [
       "**/*"
     ],
     "plugins": [
       "expo-notifications",
-      "expo-secure-store",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": false
+        }
+      ],
       "expo-apple-authentication",
       [
         "expo-camera",
         {
-          "cameraPermission": "Thallo uses the camera to scan food barcodes for nutrition tracking."
+          "cameraPermission": "Thallo uses the camera for barcode scans and optional food, supplement, equipment, form, body, and lab report photos you choose to capture."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Thallo uses your location during active outdoor cardio, including when the screen locks, to track distance, pace, route, and elevation, and when you enable sun exposure estimates to estimate daylight, UV, and coarse area context.",
+          "locationWhenInUsePermission": "Thallo uses your location during active outdoor cardio to track distance, pace, route, and elevation, and when you enable sun exposure estimates to estimate daylight, UV, and coarse area context.",
+          "isIosBackgroundLocationEnabled": true
         }
       ],
       "@bacons/apple-targets",
-      "expo-web-browser"
+      "expo-web-browser",
+      "./plugins/with-android-backup-disabled"
     ],
     "ios": {
       "bundleIdentifier": "com.thallo.app",
@@ -32,17 +46,30 @@
       "supportsTablet": false,
       "usesAppleSignIn": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes, take food photos for nutrition tracking, and capture photos of your gear (running shoes, bikes) for AI mileage estimates.",
-        "NSPhotoLibraryUsageDescription": "Thallo accesses your photo library to attach gear photos for AI mileage tracking and to add food photos to logged meals.",
-        "NSMicrophoneUsageDescription": "Thallo uses the microphone for speech-to-meal voice entry — speak what you ate and we'll log it without typing.",
+        "NSCameraUsageDescription": "Thallo uses the camera for barcode scans and optional food, supplement, equipment, form, body, and lab report photos you choose to capture.",
+        "NSPhotoLibraryUsageDescription": "Thallo accesses only the photos or videos you choose for meals, workout shares, body/form feedback, gear, equipment, supplement, and lab report features.",
+        "NSMicrophoneUsageDescription": "Thallo uses the microphone for speech-to-meal voice entry so you can describe what you ate without typing.",
         "NSFaceIDUsageDescription": "Thallo uses Face ID to unlock the app quickly so you don't have to retype your password every session.",
-        "NSHealthShareUsageDescription": "Thallo reads your sleep, resting heart rate, heart rate variability, steps, workouts, weight, and active energy from Apple Health so you can see readiness, recovery, and progress trends in the app.",
-        "NSHealthUpdateUsageDescription": "Thallo writes your completed workouts to Apple Health so they appear alongside your other activity.",
+        "NSHealthShareUsageDescription": "Thallo reads Apple Health categories you allow, including sleep, heart rate, HRV, steps, workouts and routes, weight, energy, VO2 max, respiratory rate, blood oxygen, wrist temperature, breathing disturbances, standing hours, mindful minutes, daylight time, menstrual-flow signals, and nutrition summaries so readiness, recovery, fueling, sun exposure, and progress trends work in the app.",
+        "NSHealthUpdateUsageDescription": "Thallo writes completed workouts, calories, distances, and route data to Apple Health when you save a workout with those details.",
+        "NSMotionUsageDescription": "Thallo uses motion data to suggest tracking walks, runs, and rides you appear to have started.",
         "ITSAppUsesNonExemptEncryption": false,
         "NSSupportsLiveActivities": true,
         "NSSupportsLiveActivitiesFrequentUpdates": true,
         "UIBackgroundModes": [
-          "audio"
+          "audio",
+          "location"
+        ],
+        "LSApplicationQueriesSchemes": [
+          "instagram",
+          "instagram-stories"
+        ],
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLSchemes": [
+              "com.googleusercontent.apps.592286949926-7h0niho86jnes9bbqrd2gsske9h5ohmc"
+            ]
+          }
         ]
       },
       "entitlements": {
@@ -58,11 +85,13 @@
       "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/thallo-icon.png",
-        "backgroundColor": "#0D0F14"
+        "backgroundColor": "#182030"
       },
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.POST_NOTIFICATIONS",
+        "com.android.vending.BILLING"
       ]
     },
     "scheme": "thallo",
@@ -70,8 +99,16 @@
       "typedRoutes": true
     },
     "extra": {
-      "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com",
-      "freeBetaFullAccess": true,
+      "apiBaseUrl": "https://api.thallofitness.com",
+      "freeBetaFullAccess": false,
+      "featureFlags": {
+        "billing": {
+          "revenueCat": false
+        },
+        "healthInsights": {
+          "riskSignals": true
+        }
+      },
       "googleWebClientId": "592286949926-tt77lik8cldc7dnccdetfgdd0kqntgcr.apps.googleusercontent.com",
       "googleIosClientId": "592286949926-7h0niho86jnes9bbqrd2gsske9h5ohmc.apps.googleusercontent.com",
       "eas": {

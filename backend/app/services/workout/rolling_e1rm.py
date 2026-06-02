@@ -52,13 +52,20 @@ from typing import Iterable, Optional
 
 @dataclass
 class UsableSet:
-    """Subset of ExerciseSet fields rolling_e1rm cares about."""
+    """Subset of ExerciseSet fields rolling_e1rm cares about.
+
+    `workout_id` is optional — when present it's the most reliable
+    grouping key for the "distinct sessions" confidence check; when
+    absent we fall back to completed_at date. Older callers that
+    weren't updated to populate the field default to None and the
+    distinct-session count falls back to date grouping."""
     completed_at: datetime | date
     actual_weight_lbs: float
     actual_reps: int
     actual_rir: float | None       # null → use target_rir as a fallback
     target_rir: float | None
     set_type: str | None           # "warmup" / "working" / null
+    workout_id: int | None = None
 
 
 @dataclass
@@ -91,6 +98,18 @@ _REP_WINDOW: dict[str, Optional[tuple[int, int]]] = {
     "isolation": None,
 }
 
+# Cap on `reps + rir` per category. Without this, a set like 225 × 10 @
+# 4 RIR would Epley out to a 14-rep equivalent (≈ 330 lb) — physically
+# inappropriate for prescription math because reps that far from
+# failure aren't actually informative about today's true 1RM.
+# Matches the upper end of `_REP_WINDOW` so capping is conservative:
+# the e1RM never speaks above the range the role is allowed to score.
+_MAX_EFFECTIVE_REPS: dict[str, Optional[int]] = {
+    "main_compound": 10,
+    "machine_compound": 12,
+    "isolation": None,
+}
+
 
 def _category_for_role(role: str) -> str:
     """Normalize the role string into one of the three canonical
@@ -102,6 +121,16 @@ def _category_for_role(role: str) -> str:
     if r in _MACHINE_ROLES: return "machine_compound"
     if r in _MAIN_ROLES: return "main_compound"
     return "main_compound"
+
+
+def _max_effective_reps(role: str | None) -> int | None:
+    """Cap on `reps + rir` for the category resolved from `role`.
+
+    Returns None for `isolation` (which doesn't score at all upstream)
+    so callers can short-circuit. Public-ish — `set_e1rm` and any
+    upstream rep validators should read from here so the cap stays a
+    single source of truth."""
+    return _MAX_EFFECTIVE_REPS.get(_category_for_role(role or ""))
 
 
 def _as_date(d: datetime | date) -> date:
@@ -118,21 +147,96 @@ def _rir_for(s: UsableSet) -> float | None:
     return None
 
 
+# Source labels for the RIR value used on a given set. The rolling
+# estimator tracks these so confidence can be downgraded when the
+# fallback path dominated the sample.
+RirSource = str  # Literal["actual", "target"] — string for backward compat
+
+
+def _rir_with_source(s: UsableSet) -> tuple[float | None, RirSource | None]:
+    """Same fallback chain as `_rir_for` but also reports which source
+    won. The estimator aggregates the `actual` share to decide whether
+    high confidence is allowed."""
+    if s.actual_rir is not None:
+        return float(s.actual_rir), "actual"
+    if s.target_rir is not None:
+        return float(s.target_rir), "target"
+    return None, None
+
+
+def _distinct_session_count(sets: Iterable[UsableSet]) -> int:
+    """Best-effort count of independent workouts in the sample.
+
+    `workout_id` is the most reliable key. When all sets have None
+    for `workout_id` we fall back to the completed_at *date* — two
+    sets on the same day are treated as one session, which biases
+    toward "low confidence" rather than overstating session diversity.
+
+    Returns at least 1 so the confidence math has something to divide
+    against; the calling logic interprets `<2` as "no high/med."""
+    by_id: set[int] = set()
+    by_date: set[date] = set()
+    any_id_set = False
+    for s in sets:
+        if s.workout_id is not None:
+            by_id.add(int(s.workout_id))
+            any_id_set = True
+        by_date.add(_as_date(s.completed_at))
+    if any_id_set:
+        return max(1, len(by_id))
+    return max(1, len(by_date))
+
+
+def _adjust_confidence_for_rir_source(confidence: str, actual_ratio: float) -> str:
+    """Downgrade confidence when `target_rir` was the dominant source.
+
+    Rules:
+      - ratio >= 0.70 → unchanged (high allowed)
+      - 0.50 <= ratio < 0.70 → cap at "med"
+      - ratio < 0.50 → cap at "low"
+
+    Target RIR is a prescription intent, not observed truth — letting
+    a sample full of intent-based RIR claim "high confidence" would
+    propagate guessed numbers into prescription math."""
+    if actual_ratio >= 0.70:
+        return confidence
+    if actual_ratio >= 0.50:
+        return "med" if confidence == "high" else confidence
+    # < 50% actual_rir — anything above "low" is dishonest.
+    return "low"
+
+
 # ── Single source of truth for set-level e1RM ───────────────────────
 
 def set_e1rm(
     weight_lbs: float | int | None,
     reps: float | int | None,
     rir: float | int | None,
+    *,
+    role: str | None = None,
 ) -> float | None:
     """Pure Epley with RIR adjustment.
 
-        e1rm = weight × (1 + (reps + rir) / 30)
+        e1rm = weight × (1 + min(reps + rir, cap) / 30)
 
-    Negative RIR clamps to 0 (logging "negative reps in reserve" isn't
-    a thing the equation can handle gracefully). Returns None on
-    invalid inputs; this function does NOT enforce category rep
-    windows — that's the caller's responsibility (see `_is_usable`)."""
+    Where `cap` comes from the category resolved from `role`:
+        - main_compound → 10
+        - machine_compound → 12
+        - isolation → returns None (caller should not score)
+
+    Without the cap, 225 × 10 @ 4 RIR would behave like a 14-rep
+    Epley estimate (≈ 330 lb), which is too aggressive for daily
+    prescription math. Capping at the category's rep-window upper
+    bound keeps the estimate honest about what we've actually
+    observed.
+
+    Backward compat: `role` defaults to None which resolves to
+    `main_compound` (the strictest cap), so existing call sites
+    that don't yet pass `role` get the safe behaviour. Negative RIR
+    clamps to 0. Returns None on invalid inputs; this function does
+    NOT enforce category rep windows for the input reps — that's
+    `_is_usable`'s job — but it does cap the *effective* reps after
+    adding RIR."""
     if weight_lbs is None or reps is None:
         return None
     try:
@@ -144,6 +248,16 @@ def set_e1rm(
         return None
     if w <= 0 or r <= 0:
         return None
+
+    cap = _max_effective_reps(role)
+    if cap is None:
+        # Isolation — refuse. Matches `compute_rolling_e1rm`'s isolation
+        # short-circuit so PR cards, strength score, and rolling all
+        # agree.
+        if _category_for_role(role or "") == "isolation":
+            return None
+        cap = 10  # belt-and-suspenders for unknown roles
+
     rir_raw = 0.0
     if rir is not None:
         try:
@@ -152,7 +266,7 @@ def set_e1rm(
                 rir_raw = rir_val
         except (TypeError, ValueError):
             rir_raw = 0.0
-    eff_reps = r + rir_raw
+    eff_reps = min(r + rir_raw, float(cap))
     return w * (1.0 + eff_reps / 30.0)
 
 
@@ -227,17 +341,22 @@ def compute_rolling_e1rm(
     usable = usable[:max_samples]
 
     weighted: list[tuple[float, float]] = []
+    sets_contributing: list[UsableSet] = []
+    actual_count = 0
     for s in usable:
-        rir = _rir_for(s)
+        rir, rir_src = _rir_with_source(s)
         if rir is None:
             continue
-        e1rm = set_e1rm(s.actual_weight_lbs, s.actual_reps, rir)
+        e1rm = set_e1rm(s.actual_weight_lbs, s.actual_reps, rir, role=role)
         if e1rm is None or e1rm <= 0:
             continue
         days_since = max(0, (today - _as_date(s.completed_at)).days)
         # Exponential decay by half-life — exp(-days * ln(2) / hl).
         weight = math.exp(-days_since * math.log(2) / half_life_days)
         weighted.append((e1rm, weight))
+        sets_contributing.append(s)
+        if rir_src == "actual":
+            actual_count += 1
 
     if not weighted:
         return None
@@ -245,15 +364,23 @@ def compute_rolling_e1rm(
     if final <= 0:
         return None
 
-    # Confidence: more recent + more samples + tighter spread = high.
+    # Confidence: more recent + more samples + tighter spread + multiple
+    # distinct sessions + actual_rir-dominated = high.
     n = len(weighted)
     spread = max(v for v, _ in weighted) - min(v for v, _ in weighted)
     spread_pct = (spread / final) if final > 0 else 1.0
-    if n >= 7 and spread_pct < 0.15:
+    distinct_sessions = _distinct_session_count(sets_contributing)
+    actual_ratio = actual_count / n if n else 0.0
+
+    if n >= 7 and distinct_sessions >= 3 and spread_pct < 0.15:
         confidence = "high"
-    elif n >= 4 and spread_pct < 0.25:
+    elif n >= 4 and distinct_sessions >= 2 and spread_pct < 0.25:
         confidence = "med"
     else:
         confidence = "low"
+
+    # Downgrade after the base tier so a target_rir-heavy sample can't
+    # claim high confidence even when n / spread look good.
+    confidence = _adjust_confidence_for_rir_source(confidence, actual_ratio)
 
     return E1RMEstimate(e1rm_lbs=final, sample_count=n, confidence=confidence)

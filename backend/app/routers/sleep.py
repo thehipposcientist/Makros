@@ -22,6 +22,7 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.entitlements import require_pro_feature
 from app.models import SleepLog, SleepLogUpsert, User
+from app.services.health.sleep_pressure import compute_sleep_pressure
 
 router = APIRouter(prefix="/sleep", tags=["sleep"])
 
@@ -157,6 +158,32 @@ def list_sleep_history(
         }
         for r in rows
     ]
+
+
+@router.get("/pressure")
+def get_sleep_pressure(
+    days: int = 14,
+    current_user: User = Depends(require_pro_feature("Sleep and recovery tracking")),
+    session: Session = Depends(get_session),
+):
+    """Rolling sleep-pressure read for recovery context.
+
+    The signal is capped and qualitative on purpose: it should help the
+    user decide whether to protect recovery, not create an impossible
+    "hours owed" chore list.
+    """
+    if days < 7 or days > 30:
+        raise HTTPException(status_code=400, detail="days must be 7-30")
+    today = datetime.now(timezone.utc).date()
+    cutoff = today - timedelta(days=30)
+    rows = session.exec(
+        select(SleepLog)
+        .where(SleepLog.user_id == current_user.id)
+        .where(SleepLog.night_date >= cutoff)
+        .where(SleepLog.night_date <= today)
+        .order_by(SleepLog.night_date.asc())
+    ).all()
+    return compute_sleep_pressure(rows, as_of=today, window_days=days).to_dict()
 
 
 @router.get("/today")

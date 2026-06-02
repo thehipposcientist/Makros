@@ -12,12 +12,12 @@
  *     authToken, focusLabel, exerciseNames,
  *   });
  *   if (cancelled) return; // user backed out of completion entirely
- *   await logWorkoutDone(..., gearIds);
+ *   await logWorkoutDone(..., undefined, gearIds);
  */
 import { useEffect, useState } from 'react';
 import { View, Text, Modal, TouchableOpacity, ScrollView, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import type { GearItem } from '../services/api';
 
@@ -31,6 +31,7 @@ interface Props {
 
 export default function GearPickerModal({ visible, candidates, themeName, onPick, onSkip }: Props) {
   const tc = getTheme(themeName).colors;
+  const onPrimary = getContrastingTextColor(tc.primary);
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
   // Default to ALL candidates checked when the modal opens — matches the
@@ -76,7 +77,7 @@ export default function GearPickerModal({ visible, candidates, themeName, onPick
                     { borderColor: checked ? tc.primary : tc.border, backgroundColor: checked ? tc.primary + '10' : tc.background },
                   ]}>
                   <View style={[s.checkbox, { borderColor: checked ? tc.primary : tc.border, backgroundColor: checked ? tc.primary : 'transparent' }]}>
-                    {checked && <Ionicons name="checkmark" size={14} color="#fff" />}
+                    {checked && <Ionicons name="checkmark" size={14} color={onPrimary} />}
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={[s.gearName, { color: tc.textPrimary }]}>{g.name}</Text>
@@ -98,7 +99,7 @@ export default function GearPickerModal({ visible, candidates, themeName, onPick
             <TouchableOpacity
               onPress={() => onPick(Array.from(selected))}
               style={[s.btn, { backgroundColor: tc.primary, borderColor: tc.primary, flex: 2 }]}>
-              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>
+              <Text style={{ color: onPrimary, fontWeight: '800', fontSize: 13 }}>
                 Save {selected.size > 0 ? `(${selected.size})` : ''}
               </Text>
             </TouchableOpacity>

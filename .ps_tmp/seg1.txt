@@ -1,0 +1,267 @@
+    recompForecastNutritionSignal,
+    userProfile.goal,
+    userProfile.goalDetails?.goalStartedAt,
+    userProfile.goalDetails?.pace,
+    userProfile.goalDetails?.startBodyFatPct,
+    userProfile.goalDetails?.startWeightLbs,
+    userProfile.goalDetails?.targetWeightLbs,
+    weightUnit,
+  ]);
+  useEffect(() => {
+    let cancelled = false;
+    if (loading) {
+      return () => { cancelled = true; };
+    }
+    if (liveGoalForecast?.bucket !== 'body_recomp' || !recompForecastScopeKey) {
+      setDailyRecompForecast(null);
+      return () => { cancelled = true; };
+    }
+    import('../utils/dailyProgressSnapshots').then(m =>
+      m.getStableDailyRecompForecast(liveGoalForecast, recompForecastScopeKey),
+    ).then(snapshot => {
+      if (!cancelled) setDailyRecompForecast({ scopeKey: snapshot.scopeKey, forecast: snapshot.forecast });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [liveGoalForecast, loading, recompForecastScopeKey]);
+  const goalForecast = liveGoalForecast?.bucket === 'body_recomp'
+    ? (dailyRecompForecast?.scopeKey === recompForecastScopeKey ? dailyRecompForecast.forecast : liveGoalForecast)
+    : liveGoalForecast;
+  const todayTrack = useMemo(
+    () => buildTodayTrackSummary({
+      profile: userProfile,
+      history,
+      summaries,
+      weightEntries,
+      paceHistory,
+      mealHistory,
+      mealAverages,
+      weightUnit,
+      distanceUnit,
+      window: progressWeekWindow,
+      tc,
+      showWorkoutProgress,
+      showMealProgress,
+    }),
+    [distanceUnit, history, mealAverages, mealHistory, paceHistory, progressWeekWindow, showMealProgress, showWorkoutProgress, summaries, tc, userProfile, weightEntries, weightUnit],
+  );
+  const goalForecastColor = goalForecast?.tone === 'success'
+    ? tc.success
+    : goalForecast?.tone === 'warning'
+      ? tc.warning
+      : tc.primary;
+  const goalScoreColor = goalScore
+    ? goalScore.executionScore >= 75
+      ? tc.success
+      : goalScore.executionScore >= 55
+        ? tc.warning
+        : tc.error
+    : goalForecastColor;
+  const hasGoalScoreDetail = !!goalScore || !!goalForecast;
+  const todayHeroColor = goalScore ? goalScoreColor : goalForecast ? goalForecastColor : todayTrack.color;
+  const todayHeroStatus = goalScore
+    ? goalScore.executionLabel
+    : goalForecast
+    ? goalForecast.tone === 'success'
+      ? 'On pace'
+      : goalForecast.tone === 'warning'
+        ? 'Needs signal'
+        : 'Close'
+    : todayTrack.title;
+  const todayHeroTitle = goalScore
+    ? formatGoalScoreHeroTitle(goalScore)
+    : goalForecast
+    ? goalForecast.headline.replace(/^At current pace:\s*/i, '')
+    : todayTrack.title;
+  const todayHeroSubtitle = goalScore ? null : goalForecast ? stripGoalStartedCopy(goalForecast.subheadline) : todayTrack.subtitle;
+  const todayHeroMetricLabel = goalScore || goalForecast ? 'Execution' : 'Goal signal';
+  const todayHeroMetricValue = goalScore ? `${goalScore.executionScore}%` : goalForecast ? `${goalForecast.executionPct}%` : `${todayTrack.progressPct}%`;
+  const todayHeroImageUri = goalEstimateImageUri(userProfile.goal, userProfile.physicalStats?.gender);
+  const goalVo2Points = useMemo(
+    () => buildBiometricHistoryPoints('vo2', sleepHistory, dailyHealthHistory, healthSummary, GOAL_EXECUTION_BLOCK_DAYS),
+    [dailyHealthHistory, healthSummary, sleepHistory],
+  );
+  const goalExecutionOverview = useMemo(
+    () => buildGoalExecutionOverview({
+      profile: userProfile,
+      todayTrack,
+      goalForecast,
+      weightEntries,
+      history,
+      summaries,
+      prs,
+      paceHistory,
+      mealHistory,
+      vo2Points: goalVo2Points,
+      bodyScanHistory,
+      weightUnit,
+      distanceUnit,
+      tc,
+      showWorkoutProgress,
+      showMealProgress,
+    }),
+    [bodyScanHistory, distanceUnit, goalForecast, goalVo2Points, history, mealHistory, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, tc, todayTrack, userProfile, weightEntries, weightUnit],
+  );
+  // Lock today's computed Thallo Score to the first valid read of the
+  // local day, then show the trailing 28-day average. Later meal,
+  // workout, sleep, or wearable syncs can update tomorrow's snapshot
+  // but do not move the displayed score throughout the day.
+  useEffect(() => {
+    let cancelled = false;
+    if (loading) {
+      return () => { cancelled = true; };
+    }
+    import('../utils/thalloScoreHistory').then(m => {
+      if (cancelled) return;
+      m.getStableDailyThalloScore(comprehensiveHealthScore).then(snapshot => {
+        if (cancelled) return;
+        setDailyThalloScoreResult(snapshot.result);
+        setThalloScoreAverage(snapshot.average);
+      }).catch(() => {});
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [comprehensiveHealthScore, loading]);
+  const displayedThalloScore = dailyThalloScoreResult ?? comprehensiveHealthScore;
+  // Thallo Score removed for now — card + explainer modal no longer rendered.
+  // THALLO_SCORE_ENABLED is false, so this dormant builder short-circuits each
+  // render; flip it to re-enable. (Typed `boolean`, not literal `false`, so
+  // flow-narrowing inside the IIFE stays valid for the type checker.)
+  const thalloScoreCard = THALLO_SCORE_ENABLED && isProTier && showWorkoutProgress && showMealProgress ? (() => {
+    const hs = displayedThalloScore;
+    // Headline = trailing 28-day average of the daily score (falls back
+    // to today's value before any history exists).
+    const overall = thalloScoreAverage != null ? thalloScoreAverage.average : hs.overallScore;
+    const pillars = buildThalloScorePillars(hs, tc);
+    const defaultPillar = defaultThalloPillarKey(pillars);
+    const topPillars = pillars
+      .slice()
+      .sort((a, b) => b.contributionPoints - a.contributionPoints || b.score - a.score)
+      .slice(0, 3);
+    const coveragePct = Math.round(hs.dataCoverage * 100);
+    const scoreColor = overall == null ? tc.textMuted
+      : overall >= 80 ? '#22C55E'
+      : overall >= 65 ? '#84CC16'
+      : overall >= 45 ? '#F59E0B'
+      : '#EF4444';
+    const scoreStatus = overall == null ? 'Building'
+      : overall >= 80 ? 'Strong'
+      : overall >= 65 ? 'Balanced'
+      : overall >= 45 ? 'Needs signal'
+      : 'Watch';
+    const leadPillar = topPillars[0] ?? null;
+    const supportLabel = leadPillar ? `Top support: ${leadPillar.label}` : `${coveragePct}% data coverage`;
+
+    return (
+      <TouchableOpacity
+        testID="progress-thallo-score-card"
+        activeOpacity={0.85}
+        accessibilityRole="button"
+        accessibilityLabel={`${hs.scoreLabel}: ${overall ?? 'building'}. Open score breakdown.`}
+        onPress={() => {
+          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+          setSelectedHealthScorePillar(defaultPillar);
+          setHealthScoreExplainOpen(true);
+        }}
+        style={[
+          styles.thalloScoreFloat,
+          { borderColor: scoreColor + '44', backgroundColor: tc.surface + 'F2' },
+        ]}
+      >
+        <View style={[styles.thalloScoreFloatHalo, { backgroundColor: scoreColor + '12' }]}>
+          <ThalloScoreDonut
+            score={overall}
+            pillars={pillars}
+            size={58}
+            strokeWidth={6}
+            trackColor={tc.border}
+            textColor={scoreColor}
+            mutedColor={tc.textMuted}
+            onPillarPress={key => {
+              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+              setSelectedHealthScorePillar(key);
+              setHealthScoreExplainOpen(true);
+            }}
+          />
+        </View>
+        <View style={styles.thalloScoreFloatCopy}>
+          <Text style={[styles.thalloScoreTodayEyebrow, { color: scoreColor }]}>28d Thallo Score</Text>
+          <Text style={[styles.thalloScoreFloatTitle, { color: tc.textPrimary }]} numberOfLines={1}>
+            {overall == null ? hs.scoreLabel : `${overall} · ${scoreStatus}`}
+          </Text>
+          <Text style={[styles.thalloScoreFloatSubtitle, { color: tc.textMuted }]} numberOfLines={1}>
+            {supportLabel}
+          </Text>
+        </View>
+        <View style={styles.thalloScoreFloatRight}>
+          <View style={[styles.thalloScoreTodayStatusPill, { borderColor: scoreColor + '55', backgroundColor: scoreColor + '18' }]}>
+            <Text style={[styles.thalloScoreTodayStatusText, { color: scoreColor }]} numberOfLines={1}>{coveragePct}%</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={15} color={tc.textMuted} />
+        </View>
+      </TouchableOpacity>
+    );
+  })() : null;
+  const bedtimeWindow = useMemo(
+    () => bedtimeWindowFromHistory(sleepHistory.map(n => n.bedtimeMinutes ?? -1)),
+    [sleepHistory],
+  );
+  const hasSleepCardData = !!healthSummary && (
+    healthSummary.sleepScore != null
+    || healthSummary.sleepTimeline != null
+    || healthSummary.lastNightSleepHours != null
+    || healthSummary.avgSleepHours7d != null
+  );
+  const todaySleepConstellationCard = isProTier && healthEnabled && isHealthKitAvailable() && hasSleepCardData ? (
+    <SleepConstellationCard
+      sleepScore={healthSummary!.sleepScore ?? null}
+      sleepTimeline={healthSummary!.sleepTimeline ?? null}
+      bedtimeWindow={bedtimeWindow}
+      sleepHistory={sleepHistory}
+      sleepPressure={sleepPressure}
+      mealHistory={mealHistory}
+      workoutHistory={history}
+      workoutSummaries={summaries}
+      tc={tc}
+      width={screenWidth}
+      wearableLabel={HEALTH_WEARABLE_LABEL}
+      platformLabel={HEALTH_PLATFORM_LABEL}
+      onInfo={() => setSleepScoreExplainOpen(true)}
+      onHistory={sleepHistory.length > 0 ? () => {
+        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+        setSleepHistoryOpen(true);
+      } : undefined}
+    />
+  ) : null;
+  const openBiometricHistory = useCallback((key: HealthBiometricKey) => {
+    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+    setSelectedBiometric(key);
+    setBiometricHistoryOpen(true);
+  }, []);
+  const healthVitalsOverviewCard = isProTier && isHealthKitAvailable() ? (() => {
+    const hs = healthSummary;
+    const hasAnyData = hasDisplayableHealthSummaryData(hs);
+
+    const handleConnect = async () => {
+      Alert.alert(
+        APPLE_HEALTH_PERMISSION_COPY.title,
+        APPLE_HEALTH_PERMISSION_COPY.body,
+        [
+          { text: 'Not now', style: 'cancel' },
+          {
+            text: 'Continue',
+            onPress: async () => {
+              setHealthConnecting(true);
+              try {
+                const granted = await requestHealthPermissions();
+                try { await persistAppleHealthEnabled(granted); } catch {}
+                setHealthEnabled(granted);
+                const age = userProfile.physicalStats?.age ?? null;
+                const fresh = await readHealthSummary({ age });
+                if (fresh) {
+                  setHealthSummary(fresh);
+                  saveHealthSummary(fresh).catch(() => null);
+                }
+                if (granted) {
+                  import('../services/healthDataSummary')
+                    .then(({ backfillSnapshotsToBackend, refreshHealthDataSummary }) => {
+                      refreshHealthDataSummary({ age }).catch(() => null);
+                      backfillSnapshotsToBackend(180).catch(() => null);

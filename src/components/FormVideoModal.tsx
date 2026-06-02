@@ -8,6 +8,25 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+import ExerciseDemoCard from './ExerciseDemoCard';
+import { buildExerciseVideoSearchUrl } from '../utils/exerciseVideoSearch';
+import { moveKitDemoVideo } from '../utils/exerciseDemo';
+
+// Module-level session cache. Form video metadata is per-exercise +
+// stable across the session — re-fetching every time the user taps
+// "Form Video" was a 2-3 second wait on cellular for the same data.
+// 30-minute TTL handles the rare case where the backend ranking
+// changes mid-workout. Cleared automatically when the bundle reloads.
+const VIDEO_CACHE_TTL_MS = 30 * 60 * 1000;
+type VideoCacheEntry = {
+  savedAt: number;
+  options: VideoOption[];
+  emptyReason: string | null;
+};
+const videoCache = new Map<string, VideoCacheEntry>();
+function videoCacheKey(opts: { exerciseName: string; equipment?: string | null; primaryMuscle?: string | null; movementPattern?: string | null }): string {
+  return [opts.exerciseName, opts.equipment ?? '', opts.primaryMuscle ?? '', opts.movementPattern ?? ''].join('|').toLowerCase();
+}
 
 interface Props {
   visible: boolean;
@@ -21,6 +40,10 @@ interface Props {
   equipment?: string | null;
   primaryMuscle?: string | null;
   movementPattern?: string | null;
+  /** free-exercise-db identifier — when present, a 2-frame photo demo
+   *  card renders at the top of the modal so users get a visual form
+   *  reference even before any YouTube video loads. */
+  demoExerciseDbId?: string | null;
   onClose: () => void;
 }
 
@@ -40,7 +63,8 @@ const THUMB_W = (PLAYER_W - 8) / 2;
 const THUMB_H = (THUMB_W * 9) / 16;
 
 export default function FormVideoModal({
-  visible, exerciseName, themeName, authToken, equipment, primaryMuscle, movementPattern, onClose,
+  visible, exerciseName, themeName, authToken, equipment, primaryMuscle, movementPattern,
+  demoExerciseDbId, onClose,
 }: Props) {
   const colors = getTheme(themeName).colors;
   const [options, setOptions] = useState<VideoOption[]>([]);
@@ -53,6 +77,17 @@ export default function FormVideoModal({
 
   const load = useCallback(async () => {
     if (!authToken || !exerciseName) return;
+    const key = videoCacheKey({ exerciseName, equipment, primaryMuscle, movementPattern });
+    const cached = videoCache.get(key);
+    if (cached && Date.now() - cached.savedAt < VIDEO_CACHE_TTL_MS) {
+      // Cache hit — instant render, no network.
+      setOptions(cached.options);
+      setEmptyReason(cached.emptyReason);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -85,8 +120,11 @@ export default function FormVideoModal({
       const data = await res.json();
       if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       const opts: VideoOption[] = Array.isArray(data?.options) ? data.options : [];
+      const reason = opts.length === 0 ? (data?.empty_reason || 'no_results') : null;
       setOptions(opts);
-      if (opts.length === 0) setEmptyReason(data?.empty_reason || 'no_results');
+      if (reason) setEmptyReason(reason);
+      // Stash for the rest of the session.
+      videoCache.set(key, { savedAt: Date.now(), options: opts, emptyReason: reason });
     } catch (e: any) {
       if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       setError(String(e?.message ?? e));
@@ -142,9 +180,10 @@ export default function FormVideoModal({
     }).start();
   }, [activeVideo, playerSlide]);
 
-  const searchUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(exerciseName + ' proper form')}`;
+  const searchUrl = buildExerciseVideoSearchUrl(exerciseName, equipment);
 
   const handleBack = () => setActiveVideo(null);
+  const hasBundledDemo = !!demoExerciseDbId || !!moveKitDemoVideo(demoExerciseDbId, exerciseName);
   const handleClose = () => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -182,7 +221,7 @@ export default function FormVideoModal({
             ) : null}
             <View style={{ flex: 1 }}>
               <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
-                {activeVideo ? activeVideo.title : 'YouTube form demos'}
+                {activeVideo ? activeVideo.title : 'Form demos'}
               </Text>
               <Text style={[styles.subtitle, { color: colors.textSecondary }]} numberOfLines={1}>
                 {activeVideo
@@ -253,6 +292,17 @@ export default function FormVideoModal({
           ) : (
             /* Video selection grid — default view */
             <>
+              {/* Bundled demo at the top — Move Kit video when available,
+                  otherwise the older 2-frame photo fallback. */}
+              {hasBundledDemo ? (
+                <View style={{ marginBottom: 12 }}>
+                  <ExerciseDemoCard
+                    demoExerciseDbId={demoExerciseDbId}
+                    exerciseName={exerciseName}
+                    themeName={themeName}
+                  />
+                </View>
+              ) : null}
               {loading && options.length === 0 && (
                 <View style={{ alignItems: 'center', paddingVertical: 30 }}>
                   <ActivityIndicator color={colors.primary} />

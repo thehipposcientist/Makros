@@ -1,0 +1,486 @@
+  const [weightInputValue, setWeightInputValue] = useState('');
+  const [weightInputError, setWeightInputError] = useState('');
+  const [weightCardExpanded, setWeightCardExpanded] = useState(false);
+  const [measurementsModalVisible, setMeasurementsModalVisible] = useState(false);
+  const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
+  const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
+  // Raw meal history — same payload the meal tab renders. We re-derive
+  // the per-day rows in the Facts card from this so the user sees
+  // identical numbers across both surfaces (no drift from the backend's
+  // separate aggregation path).
+  const [mealHistory, setMealHistory] = useState<import('../services/api').MealHistoryEntry[] | null>(null);
+  const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
+  const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
+  const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
+  const [nutritionScoreWeekly, setNutritionScoreWeekly] = useState<import('../services/api').NutritionScoreWeekly | null>(null);
+  const [proteinBreakdown, setProteinBreakdown] = useState<import('../services/api').ProteinBreakdown | null>(null);
+  const [proteinBreakdownExpanded, setProteinBreakdownExpanded] = useState(false);
+  const [proteinBreakdownLoading, setProteinBreakdownLoading] = useState(false);
+  const [gutInsights, setGutInsights] = useState<{
+    plantCount: number;
+    plantTier: 'on_track' | 'building' | 'low';
+    plantMessage: string;
+    fiberToday: { grams: number; target: number; pct: number; message: string };
+    proteinFlag: { tier: 'good' | 'watch' | 'flag'; detail: string } | null;
+  } | null>(null);
+  const [gutHealthWindow, setGutHealthWindow] = useState<import('../services/api').GutHealthWindow | null>(null);
+  const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
+  const paceLoadedRef = useRef(false);
+  const nutritionRefreshSeenRef = useRef(nutritionLogRefreshKey);
+  const refreshAppleNutritionSnapshot = useCallback(async (): Promise<DailyNutritionSnapshot | null> => {
+    if (!isHealthKitAvailable()) {
+      setAppleNutritionSnapshot(null);
+      return null;
+    }
+    setAppleNutritionReading(true);
+    try {
+      const now = new Date();
+      const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const dayEnd = dayStart + 86400000;
+      const snapshot = await readDailyNutritionSnapshot(dayStart, dayEnd);
+      setAppleNutritionSnapshot(snapshot);
+      return snapshot;
+    } finally {
+      setAppleNutritionReading(false);
+    }
+  }, []);
+
+  // ─── Exercise property lookup maps ────────────────────────────────────────
+  // Built from workout history — prefers structured fields from the planner
+  // (primaryMuscle, isCompound) over regex heuristics.
+  const workoutHistoryIndex = useMemo(() => buildWorkoutHistoryIndex(history), [history]);
+  const exerciseMuscleMap = workoutHistoryIndex.muscleMap;
+  const exerciseTrendMap = workoutHistoryIndex.trendMap;
+  const chartExerciseOptions = useMemo(() => {
+    if (!showWorkoutProgress) return [];
+    const prNameByKey = new Map(prs.map(pr => [pr.exerciseName.toLowerCase(), pr.exerciseName] as const));
+    return Object.entries(exerciseTrendMap)
+      .filter(([, points]) => points.length >= 2)
+      .map(([key]) => ({
+        key,
+        name: prNameByKey.get(key) ?? key.replace(/\b\w/g, c => c.toUpperCase()),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [exerciseTrendMap, prs, showWorkoutProgress]);
+  const activeChartBucket = useMemo(
+    () => CHART_MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? CHART_MUSCLE_BUCKETS[0],
+    [chartMuscleFilter],
+  );
+  const filteredChartExercises = useMemo(() => chartExerciseOptions.filter(option => {
+    if (chartMuscleFilter === 'all') return true;
+    const muscle = exerciseMuscleMap[option.key] || inferChartMuscleFromName(option.name);
+    return activeChartBucket.matches(muscle);
+  }), [activeChartBucket, chartExerciseOptions, chartMuscleFilter, exerciseMuscleMap]);
+  const selectedExerciseTrend = useMemo(
+    () => selectedExercise ? (exerciseTrendMap[selectedExercise.toLowerCase()] ?? []) : [],
+    [exerciseTrendMap, selectedExercise],
+  );
+  // Resolve the selected exercise's category (main / machine / isolation)
+  // off whatever flags the history has stamped. Drives both the
+  // chart series choice and the "Estimated 1RM Trend" vs "Best Set
+  // Trend" label swap below — Epley is unreliable for isolations so
+  // we don't pretend otherwise.
+  const selectedExerciseCategory = useMemo<LiftCategory>(() => {
+    if (!selectedExercise) return 'main_compound';
+    const target = selectedExercise.toLowerCase().trim();
+    for (const session of history) {
+      for (const exercise of session.exercises ?? []) {
+        if (String(exercise.name ?? '').toLowerCase().trim() === target) {
+          return categorizeExercise({
+            isCompound: (exercise as any).isCompound ?? (exercise as any).is_compound ?? null,
+            isMachine: (exercise as any).isMachine ?? (exercise as any).is_machine ?? null,
+            name: exercise.name,
+          });
+        }
+      }
+    }
+    return categorizeExercise({ name: selectedExercise });
+  }, [history, selectedExercise]);
+  const selectedExerciseIsIsolation = selectedExerciseCategory === 'isolation';
+  const progressWeekWindow = useMemo(
+    () => buildProgressDateWindow(planWeekWindow),
+    [planWeekWindow?.startDate, planWeekWindow?.endDate],
+  );
+  const cardioTrendSummary = useMemo(
+    () => buildCardioTrendSummary(paceHistory, summaries, healthSummary, progressWeekWindow),
+    [healthSummary, paceHistory, progressWeekWindow, summaries],
+  );
+  const localSelectedE1rmHistory = useMemo(
+    () => selectedExerciseIsIsolation
+      ? buildLocalBestSetHistory(history, selectedExercise)
+      : buildLocalE1RMHistory(history, selectedExercise, (w, r, opts) =>
+          estimate1RM(w, r, { ...opts, category: selectedExerciseCategory }),
+        ),
+    [history, selectedExercise, selectedExerciseCategory, selectedExerciseIsIsolation],
+  );
+  const selectedE1rmHistory = useMemo(
+    // Server-side e1RM only applies to compound lifts; for isolation
+    // we always use the locally-computed best-set trend.
+    () => selectedExerciseIsIsolation
+      ? localSelectedE1rmHistory
+      : (e1rmHistory.length >= 2 ? e1rmHistory : localSelectedE1rmHistory),
+    [e1rmHistory, localSelectedE1rmHistory, selectedExerciseIsIsolation],
+  );
+  const cardioInsightsMemo = useMemo(
+    () => showWorkoutProgress ? buildCardioInsights(cardioTrendSummary, distanceUnit) : [],
+    [cardioTrendSummary, distanceUnit, showWorkoutProgress],
+  );
+  const highValueTrendCards = useMemo(
+    () => showWorkoutProgress ? buildHighValueTrendCards({
+      history,
+      summaries,
+      sleepHistory,
+      healthSummary,
+      weightEntries,
+      bodyScanHistory,
+      mealAverages,
+      nutritionScoreWeekly,
+      cardioSummary: cardioTrendSummary,
+      weightUnit,
+      distanceUnit,
+      showMealProgress,
+    }) : [],
+    [
+      bodyScanHistory,
+      cardioTrendSummary,
+      distanceUnit,
+      healthSummary,
+      history,
+      mealAverages,
+      nutritionScoreWeekly,
+      showMealProgress,
+      showWorkoutProgress,
+      sleepHistory,
+      summaries,
+      weightEntries,
+      weightUnit,
+    ],
+  );
+  const activityTrendCards = useMemo(
+    () => showWorkoutProgress ? buildActivityTrendCards(history, distanceUnit) : [],
+    [distanceUnit, history, showWorkoutProgress],
+  );
+  const visibleHighValueTrendCards = useMemo(
+    () => highValueTrendCards.filter(card => !hiddenHighValueTrendCards.has(card.key)),
+    [hiddenHighValueTrendCards, highValueTrendCards],
+  );
+  const highValueTrendEditSections = useMemo(
+    () => trendActivityCardEditSections(highValueTrendCards),
+    [highValueTrendCards],
+  );
+  const visibleActivityTrendCards = useMemo(
+    () => activityTrendCards.filter(card => !hiddenActivityHighlightCards.has(card.key)),
+    [activityTrendCards, hiddenActivityHighlightCards],
+  );
+  const activityHighlightEditSections = useMemo(
+    () => trendActivityCardEditSections(activityTrendCards),
+    [activityTrendCards],
+  );
+  const trendMetricSuggestions = useMemo(
+    () => showWorkoutProgress ? buildTrendMetricSuggestions({
+      history,
+      summaries,
+      cardioSummary: cardioTrendSummary,
+      bodyScanHistory,
+      weightEntries,
+      nutritionScoreWeekly,
+      showMealProgress,
+    }) : [],
+    [
+      bodyScanHistory,
+      cardioTrendSummary,
+      history,
+      nutritionScoreWeekly,
+      showMealProgress,
+      showWorkoutProgress,
+      summaries,
+      weightEntries,
+    ],
+  );
+  const paceExerciseGroups = useMemo<CardioExerciseGroup[]>(() => {
+    const groups = new Map<string, { name: string; points: PaceHistoryPoint[] }>();
+    for (const point of paceHistory) {
+      const key = cardioExerciseKey(point.exercise);
+      const current = groups.get(key);
+      groups.set(key, {
+        name: current?.name ?? cardioExerciseDisplayName(point.exercise),
+        points: [...(current?.points ?? []), point],
+      });
+    }
+    return Array.from(groups.entries()).map(([key, group]) => {
+      const points = group.points.slice().sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+      const distancePoints = points.filter(p => p.distance != null && p.distance > 0);
+      const pacePoints = points.filter(p => paceSeconds(p.pace) != null);
+      const durationPoints = points.filter(p => p.duration_seconds != null && p.duration_seconds > 0);
+      const distances = distancePoints.map(p => p.distance!);
+      const durations = durationPoints.map(p => p.duration_seconds!);
+      return {
+        key,
+        name: group.name,
+        points,
+        distancePoints,
+        pacePoints,
+        durationPoints,
+        maxDistance: Math.max(...distances, 0.1),
+        maxDurationSec: Math.max(...durations, 1),
+      };
+    }).sort((a, b) => b.points.length - a.points.length || a.name.localeCompare(b.name));
+  }, [paceHistory]);
+  const cardioBestsMemo = useMemo(() => paceExerciseGroups.map(({ name, points }) => {
+    const bestDist = points.reduce((best, p) => p.distance != null && p.distance > (best ?? 0) ? p.distance : best, null as number | null);
+    const ptsWithPace = points.filter(p => p.pace);
+    const lastPace = ptsWithPace.length > 0 ? ptsWithPace[ptsWithPace.length - 1].pace : null;
+    const bestDur = points.reduce((best, p) => p.duration_seconds != null && p.duration_seconds > (best ?? 0) ? p.duration_seconds : best, null as number | null);
+    const extraKeys = Array.from(new Set(points.flatMap(p => p.metrics ? Object.keys(p.metrics) : [])));
+    const extraBests: Record<string, string> = {};
+    extraKeys.forEach(k => {
+      const vals = points.map(p => Number(p.metrics?.[k])).filter(v => Number.isFinite(v));
+      if (vals.length) extraBests[k] = String(Math.max(...vals));
+    });
+    return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: points.length };
+  }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != null), [paceExerciseGroups]);
+  const localOneRepMaxLifts = useMemo<import('../services/api').OneRepMaxLift[]>(() => {
+    const stats = exerciseHistoryStats(history);
+    return prs
+      .map((pr): import('../services/api').OneRepMaxLift | null => {
+        const oneRepMaxLbs = Math.round((Number(pr.weightLbs) * (1 + Number(pr.reps) / 30)) * 10) / 10;
+        if (!Number.isFinite(oneRepMaxLbs) || oneRepMaxLbs <= 0) return null;
+        const stat = stats.get(pr.exerciseName.toLowerCase());
+        const sessionCount = Math.max(1, stat?.sessionCount ?? 1);
+        return {
+          slug: exerciseNameSlug(pr.exerciseName),
+          name: pr.exerciseName,
+          oneRepMaxLbs,
+          topWeightLbs: pr.weightLbs,
+          topReps: pr.reps,
+          sessionCount,
+          confidence: Math.round(Math.min(1, sessionCount / 6) * 100) / 100,
+          lastPerformedOn: pr.date ? pr.date.slice(0, 10) : null,
+          // Local fallback (no auth / pre-server). It can't know about
+          // session position or per-set RIR, so it labels itself as
+          // "rough" data quality. The UI uses this to show a
+          // "based on raw top sets" caveat.
+          trend28dPct: null,
+          trend56dPct: null,
+          freshSetCount: 0,
+          signalConfidence: 'low',
+          dataQuality: 'rough',
+        };
+      })
+      .filter((lift): lift is import('../services/api').OneRepMaxLift => lift != null)
+      .sort((a, b) => b.oneRepMaxLbs - a.oneRepMaxLbs)
+      .slice(0, 5);
+  }, [history, prs]);
+  const displayedOneRepMaxLifts = oneRepMaxLifts.length > 0 ? oneRepMaxLifts : localOneRepMaxLifts;
+  const progressMilestones = useMemo(
+    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, displayedOneRepMaxLifts, weightUnit, distanceUnit, { showWorkoutProgress, showMealProgress }),
+    [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, weightUnit],
+  );
+
+  // Comprehensive Health Score — modular pillar blend powered by
+  // src/utils/healthScore.ts. Builds the four optional contexts the
+  // scorer accepts (nutrition, gutSupport, strength, baselines) from
+  // data that's already loaded on this screen, then calls the
+  // shared scorer. Pillars without backing data are excluded; the
+  // returned `dataCoverage` + `confidence` tell us how complete the
+  // read is.
+  const comprehensiveHealthScore = useMemo(() => {
+    // ── Nutrition context — prefer the server's pre-computed weekly
+    //    score (richer than ratios alone). Fall back to ratio-based
+    //    scoring when the weekly score isn't available. ────────────
+    const nutritionCtx: HealthNutritionContext | null = nutritionScoreWeekly
+      ? {
+          weeklyNutritionScore: nutritionScoreWeekly.avg_score,
+          weeklyDaysWithData: nutritionScoreWeekly.days_with_data,
+          fiberGramsPerDay: gutHealthWindow?.avg_fiber_g ?? null,
+          goal: userProfile?.goal ?? null,
+        }
+      : null;
+
+    // ── Gut support — fiber + plant variety from the gut window.
+    //    Hydration / fermented are not always available client-side
+    //    so they're omitted (the pillar handles missing fields). ──
+    const gutCtx: HealthGutContext | null = gutHealthWindow
+      ? {
+          fiberGramsPerDay: gutHealthWindow.avg_fiber_g,
+          plantVariety7d: gutHealthWindow.distinct_plant_foods_week,
+          // Average fermented servings per day (window-normalized) →
+          // approximate "days with at least one fermented food" by
+          // capping at 7. Imperfect but better than dropping the
+          // signal entirely.
+          fermentedFoodDays7d: Math.min(
+            7,
+            Math.round((gutHealthWindow.avg_fermented_servings ?? 0) * 7),
+          ),
+        }
+      : null;
+
+    // ── Strength context — count established PRs in the last 28 days.
+    //    `derivePersonalRecords` returns one heaviest-set record per
+    //    exercise with no `kind` tag, so we feed every recent PR into
+    //    the e1RM bucket (it's the heaviest-loaded-set dimension).
+    //    Using `establishedRecentPrs` keeps this consistent with the
+    //    Trends tab's "Records" tile, which filters out first-session
+    //    PRs so brand-new exercises don't inflate the count.
+    const cutoff28d = Date.now() - 28 * 86400000;
+    const recentEstablishedPrs = establishedRecentPrs(history, prs ?? [], cutoff28d);
+    const e1rmPrs = recentEstablishedPrs.length;
+    // hasRecentStrengthWork: any logged set in last 14d on a
+    // non-cardio exercise. We already have `history` shaped this way.
+    const cutoff14d = Date.now() - 14 * 86400000;
+    let hasRecentStrengthWork = false;
+    for (const session of history) {
+      if (!session.completed || session.skipped) continue;
+      const t = +new Date(session.date);
+      if (t < cutoff14d) continue;
+      for (const exercise of session.exercises ?? []) {
+        const sets = (exercise.sets ?? []).filter(
+          (s: any) => Number(s?.weightLbs ?? s?.weight_lbs ?? 0) > 0
+            && Number(s?.reps ?? 0) > 0,
+        );
+        if (sets.length > 0) {
+          hasRecentStrengthWork = true;
+          break;
+        }
+      }
+      if (hasRecentStrengthWork) break;
+    }
+    const strengthCtx: HealthStrengthContext = {
+      e1rmPrs28d: e1rmPrs,
+      hasRecentStrengthWork,
+    };
+
+    // ── Personal RHR / HRV baselines from the persisted nightly
+    //    sleep history. Median is more robust than mean against
+    //    one-off outlier readings. ───────────────────────────────
+    const median = (xs: number[]): number | null => {
+      const valid = xs.filter(v => Number.isFinite(v) && v > 0).slice().sort((a, b) => a - b);
+      if (valid.length === 0) return null;
+      const mid = Math.floor(valid.length / 2);
+      return valid.length % 2 === 0 ? (valid[mid - 1] + valid[mid]) / 2 : valid[mid];
+    };
+    const recent = sleepHistory.slice(-30);
+    const last7 = sleepHistory.slice(-7);
+    const baselines = {
+      rhrMedian7d: median(last7.map(n => Number(n.restingHr ?? 0))),
+      rhrMedian30d: median(recent.map(n => Number(n.restingHr ?? 0))),
+      hrvMedian7d: median(last7.map(n => Number(n.hrv ?? 0))),
+      hrvMedian30d: median(recent.map(n => Number(n.hrv ?? 0))),
+    };
+    const rhrTrendBpm7dVs30d = baselines.rhrMedian7d != null && baselines.rhrMedian30d != null
+      ? Math.round((baselines.rhrMedian7d - baselines.rhrMedian30d) * 10) / 10
+      : null;
+
+    // ── Cardio context — combines wearable VO2, in-app pace/distance,
+    //    HR-zone minutes, and personal RHR trend so cardio-focused users
+    //    get a real read without hiding it from strength users.
+    const hasCardioSignals = healthSummary?.vo2Max != null
+      || cardioTrendSummary.zone2Minutes7d > 0
+      || cardioTrendSummary.cardioSessions7d > 0
+      || rhrTrendBpm7dVs30d != null;
+    const cardioCtx: HealthCardioContext | null = hasCardioSignals
+      ? {
+          vo2Max: healthSummary?.vo2Max ?? null,
+          zone2Minutes7d: cardioTrendSummary.zone2Minutes7d > 0 ? cardioTrendSummary.zone2Minutes7d : null,
+          cardioSessions7d: cardioTrendSummary.cardioSessions7d > 0 ? cardioTrendSummary.cardioSessions7d : null,
+          rhrTrendBpm7dVs30d,
+        }
+      : null;
+
+    const ctx: HealthScoreContext = {
+      appWorkouts14d: history.filter(s => {
+        if (!s.completed || s.skipped) return false;
+        const t = +new Date(s.date);
+        return t >= Date.now() - 14 * 86400000;
+      }).length,
+      targetDaysPerWeek: userProfile?.daysPerWeek ?? 4,
+      health: healthSummary,
+      nutrition: nutritionCtx,
+      gutSupport: gutCtx,
+      cardio: cardioCtx,
+      strength: strengthCtx,
+      baselines,
+    };
+
+    return calculateHealthScore(ctx);
+  }, [
+    history,
+    prs,
+    nutritionScoreWeekly,
+    gutHealthWindow,
+    healthSummary,
+    cardioTrendSummary,
+    sleepHistory,
+    userProfile?.goal,
+    userProfile?.daysPerWeek,
+  ]);
+
+  const progressAnalytics = useMemo(
+    () => showWorkoutProgress ? buildProgressAnalytics(history, prs, plateaus, weightUnit, distanceUnit, cardioTrendSummary, progressWeekWindow) : [],
+    [cardioTrendSummary, distanceUnit, history, plateaus, progressWeekWindow, prs, showWorkoutProgress, weightUnit],
+  );
+  const coachInsightVisuals = useMemo(
+    () => buildCoachInsightVisuals(insights, guardrails, coachMemory, progressionHint, { showWorkoutProgress, showMealProgress }),
+    [coachMemory, guardrails, insights, progressionHint, showMealProgress, showWorkoutProgress],
+  );
+  const thisWeekOverview = useMemo(
+    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow, { showWorkoutProgress, showMealProgress }),
+    [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, showMealProgress, showWorkoutProgress, summaries, weightEntries, weightUnit],
+  );
+  const liveGoalForecast = useMemo(
+    () => showMixedGoalProgress ? buildGoalForecast({
+      profile: userProfile,
+      weightEntries,
+      history,
+      summaries,
+      mealAverages,
+      mealHistory,
+      nutritionScoreWeekly,
+      paceHistory,
+      oneRepMaxLifts: displayedOneRepMaxLifts,
+      bodyScanHistory,
+      calorieRanges: calorieRanges ? {
+        maintenanceCalories: calorieRanges.maintenance_calories,
+        cutAdjustmentKcal: calorieRanges.cut_adjustment_kcal ?? null,
+        bulkAdjustmentKcal: calorieRanges.bulk_adjustment_kcal ?? null,
+      } : null,
+      vo2Max: healthSummary?.vo2Max ?? null,
+      avgSleepHours: healthSummary?.avgSleepHours7d ?? null,
+      weightUnit,
+      distanceUnit,
+    }) : null,
+    [bodyScanHistory, calorieRanges, displayedOneRepMaxLifts, distanceUnit, healthSummary?.avgSleepHours7d, healthSummary?.vo2Max, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
+  );
+  const recompForecastNutritionSignal = useMemo(() => {
+    if (!showMealProgress) return 'disabled';
+    if (!authToken) return 'offline';
+    if (mealAverages == null && mealHistory == null && nutritionScoreWeekly == null) return 'loading';
+    const mealHistoryDays = new Set(
+      (mealHistory ?? [])
+        .map(row => String(row.meal_date ?? '').slice(0, 10))
+        .filter(key => /^\d{4}-\d{2}-\d{2}$/.test(key)),
+    ).size;
+    const averageDays = Math.round(Number(mealAverages?.days_with_data) || 0);
+    const scoreDays = Math.round(Number(nutritionScoreWeekly?.days_with_data) || 0);
+    return Math.max(mealHistoryDays, averageDays, scoreDays) > 0 ? 'has-meals' : 'no-meals';
+  }, [authToken, mealAverages, mealHistory, nutritionScoreWeekly, showMealProgress]);
+  const recompForecastScopeKey = useMemo(() => {
+    if (liveGoalForecast?.bucket !== 'body_recomp') return null;
+    if (recompForecastNutritionSignal === 'loading') return null;
+    const details = userProfile.goalDetails ?? {};
+    return JSON.stringify({
+      goal: userProfile.goal,
+      pace: details.pace ?? null,
+      startWeightLbs: details.startWeightLbs ?? null,
+      targetWeightLbs: details.targetWeightLbs ?? null,
+      startBodyFatPct: details.startBodyFatPct ?? null,
+      goalStartedAt: details.goalStartedAt ?? null,
+      nutritionSignal: recompForecastNutritionSignal,
+      weightUnit,
+      distanceUnit,
+    });
+  }, [
+    distanceUnit,
+    liveGoalForecast?.bucket,
+    recompForecastNutritionSignal,
+    userProfile.goal,

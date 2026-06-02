@@ -182,6 +182,463 @@ def _ok(label: str) -> None:
     print(f"  ✓ {label}")
 
 
+# ── Router regression: stale plan targets vs exact history ──────────
+
+def test_pre_set_prefers_last_session_over_stale_plan_target():
+    print("\n[test] pre-set rec: last lat pulldown session beats stale plan target")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Lat Pulldown",
+        exerciseSlug="lat_pulldown",
+        plannedSetNumber=1,
+        plannedSets=[{
+            "setNumber": 1,
+            "setType": "volume",
+            "targetReps": "8-12",
+            "targetRir": 2,
+            "targetWeightLbs": 119,
+            "progressionMode": "reps_first",
+        }],
+        lastSessionSets=[{"reps": 10, "weightLbs": 25}],
+        equipment="Lat pulldown machine",
+        primaryMuscle="back",
+    )
+    rec = pre_set_recommendation(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["dataSource"] == "exact_exercise_history", rec
+    assert rec["recommendedWeightLbs"] <= 30, rec
+    _ok(f"25 lb history won over 119 lb plan snapshot → {rec['recommendedWeightLbs']} lb")
+
+
+def test_next_set_first_anchor_prefers_last_session_best_over_stale_plan_target():
+    print("\n[test] next-set rec: client last-session best beats stale plan target")
+    from app.routers.ai.models import WeightRecommendRequest
+    from app.routers.ai.progression import recommend_weight
+
+    body = WeightRecommendRequest(
+        exerciseName="Lat Pulldown",
+        exerciseSlug="lat_pulldown",
+        goal="muscle_gain",
+        lastSets=[],
+        nextSetNumber=1,
+        targetSets=3,
+        targetReps="8-12",
+        experienceLevel="intermediate",
+        recoveryLevel="normal",
+        plannedTargetWeightLbs=119,
+        lastSessionBestWeightLbs=25,
+        lastSessionBestReps=10,
+        equipment="Lat pulldown machine",
+        primaryMuscle="back",
+    )
+    rec = recommend_weight(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["dataSource"] == "exact_exercise_history", rec
+    assert rec["weightLbs"] <= 30, rec
+    _ok(f"25 lb history won over 119 lb plan snapshot → {rec['weightLbs']} lb")
+
+
+def test_next_set_first_anchor_downshifts_stale_last_session_best():
+    print("\n[test] next-set rec: two-month-old squat best becomes reacclimation load")
+    from app.routers.ai.models import WeightRecommendRequest
+    from app.routers.ai.progression import recommend_weight
+
+    body = WeightRecommendRequest(
+        exerciseName="Barbell Squat",
+        exerciseSlug="barbell_squat",
+        goal="strength",
+        lastSets=[],
+        nextSetNumber=1,
+        targetSets=3,
+        targetReps="6-8",
+        experienceLevel="intermediate",
+        recoveryLevel="normal",
+        plannedTargetWeightLbs=225,
+        lastSessionBestWeightLbs=225,
+        lastSessionBestReps=8,
+        lastSessionBestDate=(date.today() - timedelta(days=60)).isoformat(),
+        equipment="barbell",
+        primaryMuscle="quads",
+    )
+    rec = recommend_weight(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["dataSource"] == "exact_exercise_history", rec
+    assert rec["weightLbs"] < 225, rec
+    assert "reacclimation" in (rec["recommendation"] or {}).get("reason", "").lower(), rec
+    _ok(f"225 lb from 60d ago → {rec['weightLbs']} lb")
+
+
+def test_pre_set_downshifts_stale_last_session_sets():
+    print("\n[test] pre-set rec: stale squat session uses lighter opener")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Barbell Squat",
+        exerciseSlug="barbell_squat",
+        plannedSetNumber=1,
+        plannedSets=[{
+            "setNumber": 1,
+            "setType": "volume",
+            "targetReps": "6-8",
+            "targetRir": 2,
+            "targetWeightLbs": 225,
+            "progressionMode": "reps_first",
+        }],
+        lastSessionSets=[{
+            "reps": 8,
+            "weightLbs": 225,
+            "sessionDate": (date.today() - timedelta(days=60)).isoformat(),
+        }],
+        goal="strength",
+        equipment="barbell",
+        primaryMuscle="quads",
+    )
+    rec = pre_set_recommendation(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["dataSource"] == "exact_exercise_history", rec
+    assert rec["recommendedWeightLbs"] is not None and rec["recommendedWeightLbs"] < 225, rec
+    assert "reacclimation" in rec["rationaleShort"].lower(), rec
+    _ok(f"pre-set stale 225 lb squat → {rec['recommendedWeightLbs']} lb")
+
+
+def test_pre_set_ignores_stale_plan_target_for_band_only_spanish_squat():
+    print("\n[test] pre-set rec: band-only Spanish Squat ignores stale plan load")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Spanish Squat",
+        exerciseSlug="spanish_squat",
+        plannedSetNumber=1,
+        plannedSets=[{
+            "setNumber": 1,
+            "setType": "volume",
+            "targetReps": "10-15",
+            "targetRir": 2,
+            "targetWeightLbs": 140,
+            "progressionMode": "reps_first",
+        }],
+        lastSessionSets=[{"reps": 12, "weightLbs": 140}],
+        equipment="resistance_bands",
+        primaryMuscle="quads",
+    )
+    rec = pre_set_recommendation(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["recommendedWeightLbs"] is None, rec
+    assert rec["dataSource"] == "default", rec
+    _ok("Spanish Squat returns no numeric weight despite stale 140 lb snapshot")
+
+
+def test_pre_set_snaps_plan_target_to_loadable_standard_barbell():
+    print("\n[test] pre-set rec: off-grid barbell plan target snaps before display")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Barbell Bench Press",
+        exerciseSlug="barbell_bench_press",
+        plannedSetNumber=1,
+        plannedSets=[{
+            "setNumber": 1,
+            "setType": "volume",
+            "targetReps": "8-12",
+            "targetRir": 2,
+            "targetWeightLbs": 142.5,
+            "progressionMode": "reps_first",
+        }],
+        priorSetsThisSession=[],
+        lastSessionSets=[],
+        goal="muscle_gain",
+        equipment="barbell",
+        primaryMuscle="chest",
+    )
+    rec = pre_set_recommendation(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["recommendedWeightLbs"] == 145.0, rec
+    assert "adjusted from 142.5 lb" in rec["rationaleShort"], rec
+    _ok("142.5 lb plan target displays as loadable 145 lb")
+
+
+def test_pre_set_snaps_plan_target_to_user_plate_pairs():
+    print("\n[test] pre-set rec: user plate settings constrain recommendation")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Barbell Bench Press",
+        exerciseSlug="barbell_bench_press",
+        plannedSetNumber=1,
+        plannedSets=[{
+            "setNumber": 1,
+            "setType": "volume",
+            "targetReps": "8-12",
+            "targetRir": 2,
+            "targetWeightLbs": 142.5,
+            "progressionMode": "reps_first",
+        }],
+        priorSetsThisSession=[],
+        lastSessionSets=[],
+        goal="muscle_gain",
+        equipment="barbell",
+        primaryMuscle="chest",
+    )
+    settings = {"barbell": {"barWeightLbs": 45, "platePairsLbs": [10]}}
+    with patch("app.routers.ai.progression._equipment_settings_for_user", return_value=settings):
+        rec = pre_set_recommendation(
+            body,
+            current_user=SimpleNamespace(id=1),
+            db=None,
+        )
+    assert rec["recommendedWeightLbs"] == 125.0, rec
+    assert "adjusted from 142.5 lb" in rec["rationaleShort"], rec
+    _ok("142.5 lb target snaps down to 125 lb when only 10 lb plate pairs are available")
+
+
+def test_next_set_ignores_stale_plan_target_for_band_only_spanish_squat():
+    print("\n[test] next-set rec: band-only Spanish Squat short-circuits load")
+    from app.routers.ai.models import WeightRecommendRequest
+    from app.routers.ai.progression import recommend_weight
+
+    body = WeightRecommendRequest(
+        exerciseName="Spanish Squat",
+        exerciseSlug="spanish_squat",
+        goal="muscle_gain",
+        lastSets=[],
+        nextSetNumber=1,
+        targetSets=3,
+        targetReps="10-15",
+        experienceLevel="intermediate",
+        recoveryLevel="normal",
+        plannedTargetWeightLbs=140,
+        lastSessionBestWeightLbs=140,
+        lastSessionBestReps=12,
+        equipment="resistance_bands",
+        primaryMuscle="quads",
+    )
+    rec = recommend_weight(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert rec["weightLbs"] == 0.0, rec
+    assert rec["source"] == "bodyweight", rec
+    _ok("Spanish Squat next-set rec emits 0 lb / no numeric load")
+
+
+def test_ai_safety_prefilter_flags_large_jump_against_recent_history():
+    print("\n[test] AI safety prefilter: 25 lb history vs 119 lb rec is held")
+    from app.services.workout.recommendation_ai_safety import (
+        deterministic_review_flags,
+        prepare_ai_safety_review,
+    )
+
+    payload = {
+        "kind": "pre_set",
+        "exercise": {
+            "name": "Lat Pulldown",
+            "slug": "lat_pulldown",
+            "equipment": "Lat pulldown machine",
+            "primaryMuscle": "back",
+            "loadSemantics": "external_load",
+            "numericLoad": True,
+        },
+        "recommendation": {
+            "weightLbs": 119,
+            "reps": "8-12",
+            "dataSource": "plan_snapshot",
+            "confidence": 0.55,
+            "action": "hold",
+        },
+        "plan": {"targetWeightLbs": 119, "targetReps": "8-12"},
+        "lastSessionSets": [{"weightLbs": 25, "reps": 10}],
+        "recentHistory": [{"weightLbs": 25, "reps": 10}],
+    }
+    flags = deterministic_review_flags(payload)
+    assert "too_large_jump" in flags, flags
+    out = prepare_ai_safety_review(payload, user_id=1, background_tasks=None)
+    assert out["shouldHold"] is True, out
+    assert out["reasonCode"] in flags, out
+    _ok("large stale jump is held before the UI can show it")
+
+
+def test_ai_safety_prefilter_flags_non_numeric_equipment_with_weight():
+    print("\n[test] AI safety prefilter: band-only exercise with 140 lb rec is held")
+    from app.services.workout.recommendation_ai_safety import deterministic_review_flags
+
+    payload = {
+        "kind": "pre_set",
+        "exercise": {
+            "name": "Spanish Squat",
+            "slug": "spanish_squat",
+            "equipment": "resistance_bands",
+            "primaryMuscle": "quads",
+            "loadSemantics": "band_resistance",
+            "numericLoad": False,
+        },
+        "recommendation": {
+            "weightLbs": 140,
+            "reps": "10-15",
+            "dataSource": "plan_snapshot",
+            "confidence": 0.55,
+            "action": "hold",
+        },
+        "plan": {"targetWeightLbs": 140, "targetReps": "10-15"},
+    }
+    flags = deterministic_review_flags(payload)
+    assert flags[0] == "non_numeric_equipment", flags
+    _ok("band-only weighted recommendation is flagged")
+
+
+def test_ai_safety_prefilter_skips_clean_small_exact_history_update():
+    print("\n[test] AI safety prefilter: small exact-history update does not spend tokens")
+    from app.services.workout.recommendation_ai_safety import (
+        deterministic_review_flags,
+        prepare_ai_safety_review,
+    )
+
+    payload = {
+        "kind": "pre_set",
+        "exercise": {
+            "name": "Lat Pulldown",
+            "slug": "lat_pulldown",
+            "equipment": "Lat pulldown machine",
+            "primaryMuscle": "back",
+            "loadSemantics": "external_load",
+            "numericLoad": True,
+        },
+        "recommendation": {
+            "weightLbs": 27.5,
+            "reps": "8-12",
+            "dataSource": "exact_exercise_history",
+            "confidence": 0.7,
+            "action": "hold",
+        },
+        "plan": {"targetWeightLbs": 30, "targetReps": "8-12"},
+        "lastSessionSets": [{"weightLbs": 25, "reps": 10}],
+        "recentHistory": [{"weightLbs": 25, "reps": 10}],
+    }
+    assert deterministic_review_flags(payload) == []
+    out = prepare_ai_safety_review(payload, user_id=1, background_tasks=None)
+    assert out["status"] == "not_required", out
+    assert out["shouldHold"] is False, out
+    _ok("clean exact-history recommendation bypasses AI")
+
+
+def test_db_history_lookup_and_profile_canonicalize_lat_pull_down_alias():
+    print("\n[test] DB history canonicalizes Lat Pull Down logs to lat_pulldown")
+    from datetime import timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+
+    from app.enums import EquipmentType, WorkoutSource
+    from app.models import (  # noqa: F401
+        AIDecision,
+        CoachMemory,
+        DailyRollup,
+        Equipment,
+        Exercise,
+        ExerciseEquipment,
+        ExerciseSet,
+        Food,
+        FoodAlias,
+        FoodNutrition,
+        FoodServing,
+        GoalOption,
+        Meal,
+        MealItem,
+        NutritionPlan,
+        PaceOption,
+        PlanJob,
+        User,
+        UserCoachingState,
+        UserDayState,
+        UserFlag,
+        UserGoal,
+        UserPreferences,
+        UserProfile,
+        UserRecentFood,
+        UserRollup,
+        UserState,
+        WeeklyCheckIn,
+        WorkoutCompletion,
+        WorkoutExercise,
+        WorkoutPlan,
+        WorkoutSession,
+    )
+    from app.services.workout.history import db_history_lookup
+    from app.services.workout.performance import build_performance_profile
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        user = User(email="lat-alias@example.com", username="latalias", hashed_password="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = WorkoutSession(
+            user_id=user.id,
+            name="Pull",
+            focus="Pull",
+            workout_date=date.today(),
+            source=WorkoutSource.GENERATED,
+            completed_at=datetime.now(timezone.utc),
+        )
+        session.add(ws)
+        session.flush()
+        we = WorkoutExercise(
+            session_id=ws.id,
+            exercise_id=None,
+            name="Lat Pull Down",
+            order_index=0,
+            equipment=EquipmentType.GYM,
+            exercise_slug_snapshot="lat_pull_down",
+        )
+        session.add(we)
+        session.flush()
+        session.add(ExerciseSet(
+            workout_exercise_id=we.id,
+            set_number=1,
+            actual_weight_lbs=25.0,
+            actual_reps=10,
+            completed=True,
+            completed_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+        hist = db_history_lookup(user.id, session)("lat_pulldown")
+        profiles = build_performance_profile(user.id, session)
+
+    assert hist and hist[0].weight_lbs == 25.0, hist
+    assert "lat_pulldown" in profiles, profiles
+    assert "lat_pull_down" not in profiles, profiles
+    _ok("old Lat Pull Down snapshot history feeds canonical lat_pulldown")
+
+
 # ── Group 1: load_increment_for — gaps + cross-equipment (6 tests) ──
 
 def test_inc_dumbbell_compound_5lb():
@@ -216,6 +673,17 @@ def test_inc_lower_body_isolation_via_muscle_inference():
     ex = {"equipment_bucket": "machine", "is_compound": False, "primary_muscle": "hamstrings"}
     assert load_increment_for(ex) == 2.5
     _ok("hamstring iso 2.5 lb (compound flag respected)")
+
+
+def test_leg_curl_name_fallback_stays_machine_weighted():
+    print("\n[test] single-leg lying leg curl fallback → machine weighted")
+    from app.services.workout.exercise_metadata import set_programming_exercise_metadata
+
+    name = "Single-Leg Lying Leg Curl"
+    meta = set_programming_exercise_metadata(None, name, None, None, "hamstrings")
+    assert meta["equipment_bucket"] == "machine"
+    assert load_increment_for(meta) == 2.5
+    _ok("leg curl name fallback keeps a machine load path")
 
 
 def test_inc_unknown_equipment_falls_back_to_5lb():
@@ -1280,6 +1748,39 @@ def test_callsite_live_scheme_preserves_top_set_to_backoff_transition():
     _ok("heavy_top set 1 → backoff set 2 keeps planned 170 lb target")
 
 
+def test_callsite_live_scheme_scales_backoff_from_actual_top_when_plan_is_too_heavy():
+    print("\n[test] live backoff transition scales from actual top set when plan target is too heavy")
+    from app.routers.ai.progression import _planned_backoff_transition_weight
+
+    scheme = [
+        {
+            "setNumber": 1,
+            "setType": "heavy_top",
+            "targetReps": "6-8",
+            "targetRir": 1,
+            "targetWeightLbs": 240,
+            "progressionMode": "load_first",
+        },
+        {
+            "setNumber": 2,
+            "setType": "backoff",
+            "targetReps": "6-8",
+            "targetRir": 2,
+            "targetWeightLbs": 220,
+            "progressionMode": "load_first",
+        },
+    ]
+
+    assert _planned_backoff_transition_weight(
+        scheme,
+        completed_set_number=1,
+        next_set_number=2,
+        completed_actual_weight_lbs=195,
+        increment_lbs=5,
+    ) == 175.0
+    _ok("195 lb actual top set → 175 lb backoff, not stale 220 lb plan target")
+
+
 def test_callsite_live_scheme_ignores_stale_swap_backoff_target():
     print("\n[test] live setScheme ignores stale backoff target after swapped lift")
     from app.routers.ai.progression import _planned_backoff_transition_weight
@@ -1311,8 +1812,8 @@ def test_callsite_live_scheme_ignores_stale_swap_backoff_target():
     _ok("actual 115 lb top set is not overridden by stale 80 lb backoff")
 
 
-def test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session():
-    print("\n[test] /pre-set-recommendation uses PlanWeek target before stale last-session best")
+def test_callsite_pre_set_endpoint_prefers_last_session_over_plan_target():
+    print("\n[test] /pre-set-recommendation uses exact last-session best before PlanWeek target")
     from app.routers.ai.models import PreSetRecommendRequest
     from app.routers.ai.progression import pre_set_recommendation
 
@@ -1341,9 +1842,129 @@ def test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session():
         current_user=SimpleNamespace(id=1),
         db=None,
     )
-    assert out["recommendedWeightLbs"] == 185.0
-    assert "plan set" in out["rationaleShort"]
-    _ok("planned 185 lb target wins over last-session 165 lb")
+    assert 160.0 <= out["recommendedWeightLbs"] <= 170.0, out
+    assert out["dataSource"] == "exact_exercise_history"
+    _ok("last-session 165 lb wins over planned 185 lb target")
+
+
+def test_callsite_recommendation_routes_keep_new_and_legacy_paths():
+    print("\n[test] recommendation routers expose canonical paths plus /ai compatibility aliases")
+    from app.routers.ai.router import router as ai_router
+    from app.routers.coach import router as coach_router
+    from app.routers.recommendations import router as recommendations_router
+
+    ai_paths = {getattr(route, "path", "") for route in ai_router.routes}
+    coach_paths = {getattr(route, "path", "") for route in coach_router.routes}
+    recommendation_paths = {getattr(route, "path", "") for route in recommendations_router.routes}
+
+    assert "/ai/recommend-weight" in ai_paths
+    assert "/ai/pre-set-recommendation" in ai_paths
+    assert "/ai/workout-question" in ai_paths
+    assert "/recommendations/next-set" in recommendation_paths
+    assert "/recommendations/pre-set" in recommendation_paths
+    assert "/coach/workout-question" in coach_paths
+    _ok("canonical recommendation + coach routes registered; /ai aliases preserved")
+
+
+def test_callsite_recommendation_routes_http_new_and_legacy_paths():
+    print("\n[test] recommendation route aliases return deterministic metadata over HTTP")
+    from fastapi.testclient import TestClient
+    from app.auth import get_current_user
+    from app.database import get_session
+    from app.main import app
+    from app.models import User
+
+    user = User(
+        id=1,
+        email="rec-http@test.local",
+        username="rec-http",
+        hashed_password="x",
+        subscription_tier="pro",
+    )
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_session] = lambda: None
+    client = TestClient(app)
+    try:
+        pre_payload = {
+            "exerciseName": "Barbell Bench Press",
+            "exerciseSlug": "barbell_bench_press",
+            "plannedSetNumber": 1,
+            "plannedSets": [
+                {
+                    "setNumber": 1,
+                    "setType": "heavy_top",
+                    "targetReps": "6-8",
+                    "targetRir": 2,
+                    "targetWeightLbs": 185,
+                    "progressionMode": "load_first",
+                }
+            ],
+            "priorSetsThisSession": [],
+            "lastSessionSets": [],
+            "goal": "muscle_gain",
+            "equipment": "barbell",
+            "primaryMuscle": "chest",
+            "weightLbs": 185,
+        }
+        for path in ("/recommendations/pre-set", "/ai/pre-set-recommendation"):
+            r = client.post(path, json=pre_payload)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["algorithmSource"] == "deterministic_progression", data
+            assert data["trace"]["recommendationVersion"] == "live_recommendation.v1", data
+
+        next_payload = {
+            "exerciseName": "Push-Up",
+            "goal": "muscle_gain",
+            "lastSets": [],
+            "nextSetNumber": 1,
+            "targetSets": 3,
+            "targetReps": "8-12",
+            "equipment": "bodyweight",
+        }
+        for path in ("/recommendations/next-set", "/ai/recommend-weight"):
+            r = client.post(path, json=next_payload)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["algorithmSource"] == "deterministic_progression", data
+            assert data["trace"]["adjustmentReason"] == "bodyweight_no_load", data
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_session, None)
+    _ok("new /recommendations paths and legacy /ai aliases return deterministic trace metadata")
+
+
+def test_callsite_pre_set_malformed_snapshot_falls_back_with_trace():
+    print("\n[test] /pre-set-recommendation tolerates malformed live plan snapshot")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Barbell Bench Press",
+        exerciseSlug="barbell_bench_press",
+        plannedSetNumber=99,
+        plannedSets=[
+            {"setNumber": "not-a-number", "targetReps": "6-8", "targetWeightLbs": 10_000},
+            {"setNumber": 500, "setType": "???", "targetRir": "nope"},
+        ],
+        priorSetsThisSession=[],
+        lastSessionSets=[],
+        goal="muscle_gain",
+        equipment="barbell",
+        primaryMuscle="chest",
+        weightLbs=135,
+    )
+    out = pre_set_recommendation(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+
+    assert out["recommendedReps"] == "8-12", out
+    assert out["algorithmSource"] == "deterministic_progression", out
+    assert out["trace"]["recommendationVersion"] == "live_recommendation.v1", out
+    assert out["trace"]["fallbackUsed"] is False, out
+    _ok("bad setScheme shape → safe deterministic fallback with trace")
 
 
 def test_callsite_recommend_weight_big_rir_overshoot_skips_backoff_override():
@@ -1401,7 +2022,129 @@ def test_callsite_recommend_weight_big_rir_overshoot_skips_backoff_override():
     assert out["action"] == "increase", out
     assert out["weightLbs"] == 70.0, out
     assert any("big overshoot" in r for r in out["suspicionReasons"]), out
+    assert out["algorithmSource"] == "deterministic_progression", out
+    assert out["dataSource"] == "session_state", out
+    assert "overshot_reps" in out["reasonTags"], out
+    assert out["trace"]["recommendedWeight"] == 70.0, out
+    assert out["trace"]["rirUsed"] == 4, out
     _ok("60 lb + huge overshoot → 70 lb, not stale 55 lb backoff")
+
+
+def test_callsite_recommend_weight_high_rir_overshoot_uses_plan_target_rir():
+    print("\n[test] /recommend-weight high-RIR overshoot uses planned RIR, not actual RIR as target")
+    from app.routers.ai.models import WeightRecommendRequest
+    from app.routers.ai.progression import recommend_weight
+
+    body = WeightRecommendRequest(
+        exerciseName="Decline Dumbbell Press",
+        exerciseSlug="decline_dumbbell_press",
+        goal="muscle_gain",
+        lastSets=[{"setNumber": 1, "reps": 14, "weightLbs": 60, "rir": 3}],
+        nextSetNumber=2,
+        targetSets=3,
+        targetReps="8-12",
+        progressionPace="moderate",
+        experienceLevel="intermediate",
+        recoveryLevel="normal",
+        phase="accumulation",
+        workoutFocus="push",
+        weekNumber=1,
+        incrementLbs=5,
+        equipment="dumbbell",
+        primaryMuscle="chest",
+        setScheme=[
+            {
+                "setNumber": 1,
+                "setType": "heavy_top",
+                "targetReps": "8-12",
+                "targetRir": 2,
+                "targetWeightLbs": 60,
+                "progressionMode": "load_first",
+            },
+            {
+                "setNumber": 2,
+                "setType": "backoff",
+                "targetReps": "8-12",
+                "targetRir": 2,
+                "targetWeightLbs": 55,
+                "progressionMode": "reps_first",
+            },
+            {
+                "setNumber": 3,
+                "setType": "backoff",
+                "targetReps": "8-12",
+                "targetRir": 2,
+                "targetWeightLbs": 55,
+                "progressionMode": "reps_first",
+            },
+        ],
+    )
+    with patch("app.services.workout.history.get_recent_completions_for_fatigue", return_value=[]):
+        out = recommend_weight(body, current_user=SimpleNamespace(id=1), db=None)
+
+    assert out["action"] == "increase", out
+    assert out["weightLbs"] == 65.0, out
+    assert "adding 5 lb" in out["tip"], out
+    _ok("14 reps at 3 RIR beats planned 2 RIR → 65 lb, not stale 55 lb backoff")
+
+
+def test_callsite_recommend_weight_backoff_never_exceeds_actual_top_set():
+    print("\n[test] /recommend-weight backoff after 195x7@1RIR does not jump to stale 220")
+    from app.routers.ai.models import WeightRecommendRequest
+    from app.routers.ai.progression import recommend_weight
+
+    body = WeightRecommendRequest(
+        exerciseName="Barbell Bench Press",
+        exerciseSlug="barbell_bench_press",
+        goal="strength",
+        lastSets=[{"setNumber": 1, "reps": 7, "weightLbs": 195, "rir": 1}],
+        nextSetNumber=2,
+        targetSets=3,
+        targetReps="6-8",
+        progressionPace="moderate",
+        experienceLevel="intermediate",
+        recoveryLevel="normal",
+        phase="accumulation",
+        workoutFocus="push",
+        weekNumber=1,
+        incrementLbs=5,
+        equipment="barbell",
+        primaryMuscle="chest",
+        setScheme=[
+            {
+                "setNumber": 1,
+                "setType": "heavy_top",
+                "targetReps": "6-8",
+                "targetRir": 1,
+                "targetWeightLbs": 240,
+                "progressionMode": "load_first",
+            },
+            {
+                "setNumber": 2,
+                "setType": "backoff",
+                "targetReps": "6-8",
+                "targetRir": 2,
+                "targetWeightLbs": 220,
+                "progressionMode": "load_first",
+            },
+            {
+                "setNumber": 3,
+                "setType": "backoff",
+                "targetReps": "6-8",
+                "targetRir": 2,
+                "targetWeightLbs": 220,
+                "progressionMode": "load_first",
+            },
+        ],
+    )
+    with patch("app.services.workout.history.get_recent_completions_for_fatigue", return_value=[]):
+        out = recommend_weight(body, current_user=SimpleNamespace(id=1), db=None)
+
+    assert out["action"] == "decrease", out
+    assert out["weightLbs"] == 175.0, out
+    assert "Backoff set" in out["tip"], out
+    assert "220" not in out["tip"], out
+    _ok("195 lb top set → 175 lb backoff recommendation")
 
 
 # ── Runner ──────────────────────────────────────────────────────────
@@ -1415,6 +2158,7 @@ def _run_all():
         test_inc_machine_isolation_2_5lb,
         test_inc_cable_isolation_2_5lb,
         test_inc_lower_body_isolation_via_muscle_inference,
+        test_leg_curl_name_fallback_stays_machine_weighted,
         test_inc_unknown_equipment_falls_back_to_5lb,
         # Group 2: round_to_increment
         test_round_5lb_rounds_to_nearest_not_floor,
@@ -1491,6 +2235,19 @@ def _run_all():
         test_e1rm_caps_to_max_samples_10_drops_oldest,
         test_e1rm_realistic_progression_recent_increase_dominates,
         test_e1rm_outlier_hot_session_does_not_break_estimate,
+        # Router regression: stale plan targets vs exact history
+        test_pre_set_prefers_last_session_over_stale_plan_target,
+        test_next_set_first_anchor_prefers_last_session_best_over_stale_plan_target,
+        test_next_set_first_anchor_downshifts_stale_last_session_best,
+        test_pre_set_downshifts_stale_last_session_sets,
+        test_pre_set_ignores_stale_plan_target_for_band_only_spanish_squat,
+        test_pre_set_snaps_plan_target_to_loadable_standard_barbell,
+        test_pre_set_snaps_plan_target_to_user_plate_pairs,
+        test_next_set_ignores_stale_plan_target_for_band_only_spanish_squat,
+        test_ai_safety_prefilter_flags_large_jump_against_recent_history,
+        test_ai_safety_prefilter_flags_non_numeric_equipment_with_weight,
+        test_ai_safety_prefilter_skips_clean_small_exact_history_update,
+        test_db_history_lookup_and_profile_canonicalize_lat_pull_down_alias,
         # Group 11: realistic call-site shapes
         test_callsite_progression_router_minimal_planned_set_proxy,
         test_callsite_realistic_warmup_filtered_in_e1rm,
@@ -1498,9 +2255,15 @@ def _run_all():
         test_callsite_http_metadata_preserves_barbell_squat_10lb_increment,
         test_callsite_http_metadata_preserves_cable_isolation_2_5lb_increment,
         test_callsite_live_scheme_preserves_top_set_to_backoff_transition,
+        test_callsite_live_scheme_scales_backoff_from_actual_top_when_plan_is_too_heavy,
         test_callsite_live_scheme_ignores_stale_swap_backoff_target,
-        test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session,
+        test_callsite_pre_set_endpoint_prefers_last_session_over_plan_target,
+        test_callsite_recommendation_routes_keep_new_and_legacy_paths,
+        test_callsite_recommendation_routes_http_new_and_legacy_paths,
+        test_callsite_pre_set_malformed_snapshot_falls_back_with_trace,
         test_callsite_recommend_weight_big_rir_overshoot_skips_backoff_override,
+        test_callsite_recommend_weight_high_rir_overshoot_uses_plan_target_rir,
+        test_callsite_recommend_weight_backoff_never_exceeds_actual_top_set,
     ]
     failed = 0
     for t in tests:

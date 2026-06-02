@@ -1,7 +1,7 @@
 """Social notifications.
 
 Covers the in-app notification stream for friend requests, accepted
-requests, and feed likes. The payload assertions also guard the social
+requests, feed likes, and feed comments. The payload assertions also guard the social
 privacy boundary: no calories/body metrics in notification payloads.
 """
 from __future__ import annotations
@@ -12,11 +12,15 @@ from datetime import datetime, timezone
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import ActivityFeedItem, FeedLike, Friendship, SocialNotification, User, UserSocialProfile
+from app.models import ActivityFeedItem, FeedComment, FeedLike, Friendship, SocialNotification, User, UserSocialProfile
 from app.routers.social import (
+    CreateFeedCommentBody,
     FriendRequestBody,
     accept_friend,
+    create_feed_comment,
+    delete_feed_comment,
     get_feed,
+    list_feed_comments,
     list_notifications,
     mark_all_notifications_read,
     mark_notification_read,
@@ -202,6 +206,88 @@ def test_feed_like_persists_and_hydrates_on_posts():
     _ok("post like row is stored, read into feed state, and removed on unlike")
 
 
+def test_feed_comments_are_visible_bounded_and_deletable_by_author():
+    print("\n[test] feed comments hydrate, notify, and delete by author")
+    eng = _make_engine()
+    with Session(eng) as s:
+        alice = _user(s, 1, "alice")
+        bob = _user(s, 2, "bob")
+        casey = _user(s, 3, "casey")
+        _accepted_friendship(s, 1, 2)
+        item = ActivityFeedItem(
+            user_id=2,
+            event_type="workout_post",
+            payload={
+                "caption": "Solid push day.",
+                "workout_summary": {
+                    "focus": "Push",
+                    "duration_seconds": 2700,
+                    "date": "2026-05-05",
+                    "calories": 600,
+                    "body_weight_lbs": 185,
+                    "exercises": [],
+                },
+            },
+        )
+        s.add(item)
+        s.commit()
+        s.refresh(item)
+
+        created = create_feed_comment(
+            item.id,
+            CreateFeedCommentBody(body="Nice work."),
+            current_user=alice,
+            db=s,
+        )
+        assert created["comment_count"] == 1
+        assert created["comment"].body == "Nice work."
+        assert created["comment"].can_delete is True
+
+        feed = get_feed(current_user=bob, db=s)
+        hydrated = next(i for i in feed["items"] if i["id"] == item.id)
+        assert hydrated["comment_count"] == 1
+        assert hydrated["recent_comments"][0]["body"] == "Nice work."
+        dumped = json.dumps(hydrated).lower()
+        assert "calorie" not in dumped
+        assert "body_weight" not in dumped
+
+        bob_view = list_feed_comments(item.id, current_user=bob, db=s)
+        assert bob_view.comment_count == 1
+        assert bob_view.items[0].username == "alice"
+        assert bob_view.items[0].can_delete is False
+
+        result = list_notifications(current_user=bob, db=s)
+        assert result.unread_count == 1
+        n = result.items[0]
+        assert n.notification_type == "feed_comment"
+        assert n.payload["comment"] == "Nice work."
+        dumped = json.dumps(n.payload).lower()
+        assert "weight" not in dumped
+        assert "calorie" not in dumped
+
+        try:
+            create_feed_comment(
+                item.id,
+                CreateFeedCommentBody(body="Can I see this?"),
+                current_user=casey,
+                db=s,
+            )
+            raise AssertionError("non-friend should not comment")
+        except Exception as e:
+            assert getattr(e, "status_code", None) == 404
+
+        try:
+            delete_feed_comment(item.id, created["comment"].id, current_user=bob, db=s)
+            raise AssertionError("post owner should not delete another user's comment")
+        except Exception as e:
+            assert getattr(e, "status_code", None) == 404
+
+        deleted = delete_feed_comment(item.id, created["comment"].id, current_user=alice, db=s)
+        assert deleted == {"ok": True, "comment_count": 0}
+        assert s.exec(select(FeedComment).where(FeedComment.feed_item_id == item.id)).all() == []
+    _ok("comments stay friends-only, text-only, and author-deletable")
+
+
 def test_feed_limit_counts_workout_days_not_pr_rows():
     print("\n[test] feed limit counts workout days, not same-day PR rows")
     eng = _make_engine()
@@ -294,6 +380,7 @@ cases = [
     test_accept_friend_creates_notification_for_requester_and_marks_read,
     test_like_notification_is_sanitized_and_deduped,
     test_feed_like_persists_and_hydrates_on_posts,
+    test_feed_comments_are_visible_bounded_and_deletable_by_author,
     test_feed_limit_counts_workout_days_not_pr_rows,
     test_mark_all_notifications_read,
     test_pr_feed_event_is_written_without_lift_value,

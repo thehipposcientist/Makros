@@ -1,15 +1,18 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  TextInput, Modal,
+  TextInput, Modal, ImageBackground,
 } from 'react-native';
 import FadeInView from '../components/FadeInView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
 import { UserProfile, SupplementItem, AppThemeName } from '../types';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { SUPPLEMENT_LIBRARY, SUPPLEMENT_CATEGORIES, SupplementEntry } from '../constants/supplementLibrary';
+import { STOCK_IMAGES } from '../constants/stockImages';
 
 interface SupplementsScreenProps {
   userProfile: UserProfile;
@@ -31,14 +34,17 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
   const [aiStack, setAiStack] = useState<SupplementItem[]>([]);
 
   useEffect(() => {
-    AsyncStorage.getItem('supplementStack').then(raw => {
-      if (raw) {
-        try { setAiStack(JSON.parse(raw)); } catch {}
-      }
-    });
+    AsyncStorage.getItem('supplementStack')
+      .then(raw => {
+        if (raw) {
+          try { setAiStack(JSON.parse(raw)); } catch {}
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const toggle = (name: string) => {
+    Haptics.selectionAsync();
     setSelected(prev => {
       const next = new Set(prev);
       if (next.has(name)) next.delete(name); else next.add(name);
@@ -47,6 +53,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
   };
 
   const handleSave = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     onSave({ ...userProfile, supplementsAvailable: Array.from(selected) });
   };
 
@@ -80,6 +87,20 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+        <ImageBackground
+          source={{ uri: STOCK_IMAGES.supplements.hero }}
+          style={styles.heroImage}
+          imageStyle={styles.heroPhoto}
+        >
+          <LinearGradient
+            colors={['rgba(0,0,0,0.04)', 'rgba(0,0,0,0.56)']}
+            style={styles.heroGradient}
+          />
+          <View style={styles.heroCopy}>
+            <Text style={styles.heroTitle}>Supplement stack</Text>
+            <Text style={styles.heroMeta}>Evidence · dose · timing</Text>
+          </View>
+        </ImageBackground>
 
         {/* Search */}
         <View style={[styles.searchRow, { backgroundColor: c.surfaceRaised, borderColor: c.border }]}>
@@ -378,6 +399,19 @@ const createStyles = (
 
   scrollContent: { paddingHorizontal: 16, paddingTop: 14 },
 
+  heroImage: {
+    height: 132,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    justifyContent: 'flex-end',
+    marginBottom: 14,
+  },
+  heroPhoto: { borderRadius: radius.md },
+  heroGradient: { ...StyleSheet.absoluteFillObject },
+  heroCopy: { padding: 14 },
+  heroTitle: { color: '#fff', fontSize: 20, fontWeight: '900' },
+  heroMeta: { color: '#fff', fontSize: 12, fontWeight: '800', marginTop: 3, opacity: 0.88 },
+
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -387,7 +421,7 @@ const createStyles = (
     paddingVertical: 10,
     marginBottom: 16,
   },
-  searchInput: { flex: 1, fontSize: 15, padding: 0 },
+  searchInput: { flex: 1, fontSize: 15, padding: 0, letterSpacing: 0, fontWeight: '400' },
 
   section: { marginBottom: 20 },
   sectionTitle: { fontSize: 15, fontWeight: '700', marginBottom: 6 },

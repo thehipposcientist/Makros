@@ -1,7 +1,10 @@
-import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useState, useEffect, useRef, useMemo, type ComponentProps, type ReactNode } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, ActivityIndicator,
-  TextInput, Alert, Image, Linking, Modal, Animated,
+  TextInput, Alert, Image, ImageBackground, Linking, Modal, Animated, useWindowDimensions,
+  InteractionManager,
+  type ImageSourcePropType,
+  type LayoutChangeEvent,
 } from 'react-native';
 // Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
 const ImagePicker: typeof import('expo-image-picker') = (() => {
@@ -14,10 +17,15 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
   });
 })();
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { LayoutAnimation, UIManager, Platform } from 'react-native';
+import TabDragWrapper from '../components/TabDragWrapper';
 import FadeInView from '../components/FadeInView';
+import { overPhotoTextShadow } from '../components/PhotoScrim';
+import BottomSheetDismissHandle from '../components/BottomSheetDismissHandle';
 import AnimatedNumber from '../components/AnimatedNumber';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
+import MovingGradientBackground from '../components/MovingGradientBackground';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { TIMING_SMOOTH, TIMING_STANDARD, staggerDelay, useReducedMotion } from '../utils/motion';
 
@@ -25,50 +33,142 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
-import Svg, { Polyline, Circle, Line, Text as SvgText } from 'react-native-svg';
+import Svg, { Defs, Polyline, Circle, Line, Polygon, Rect, LinearGradient as SvgLinearGradient, Stop, Text as SvgText } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
+import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult, HealthPillarKey, SleepScore, SleepStageTimeline, WeightEntry } from '../types';
 import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
-import { scoreSleep } from '../services/sleepScore';
-import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
+import type { StalenessWatch } from '../utils/stalenessReminders';
+import type { ThalloScoreAverage } from '../utils/thalloScoreHistory';
+import {
+  APPLE_HEALTH_PERMISSION_COPY,
+  readHealthSummary,
+  isHealthKitAvailable,
+  requestHealthPermissions,
+  getLastHealthKitError,
+  loadSleepHistory,
+  readDailyNutritionSnapshot,
+  type DailyNutritionSnapshot,
+} from '../services/appleHealth';
+import { scoreSleep, bedtimeWindowFromHistory, type BedtimeWindow } from '../services/sleepScore';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
+import { STOCK_IMAGES } from '../constants/stockImages';
 import Zone2TargetCard from '../components/Zone2TargetCard';
+import CardioHrZonesCard from '../components/CardioHrZonesCard';
+import CardioLoadCard from '../components/CardioLoadCard';
+import CardioProgressionCard from '../components/CardioProgressionCard';
 import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
+import HealthInsightsScreen from './HealthInsightsScreen';
+import { GoalTrajectoryChart } from '../components/GoalTrajectoryChart';
+import { RecompTrajectoryChart } from '../components/RecompTrajectoryChart';
+import DailyStressTimelineCard from '../components/DailyStressTimelineCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import SwipeableRow from '../components/SwipeableRow';
 import RecoveryCard from '../components/RecoveryCard';
-import { RECOVERY_LABELS } from '../utils/healthScore';
+import RouteSummaryMap from '../components/RouteSummaryMap';
+import AppleHealthWorkoutAttachModal from '../components/AppleHealthWorkoutAttachModal';
+import HealthLabsCard from '../components/HealthLabsCard';
+import MetabolicSignalsCard from '../components/MetabolicSignalsCard';
+import SunExposureHealthCard from '../components/SunExposureHealthCard';
+import TrendsOverviewCard from '../components/TrendsOverviewCard';
+import { RECOVERY_LABELS, calculateHealthScore } from '../utils/healthScore';
+import {
+  getHealthSummarySignalAvailability,
+  hasDisplayableHealthSummaryData,
+} from '../utils/healthSignalDisplay';
+import type {
+  ScoreContext as HealthScoreContext,
+  NutritionContext as HealthNutritionContext,
+  GutSupportContext as HealthGutContext,
+  StrengthContext as HealthStrengthContext,
+  CardioContext as HealthCardioContext,
+} from '../utils/healthScore';
 import { getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
 import { proteinTimingInsights } from '../utils/nutritionInsights';
-import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
-import { buildGoalForecast } from '../utils/goalForecast';
+import { getGoalEstimate, getRecompProjection, computeGoalProgressBar, computeRecompTrajectory, computeFatMassProgress, resolveGoalBucket } from '../utils/goalEstimate';
+import { buildGoalForecast, type GoalForecastModel } from '../utils/goalForecast';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
+import { displayFocusForExercises } from '../utils/workoutFocusDisplay';
 import { estimate1RM, categorizeExercise, type LiftCategory } from '../utils/oneRepMax';
-import { computeStrengthScore, strengthBandLabel } from '../utils/strengthScore';
-import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries, saveWeightEntryAPI, deleteWeightEntryAPI, clearWeightEntriesAPI } from '../services/api';
+import { computeStrengthScore, strengthBandLabel, strengthConfidenceLabel } from '../utils/strengthScore';
+import {
+  planChangeIsScheduled,
+  planScopeMatches,
+  restorePlanScope,
+} from '../utils/pendingPlanChange';
+import {
+  classifyActiveEnergy,
+  classifyAvgSleepHours,
+  classifyAvgSteps,
+  classifyHrv,
+  classifyRestingHeartRate,
+  type VitalTrendResult,
+} from '../utils/vitalsTrend';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getCalorieRanges, CalorieRanges, getGoalScores, type GoalScoreResult } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
-import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRO_COPY, HEALTH_PLATFORM_STATUS_COPY, HEALTH_WEARABLE_LABEL } from '../constants/platformHealth';
-import { aggregateDailyFromHistory, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
+import { HEALTH_DATA_LABEL, HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRO_COPY, HEALTH_PLATFORM_STATUS_COPY, HEALTH_WEARABLE_LABEL } from '../constants/platformHealth';
+import {
+  aggregateDailyFromHistory,
+  buildHrZoneSourceBreakdown,
+  buildRelativeStrengthProfiles,
+  buildStrengthLoadBalance,
+  buildStrengthVolumeTrend,
+  isCardioHrZoneSource,
+  macrosHeadlineFromAverages,
+  macrosHeadlineFromDailyRows,
+  selectDailyRows,
+  type StrengthLoadBalanceStatus,
+  type StrengthLoadBalanceSummary,
+  type StrengthLoadMuscleSummary,
+  type StrengthVolumeTrendBreakdown,
+  type StrengthVolumeWindowSummary,
+} from './progressData';
 import { tierOf } from '../utils/subscription';
-import { manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
+import { appleHealthMetricsFromWorkoutSession, manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
+import { completeWorkoutWithOfflineQueue } from '../utils/workoutCompletionQueue';
 import { formatDistance, formatWeight, lbsToUnit, resolveDistanceUnit, resolveWeightUnit, unitToLbs, type DistanceUnit, type WeightUnit } from '../utils/units';
 import {
   buildExerciseTrendMap,
+  buildStrengthTrendSummary,
   buildLocalBestSetHistory,
   buildLocalE1RMHistory,
   inferChartMuscleFromName,
+  isNonStrengthExercise,
   type E1RMTrendPoint,
+  type StrengthTrendRow,
 } from '../utils/workoutProgressFilters';
+import {
+  filterWorkoutHistory,
+  workoutDaysAgoLabel as workoutHistoryDaysAgoLabel,
+  type WorkoutHistoryDateFilter,
+  type WorkoutHistoryTypeFilter,
+} from '../utils/workoutHistorySearch';
 import { shouldShowMeals, shouldShowWorkouts } from '../utils/hiddenSurfaces';
+import { STORAGE_KEYS } from '../utils/storageKeys.ts';
+import type { MealHistoryEntry } from '../services/api';
 
-type ProgressTab = 'today' | 'trends' | 'body' | 'health';
+type ProgressTab = 'today' | 'insights' | 'trends' | 'body' | 'health';
+type ProgressFocusTarget = 'sleep' | 'weight';
+type HealthBiometricKey = 'rhr' | 'hrv' | 'sleep' | 'steps' | 'active-energy' | 'workouts' | 'vo2';
+type BiometricHistoryWindow = 14 | 30 | 90;
+type HealthBiometricHistoryPoint = {
+  date: string;
+  value: number;
+};
+type HealthBiometricConfig = {
+  title: string;
+  eyebrow: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
+  accent: string;
+  unit?: string;
+  better: 'higher' | 'lower' | 'neutral';
+  empty: string;
+};
 
 type InProgressWorkoutSummary = {
   focus: string;
@@ -96,12 +196,164 @@ interface ProgressScreenProps {
   onDiscardInProgressWorkout?: () => void | Promise<void>;
   showWorkoutProgress?: boolean;
   showMealProgress?: boolean;
+  webMode?: boolean;
+  resetToTodayToken?: number;
+  focusTarget?: ProgressFocusTarget | null;
+  focusTargetToken?: number;
+  onRequestPreviousSurface?: () => void;
 }
 
 type ProgressSurfaceVisibility = {
   showWorkoutProgress: boolean;
   showMealProgress: boolean;
 };
+
+const PROGRESS_SERVER_SESSION_LIMIT = 100;
+const PROGRESS_SERVER_COMPLETION_LIMIT = 500;
+const PROGRESS_SERVER_HYDRATE_TIMEOUT_MS = 12000;
+
+function progressPexelsPhoto(id: string, extension: 'jpeg' | 'png' = 'jpeg') {
+  return `https://images.pexels.com/photos/${id}/pexels-photo-${id}.${extension}?auto=compress&cs=tinysrgb&w=900&h=540&fit=crop`;
+}
+
+const NUTRITION_GUT_FACTS_IMAGE = progressPexelsPhoto('3851075');
+
+// Fixed identity accents so the Strength and Cardio profiles read as
+// distinct at a glance. Quality is still conveyed by the score value +
+// label (e.g. "Advanced" / "Building base"), not the accent color.
+const STRENGTH_PROFILE_COLOR = '#6366F1'; // indigo
+const CARDIO_PROFILE_COLOR = '#06B6D4';   // teal
+
+// Thallo Score is removed from the UI for now. This flag keeps the dormant
+// score-card builder from computing each render. Full re-enable also needs the
+// Today-tab card render block + the explainer modal restored (see git history).
+// Typed `boolean` (not literal `false`) so flow-narrowing in the builder holds.
+const THALLO_SCORE_ENABLED: boolean = false;
+
+type EditVisibilitySection = { id: string; label: string; desc: string };
+
+// Toggleable sections on the Trends tab. Visibility is persisted on
+// device under `trendsHiddenSections_v1` and edited via EditTrendsSheet.
+const TRENDS_SECTIONS: ReadonlyArray<EditVisibilitySection> = [
+  { id: 'trends-overview', label: 'Training volume + PRs', desc: 'Lead trend card with weekly load and recent records' },
+  { id: 'strength-profile', label: 'Relative Strength Profile', desc: 'Compound-lift strength radar vs bodyweight' },
+  { id: 'cardio-profile', label: 'Cardio Fitness Profile', desc: 'Aerobic-quality radar' },
+  { id: 'performance-gauges', label: 'Performance gauges', desc: 'Strength index, volume trend, recent records' },
+  { id: 'high-value-trends', label: 'High-value trends', desc: 'Recovery, quality, readiness, nutrition, and body signals' },
+  { id: 'activity-highlights', label: 'Activity highlights', desc: 'Sauna, swim, cycling, hike, and recovery metrics' },
+  { id: 'metric-suggestions', label: 'Suggested signals', desc: 'Recommended data to log next' },
+  { id: 'strength-charts', label: 'Strength charts', desc: 'Per-exercise strength, best-set, and 1RM trends' },
+  { id: 'cardio-progression', label: 'Cardio progression', desc: 'Distance, pace, duration, and HR-zone trends' },
+];
+
+// Toggleable sections on the Health tab. Visibility is persisted on
+// device under `healthHiddenSections_v1` and edited via the same sheet.
+const HEALTH_SECTIONS: ReadonlyArray<EditVisibilitySection> = [
+  { id: 'health-vitals-overview', label: 'Vitals Overview', desc: '7-day rolling snapshot of key signals' },
+  { id: 'health-labs', label: 'Health Labs', desc: 'Blood work and clinical markers' },
+  { id: 'metabolic-signals', label: 'Metabolic Signals', desc: 'Glucose, lipids, and metabolism' },
+  { id: 'nutrition-gut', label: 'Nutrition & Gut Facts', desc: 'Fiber, plant diversity, macros, processing' },
+  { id: 'sun-exposure', label: 'Sun Exposure', desc: 'Vitamin D and daylight exposure' },
+  { id: 'device-vitals', label: 'Device Vitals', desc: 'HR, HRV, activity, recovery snapshot' },
+];
+
+function EditTrendsSheet({ visible, hidden, onSetVisible, onShowAll, onHideAll, onClose, tc, sections = TRENDS_SECTIONS, title = 'Edit Trends', testPrefix = 'edit-trends', countLabel = 'sections' }: {
+  visible: boolean;
+  hidden: Set<string>;
+  onSetVisible: (id: string, visible: boolean) => void;
+  onShowAll: () => void;
+  onHideAll?: () => void;
+  onClose: () => void;
+  tc: ReturnType<typeof getTheme>['colors'];
+  sections?: ReadonlyArray<EditVisibilitySection>;
+  title?: string;
+  testPrefix?: string;
+  countLabel?: string;
+}) {
+  const shownCount = sections.filter(s => !hidden.has(s.id)).length;
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' }}>
+        <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={onClose} />
+        <View style={{ backgroundColor: tc.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 18, paddingTop: 16, paddingBottom: 28, maxHeight: '86%' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+            <Ionicons name="options-outline" size={20} color={tc.primary} />
+            <Text style={{ flex: 1, fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>{title}</Text>
+            {onHideAll && (
+              <TouchableOpacity onPress={onHideAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textMuted }}>Hide all</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity onPress={onShowAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={{ fontSize: 13, fontWeight: '800', color: tc.primary }}>Show all</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={{ fontSize: 12, color: tc.textMuted, marginBottom: 6 }}>
+            {shownCount}/{sections.length} {countLabel} shown
+          </Text>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {sections.map(s => {
+              const shown = !hidden.has(s.id);
+              return (
+                <TouchableOpacity
+                  key={s.id}
+                  testID={`${testPrefix}-${s.id}`}
+                  activeOpacity={0.8}
+                  onPress={() => onSetVisible(s.id, !shown)}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderTopWidth: 1, borderTopColor: tc.border }}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{s.label}</Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 1 }}>{s.desc}</Text>
+                  </View>
+                  <Ionicons name={shown ? 'eye-outline' : 'eye-off-outline'} size={22} color={shown ? tc.primary : tc.textMuted} />
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function parseHiddenIdSet(raw: string | null): Set<string> {
+  if (!raw) return new Set();
+  try {
+    const decoded = JSON.parse(raw);
+    return new Set(Array.isArray(decoded) ? decoded.filter((id): id is string => typeof id === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+const BODY_WEIGHT_IMAGE = progressPexelsPhoto('6550832');
+const SLEEP_SCORE_IMAGE: ImageSourcePropType = require('../../assets/images/card-backgrounds/sleep-score-night-sky.jpg');
+const HEALTH_DATA_READY_IMAGE = progressPexelsPhoto('4679246');
+const HEALTH_DATA_CONNECT_IMAGE = progressPexelsPhoto('8539219');
+const HEALTH_DATA_SYNC_IMAGE = progressPexelsPhoto('6622519');
+const HEALTH_DATA_EMPTY_IMAGE = progressPexelsPhoto('8539061');
+
+function bodyMeasurementsImageSource(gender: string | null | undefined): ImageSourcePropType {
+  if (gender === 'female') return STOCK_IMAGES.progress.bodyMeasureFemale;
+  if (gender === 'male') return STOCK_IMAGES.progress.bodyMeasureMale;
+  return { uri: progressPexelsPhoto('5629205') };
+}
+
+function bodyCheckImageUri(gender: string | null | undefined) {
+  if (gender === 'male') return progressPexelsPhoto('13975083', 'png');
+  return progressPexelsPhoto('13106587');
+}
+
+function goalEstimateImageUri(goal: string | null | undefined, gender: string | null | undefined) {
+  const bucket = resolveGoalBucket(goal);
+  if (bucket === 'fat_loss') return progressPexelsPhoto('19797435');
+  if (bucket === 'muscle_gain' || bucket === 'strength') {
+    if (gender === 'female') return progressPexelsPhoto('29825216');
+    return progressPexelsPhoto('5327511');
+  }
+  if (bucket === 'body_recomp' || bucket === 'toning') return progressPexelsPhoto('18204829');
+  if (bucket === 'endurance' || bucket === 'hyrox') return progressPexelsPhoto('8454909');
+  return progressPexelsPhoto('24809806');
+}
 
 function sentenceLabel(value: unknown): string {
   return humanizeToken(String(value ?? '')).toLowerCase();
@@ -142,6 +394,408 @@ function humanizeInlineIdentifiers(text: string): string {
     /\b([a-z]+(?:_[a-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*)\b/g,
     token => sentenceLabel(token),
   );
+}
+
+function isFullHealthSummary(value: HealthSummary | null | undefined): value is HealthSummary {
+  if (!value || typeof value !== 'object') return false;
+  return typeof value.fetchedAt === 'string'
+    && (
+      'restingHeartRate' in value ||
+      'avgSteps7d' in value ||
+      'avgSleepHours7d' in value ||
+      'lastNightSleepHours' in value ||
+      'activeEnergy7d' in value ||
+      'hrvAvg' in value ||
+      'workoutDetails' in value
+    );
+}
+
+async function readFreshProgressHealthSummary(age: number | null, force = false): Promise<HealthSummary | null> {
+  const { getHealthDataSummary } = await import('../services/healthDataSummary');
+  const agg = await getHealthDataSummary({ age, force }).catch(() => null);
+  return isFullHealthSummary(agg?.raw) ? agg.raw : readHealthSummary({ age });
+}
+
+type ProgressSleepHistoryPoint = {
+  night: string;
+  sleepHours: number | null;
+  inBedMinutes: number | null;
+  deepHours: number | null;
+  remHours: number | null;
+  coreHours: number | null;
+  awakeMinutes: number | null;
+  hrv: number | null;
+  restingHr: number | null;
+  respiratoryRate: number | null;
+  spo2Percent: number | null;
+  bedtimeMinutes: number | null;
+  score: number | null;
+  rating: SleepScore['rating'] | null;
+  mode: SleepScore['mode'] | null;
+};
+
+function finiteOrNull(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function sleepRatingOrNull(value: unknown): SleepScore['rating'] | null {
+  return value === 'Excellent' || value === 'Good' || value === 'Fair' || value === 'Poor'
+    ? value
+    : null;
+}
+
+function sleepModeOrNull(value: unknown): SleepScore['mode'] | null {
+  return value === 'mvp' || value === 'personalized' ? value : null;
+}
+
+function sleepHistoryPointFromLocal(row: any): ProgressSleepHistoryPoint | null {
+  const night = typeof row?.night === 'string' ? row.night : null;
+  if (!night) return null;
+  return {
+    night,
+    sleepHours: finiteOrNull(row.sleepHours),
+    inBedMinutes: finiteOrNull(row.inBedMinutes),
+    deepHours: finiteOrNull(row.deepHours),
+    remHours: finiteOrNull(row.remHours),
+    coreHours: finiteOrNull(row.coreHours),
+    awakeMinutes: finiteOrNull(row.awakeMinutes),
+    hrv: finiteOrNull(row.hrv),
+    restingHr: finiteOrNull(row.restingHr),
+    respiratoryRate: finiteOrNull(row.respiratoryRate),
+    spo2Percent: finiteOrNull(row.spo2Percent),
+    bedtimeMinutes: finiteOrNull(row.bedtimeMinutes),
+    score: finiteOrNull(row.score),
+    rating: sleepRatingOrNull(row.rating),
+    mode: sleepModeOrNull(row.mode),
+  };
+}
+
+function sleepHistoryPointFromRemote(row: any): ProgressSleepHistoryPoint | null {
+  const night = typeof row?.night_date === 'string' ? row.night_date : null;
+  if (!night) return null;
+  return {
+    night,
+    sleepHours: finiteOrNull(row.total_hours),
+    inBedMinutes: finiteOrNull(row.in_bed_minutes),
+    deepHours: finiteOrNull(row.deep_hours),
+    remHours: finiteOrNull(row.rem_hours),
+    coreHours: finiteOrNull(row.core_hours),
+    awakeMinutes: finiteOrNull(row.awake_minutes),
+    hrv: finiteOrNull(row.hrv_ms),
+    restingHr: finiteOrNull(row.resting_hr),
+    respiratoryRate: finiteOrNull(row.respiratory_rate),
+    spo2Percent: finiteOrNull(row.spo2_percent),
+    bedtimeMinutes: finiteOrNull(row.bedtime_minutes_from_midnight),
+    score: finiteOrNull(row.score),
+    rating: sleepRatingOrNull(row.rating),
+    mode: sleepModeOrNull(row.mode),
+  };
+}
+
+function mergeSleepHistoryPoint(a: ProgressSleepHistoryPoint, b: ProgressSleepHistoryPoint): ProgressSleepHistoryPoint {
+  return {
+    night: b.night,
+    sleepHours: b.sleepHours ?? a.sleepHours,
+    inBedMinutes: b.inBedMinutes ?? a.inBedMinutes,
+    deepHours: b.deepHours ?? a.deepHours,
+    remHours: b.remHours ?? a.remHours,
+    coreHours: b.coreHours ?? a.coreHours,
+    awakeMinutes: b.awakeMinutes ?? a.awakeMinutes,
+    hrv: b.hrv ?? a.hrv,
+    restingHr: b.restingHr ?? a.restingHr,
+    respiratoryRate: b.respiratoryRate ?? a.respiratoryRate,
+    spo2Percent: b.spo2Percent ?? a.spo2Percent,
+    bedtimeMinutes: b.bedtimeMinutes ?? a.bedtimeMinutes,
+    score: b.score ?? a.score,
+    rating: b.rating ?? a.rating,
+    mode: b.mode ?? a.mode,
+  };
+}
+
+function mergeSleepHistoryPoints(points: ProgressSleepHistoryPoint[]): ProgressSleepHistoryPoint[] {
+  const byNight = new Map<string, ProgressSleepHistoryPoint>();
+  for (const point of points) {
+    const existing = byNight.get(point.night);
+    byNight.set(point.night, existing ? mergeSleepHistoryPoint(existing, point) : point);
+  }
+  return Array.from(byNight.values()).sort((a, b) => a.night.localeCompare(b.night)).slice(-30);
+}
+
+function overlayCurrentSleepScore(points: ProgressSleepHistoryPoint[], summary: HealthSummary | null | undefined): ProgressSleepHistoryPoint[] {
+  const sleepScore = summary?.sleepScore ?? null;
+  if (!sleepScore || points.length === 0) return points;
+  const todayKeys = new Set([dateKey(new Date()), new Date().toISOString().slice(0, 10)]);
+  return points.map((point) => todayKeys.has(point.night) ? {
+    ...point,
+    sleepHours: sleepScore.duration ?? point.sleepHours,
+    deepHours: sleepScore.stages?.deep ?? point.deepHours,
+    remHours: sleepScore.stages?.rem ?? point.remHours,
+    coreHours: sleepScore.stages?.core ?? point.coreHours,
+    awakeMinutes: sleepScore.stages?.awake != null ? Math.round(sleepScore.stages.awake * 60) : point.awakeMinutes,
+    inBedMinutes: sleepScore.efficiency && sleepScore.duration
+      ? Math.round((sleepScore.duration * 60) / sleepScore.efficiency)
+      : point.inBedMinutes,
+    hrv: sleepScore.hrvAvg ?? point.hrv,
+    restingHr: sleepScore.restingHeartRate ?? point.restingHr,
+    respiratoryRate: sleepScore.respiratoryRate ?? point.respiratoryRate,
+    spo2Percent: sleepScore.oxygenSaturation ?? point.spo2Percent,
+    bedtimeMinutes: sleepScore.bedtimeMinutes ?? point.bedtimeMinutes,
+    score: sleepScore.score,
+    rating: sleepScore.rating,
+    mode: sleepScore.mode,
+  } : point);
+}
+
+async function loadProgressSleepHistory(authToken: string | null | undefined, summary?: HealthSummary | null): Promise<ProgressSleepHistoryPoint[]> {
+  const localRows = (await loadSleepHistory().catch(() => []))
+    .map(sleepHistoryPointFromLocal)
+    .filter((row): row is ProgressSleepHistoryPoint => row != null);
+  let remoteRows: ProgressSleepHistoryPoint[] = [];
+  if (authToken) {
+    const { getSleepHistory } = await import('../services/api');
+    remoteRows = (await getSleepHistory(authToken, 30).catch(() => []))
+      .map(sleepHistoryPointFromRemote)
+      .filter((row): row is ProgressSleepHistoryPoint => row != null);
+  }
+  return overlayCurrentSleepScore(mergeSleepHistoryPoints([...localRows, ...remoteRows]), summary);
+}
+
+function round1Local(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+const BIOMETRIC_HISTORY_CONFIG: Record<HealthBiometricKey, HealthBiometricConfig> = {
+  rhr: {
+    title: 'Resting HR',
+    eyebrow: 'Heart trend',
+    icon: 'pulse-outline',
+    accent: '#EF4444',
+    unit: 'bpm',
+    better: 'lower',
+    empty: 'Resting heart-rate history will appear after Apple Health syncs daily snapshots.',
+  },
+  hrv: {
+    title: 'HRV',
+    eyebrow: 'Recovery trend',
+    icon: 'analytics-outline',
+    accent: '#8B5CF6',
+    unit: 'ms',
+    better: 'higher',
+    empty: 'HRV history will appear after Apple Health syncs nightly or daily values.',
+  },
+  sleep: {
+    title: 'Sleep',
+    eyebrow: 'Night trend',
+    icon: 'moon-outline',
+    accent: '#818CF8',
+    unit: 'h',
+    better: 'neutral',
+    empty: 'Sleep history appears after Apple Health returns sleep samples.',
+  },
+  steps: {
+    title: 'Steps',
+    eyebrow: 'Activity trend',
+    icon: 'walk-outline',
+    accent: '#14B8A6',
+    unit: 'steps',
+    better: 'higher',
+    empty: 'Step history will appear after daily health snapshots sync.',
+  },
+  'active-energy': {
+    title: 'Active calories',
+    eyebrow: 'Burn trend',
+    icon: 'flame-outline',
+    accent: '#F97316',
+    unit: 'kcal',
+    better: 'neutral',
+    empty: 'Active calorie history will appear after Apple Health syncs daily energy.',
+  },
+  workouts: {
+    title: 'Workout minutes',
+    eyebrow: 'Training trend',
+    icon: 'fitness-outline',
+    accent: '#22C55E',
+    unit: 'min',
+    better: 'neutral',
+    empty: 'Workout-minute history will appear after workouts sync into daily health snapshots.',
+  },
+  vo2: {
+    title: 'VO2 Max',
+    eyebrow: 'Cardio trend',
+    icon: 'speedometer-outline',
+    accent: '#0EA5E9',
+    unit: 'ml/kg/min',
+    better: 'higher',
+    empty: 'VO2 Max history will appear after Apple Health returns cardio fitness samples.',
+  },
+};
+
+function dailyHealthSnapshotDate(row: any): string | null {
+  const raw = typeof row?.snapshot_date === 'string' ? row.snapshot_date.slice(0, 10) : '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+}
+
+function healthMetricPoint(date: string | null, value: unknown): HealthBiometricHistoryPoint | null {
+  const n = finiteOrNull(value);
+  if (!date || n == null) return null;
+  return { date, value: n };
+}
+
+function mergeHealthMetricPoints(points: HealthBiometricHistoryPoint[], limit: number): HealthBiometricHistoryPoint[] {
+  const byDate = new Map<string, HealthBiometricHistoryPoint>();
+  for (const point of points) {
+    byDate.set(point.date, point);
+  }
+  return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date)).slice(-limit);
+}
+
+function formatBiometricValue(key: HealthBiometricKey, value: number | null | undefined, includeUnit = true): string {
+  if (value == null || !Number.isFinite(value)) return '--';
+  if (key === 'sleep') {
+    const total = Math.max(0, Math.round(value * 60));
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  const rounded = key === 'vo2'
+    ? Math.round(value * 10) / 10
+    : Math.round(value);
+  const formatted = rounded.toLocaleString();
+  const unit = BIOMETRIC_HISTORY_CONFIG[key].unit;
+  return includeUnit && unit && unit !== 'steps' ? `${formatted} ${unit}` : formatted;
+}
+
+function formatBiometricDelta(key: HealthBiometricKey, value: number): string {
+  const sign = value > 0 ? '+' : '';
+  if (key === 'sleep') {
+    const minutes = Math.round(value * 60);
+    return `${minutes > 0 ? '+' : ''}${minutes}m`;
+  }
+  if (key === 'vo2') return `${sign}${Math.round(value * 10) / 10}`;
+  return `${sign}${Math.round(value).toLocaleString()}`;
+}
+
+function formatGoalScoreHeroTitle(score: GoalScoreResult): string {
+  const outcome = score.projectedOutcome;
+  const midpoint = Number(outcome?.expectedMidpoint);
+  if (!Number.isFinite(midpoint)) return `${score.executionLabel} execution`;
+  const sign = midpoint > 0 ? '+' : '';
+  const abs = Math.abs(midpoint);
+  const value = abs >= 10
+    ? `${sign}${Math.round(midpoint).toLocaleString()}`
+    : `${sign}${midpoint.toFixed(1).replace(/\.0$/, '')}`;
+  const metric = String(outcome?.metric ?? '').toLowerCase();
+  const unit = String(outcome?.unit ?? '').toLowerCase();
+  if (unit === 'percentage_points') return `On pace: ${value} body-fat pts`;
+  if (unit === 'lb' || unit === 'lbs') return `On pace: ${value} lb`;
+  if (metric === 'estimated_1rm_pct' || unit === 'percent') return `On pace: ${value}% strength`;
+  if (metric === 'cardio_volume_min') return `On pace: ${value} cardio min`;
+  return `On pace: ${value} ${unit.replace(/_/g, ' ') || 'change'}`;
+}
+
+type BiometricStatusTone = 'good' | 'onTrack' | 'monitor' | 'neutral' | 'waiting';
+
+function biometricStatusFromTrend(
+  trend: VitalTrendResult | null | undefined,
+  hasValue: boolean,
+): { label: string; tone: BiometricStatusTone } {
+  if (!hasValue) return { label: 'Waiting', tone: 'waiting' };
+  if (trend?.trend === 'improving') return { label: 'Good', tone: 'good' };
+  if (trend?.trend === 'onTrack') return { label: 'On track', tone: 'onTrack' };
+  if (trend?.trend === 'monitor') return { label: 'Monitor', tone: 'monitor' };
+  return { label: 'Logged', tone: 'neutral' };
+}
+
+function buildBiometricHistoryPoints(
+  key: HealthBiometricKey,
+  sleepRows: ProgressSleepHistoryPoint[],
+  dailyRows: import('../services/api').DailyHealthHistoryItem[] | null,
+  summary: HealthSummary | null | undefined,
+  windowDays: number,
+): HealthBiometricHistoryPoint[] {
+  const points: HealthBiometricHistoryPoint[] = [];
+  if (key === 'sleep' || key === 'rhr' || key === 'hrv') {
+    for (const row of sleepRows) {
+      const value = key === 'sleep' ? row.sleepHours : key === 'rhr' ? row.restingHr : row.hrv;
+      const point = healthMetricPoint(row.night, value);
+      if (point) points.push(point);
+    }
+  }
+  if (dailyRows) {
+    for (const row of dailyRows) {
+      const date = dailyHealthSnapshotDate(row);
+      const value =
+        key === 'rhr' ? row.resting_hr
+        : key === 'hrv' ? row.hrv_ms
+        : key === 'steps' ? row.steps
+        : key === 'active-energy' ? row.active_energy_kcal
+        : key === 'workouts' ? row.workout_minutes
+        : key === 'vo2' ? row.vo2_max
+        : null;
+      const point = healthMetricPoint(date, value);
+      if (point) points.push(point);
+    }
+  }
+  const today = dateKey(new Date());
+  const todayValue =
+    key === 'rhr' ? summary?.sleepScore?.restingHeartRate
+    : key === 'hrv' ? summary?.sleepScore?.hrvAvg
+    : key === 'sleep' ? summary?.lastNightSleepHours
+    : key === 'steps' ? summary?.stepsToday
+    : key === 'active-energy' ? summary?.activeEnergyToday
+    : key === 'workouts' ? null
+    : key === 'vo2' ? summary?.vo2Max
+    : null;
+  const todayPoint = healthMetricPoint(today, todayValue);
+  if (todayPoint) points.push(todayPoint);
+  return mergeHealthMetricPoints(points, windowDays);
+}
+
+function sleepHistoryDotScore(
+  point: ProgressSleepHistoryPoint,
+  index: number,
+  history: ProgressSleepHistoryPoint[],
+  age: number | null,
+): number | null {
+  if (point.score != null) {
+    return Math.max(0, Math.min(100, Math.round(point.score)));
+  }
+  if (point.sleepHours == null || point.sleepHours < 0.5) return null;
+
+  const baselineRows = index + 1 > 14 ? history.slice(0, index) : history.slice(0, index + 1);
+  const hrvHistory = baselineRows.map(n => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
+  const rhrHistory = baselineRows.map(n => n.restingHr).filter((v): v is number => typeof v === 'number' && v > 0);
+  const respHistory = baselineRows.map(n => n.respiratoryRate).filter((v): v is number => typeof v === 'number' && v > 0);
+  const spo2History = baselineRows.map(n => n.spo2Percent).filter((v): v is number => typeof v === 'number' && v > 0);
+  const bedtimeHistory = baselineRows.map(n => n.bedtimeMinutes).filter((v): v is number => typeof v === 'number' && v >= 0);
+  const stages = point.awakeMinutes != null ? {
+    core: point.coreHours ?? Math.max(0, round1Local(point.sleepHours - (point.deepHours ?? 0) - (point.remHours ?? 0))),
+    deep: point.deepHours ?? 0,
+    rem: point.remHours ?? 0,
+    awake: round1Local(point.awakeMinutes / 60),
+    total: point.sleepHours,
+  } : null;
+
+  return scoreSleep({
+    totalSleepHours: point.sleepHours,
+    inBedMinutes: point.inBedMinutes,
+    deepSleepHours: point.deepHours,
+    remSleepHours: point.remHours,
+    hrvMs: point.hrv,
+    restingHeartRate: point.restingHr,
+    spo2Percent: point.spo2Percent,
+    respiratoryRate: point.respiratoryRate,
+    age,
+    stages,
+    bedtimeMinutes: point.bedtimeMinutes,
+    hrvHistory,
+    rhrHistory,
+    respiratoryRateHistory: respHistory,
+    spo2History,
+    bedtimeHistory,
+  })?.score ?? null;
 }
 
 function formatCoachMemorySummary(memory: any): string {
@@ -251,105 +905,33 @@ function buildCoachInsightVisuals(
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const HISTORY_DATE_FILTER_OPTIONS: Array<{ key: WorkoutHistoryDateFilter; label: string }> = [
+  { key: 'all', label: 'All time' },
+  { key: '7d', label: '7D' },
+  { key: '30d', label: '30D' },
+  { key: '90d', label: '90D' },
+];
+const HISTORY_TYPE_FILTER_OPTIONS: Array<{ key: WorkoutHistoryTypeFilter; label: string; icon: ComponentProps<typeof Ionicons>['name'] }> = [
+  { key: 'all', label: 'All', icon: 'albums-outline' },
+  { key: 'strength', label: 'Strength', icon: 'barbell-outline' },
+  { key: 'cardio', label: 'Cardio', icon: 'pulse-outline' },
+  { key: 'mobility', label: 'Mobility', icon: 'body-outline' },
+  { key: 'sport', label: 'Sport', icon: 'basketball-outline' },
+  { key: 'active', label: 'Active', icon: 'hammer-outline' },
+  { key: 'recovery', label: 'Recovery', icon: 'leaf-outline' },
+  { key: 'prs', label: 'PRs', icon: 'trophy-outline' },
+  { key: 'imported', label: 'Imported', icon: 'cloud-download-outline' },
+];
 
-function planChangeIsScheduled(change: PlanChangeEntry): boolean {
-  return change.changedBy === 'user'
-    && !!change.effectiveDate
-    && change.effectiveDate > dateKey(new Date());
-}
+// Shared pending-plan-change helpers live in src/utils/pendingPlanChange.ts
+// so the workout-Home banner and this screen agree on what's "pending"
+// and how to safely cancel/restore it.
+//
+// (`restorePlanScope` is also imported below.)
 
-function planScopeSnapshot(profile: Partial<UserProfile>, scope?: PlanChangeEntry['scope']): Record<string, unknown> {
-  if (scope === 'goal') {
-    return {
-      goal: profile.goal ?? null,
-      goalSelection: profile.goalSelection ?? null,
-      goalDetails: profile.goalDetails ?? null,
-      secondaryGoal: profile.secondaryGoal ?? null,
-      focusedMuscleGroup: profile.focusedMuscleGroup ?? null,
-    };
-  }
-  if (scope === 'workout') {
-    return {
-      priorityRegion: profile.priorityRegion ?? null,
-      daysPerWeek: profile.daysPerWeek ?? null,
-      trainingDays: profile.trainingDays ?? null,
-      workoutDurationMinutes: profile.workoutDurationMinutes ?? null,
-      equipment: profile.equipment ?? [],
-      equipmentSettings: profile.equipmentSettings ?? null,
-      injuries: profile.injuries ?? null,
-      injuryEntries: profile.injuryEntries ?? [],
-      experienceLevel: profile.experienceLevel ?? null,
-      preferredSplit: profile.preferredSplit ?? null,
-      dislikedExercises: profile.dislikedExercises ?? [],
-    };
-  }
-  if (scope === 'mealplan') {
-    return {
-      foodsAvailable: profile.foodsAvailable ?? [],
-      customFoods: profile.customFoods ?? [],
-      cookingSkill: profile.cookingSkill ?? null,
-      prepTimeMinutes: profile.prepTimeMinutes ?? null,
-      dietaryPreference: profile.dietaryPreference ?? null,
-      mealVariety: profile.mealVariety ?? null,
-      mealsPerDay: profile.mealsPerDay ?? null,
-      savedMeals: profile.savedMeals ?? [],
-      mealRoutine: profile.mealRoutine ?? null,
-      customMacros: profile.customMacros ?? null,
-      allergies: profile.allergies ?? [],
-    };
-  }
-  return profile as unknown as Record<string, unknown>;
-}
-
-function planScopeMatches(current: UserProfile, scheduled: Partial<UserProfile>, scope?: PlanChangeEntry['scope']): boolean {
-  return JSON.stringify(planScopeSnapshot(current, scope)) === JSON.stringify(planScopeSnapshot(scheduled, scope));
-}
-
-function restorePlanScope(current: UserProfile, previous: Partial<UserProfile>, scope?: PlanChangeEntry['scope']): UserProfile {
-  if (scope === 'goal') {
-    return {
-      ...current,
-      goal: previous.goal ?? current.goal,
-      goalSelection: previous.goalSelection,
-      goalDetails: previous.goalDetails ?? current.goalDetails,
-      secondaryGoal: previous.secondaryGoal,
-      focusedMuscleGroup: previous.focusedMuscleGroup,
-    };
-  }
-  if (scope === 'workout') {
-    return {
-      ...current,
-      priorityRegion: previous.priorityRegion,
-      daysPerWeek: previous.daysPerWeek ?? current.daysPerWeek,
-      trainingDays: previous.trainingDays,
-      workoutDurationMinutes: previous.workoutDurationMinutes ?? current.workoutDurationMinutes,
-      equipment: previous.equipment ?? current.equipment,
-      equipmentSettings: previous.equipmentSettings,
-      injuries: previous.injuries,
-      injuryEntries: previous.injuryEntries,
-      experienceLevel: previous.experienceLevel,
-      preferredSplit: previous.preferredSplit,
-      dislikedExercises: previous.dislikedExercises,
-    };
-  }
-  if (scope === 'mealplan') {
-    return {
-      ...current,
-      foodsAvailable: previous.foodsAvailable ?? current.foodsAvailable,
-      customFoods: previous.customFoods ?? current.customFoods,
-      cookingSkill: previous.cookingSkill,
-      prepTimeMinutes: previous.prepTimeMinutes,
-      dietaryPreference: previous.dietaryPreference,
-      mealVariety: previous.mealVariety,
-      mealsPerDay: previous.mealsPerDay,
-      savedMeals: previous.savedMeals,
-      mealRoutine: previous.mealRoutine,
-      customMacros: previous.customMacros,
-      allergies: previous.allergies,
-    };
-  }
-  return { ...current, ...previous };
-}
+// `restorePlanScope`, `planChangeIsScheduled`, `planScopeMatches`, and
+// `planScopeSnapshot` now live in src/utils/pendingPlanChange.ts —
+// imported below alongside the other utils.
 
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
 const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white-transparent-New.png');
@@ -392,6 +974,12 @@ function normalizeRemoteWeightEntry(row: import('../services/api').WeightEntryAP
   };
 }
 
+function bodyScanFlag(value: any): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return ['1', 'true', 'yes', 'y'].includes(value.trim().toLowerCase());
+  return Boolean(value);
+}
+
 function normalizeBodyScanEntry(raw: any): BodyScanEntry | null {
   if (!raw || typeof raw !== 'object') return null;
   const date = String(raw.date ?? raw.created_at ?? raw.scan_date ?? '').trim();
@@ -400,10 +988,14 @@ function normalizeBodyScanEntry(raw: any): BodyScanEntry | null {
   const id = String(raw.id ?? `${date}-${bodyFatPct}`);
   const bodyFatRange = String(raw.bodyFatRange ?? raw.body_fat_range ?? '');
   const muscleMass = String(raw.muscleMass ?? raw.muscle_mass ?? '');
+  const photoQuality = raw.photoQuality ?? raw.photo_quality;
+  const qualityFlags = raw.qualityFlags ?? raw.quality_flags;
+  const sensitivePhoto = bodyScanFlag(raw.sensitivePhoto ?? raw.sensitive_photo);
+  const photoHidden = sensitivePhoto || bodyScanFlag(raw.photoHidden ?? raw.photo_hidden);
   return {
     id,
     date,
-    photoUri: raw.photoUri,
+    photoUri: raw.photoUri ?? raw.photo_uri,
     bodyFatPct: Math.round(bodyFatPct * 10) / 10,
     bodyFatRange,
     muscleMass,
@@ -411,6 +1003,17 @@ function normalizeBodyScanEntry(raw: any): BodyScanEntry | null {
     strengths: Array.isArray(raw.strengths) ? raw.strengths.map(String) : [],
     improvements: Array.isArray(raw.improvements) ? raw.improvements.map(String) : [],
     assessment: String(raw.assessment ?? ''),
+    confidence: raw.confidence ? String(raw.confidence) : undefined,
+    photoQuality: photoQuality ? String(photoQuality) : undefined,
+    qualityFlags: Array.isArray(qualityFlags)
+      ? qualityFlags.map(String)
+      : [],
+    needsRetake: Boolean(raw.needsRetake ?? raw.needs_retake),
+    sensitivePhoto,
+    photoHidden,
+    method: raw.method ? String(raw.method) : undefined,
+    visualEstimatePct: raw.visualEstimatePct ?? raw.visual_estimate_pct ?? null,
+    measurementEstimatePct: raw.measurementEstimatePct ?? raw.measurement_estimate_pct ?? null,
     weightLbs: raw.weightLbs ?? raw.weight_lbs,
   };
 }
@@ -424,6 +1027,40 @@ function bodyScanSortValue(entry: BodyScanEntry): number {
 
 function bodyScanMergeKey(entry: BodyScanEntry): string {
   return entry.id ? `id:${entry.id}` : `date:${entry.date}`;
+}
+
+function bodyScanHasServerId(entry: BodyScanEntry): boolean {
+  return /^[1-9]\d*$/.test(String(entry.id ?? ''));
+}
+
+const BODY_SCAN_CACHE_KEY = STORAGE_KEYS.health.bodyScanHistory;
+const BODY_SCAN_QUARANTINE_KEY = STORAGE_KEYS.health.bodyScanHistoryQuarantine;
+
+function onlyServerBackedBodyScans(entries: BodyScanEntry[]): BodyScanEntry[] {
+  return entries.filter(bodyScanHasServerId);
+}
+
+async function quarantineLegacyBodyScans(entries: BodyScanEntry[], reason: string): Promise<void> {
+  if (entries.length === 0) return;
+  try {
+    const raw = await AsyncStorage.getItem(BODY_SCAN_QUARANTINE_KEY);
+    const existing = raw ? JSON.parse(raw) : [];
+    const next = [
+      ...(Array.isArray(existing) ? existing : []),
+      {
+        reason,
+        quarantinedAt: new Date().toISOString(),
+        scans: entries,
+      },
+    ].slice(-20);
+    await AsyncStorage.setItem(BODY_SCAN_QUARANTINE_KEY, JSON.stringify(next));
+  } catch {
+    // Legacy local body scans are never uploaded on hydration.
+  }
+}
+
+function bodyScanPhotoVisibleInHistory(entry: BodyScanEntry): boolean {
+  return !!entry.photoUri && !entry.photoHidden && !entry.sensitivePhoto;
 }
 
 function formatDuration(seconds: number): string {
@@ -459,6 +1096,33 @@ function formatPaceDelta(seconds: number): string {
   return `${seconds < 0 ? '-' : '+'}${min}:${String(sec).padStart(2, '0')}`;
 }
 
+function formatPaceSeconds(seconds: number): string {
+  const safe = Math.max(0, Math.round(seconds));
+  const min = Math.floor(safe / 60);
+  const sec = safe % 60;
+  return `${min}:${String(sec).padStart(2, '0')}`;
+}
+
+function cardioPaceTrendScore(deltaSec: number): number {
+  if (deltaSec <= -45) return 92;
+  if (deltaSec <= -15) return 80;
+  if (deltaSec <= 15) return 65;
+  if (deltaSec <= 45) return 50;
+  return 35;
+}
+
+function cardioExerciseDisplayName(raw?: string | null): string {
+  const label = humanizeToken(raw) || 'Cardio';
+  return label
+    .replace(/\bHiit\b/g, 'HIIT')
+    .replace(/\bVo2\b/g, 'VO2')
+    .replace(/\bRpe\b/g, 'RPE');
+}
+
+function cardioExerciseKey(raw?: string | null): string {
+  return cardioExerciseDisplayName(raw).toLowerCase();
+}
+
 function formatSignedWeightDelta(lbs: number, weightUnit: WeightUnit): string {
   const prefix = lbs > 0 ? '+' : lbs < 0 ? '-' : '';
   return `${prefix}${formatWeight(Math.abs(lbs), weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}`;
@@ -469,38 +1133,1499 @@ function weightChartValue(lbs: number, weightUnit: WeightUnit): number {
   return weightUnit === 'kg' ? Math.round(value * 10) / 10 : Math.round(value);
 }
 
-function buildCardioInsights(points: PaceHistoryPoint[], distanceUnit: DistanceUnit) {
-  const withDistance = points.filter(p => p.distance != null && p.distance > 0);
-  if (withDistance.length === 0) return [];
-  const totalDistance = withDistance.reduce((sum, p) => sum + (p.distance ?? 0), 0);
-  const bestDistance = withDistance.reduce((best, p) => (p.distance ?? 0) > (best.distance ?? 0) ? p : best, withDistance[0]);
-  const latest = [...withDistance].sort((a, b) => +new Date(a.date) - +new Date(b.date)).slice(-1)[0];
-  const byExercise = new Map<string, PaceHistoryPoint[]>();
-  for (const p of points) byExercise.set(p.exercise, [...(byExercise.get(p.exercise) ?? []), p]);
+function graphValueLabelIndexes(values: number[], fullLabelLimit = 12): Set<number> {
+  const indexes = new Set<number>();
+  const finiteValues = values
+    .map((value, index) => ({ value, index }))
+    .filter(item => Number.isFinite(item.value));
+  if (finiteValues.length === 0) return indexes;
+  if (values.length <= fullLabelLimit) {
+    finiteValues.forEach(item => indexes.add(item.index));
+    return indexes;
+  }
+  indexes.add(finiteValues[0].index);
+  indexes.add(finiteValues[finiteValues.length - 1].index);
+  const peak = finiteValues.reduce((best, item) => (item.value > best.value ? item : best), finiteValues[0]);
+  indexes.add(peak.index);
+  return indexes;
+}
+
+function graphValueLabelWidth(label: string): number {
+  return Math.max(24, label.length * 6.2 + 10);
+}
+
+function graphValueLabelX(x: number, labelWidth: number, chartW: number, padL: number, padR: number): number {
+  const minX = padL + labelWidth / 2;
+  const maxX = chartW - padR - labelWidth / 2;
+  return Math.max(minX, Math.min(maxX, x));
+}
+
+function graphValueLabelY(y: number): number {
+  return Math.max(13, y - 10);
+}
+
+function formatLoadVolume(lbs: number, weightUnit: WeightUnit): string {
+  const value = lbsToUnit(lbs, weightUnit);
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  if (abs >= 1000) {
+    const precision = abs >= 10000 ? 0 : 1;
+    return `${sign}${(abs / 1000).toFixed(precision)}k ${weightUnit}`;
+  }
+  return `${sign}${Math.round(abs)} ${weightUnit}`;
+}
+
+function formatLoadedSetCount(sets: number): string {
+  return `${sets} loaded set${sets === 1 ? '' : 's'}`;
+}
+
+function formatSignedLoadVolume(lbs: number | null, weightUnit: WeightUnit): string {
+  if (lbs == null || !Number.isFinite(lbs)) return '--';
+  const prefix = lbs > 0 ? '+' : lbs < 0 ? '-' : '';
+  return `${prefix}${formatLoadVolume(Math.abs(lbs), weightUnit)}`;
+}
+
+function formatAverageLoadPerSet(window: StrengthVolumeWindowSummary, weightUnit: WeightUnit): string {
+  if (window.loadedSets <= 0) return '--';
+  return `${formatLoadVolume(window.volumeLbs / window.loadedSets, weightUnit)}/set`;
+}
+
+function strengthVolumeTrendDetail(trend: StrengthVolumeTrendBreakdown, weightUnit: WeightUnit): string {
+  const setText = formatLoadedSetCount(trend.current.loadedSets);
+  const isFixedWeek = trend.bucketMode === 'fixed_week';
+  const currentText = isFixedWeek
+    ? (trend.elapsedDays >= trend.windowDays ? 'this week' : `this week through day ${trend.elapsedDays}`)
+    : `the last ${trend.windowDays}d`;
+  const comparisonText = isFixedWeek ? 'last week at this time' : `prior ${trend.windowDays}d`;
+  if (!trend.previous) return `${setText} in ${currentText}`;
+  if (trend.deltaPct != null) {
+    return `${setText} · ${trend.deltaPct >= 0 ? '+' : ''}${trend.deltaPct}% vs ${comparisonText}`;
+  }
+  if (trend.comparison === 'absolute' && trend.deltaLbs != null) {
+    return `${setText} · ${formatSignedLoadVolume(trend.deltaLbs, weightUnit)} vs ${comparisonText}`;
+  }
+  if (trend.comparison === 'insufficient_previous') {
+    return `${setText} · ${comparisonText} too sparse for %`;
+  }
+  return `${setText} · no prior workload`;
+}
+
+function strengthLoadBalanceColor(status: StrengthLoadBalanceStatus, score: number | null): string {
+  if (status === 'spike') return '#EF4444';
+  if (status === 'low' || status === 'high') return '#F59E0B';
+  if (status === 'balanced') return '#22C55E';
+  if (score != null && score >= 70) return '#22C55E';
+  if (score != null && score >= 50) return '#F59E0B';
+  return '#6366F1';
+}
+
+function strengthLoadStatusLabel(status: StrengthLoadBalanceStatus): string {
+  if (status === 'spike') return 'Spike';
+  if (status === 'low') return 'Low';
+  if (status === 'high') return 'High';
+  if (status === 'balanced') return 'In range';
+  return 'Needs data';
+}
+
+function formatSetCount(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function strengthLoadBalanceValue(summary: StrengthLoadBalanceSummary, _weightUnit: WeightUnit): string {
+  return summary.score == null ? 'Needs tags' : String(summary.score);
+}
+
+type ZoneMinutes = [number, number, number, number, number];
+
+type CardioTrendSummary = {
+  hasData: boolean;
+  score: number | null;
+  rating: string;
+  distance14dMiles: number;
+  previousDistance14dMiles: number;
+  distanceDeltaPct: number | null;
+  duration14dSec: number;
+  previousDuration14dSec: number;
+  durationDeltaPct: number | null;
+  zone2Minutes7d: number;
+  zone2MinutesWeek: number;
+  previousZone2MinutesWeek: number;
+  cardioSessions7d: number;
+  easyZoneMinutes14d: number;
+  hardZoneMinutes14d: number;
+  easySharePct: number | null;
+  // 30-day variants — power the Cardio Fitness Profile radar (score card + insights
+  // stay on the conventional weekly/14-day fields above).
+  distance30dMiles: number;
+  zone2Minutes30d: number;
+  cardioSessions30d: number;
+  easyZoneMinutes30d: number;
+  hardZoneMinutes30d: number;
+  easySharePct30d: number | null;
+  bestPaceDeltaSec: number | null;
+  bestPaceExercise: string | null;
+  longestDistanceMiles: number;
+  longestDistanceExercise: string | null;
+  longestDurationSec: number;
+  longestDurationExercise: string | null;
+  latestPoint: PaceHistoryPoint | null;
+  vo2Max: number | null;
+};
+
+type CardioChartMode = 'distance' | 'pace' | 'duration';
+
+type CardioExerciseGroup = {
+  key: string;
+  name: string;
+  points: PaceHistoryPoint[];
+  distancePoints: PaceHistoryPoint[];
+  pacePoints: PaceHistoryPoint[];
+  durationPoints: PaceHistoryPoint[];
+  maxDistance: number;
+  maxDurationSec: number;
+};
+
+type TrendActivityMetric = { label: string; value: string; detail: string };
+type TrendActivityCard = {
+  key: string;
+  title: string;
+  subtitle: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
+  color: string;
+  metrics: TrendActivityMetric[];
+};
+
+function trendActivityCardEditSections(cards: TrendActivityCard[]): EditVisibilitySection[] {
+  return cards.map(card => ({
+    id: card.key,
+    label: card.title,
+    desc: card.metrics.length > 0
+      ? `${card.subtitle} - ${card.metrics.slice(0, 3).map(metric => metric.label).join(', ')}`
+      : card.subtitle,
+  }));
+}
+
+function cardioDurationSourceNote(rows: PaceHistoryPoint[]): string | null {
+  const hasMovingTime = rows.some(point => {
+    const source = String(point.duration_source ?? '').toLowerCase();
+    return source.includes('moving') || (point.moving_seconds != null && point.moving_seconds > 0);
+  });
+  if (!hasMovingTime) return null;
+  const hasMixedDuration = rows.some(point => {
+    const source = String(point.duration_source ?? '').toLowerCase();
+    return source && !source.includes('moving');
+  });
+  return hasMixedDuration ? 'Moving time used where available.' : 'Moving time.';
+}
+
+function cardioPointDurationSeconds(point: PaceHistoryPoint): number {
+  const seconds = Number(point.moving_seconds ?? point.pace_duration_seconds ?? point.duration_seconds);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function cardioVolumeValue(summary: CardioTrendSummary, distanceUnit: DistanceUnit): string | null {
+  if (summary.distance14dMiles > 0) return formatDistance(summary.distance14dMiles, distanceUnit);
+  if (summary.duration14dSec > 0) return formatMinutesCompact(summary.duration14dSec / 60);
+  return null;
+}
+
+function cardioVolumeTrendValue(summary: CardioTrendSummary, distanceUnit: DistanceUnit): string | null {
+  if (summary.distanceDeltaPct != null) {
+    return `${summary.distanceDeltaPct >= 0 ? '+' : ''}${summary.distanceDeltaPct}%`;
+  }
+  if (summary.durationDeltaPct != null) {
+    return `${summary.durationDeltaPct >= 0 ? '+' : ''}${summary.durationDeltaPct}%`;
+  }
+  return cardioVolumeValue(summary, distanceUnit);
+}
+
+function cardioVolumeDetail(summary: CardioTrendSummary, distanceUnit: DistanceUnit): string {
+  const base = summary.distance14dMiles > 0
+    ? `${formatDistance(summary.distance14dMiles, distanceUnit)} last 14d`
+    : summary.duration14dSec > 0
+      ? `${formatMinutesCompact(summary.duration14dSec / 60)} last 14d`
+      : 'distance or time logged';
+  if (summary.distanceDeltaPct != null) return `${base} vs prior 14d`;
+  if (summary.durationDeltaPct != null) return `${base} vs prior 14d`;
+  return base;
+}
+
+type TrendMetricSuggestion = {
+  key: string;
+  title: string;
+  detail: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
+  color: string;
+};
+
+function emptyZoneMinutes(): ZoneMinutes {
+  return [0, 0, 0, 0, 0];
+}
+
+function addSummaryZones(acc: ZoneMinutes, summary: StoredWorkoutSummary): ZoneMinutes {
+  const zones = summary.hrZoneMinutes ?? [];
+  return [
+    acc[0] + Math.max(0, Number(zones[0] ?? 0) || 0),
+    acc[1] + Math.max(0, Number(zones[1] ?? 0) || 0),
+    acc[2] + Math.max(0, Number(zones[2] ?? 0) || 0),
+    acc[3] + Math.max(0, Number(zones[3] ?? 0) || 0),
+    acc[4] + Math.max(0, Number(zones[4] ?? 0) || 0),
+  ];
+}
+
+function isCardioFocusText(raw: unknown): boolean {
+  const value = String(raw ?? '').toLowerCase();
+  return /\b(cardio|conditioning|zone\s*2|interval|hiit|run|running|jog|bike|cycling|cycle|row|rowing|swim|swimming|elliptical|stair|hike|hiking|walk|walking|tempo|sprint|endurance|aerobic)\b/.test(value);
+}
+
+function zoneMinutesInWindow(
+  summaries: StoredWorkoutSummary[],
+  startDate: string,
+  endDate: string,
+): ZoneMinutes {
+  return summaries
+    .filter(row => dateInWindow(row.date, startDate, endDate) && isCardioHrZoneSource(row))
+    .reduce((acc, row) => addSummaryZones(acc, row), emptyZoneMinutes());
+}
+
+function cardioSessionCountInWindow(
+  paceHistory: PaceHistoryPoint[],
+  summaries: StoredWorkoutSummary[],
+  healthSummary: HealthSummary | null,
+  startDate: string,
+  endDate: string,
+): number {
+  const keys = new Set<string>();
+  for (const point of paceHistory) {
+    if (!dateInWindow(point.date, startDate, endDate)) continue;
+    const hasCardioMetric = (point.distance != null && point.distance > 0)
+      || paceSeconds(point.pace) != null
+      || (point.duration_seconds != null && point.duration_seconds > 0);
+    if (hasCardioMetric) {
+      keys.add(`pace:${String(point.date ?? '').slice(0, 10)}:${String(point.exercise ?? 'cardio').toLowerCase()}`);
+    }
+  }
+  for (const summary of summaries) {
+    if (!dateInWindow(summary.date, startDate, endDate)) continue;
+    const hasRoute = Array.isArray(summary.routeCoords) && summary.routeCoords.length > 0;
+    if (isCardioFocusText(summary.focus) || hasRoute) {
+      keys.add(`summary:${summary.date.slice(0, 10)}:${String(summary.focus ?? '').toLowerCase()}`);
+    }
+  }
+  for (const workout of healthSummary?.workoutDetails ?? []) {
+    if (!dateInWindow(workout.startDate, startDate, endDate)) continue;
+    if (isCardioFocusText(workout.activityName) || (workout.distanceMiles ?? 0) > 0) {
+      keys.add(`health:${String(workout.startDate).slice(0, 10)}:${workout.activityName.toLowerCase()}`);
+    }
+  }
+  return keys.size;
+}
+
+type CardioActivityMixItem = {
+  key: 'running' | 'cycling' | 'walking' | 'other';
+  label: string;
+  count: number;
+};
+
+function cardioActivityMixKey(raw: unknown): CardioActivityMixItem['key'] {
+  const text = String(raw ?? '').toLowerCase();
+  if (/\b(run|running|jog|jogging|treadmill|trail)\b/.test(text)) return 'running';
+  if (/\b(bike|cycling|cycle|ride|riding|stationary bike)\b/.test(text)) return 'cycling';
+  if (/\b(walk|walking|hike|hiking)\b/.test(text)) return 'walking';
+  return 'other';
+}
+
+function buildCardioActivityMix(
+  paceHistory: PaceHistoryPoint[],
+  summaries: StoredWorkoutSummary[],
+  healthSummary: HealthSummary | null,
+  startDate: string,
+  endDate: string,
+): CardioActivityMixItem[] {
+  const counts: Record<CardioActivityMixItem['key'], Set<string>> = {
+    running: new Set(),
+    cycling: new Set(),
+    walking: new Set(),
+    other: new Set(),
+  };
+  const add = (source: string, date: unknown, label: unknown) => {
+    const day = String(date ?? '').slice(0, 10);
+    if (!day || !dateInWindow(day, startDate, endDate)) return;
+    const kind = cardioActivityMixKey(label);
+    counts[kind].add(`${source}:${day}:${String(label ?? 'cardio').toLowerCase()}`);
+  };
+  for (const point of paceHistory) {
+    const hasCardioMetric = (point.distance != null && point.distance > 0)
+      || paceSeconds(point.pace) != null
+      || (point.duration_seconds != null && point.duration_seconds > 0);
+    if (hasCardioMetric) add('pace', point.date, point.exercise);
+  }
+  for (const summary of summaries) {
+    const hasRoute = Array.isArray(summary.routeCoords) && summary.routeCoords.length > 0;
+    if (isCardioFocusText(summary.focus) || hasRoute) add('summary', summary.date, summary.focus);
+  }
+  for (const workout of healthSummary?.workoutDetails ?? []) {
+    if (isCardioFocusText(workout.activityName) || (workout.distanceMiles ?? 0) > 0) {
+      add('health', workout.startDate, workout.activityName);
+    }
+  }
+  const items: CardioActivityMixItem[] = [
+    { key: 'running', label: 'Running', count: counts.running.size },
+    { key: 'cycling', label: 'Cycling', count: counts.cycling.size },
+    { key: 'walking', label: 'Walking', count: counts.walking.size },
+    { key: 'other', label: 'Other', count: counts.other.size },
+  ];
+  return items.filter(item => item.count > 0);
+}
+
+function buildCardioTrendSummary(
+  paceHistory: PaceHistoryPoint[],
+  summaries: StoredWorkoutSummary[],
+  healthSummary: HealthSummary | null,
+  window: ProgressDateWindow,
+): CardioTrendSummary {
+  const today = dateKey(new Date());
+  const current14Start = shiftDateKey(today, -13);
+  const previous14Start = shiftDateKey(today, -27);
+  const previous14End = shiftDateKey(today, -14);
+  const current7Start = shiftDateKey(today, -6);
+  const current30Start = shiftDateKey(today, -29);
+  const usablePoints = paceHistory
+    .filter(point => (point.distance != null && point.distance > 0)
+      || paceSeconds(point.pace) != null
+      || (point.duration_seconds != null && point.duration_seconds > 0))
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+  const current30Points = usablePoints.filter(point => dateInWindow(point.date, current30Start, today));
+  const distance14dMiles = paceHistory
+    .filter(point => dateInWindow(point.date, current14Start, today))
+    .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
+  const previousDistance14dMiles = paceHistory
+    .filter(point => dateInWindow(point.date, previous14Start, previous14End))
+    .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
+  const distanceDeltaPct = previousDistance14dMiles > 0
+    ? Math.round(((distance14dMiles - previousDistance14dMiles) / previousDistance14dMiles) * 100)
+    : null;
+  const duration14dSec = paceHistory
+    .filter(point => dateInWindow(point.date, current14Start, today))
+    .reduce((sum, point) => sum + cardioPointDurationSeconds(point), 0);
+  const previousDuration14dSec = paceHistory
+    .filter(point => dateInWindow(point.date, previous14Start, previous14End))
+    .reduce((sum, point) => sum + cardioPointDurationSeconds(point), 0);
+  const durationDeltaPct = previousDuration14dSec > 0
+    ? Math.round(((duration14dSec - previousDuration14dSec) / previousDuration14dSec) * 100)
+    : null;
+
+  const zones14d = zoneMinutesInWindow(summaries, current14Start, today);
+  const zones7d = zoneMinutesInWindow(summaries, current7Start, today);
+  const zonesWeek = zoneMinutesInWindow(summaries, window.startDate, window.endDate);
+  const previousZonesWeek = zoneMinutesInWindow(summaries, window.previousStartDate, window.previousEndDate);
+  const easyZoneMinutes14d = zones14d[0] + zones14d[1];
+  const hardZoneMinutes14d = zones14d[2] + zones14d[3] + zones14d[4];
+  const easyHardTotal = easyZoneMinutes14d + hardZoneMinutes14d;
+  const easySharePct = easyHardTotal > 0 ? Math.round((easyZoneMinutes14d / easyHardTotal) * 100) : null;
+
+  // 30-day windows for the Cardio Fitness Profile radar.
+  const distance30dMiles = paceHistory
+    .filter(point => dateInWindow(point.date, current30Start, today))
+    .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
+  const zones30d = zoneMinutesInWindow(summaries, current30Start, today);
+  const zone2Minutes30d = zones30d[1];
+  const easyZoneMinutes30d = zones30d[0] + zones30d[1];
+  const hardZoneMinutes30d = zones30d[2] + zones30d[3] + zones30d[4];
+  const easyHardTotal30d = easyZoneMinutes30d + hardZoneMinutes30d;
+  const easySharePct30d = easyHardTotal30d > 0 ? Math.round((easyZoneMinutes30d / easyHardTotal30d) * 100) : null;
+
+  const byExercise = new Map<string, { name: string; rows: PaceHistoryPoint[] }>();
+  for (const point of current30Points) {
+    const key = cardioExerciseKey(point.exercise);
+    const current = byExercise.get(key);
+    byExercise.set(key, {
+      name: current?.name ?? cardioExerciseDisplayName(point.exercise),
+      rows: [...(current?.rows ?? []), point],
+    });
+  }
   let bestPaceTrend: { exercise: string; delta: number } | null = null;
-  for (const [exercise, rows] of byExercise) {
+  for (const { name, rows } of byExercise.values()) {
     const paceRows = rows
-      .filter(p => paceSeconds(p.pace) != null)
-      .sort((a, b) => +new Date(a.date) - +new Date(b.date));
+      .filter(point => paceSeconds(point.pace) != null)
+      .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
     if (paceRows.length < 2) continue;
     const delta = paceSeconds(paceRows[paceRows.length - 1].pace)! - paceSeconds(paceRows[0].pace)!;
-    if (!bestPaceTrend || delta < bestPaceTrend.delta) bestPaceTrend = { exercise, delta };
+    if (!bestPaceTrend || delta < bestPaceTrend.delta) bestPaceTrend = { exercise: name, delta };
   }
-  const recent = withDistance.slice(-3);
-  const previous = withDistance.slice(-6, -3);
-  const recentAvg = recent.reduce((sum, p) => sum + (p.distance ?? 0), 0) / Math.max(1, recent.length);
-  const previousAvg = previous.reduce((sum, p) => sum + (p.distance ?? 0), 0) / Math.max(1, previous.length);
-  const avgDelta = previous.length ? recentAvg - previousAvg : null;
+
+  let longestDistanceMiles = 0;
+  let longestDistanceExercise: string | null = null;
+  let longestDurationSec = 0;
+  let longestDurationExercise: string | null = null;
+  for (const point of current30Points) {
+    const distance = Math.max(0, Number(point.distance) || 0);
+    const duration = Math.max(0, Number(point.duration_seconds) || 0);
+    if (distance > longestDistanceMiles) {
+      longestDistanceMiles = distance;
+      longestDistanceExercise = cardioExerciseDisplayName(point.exercise);
+    }
+    if (duration > longestDurationSec) {
+      longestDurationSec = duration;
+      longestDurationExercise = cardioExerciseDisplayName(point.exercise);
+    }
+  }
+
+  const cardioSessions7d = cardioSessionCountInWindow(paceHistory, summaries, healthSummary, current7Start, today);
+  const cardioSessions30d = cardioSessionCountInWindow(paceHistory, summaries, healthSummary, current30Start, today);
+  const vo2Max = healthSummary?.vo2Max ?? null;
+  const hasZoneData = easyHardTotal > 0 || zones7d.some(v => v > 0) || zonesWeek.some(v => v > 0);
+  const hasDistanceData = distance14dMiles > 0 || previousDistance14dMiles > 0 || longestDistanceMiles > 0;
+  const hasData = hasDistanceData || duration14dSec > 0 || hasZoneData || cardioSessions7d > 0 || vo2Max != null || longestDurationSec > 0;
+
+  const scoreParts: Array<{ value: number; weight: number }> = [];
+  if (vo2Max != null) {
+    const value = vo2Max >= 50 ? 95 : vo2Max >= 42 ? 80 : vo2Max >= 35 ? 65 : vo2Max >= 28 ? 45 : 25;
+    scoreParts.push({ value, weight: 0.45 });
+  }
+  if (hasZoneData) {
+    const z2 = zones7d[1];
+    const value = z2 >= 150 ? 95 : z2 >= 90 ? 75 : z2 >= 45 ? 55 : z2 >= 15 ? 35 : 20;
+    scoreParts.push({ value, weight: 0.30 });
+  }
+  if (bestPaceTrend != null) {
+    scoreParts.push({ value: cardioPaceTrendScore(bestPaceTrend.delta), weight: 0.18 });
+  }
+  if (cardioSessions7d > 0) {
+    const value = cardioSessions7d >= 3 ? 90 : cardioSessions7d >= 2 ? 70 : 50;
+    scoreParts.push({ value, weight: 0.12 });
+  }
+  if (easySharePct != null && easyHardTotal >= 20) {
+    const value = easySharePct >= 65 && easySharePct <= 90 ? 85
+      : easySharePct >= 50 && easySharePct <= 95 ? 70
+        : 45;
+    scoreParts.push({ value, weight: 0.10 });
+  }
+  const hasPrimaryCardioSignal = vo2Max != null || hasZoneData || bestPaceTrend != null;
+  const rawScore = scoreParts.length > 0
+    ? Math.round(scoreParts.reduce((sum, part) => sum + part.value * part.weight, 0) / scoreParts.reduce((sum, part) => sum + part.weight, 0))
+    : null;
+  const score = rawScore == null ? null : (!hasPrimaryCardioSignal ? Math.min(rawScore, 55) : rawScore);
+  const rating = score == null ? 'Need cardio data'
+    : score >= 85 ? 'Strong aerobic base'
+      : score >= 70 ? 'Good aerobic work'
+        : score >= 50 ? 'Building cardio base'
+          : 'Needs consistency';
+
+  return {
+    hasData,
+    score,
+    rating,
+    distance14dMiles,
+    previousDistance14dMiles,
+    distanceDeltaPct,
+    duration14dSec,
+    previousDuration14dSec,
+    durationDeltaPct,
+    zone2Minutes7d: zones7d[1],
+    zone2MinutesWeek: zonesWeek[1],
+    previousZone2MinutesWeek: previousZonesWeek[1],
+    cardioSessions7d,
+    easyZoneMinutes14d,
+    hardZoneMinutes14d,
+    easySharePct,
+    distance30dMiles,
+    zone2Minutes30d,
+    cardioSessions30d,
+    easyZoneMinutes30d,
+    hardZoneMinutes30d,
+    easySharePct30d,
+    bestPaceDeltaSec: bestPaceTrend?.delta ?? null,
+    bestPaceExercise: bestPaceTrend?.exercise ?? null,
+    longestDistanceMiles,
+    longestDistanceExercise,
+    longestDurationSec,
+    longestDurationExercise,
+    latestPoint: usablePoints[usablePoints.length - 1] ?? null,
+    vo2Max,
+  };
+}
+
+function buildCardioInsights(summary: CardioTrendSummary, distanceUnit: DistanceUnit) {
+  if (!summary.hasData) return [];
+  const items: Array<{ label: string; value: string; detail: string }> = [];
+  if (summary.distance14dMiles > 0 || summary.previousDistance14dMiles > 0) {
+    items.push({
+      label: '14d distance',
+      value: formatDistance(summary.distance14dMiles, distanceUnit),
+      detail: summary.distanceDeltaPct == null
+        ? 'distance logged in the last 14 days'
+        : `${summary.distanceDeltaPct >= 0 ? '+' : ''}${summary.distanceDeltaPct}% vs previous 14 days`,
+    });
+  } else if (summary.duration14dSec > 0 || summary.previousDuration14dSec > 0) {
+    items.push({
+      label: '14d time',
+      value: formatMinutesCompact(summary.duration14dSec / 60),
+      detail: summary.durationDeltaPct == null
+        ? 'cardio time logged in the last 14 days'
+        : `${summary.durationDeltaPct >= 0 ? '+' : ''}${summary.durationDeltaPct}% vs previous 14 days`,
+    });
+  }
+  if (summary.zone2MinutesWeek > 0 || summary.previousZone2MinutesWeek > 0) {
+    const delta = Math.round(summary.zone2MinutesWeek - summary.previousZone2MinutesWeek);
+    items.push({
+      label: 'Zone 2',
+      value: `${Math.round(summary.zone2MinutesWeek)}m`,
+      detail: summary.previousZone2MinutesWeek > 0
+        ? `${delta >= 0 ? '+' : ''}${delta}m vs prior week`
+        : 'easy aerobic minutes this week',
+    });
+  }
+  if (summary.cardioSessions7d > 0) {
+    items.push({
+      label: 'Sessions',
+      value: String(summary.cardioSessions7d),
+      detail: `cardio session${summary.cardioSessions7d === 1 ? '' : 's'} in the last 7 days`,
+    });
+  }
+  if (summary.easySharePct != null) {
+    items.push({
+      label: 'Intensity split',
+      value: `${summary.easySharePct}% easy`,
+      detail: 'Z1-Z2 vs Z3-Z5 from HR zones',
+    });
+  }
+  if (summary.bestPaceDeltaSec != null && summary.bestPaceExercise) {
+    items.push({
+      label: 'Pace trend',
+      value: formatPaceDelta(summary.bestPaceDeltaSec),
+      detail: `${summary.bestPaceExercise} vs first log`,
+    });
+  }
+  if (summary.longestDistanceMiles > 0 && summary.longestDistanceExercise) {
+    items.push({
+      label: 'Longest session',
+      value: formatDistance(summary.longestDistanceMiles, distanceUnit),
+      detail: summary.longestDistanceExercise,
+    });
+  } else if (summary.longestDurationSec > 0 && summary.longestDurationExercise) {
+    items.push({
+      label: 'Longest session',
+      value: formatDuration(summary.longestDurationSec),
+      detail: summary.longestDurationExercise,
+    });
+  }
+  if (items.length === 0 && summary.vo2Max != null) {
+    items.push({
+      label: 'VO₂ max',
+      value: summary.vo2Max.toFixed(1),
+      detail: `${HEALTH_WEARABLE_LABEL} cardio fitness estimate`,
+    });
+  }
+  return items.slice(0, 6);
+}
+
+function positiveNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function average(values: Array<number | null | undefined>): number | null {
+  const finite = values.filter((v): v is number => Number.isFinite(v ?? NaN));
+  if (finite.length === 0) return null;
+  return finite.reduce((sum, value) => sum + value, 0) / finite.length;
+}
+
+function formatMinutesCompact(minutes: number): string {
+  const rounded = Math.max(0, Math.round(minutes));
+  if (rounded >= 60) {
+    const h = Math.floor(rounded / 60);
+    const m = rounded % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  return `${rounded}m`;
+}
+
+function formatPacePer100m(seconds: number): string {
+  const rounded = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(rounded / 60);
+  const secs = rounded % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}/100m`;
+}
+
+function manualActivityText(session: WorkoutSession): string {
+  const activity = session.manualActivity;
   return [
-	    { label: '90d distance', value: formatDistance(totalDistance, distanceUnit), detail: `${withDistance.length} cardio logs with distance` },
-	    { label: 'Best session', value: formatDistance(bestDistance.distance ?? 0, distanceUnit), detail: bestDistance.exercise },
-	    { label: 'Latest', value: formatDistance(latest.distance ?? 0, distanceUnit), detail: latest.pace ? `${latest.exercise} · ${latest.pace}` : latest.exercise },
-    bestPaceTrend
-      ? { label: 'Pace trend', value: formatPaceDelta(bestPaceTrend.delta), detail: `${bestPaceTrend.exercise} vs first log` }
-      : avgDelta != null
-	        ? { label: 'Distance trend', value: `${avgDelta >= 0 ? '+' : ''}${formatDistance(Math.abs(avgDelta), distanceUnit)}`, detail: 'Recent 3 vs previous 3 avg' }
-        : null,
-  ].filter((x): x is { label: string; value: string; detail: string } => Boolean(x));
+    activity?.category,
+    activity?.subtype,
+    activity?.cardioStyle,
+    session.focus,
+  ].map(value => String(value ?? '').toLowerCase()).join(' ');
+}
+
+function activityTextIncludesAny(session: WorkoutSession, terms: string[]): boolean {
+  const text = manualActivityText(session);
+  return terms.some(term => text.includes(term));
+}
+
+function recentManualActivitySessions(history: WorkoutSession[]): WorkoutSession[] {
+  const today = dateKey(new Date());
+  const start = shiftDateKey(today, -89);
+  return history
+    .filter(session => session.completed && !session.skipped && session.manualActivity && dateInWindow(session.date, start, today))
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+}
+
+function sessionDurationMinutes(session: WorkoutSession): number {
+  return Math.max(0, Number(session.durationSeconds) || 0) / 60;
+}
+
+function swimDistanceMiles(session: WorkoutSession): number | null {
+  const activityDistance = positiveNumber(session.manualActivity?.distanceMiles);
+  if (activityDistance != null) return activityDistance;
+  const details = session.manualActivity?.details;
+  const poolLengthMeters = positiveNumber(details?.poolLengthMeters);
+  const laps = positiveNumber(details?.laps);
+  if (poolLengthMeters != null && laps != null) {
+    return (poolLengthMeters * laps) / 1609.344;
+  }
+  return null;
+}
+
+function latestActivitySubtitle(sessions: WorkoutSession[], fallback: string): string {
+  const latest = [...sessions].sort((a, b) => parseDateKeyMs(b.date) - parseDateKeyMs(a.date))[0];
+  const subtype = latest?.manualActivity?.subtype;
+  return subtype ? humanizeToken(subtype) : fallback;
+}
+
+function formatSignedNumber(value: number, suffix = '', precision = 0): string {
+  const rounded = Math.round(value * Math.pow(10, precision)) / Math.pow(10, precision);
+  return `${rounded >= 0 ? '+' : ''}${rounded.toFixed(precision)}${suffix}`;
+}
+
+function hardSessionSignal(summary: StoredWorkoutSummary): boolean {
+  const hardZones = (summary.hrZoneMinutes ?? []).slice(2).reduce((sum, min) => sum + (Number(min) || 0), 0);
+  return (summary.trainingScore ?? 0) >= 75
+    || (summary.feedback?.intensity ?? 0) >= 4
+    || hardZones >= 20
+    || /\b(hiit|interval|sprint|race|tempo|heavy|hard)\b/i.test(String(summary.focus ?? ''));
+}
+
+function sessionCategoryLabel(session: WorkoutSession): string {
+  const category = session.manualActivity?.category;
+  if (category) return humanizeToken(category);
+  if (session.exercises?.length > 0) return 'Strength';
+  if (isCardioFocusText(session.focus)) return 'Cardio';
+  return 'Workout';
+}
+
+function buildHighValueTrendCards(input: {
+  history: WorkoutSession[];
+  summaries: StoredWorkoutSummary[];
+  sleepHistory: ProgressSleepHistoryPoint[];
+  healthSummary: HealthSummary | null;
+  weightEntries: WeightEntry[];
+  bodyScanHistory: BodyScanEntry[];
+  mealAverages: import('../services/api').MealAverages | null;
+  nutritionScoreWeekly: import('../services/api').NutritionScoreWeekly | null;
+  cardioSummary: CardioTrendSummary;
+  weightUnit: WeightUnit;
+  distanceUnit: DistanceUnit;
+  showMealProgress: boolean;
+}): TrendActivityCard[] {
+  const {
+    history,
+    summaries,
+    sleepHistory,
+    healthSummary,
+    weightEntries,
+    bodyScanHistory,
+    mealAverages,
+    nutritionScoreWeekly,
+    cardioSummary,
+    weightUnit,
+    distanceUnit,
+    showMealProgress,
+  } = input;
+  const today = dateKey(new Date());
+  const current14Start = shiftDateKey(today, -13);
+  const previous14Start = shiftDateKey(today, -27);
+  const previous14End = shiftDateKey(today, -14);
+  const current28Start = shiftDateKey(today, -27);
+  const previous28Start = shiftDateKey(today, -55);
+  const previous28End = shiftDateKey(today, -28);
+  const cards: TrendActivityCard[] = [];
+
+  const sleepByNight = new Map(sleepHistory.map(point => [point.night.slice(0, 10), point]));
+  const sleepBaseline = sleepHistory.slice(-30);
+  const hrvBaseline = average(sleepBaseline.map(point => point.hrv));
+  const rhrBaseline = average(sleepBaseline.map(point => point.restingHr));
+  const hardSummaries = summaries
+    .filter(summary => dateInWindow(summary.date, shiftDateKey(today, -20), today) && hardSessionSignal(summary))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const nextSleep = hardSummaries
+    .map(summary => sleepByNight.get(shiftDateKey(String(summary.date ?? '').slice(0, 10), 1)))
+    .filter((point): point is ProgressSleepHistoryPoint => !!point);
+  const hrvDelta = hrvBaseline != null
+    ? average(nextSleep.map(point => point.hrv != null ? point.hrv - hrvBaseline : null))
+    : null;
+  const rhrDelta = rhrBaseline != null
+    ? average(nextSleep.map(point => point.restingHr != null ? point.restingHr - rhrBaseline : null))
+    : null;
+  const nextSleepScore = average(nextSleep.map(point => point.score));
+  if (nextSleep.length > 0 || healthSummary?.sleepScore || healthSummary?.hrvAvg != null || healthSummary?.restingHeartRate != null) {
+    const recoveryColor = hrvDelta != null
+      ? hrvDelta >= 0 ? '#22C55E' : '#F59E0B'
+      : rhrDelta != null
+        ? rhrDelta <= 0 ? '#22C55E' : '#F59E0B'
+        : '#14B8A6';
+    cards.push({
+      key: 'recovery-response',
+      title: 'Recovery response',
+      subtitle: nextSleep.length > 0 ? 'After hard sessions' : 'Wearable recovery baseline',
+      icon: 'leaf-outline',
+      color: recoveryColor,
+      metrics: [
+        {
+          label: 'Samples',
+          value: nextSleep.length > 0 ? String(nextSleep.length) : (healthSummary?.sleepScore ? '1' : '--'),
+          detail: nextSleep.length > 0 ? 'next-night hard-day reads' : 'latest recovery read',
+        },
+        ...(hrvDelta != null ? [{ label: 'HRV response', value: formatSignedNumber(hrvDelta, ' ms', 0), detail: 'vs 30-night baseline' }] : []),
+        ...(rhrDelta != null ? [{ label: 'RHR response', value: formatSignedNumber(rhrDelta, ' bpm', 0), detail: 'lower is easier recovery' }] : []),
+        ...(nextSleepScore != null ? [{ label: 'Sleep score', value: String(Math.round(nextSleepScore)), detail: 'after hard sessions' }] : []),
+      ],
+    });
+  }
+
+  const currentScores = summaries
+    .filter(summary => dateInWindow(summary.date, current14Start, today))
+    .map(summary => positiveNumber(summary.trainingScore))
+    .filter((score): score is number => score != null);
+  const previousScores = summaries
+    .filter(summary => dateInWindow(summary.date, previous14Start, previous14End))
+    .map(summary => positiveNumber(summary.trainingScore))
+    .filter((score): score is number => score != null);
+  const currentQuality = average(currentScores);
+  const previousQuality = average(previousScores);
+  const currentFeedback = summaries.filter(summary => dateInWindow(summary.date, current14Start, today) && summary.feedback);
+  const avgIntensity = average(currentFeedback.map(summary => summary.feedback?.intensity));
+  const sorenessMentions = currentFeedback.reduce((sum, summary) => sum + (summary.feedback?.sorenessAreas?.length ?? 0), 0);
+  if (currentQuality != null || currentFeedback.length > 0) {
+    const qualityDelta = currentQuality != null && previousQuality != null ? currentQuality - previousQuality : null;
+    cards.push({
+      key: 'workout-quality',
+      title: 'Workout quality',
+      subtitle: 'Training score + feedback',
+      icon: 'checkmark-done-outline',
+      color: qualityDelta == null || qualityDelta >= 0 ? '#14B8A6' : '#F59E0B',
+      metrics: [
+        ...(currentQuality != null ? [{ label: 'Avg score', value: String(Math.round(currentQuality)), detail: `${currentScores.length} scored session${currentScores.length === 1 ? '' : 's'}` }] : []),
+        ...(qualityDelta != null ? [{ label: 'Trend', value: formatSignedNumber(qualityDelta, '', 0), detail: 'vs prior 14 days' }] : []),
+        ...(avgIntensity != null ? [{ label: 'Intensity', value: `${avgIntensity.toFixed(1)}/5`, detail: 'post-workout feedback' }] : []),
+        { label: 'Soreness', value: String(sorenessMentions), detail: 'areas mentioned in 14d' },
+      ],
+    });
+  }
+
+  const setRows = history
+    .filter(session => session.completed && !session.skipped)
+    .flatMap(session => (session.exercises ?? []).flatMap(ex => (ex.sets ?? []).map(set => ({ set, date: session.date }))));
+  const currentRir = average(setRows
+    .filter(row => dateInWindow(row.date, current14Start, today))
+    .map(row => row.set.rir));
+  const previousRir = average(setRows
+    .filter(row => dateInWindow(row.date, previous14Start, previous14End))
+    .map(row => row.set.rir));
+  const loadedSets14d = setRows.filter(row =>
+    dateInWindow(row.date, current14Start, today)
+    && positiveNumber(row.set.weightLbs) != null
+    && positiveNumber(row.set.reps) != null
+  ).length;
+  const volumeTrend = buildStrengthVolumeTrend(history, { bucketMode: 'rolling', windowDays: 14, weekCount: 2 });
+  if (currentRir != null || loadedSets14d > 0 || volumeTrend.current.loadedSets > 0) {
+    const rirDelta = currentRir != null && previousRir != null ? currentRir - previousRir : null;
+    const readinessColor = currentRir == null ? '#6366F1' : currentRir >= 1.5 ? '#22C55E' : '#F59E0B';
+    cards.push({
+      key: 'strength-readiness',
+      title: 'Strength readiness',
+      subtitle: 'RIR + workload',
+      icon: 'barbell-outline',
+      color: readinessColor,
+      metrics: [
+        ...(currentRir != null ? [{ label: 'Avg RIR', value: currentRir.toFixed(1), detail: rirDelta != null ? `${formatSignedNumber(rirDelta, '', 1)} vs prior` : 'last 14 days' }] : []),
+        ...(volumeTrend.deltaPct != null ? [{ label: 'Volume trend', value: `${volumeTrend.deltaPct >= 0 ? '+' : ''}${volumeTrend.deltaPct}%`, detail: '14d vs prior 14d' }] : []),
+        { label: 'Loaded sets', value: String(loadedSets14d), detail: 'last 14 days' },
+      ],
+    });
+  }
+
+  if (cardioSummary.hasData) {
+    const volumeTrend = cardioVolumeTrendValue(cardioSummary, distanceUnit);
+    cards.push({
+      key: 'cardio-efficiency',
+      title: 'Cardio volume',
+      subtitle: 'Mileage, time, zones',
+      icon: 'pulse-outline',
+      color: '#06B6D4',
+      metrics: [
+        ...(volumeTrend ? [{ label: 'Volume trend', value: volumeTrend, detail: cardioVolumeDetail(cardioSummary, distanceUnit) }] : []),
+        ...(cardioSummary.bestPaceDeltaSec != null ? [{ label: 'Pace trend', value: formatPaceDelta(cardioSummary.bestPaceDeltaSec), detail: cardioSummary.bestPaceExercise ?? 'comparable cardio' }] : []),
+        ...(cardioSummary.easySharePct != null ? [{ label: 'Easy share', value: `${cardioSummary.easySharePct}%`, detail: 'Z1-Z2 vs Z3-Z5' }] : []),
+        ...(cardioSummary.zone2MinutesWeek > 0 ? [{ label: 'Zone 2', value: `${Math.round(cardioSummary.zone2MinutesWeek)}m`, detail: 'this plan week' }] : []),
+        ...(cardioSummary.vo2Max != null ? [{ label: 'VO2 max', value: cardioSummary.vo2Max.toFixed(1), detail: HEALTH_WEARABLE_LABEL }] : []),
+      ],
+    });
+  }
+
+  const currentSessions = history.filter(session => session.completed && !session.skipped && dateInWindow(session.date, current28Start, today));
+  const previousSessions = history.filter(session => session.completed && !session.skipped && dateInWindow(session.date, previous28Start, previous28End));
+  if (currentSessions.length > 0 || previousSessions.length > 0) {
+    const currentDays = new Set(currentSessions.map(session => String(session.date ?? '').slice(0, 10))).size;
+    const previousDays = new Set(previousSessions.map(session => String(session.date ?? '').slice(0, 10))).size;
+    const categoryCounts = new Map<string, number>();
+    for (const session of currentSessions) {
+      const label = sessionCategoryLabel(session);
+      categoryCounts.set(label, (categoryCounts.get(label) ?? 0) + 1);
+    }
+    const topCategory = Array.from(categoryCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+    cards.push({
+      key: 'consistency-mix',
+      title: 'Consistency mix',
+      subtitle: 'Activity distribution',
+      icon: 'calendar-outline',
+      color: currentDays >= previousDays ? '#22C55E' : '#F59E0B',
+      metrics: [
+        { label: 'Active days', value: String(currentDays), detail: `${formatSignedNumber(currentDays - previousDays)} vs prior 28d` },
+        { label: 'Sessions', value: String(currentSessions.length), detail: 'last 28 days' },
+        ...(topCategory ? [{ label: 'Top category', value: topCategory[0], detail: `${topCategory[1]} session${topCategory[1] === 1 ? '' : 's'}` }] : []),
+      ],
+    });
+  }
+
+  if (showMealProgress && (nutritionScoreWeekly || mealAverages)) {
+    const trackingPct = positiveNumber(mealAverages?.tracking_rate_pct);
+    cards.push({
+      key: 'nutrition-trend',
+      title: 'Nutrition trend',
+      subtitle: 'Logging + target hits',
+      icon: 'restaurant-outline',
+      color: (nutritionScoreWeekly?.avg_score ?? 0) >= 75 ? '#22C55E' : '#F59E0B',
+      metrics: [
+        ...(nutritionScoreWeekly ? [{ label: 'Avg score', value: String(Math.round(nutritionScoreWeekly.avg_score)), detail: `${nutritionScoreWeekly.days_with_data}/${nutritionScoreWeekly.window_days} days scored` }] : []),
+        ...(nutritionScoreWeekly ? [{ label: 'Protein hits', value: String(nutritionScoreWeekly.days_hit_protein), detail: 'days on target' }] : []),
+        ...(nutritionScoreWeekly ? [{ label: 'Fiber hits', value: String(nutritionScoreWeekly.days_hit_fiber), detail: 'days on target' }] : []),
+        ...(trackingPct != null ? [{ label: 'Tracking', value: `${Math.round(trackingPct)}%`, detail: 'meal logging rate' }] : []),
+      ],
+    });
+  }
+
+  const sortedWeights = [...weightEntries]
+    .filter(entry => positiveNumber(entry.weightLbs) != null)
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+  const recentWeights = sortedWeights.filter(entry => dateInWindow(entry.date, shiftDateKey(today, -59), today));
+  const firstWeight = recentWeights[0];
+  const lastWeight = recentWeights[recentWeights.length - 1];
+  const sortedScans = [...bodyScanHistory]
+    .filter(scan => positiveNumber(scan.bodyFatPct) != null)
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+  const firstScan = sortedScans[0];
+  const lastScan = sortedScans[sortedScans.length - 1];
+  if ((firstWeight && lastWeight && firstWeight.date !== lastWeight.date) || (firstScan && lastScan && firstScan.date !== lastScan.date)) {
+    const days = firstWeight && lastWeight ? Math.max(1, Math.round((parseDateKeyMs(lastWeight.date) - parseDateKeyMs(firstWeight.date)) / 86400000)) : 0;
+    const weightPerWeek = firstWeight && lastWeight && days > 0
+      ? ((lastWeight.weightLbs - firstWeight.weightLbs) / days) * 7
+      : null;
+    const bfDelta = firstScan && lastScan && firstScan.date !== lastScan.date
+      ? lastScan.bodyFatPct - firstScan.bodyFatPct
+      : null;
+    cards.push({
+      key: 'body-goal-trend',
+      title: 'Body / goal trend',
+      subtitle: 'Scale + scan direction',
+      icon: 'body-outline',
+      color: weightPerWeek == null || Math.abs(weightPerWeek) <= 1.5 ? '#6366F1' : '#F59E0B',
+      metrics: [
+        ...(weightPerWeek != null ? [{ label: 'Scale trend', value: `${formatSignedWeightDelta(weightPerWeek, weightUnit)}/wk`, detail: `${recentWeights.length} weigh-in${recentWeights.length === 1 ? '' : 's'}` }] : []),
+        ...(lastWeight ? [{ label: 'Latest weight', value: formatWeight(lastWeight.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }), detail: formatDate(lastWeight.date) }] : []),
+        ...(bfDelta != null ? [{ label: 'Body fat', value: formatSignedNumber(bfDelta, '%', 1), detail: `${sortedScans.length} scan${sortedScans.length === 1 ? '' : 's'}` }] : []),
+        ...(cardioSummary.longestDistanceMiles > 0 ? [{ label: 'Cardio range', value: formatDistance(cardioSummary.longestDistanceMiles, distanceUnit), detail: 'longest 30d session' }] : []),
+      ],
+    });
+  }
+
+  return cards.filter(card => card.metrics.length > 0).slice(0, 8);
+}
+
+function buildActivityTrendCards(history: WorkoutSession[], distanceUnit: DistanceUnit): TrendActivityCard[] {
+  const recent = recentManualActivitySessions(history);
+  const cards: TrendActivityCard[] = [];
+
+  const sauna = recent.filter(session => activityTextIncludesAny(session, ['sauna']));
+  if (sauna.length > 0) {
+    const totalMinutes = sauna.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const avgTemp = average(sauna.map(session => positiveNumber(session.manualActivity?.details?.temperatureF)));
+    const avgHumidity = average(sauna.map(session => positiveNumber(session.manualActivity?.details?.humidityPct)));
+    cards.push({
+      key: 'sauna',
+      title: 'Sauna exposure',
+      subtitle: latestActivitySubtitle(sauna, 'Heat recovery'),
+      icon: 'flame-outline',
+      color: '#F97316',
+      metrics: [
+        { label: 'Sessions', value: String(sauna.length), detail: 'last 90d' },
+        { label: 'Heat time', value: formatMinutesCompact(totalMinutes), detail: 'logged exposure' },
+        ...(avgTemp != null ? [{ label: 'Avg temp', value: `${Math.round(avgTemp)}F`, detail: avgHumidity != null ? `${Math.round(avgHumidity)}% humidity` : 'temperature logs' }] : []),
+      ],
+    });
+  }
+
+  const swims = recent.filter(session => activityTextIncludesAny(session, ['swim', 'pool']));
+  if (swims.length > 0) {
+    const swimMiles = swims.map(swimDistanceMiles).filter((v): v is number => v != null);
+    const totalMiles = swimMiles.reduce((sum, value) => sum + value, 0);
+    const totalLaps = swims.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.laps) ?? 0), 0);
+    const totalSeconds = swims.reduce((sum, session) => sum + Math.max(0, Number(session.durationSeconds) || 0), 0);
+    const totalMeters = totalMiles * 1609.344;
+    const pace100 = totalMeters > 0 && totalSeconds > 0 ? (totalSeconds / totalMeters) * 100 : null;
+    cards.push({
+      key: 'swim',
+      title: 'Swim efficiency',
+      subtitle: latestActivitySubtitle(swims, 'Pool or open water'),
+      icon: 'water-outline',
+      color: '#06B6D4',
+      metrics: [
+        { label: 'Sessions', value: String(swims.length), detail: 'last 90d' },
+        ...(totalMiles > 0 ? [{ label: 'Distance', value: formatDistance(totalMiles, distanceUnit), detail: totalLaps > 0 ? `${Math.round(totalLaps)} laps logged` : 'swim volume' }] : []),
+        ...(pace100 != null ? [{ label: 'Avg pace', value: formatPacePer100m(pace100), detail: 'from distance and duration' }] : []),
+      ],
+    });
+  }
+
+  const rides = recent.filter(session => activityTextIncludesAny(session, ['ride', 'cycling', 'cycle', 'bike', 'spin']));
+  if (rides.length > 0) {
+    const totalMiles = rides.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.distanceMiles) ?? 0), 0);
+    const bestWatts = rides.reduce((best, session) => Math.max(best, positiveNumber(session.manualActivity?.details?.avgWatts) ?? 0), 0);
+    const elevationFt = rides.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.elevationGainFt) ?? 0), 0);
+    cards.push({
+      key: 'cycling',
+      title: 'Cycling output',
+      subtitle: latestActivitySubtitle(rides, 'Ride trend'),
+      icon: 'bicycle-outline',
+      color: '#22C55E',
+      metrics: [
+        { label: 'Sessions', value: String(rides.length), detail: 'last 90d' },
+        ...(totalMiles > 0 ? [{ label: 'Distance', value: formatDistance(totalMiles, distanceUnit), detail: 'total ride volume' }] : []),
+        ...(bestWatts > 0 ? [{ label: 'Best power', value: `${Math.round(bestWatts)} W`, detail: 'best avg watts' }] : []),
+        ...(elevationFt > 0 ? [{ label: 'Elevation', value: `${Math.round(elevationFt).toLocaleString()} ft`, detail: 'climbing load' }] : []),
+      ],
+    });
+  }
+
+  const runWalkHike = recent.filter(session => activityTextIncludesAny(session, ['run', 'jog', 'walk', 'hike', 'trail', 'treadmill']));
+  if (runWalkHike.length > 0) {
+    const totalMiles = runWalkHike.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.distanceMiles) ?? 0), 0);
+    const longest = runWalkHike.reduce((best, session) => Math.max(best, positiveNumber(session.manualActivity?.distanceMiles) ?? 0), 0);
+    const elevationFt = runWalkHike.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.elevationGainFt) ?? 0), 0);
+    cards.push({
+      key: 'run-walk-hike',
+      title: 'Run / walk / hike',
+      subtitle: latestActivitySubtitle(runWalkHike, 'Foot miles'),
+      icon: 'footsteps-outline',
+      color: '#84CC16',
+      metrics: [
+        { label: 'Sessions', value: String(runWalkHike.length), detail: 'last 90d' },
+        ...(totalMiles > 0 ? [{ label: 'Distance', value: formatDistance(totalMiles, distanceUnit), detail: longest > 0 ? `${formatDistance(longest, distanceUnit)} longest` : 'total mileage' }] : []),
+        ...(elevationFt > 0 ? [{ label: 'Elevation', value: `${Math.round(elevationFt).toLocaleString()} ft`, detail: 'climb logged' }] : []),
+      ],
+    });
+  }
+
+  const cold = recent.filter(session => activityTextIncludesAny(session, ['cold_plunge', 'ice_bath', 'contrast']));
+  if (cold.length > 0) {
+    const totalMinutes = cold.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const avgTemp = average(cold.map(session => positiveNumber(session.manualActivity?.details?.temperatureF)));
+    const rounds = cold.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.rounds) ?? 0), 0);
+    cards.push({
+      key: 'cold-exposure',
+      title: 'Cold exposure',
+      subtitle: latestActivitySubtitle(cold, 'Recovery stimulus'),
+      icon: 'snow-outline',
+      color: '#38BDF8',
+      metrics: [
+        { label: 'Sessions', value: String(cold.length), detail: 'last 90d' },
+        { label: 'Exposure', value: formatMinutesCompact(totalMinutes), detail: rounds > 0 ? `${Math.round(rounds)} rounds` : 'logged duration' },
+        ...(avgTemp != null ? [{ label: 'Avg temp', value: `${Math.round(avgTemp)}F`, detail: 'water temperature' }] : []),
+      ],
+    });
+  }
+
+  const climbing = recent.filter(session => activityTextIncludesAny(session, ['climbing', 'climb', 'boulder', 'top_rope']));
+  const skiing = recent.filter(session => activityTextIncludesAny(session, ['skiing', 'ski']));
+  if (climbing.length > 0 || skiing.length > 0) {
+    const latestGrade = [...climbing].reverse().map(session => session.manualActivity?.details?.climbingGrade).find(Boolean);
+    const skiVerticalFt = skiing.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.skiVerticalFt) ?? 0), 0);
+    const skiRuns = skiing.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.skiRuns) ?? 0), 0);
+    cards.push({
+      key: 'sport-skills',
+      title: 'Sport details',
+      subtitle: latestActivitySubtitle(climbing.length > 0 ? climbing : skiing, 'Skill sessions'),
+      icon: 'trophy-outline',
+      color: '#A855F7',
+      metrics: [
+        { label: 'Sessions', value: String(climbing.length + skiing.length), detail: 'last 90d' },
+        ...(latestGrade ? [{ label: 'Climb grade', value: String(latestGrade), detail: 'latest logged grade' }] : []),
+        ...(skiVerticalFt > 0 ? [{ label: 'Ski vertical', value: `${Math.round(skiVerticalFt).toLocaleString()} ft`, detail: skiRuns > 0 ? `${Math.round(skiRuns)} runs` : 'vertical load' }] : []),
+      ],
+    });
+  }
+
+  const indoorCardio = recent.filter(session => activityTextIncludesAny(session, ['row', 'rowing', 'elliptical', 'stair', 'hiit', 'bootcamp', 'conditioning']));
+  if (indoorCardio.length > 0) {
+    const totalMinutes = indoorCardio.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const calories = indoorCardio.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.caloriesBurned) ?? 0), 0);
+    const avgHr = average(indoorCardio.map(session => positiveNumber(session.manualActivity?.avgHeartRate)));
+    cards.push({
+      key: 'indoor-cardio',
+      title: 'Indoor cardio',
+      subtitle: latestActivitySubtitle(indoorCardio, 'Machine and class work'),
+      icon: 'sync-outline',
+      color: '#EF4444',
+      metrics: [
+        { label: 'Sessions', value: String(indoorCardio.length), detail: 'last 90d' },
+        { label: 'Duration', value: formatMinutesCompact(totalMinutes), detail: 'total cardio time' },
+        ...(calories > 0 ? [{ label: 'Energy', value: `${Math.round(calories)} kcal`, detail: 'logged burn' }] : []),
+        ...(avgHr != null ? [{ label: 'Avg HR', value: `${Math.round(avgHr)} bpm`, detail: 'where available' }] : []),
+      ],
+    });
+  }
+
+  const mobility = recent.filter(session => session.manualActivity?.category === 'mobility' || activityTextIncludesAny(session, ['yoga', 'stretch', 'pilates', 'foam_roll', 'mobility']));
+  if (mobility.length > 0) {
+    const totalMinutes = mobility.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const styleCounts = new Map<string, number>();
+    for (const session of mobility) {
+      const style = session.manualActivity?.details?.yogaStyle ?? session.manualActivity?.subtype ?? 'mobility';
+      styleCounts.set(String(style), (styleCounts.get(String(style)) ?? 0) + 1);
+    }
+    const topStyle = Array.from(styleCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+    cards.push({
+      key: 'mobility',
+      title: 'Mobility dose',
+      subtitle: latestActivitySubtitle(mobility, 'Tissue and range work'),
+      icon: 'body-outline',
+      color: '#A3E635',
+      metrics: [
+        { label: 'Sessions', value: String(mobility.length), detail: 'last 90d' },
+        { label: 'Duration', value: formatMinutesCompact(totalMinutes), detail: 'logged mobility time' },
+        ...(topStyle ? [{ label: 'Top style', value: humanizeToken(topStyle[0]), detail: `${topStyle[1]} session${topStyle[1] === 1 ? '' : 's'}` }] : []),
+      ],
+    });
+  }
+
+  const activeWork = recent.filter(session => session.manualActivity?.category === 'active'
+    || activityTextIncludesAny(session, ['yard_work', 'chopping_wood', 'moving', 'gardening', 'cleaning', 'construction', 'shoveling', 'playing', 'dancing']));
+  if (activeWork.length > 0) {
+    const totalMinutes = activeWork.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const calories = activeWork.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.caloriesBurned) ?? 0), 0);
+    cards.push({
+      key: 'active-work',
+      title: 'Active work',
+      subtitle: latestActivitySubtitle(activeWork, 'Non-gym activity'),
+      icon: 'hammer-outline',
+      color: '#EAB308',
+      metrics: [
+        { label: 'Sessions', value: String(activeWork.length), detail: 'last 90d' },
+        { label: 'Duration', value: formatMinutesCompact(totalMinutes), detail: 'yard, home, labor, play' },
+        ...(calories > 0 ? [{ label: 'Energy', value: `${Math.round(calories)} kcal`, detail: 'estimated burn' }] : []),
+      ],
+    });
+  }
+
+  const sportPlay = recent.filter(session => session.manualActivity?.category === 'sport'
+    && !activityTextIncludesAny(session, ['climbing', 'climb', 'boulder', 'skiing', 'ski']));
+  if (sportPlay.length > 0) {
+    const totalMinutes = sportPlay.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const sportCounts = new Map<string, number>();
+    for (const session of sportPlay) {
+      const sport = session.manualActivity?.subtype ?? 'sport';
+      sportCounts.set(sport, (sportCounts.get(sport) ?? 0) + 1);
+    }
+    const topSport = Array.from(sportCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+    cards.push({
+      key: 'sport-play',
+      title: 'Sport play',
+      subtitle: latestActivitySubtitle(sportPlay, 'Court, field, or water'),
+      icon: 'basketball-outline',
+      color: '#F59E0B',
+      metrics: [
+        { label: 'Sessions', value: String(sportPlay.length), detail: 'last 90d' },
+        { label: 'Duration', value: formatMinutesCompact(totalMinutes), detail: 'sport exposure' },
+        ...(topSport ? [{ label: 'Top sport', value: humanizeToken(topSport[0]), detail: `${topSport[1]} session${topSport[1] === 1 ? '' : 's'}` }] : []),
+      ],
+    });
+  }
+
+  const downshift = recent.filter(session => activityTextIncludesAny(session, ['breathwork', 'meditation', 'sleep', 'general']));
+  if (downshift.length > 0) {
+    const totalMinutes = downshift.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const rounds = downshift.reduce((sum, session) => sum + (positiveNumber(session.manualActivity?.details?.rounds) ?? 0), 0);
+    cards.push({
+      key: 'downshift',
+      title: 'Downshift work',
+      subtitle: latestActivitySubtitle(downshift, 'Parasympathetic recovery'),
+      icon: 'flower-outline',
+      color: '#2DD4BF',
+      metrics: [
+        { label: 'Sessions', value: String(downshift.length), detail: 'last 90d' },
+        { label: 'Duration', value: formatMinutesCompact(totalMinutes), detail: 'breathwork / meditation' },
+        ...(rounds > 0 ? [{ label: 'Rounds', value: String(Math.round(rounds)), detail: 'breathwork or contrast' }] : []),
+      ],
+    });
+  }
+
+  const customStrength = recent.filter(session => session.manualActivity?.category === 'strength');
+  if (customStrength.length > 0) {
+    const totalMinutes = customStrength.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
+    const avgRpe = average(customStrength.map(session => positiveNumber(session.manualActivity?.details?.sessionRpe)));
+    cards.push({
+      key: 'custom-strength',
+      title: 'Custom strength',
+      subtitle: latestActivitySubtitle(customStrength, 'Manual lifting logs'),
+      icon: 'barbell-outline',
+      color: '#6366F1',
+      metrics: [
+        { label: 'Sessions', value: String(customStrength.length), detail: 'last 90d' },
+        { label: 'Duration', value: formatMinutesCompact(totalMinutes), detail: 'manual strength time' },
+        ...(avgRpe != null ? [{ label: 'Avg RPE', value: avgRpe.toFixed(1), detail: 'session-level effort' }] : []),
+      ],
+    });
+  }
+
+  return cards.filter(card => card.metrics.length > 1).slice(0, 12);
+}
+
+function buildTrendMetricSuggestions(input: {
+  history: WorkoutSession[];
+  summaries: StoredWorkoutSummary[];
+  cardioSummary: CardioTrendSummary;
+  bodyScanHistory: BodyScanEntry[];
+  weightEntries: WeightEntry[];
+  nutritionScoreWeekly: import('../services/api').NutritionScoreWeekly | null;
+  showMealProgress: boolean;
+}): TrendMetricSuggestion[] {
+  const {
+    history,
+    summaries,
+    cardioSummary,
+    bodyScanHistory,
+    weightEntries,
+    nutritionScoreWeekly,
+    showMealProgress,
+  } = input;
+  const recent = recentManualActivitySessions(history);
+  const hasSwimDetails = recent.some(session =>
+    activityTextIncludesAny(session, ['swim', 'pool'])
+    && (positiveNumber(session.manualActivity?.details?.laps) != null || positiveNumber(session.manualActivity?.details?.poolLengthMeters) != null)
+  );
+  const hasSaunaTemp = recent.some(session =>
+    activityTextIncludesAny(session, ['sauna'])
+    && positiveNumber(session.manualActivity?.details?.temperatureF) != null
+  );
+  const hasCyclingPower = recent.some(session =>
+    activityTextIncludesAny(session, ['ride', 'cycling', 'cycle', 'bike', 'spin'])
+    && positiveNumber(session.manualActivity?.details?.avgWatts) != null
+  );
+  const hasElevation = recent.some(session =>
+    activityTextIncludesAny(session, ['run', 'walk', 'hike', 'ride', 'cycling', 'bike'])
+    && positiveNumber(session.manualActivity?.details?.elevationGainFt) != null
+  );
+  const suggestions: TrendMetricSuggestion[] = [];
+
+  if (!hasSwimDetails) {
+    suggestions.push({
+      key: 'swim-details',
+      title: 'Swim pace per 100m',
+      detail: 'Track pool length, laps, stroke, and duration so swim work can show pace and efficiency instead of only time.',
+      icon: 'water-outline',
+      color: '#06B6D4',
+    });
+  }
+  if (!hasSaunaTemp) {
+    suggestions.push({
+      key: 'sauna-heat-dose',
+      title: 'Sauna heat dose',
+      detail: 'Add temperature and humidity to sauna logs to compare heat exposure, duration, and recovery response.',
+      icon: 'thermometer-outline',
+      color: '#F97316',
+    });
+  }
+  if (!hasCyclingPower) {
+    suggestions.push({
+      key: 'cycling-power',
+      title: 'Cycling output',
+      detail: 'Add average watts for rides or spin classes to show power trend alongside distance and duration.',
+      icon: 'bicycle-outline',
+      color: '#22C55E',
+    });
+  }
+  if (!hasElevation) {
+    suggestions.push({
+      key: 'elevation-load',
+      title: 'Elevation load',
+      detail: 'Capture elevation gain for hikes, runs, and rides so route difficulty is visible in trends.',
+      icon: 'trail-sign-outline',
+      color: '#84CC16',
+    });
+  }
+  if (cardioSummary.easySharePct == null) {
+    suggestions.push({
+      key: 'hr-zone-split',
+      title: 'HR-zone split',
+      detail: 'Attach Apple Health or watch HR data to show easy vs hard minutes for any cardio activity.',
+      icon: 'pulse-outline',
+      color: '#EF4444',
+    });
+  }
+  const hasWorkoutFeedback = summaries.some(summary => summary.feedback);
+  if (!hasWorkoutFeedback) {
+    suggestions.push({
+      key: 'workout-feedback',
+      title: 'Workout quality feedback',
+      detail: 'Add post-workout feeling, intensity, and soreness so trend cards can connect load with recovery.',
+      icon: 'chatbubble-ellipses-outline',
+      color: '#14B8A6',
+    });
+  }
+  const hasRir = history.some(session => (session.exercises ?? []).some(ex => (ex.sets ?? []).some(set => typeof set.rir === 'number')));
+  if (!hasRir) {
+    suggestions.push({
+      key: 'rir-feedback',
+      title: 'RIR on hard sets',
+      detail: 'Log reps-in-reserve on top sets so strength readiness can tell whether load is productive or too grindy.',
+      icon: 'speedometer-outline',
+      color: '#6366F1',
+    });
+  }
+  if (bodyScanHistory.length < 2 || weightEntries.length < 3) {
+    suggestions.push({
+      key: 'body-cadence',
+      title: 'Body trend cadence',
+      detail: 'A few weigh-ins plus recurring body scans or measurements make recomposition clearer than scale weight alone.',
+      icon: 'body-outline',
+      color: '#A855F7',
+    });
+  }
+  if (showMealProgress && ((nutritionScoreWeekly?.days_with_data ?? 0) < 4)) {
+    suggestions.push({
+      key: 'nutrition-days',
+      title: 'Nutrition target hits',
+      detail: 'Log four or more meal days per week so protein, fiber, calories, and energy availability become trendable.',
+      icon: 'restaurant-outline',
+      color: '#22C55E',
+    });
+  }
+
+  if (suggestions.length === 0) {
+    suggestions.push({
+      key: 'repeatability',
+      title: 'Comparable routes',
+      detail: 'Repeat the same route, pool set, or bike class periodically so trend deltas are fair.',
+      icon: 'git-compare-outline',
+      color: '#6366F1',
+    });
+  }
+  return suggestions.slice(0, 8);
+}
+
+function ActivityTrendHighlightsCard({ cards, availableCount = cards.length, onEdit, tc, styles }: {
+  cards: TrendActivityCard[];
+  availableCount?: number;
+  onEdit?: () => void;
+  tc: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  if (availableCount === 0) return null;
+  return (
+    <View style={[styles.graphCard, styles.activityTrendCard]}>
+      <ProgressCardWash color={tc.primary} secondaryColor="#14B8A6" intensity="soft" />
+      <View style={styles.cardioSectionHeader}>
+        <View style={[styles.performanceGaugeIcon, { backgroundColor: tc.primary + '1F', marginBottom: 0 }]}>
+          <Ionicons name="sparkles-outline" size={15} color={tc.primary} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.graphTitle} numberOfLines={1}>Activity highlights</Text>
+          <Text style={[styles.graphSubtitle, { marginBottom: 0 }]} numberOfLines={2}>
+            Extra trend surfaces from manual activities, imports, and recovery logs.
+          </Text>
+        </View>
+        {onEdit && (
+          <TouchableOpacity
+            testID="progress-edit-activity-highlights"
+            accessibilityRole="button"
+            accessibilityLabel="Edit Activity Highlights"
+            activeOpacity={0.78}
+            onPress={onEdit}
+            style={[styles.trendCardsEditButton, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+            <Ionicons name="options-outline" size={14} color={tc.textSecondary} />
+            <Text style={[styles.trendCardsEditText, { color: tc.textSecondary }]}>Edit</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      {cards.length === 0 ? (
+        <View style={[styles.trendCardsEmptyState, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+          <Ionicons name="eye-off-outline" size={26} color={tc.textMuted} />
+          <Text style={[styles.trendCardsEmptyTitle, { color: tc.textPrimary }]}>All highlights hidden</Text>
+          <Text style={[styles.trendCardsEmptyBody, { color: tc.textSecondary }]}>Edit Activity Highlights to choose which cards show here.</Text>
+        </View>
+      ) : (
+        <View style={styles.activityTrendGrid}>
+          {cards.map((card, index) => (
+            <FadeInView
+              key={card.key}
+              delay={staggerDelay(index, 35)}
+              duration={TIMING_STANDARD.duration}
+              slideDistance={5}
+              style={[styles.activityTrendTile, { borderColor: card.color + '36' }]}
+            >
+              <ProgressCardWash color={card.color} intensity="soft" cornerRadius={radius.md} />
+              <View style={styles.activityTrendTileHeader}>
+                <View style={[styles.activityTrendIcon, { backgroundColor: card.color + '1F' }]}>
+                  <Ionicons name={card.icon} size={15} color={card.color} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.activityTrendTitle} numberOfLines={1}>{card.title}</Text>
+                  <Text style={styles.activityTrendSubtitle} numberOfLines={1}>{card.subtitle}</Text>
+                </View>
+              </View>
+              <View style={styles.activityTrendMetricGrid}>
+                {card.metrics.slice(0, 4).map(metric => (
+                  <View key={`${card.key}-${metric.label}`} style={[styles.activityTrendMetric, { borderColor: card.color + '22' }]}>
+                    <Text style={[styles.activityTrendMetricValue, { color: card.color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                      {metric.value}
+                    </Text>
+                    <Text style={styles.activityTrendMetricLabel} numberOfLines={1}>{metric.label}</Text>
+                    <Text style={styles.activityTrendMetricDetail} numberOfLines={2}>{metric.detail}</Text>
+                  </View>
+                ))}
+              </View>
+            </FadeInView>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function HighValueTrendCardsCard({ cards, availableCount = cards.length, onEdit, tc, styles }: {
+  cards: TrendActivityCard[];
+  availableCount?: number;
+  onEdit?: () => void;
+  tc: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  if (availableCount === 0) return null;
+  return (
+    <View style={[styles.graphCard, styles.activityTrendCard]}>
+      <ProgressCardWash color="#14B8A6" secondaryColor={tc.primary} intensity="soft" />
+      <View style={styles.cardioSectionHeader}>
+        <View style={[styles.performanceGaugeIcon, { backgroundColor: '#14B8A61F', marginBottom: 0 }]}>
+          <Ionicons name="analytics-outline" size={15} color="#14B8A6" />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.graphTitle} numberOfLines={1}>High-value trends</Text>
+          <Text style={[styles.graphSubtitle, { marginBottom: 0 }]} numberOfLines={2}>
+            Recovery, readiness, nutrition, body, and consistency signals that combine multiple logs.
+          </Text>
+        </View>
+        {onEdit && (
+          <TouchableOpacity
+            testID="progress-edit-high-value-trends"
+            accessibilityRole="button"
+            accessibilityLabel="Edit High-Value Trends"
+            activeOpacity={0.78}
+            onPress={onEdit}
+            style={[styles.trendCardsEditButton, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+            <Ionicons name="options-outline" size={14} color={tc.textSecondary} />
+            <Text style={[styles.trendCardsEditText, { color: tc.textSecondary }]}>Edit</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      {cards.length === 0 ? (
+        <View style={[styles.trendCardsEmptyState, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+          <Ionicons name="eye-off-outline" size={26} color={tc.textMuted} />
+          <Text style={[styles.trendCardsEmptyTitle, { color: tc.textPrimary }]}>All high-value cards hidden</Text>
+          <Text style={[styles.trendCardsEmptyBody, { color: tc.textSecondary }]}>Edit High-Value Trends to choose which cards show here.</Text>
+        </View>
+      ) : (
+        <View style={styles.activityTrendGrid}>
+          {cards.map((card, index) => (
+            <FadeInView
+              key={card.key}
+              delay={staggerDelay(index, 35)}
+              duration={TIMING_STANDARD.duration}
+              slideDistance={5}
+              style={[styles.activityTrendTile, { borderColor: card.color + '36' }]}
+            >
+              <ProgressCardWash color={card.color} intensity="soft" cornerRadius={radius.md} />
+              <View style={styles.activityTrendTileHeader}>
+                <View style={[styles.activityTrendIcon, { backgroundColor: card.color + '1F' }]}>
+                  <Ionicons name={card.icon} size={15} color={card.color} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.activityTrendTitle} numberOfLines={1}>{card.title}</Text>
+                  <Text style={styles.activityTrendSubtitle} numberOfLines={1}>{card.subtitle}</Text>
+                </View>
+              </View>
+              <View style={styles.activityTrendMetricGrid}>
+                {card.metrics.slice(0, 4).map(metric => (
+                  <View key={`${card.key}-${metric.label}`} style={[styles.activityTrendMetric, { borderColor: card.color + '22' }]}>
+                    <Text style={[styles.activityTrendMetricValue, { color: card.color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                      {metric.value}
+                    </Text>
+                    <Text style={styles.activityTrendMetricLabel} numberOfLines={1}>{metric.label}</Text>
+                    <Text style={styles.activityTrendMetricDetail} numberOfLines={2}>{metric.detail}</Text>
+                  </View>
+                ))}
+              </View>
+            </FadeInView>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function TrendMetricSuggestionsCard({ suggestions, tc, styles }: {
+  suggestions: TrendMetricSuggestion[];
+  tc: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  return (
+    <View style={[styles.graphCard, styles.trendSuggestionCard]}>
+      <ProgressCardWash color="#6366F1" secondaryColor={tc.primary} intensity="soft" />
+      <View style={styles.cardioSectionHeader}>
+        <View style={[styles.performanceGaugeIcon, { backgroundColor: '#6366F11F', marginBottom: 0 }]}>
+          <Ionicons name="bulb-outline" size={15} color="#6366F1" />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.graphTitle} numberOfLines={1}>Suggested signals</Text>
+          <Text style={[styles.graphSubtitle, { marginBottom: 0 }]} numberOfLines={2}>
+            New data worth showing as activity logging gets more specific.
+          </Text>
+        </View>
+      </View>
+      <View style={styles.trendSuggestionList}>
+        {suggestions.map(item => (
+          <View key={item.key} style={[styles.trendSuggestionRow, { borderColor: item.color + '32' }]}>
+            <ProgressCardWash color={item.color} intensity="soft" cornerRadius={radius.md} />
+            <View style={[styles.trendSuggestionIcon, { backgroundColor: item.color + '1F' }]}>
+              <Ionicons name={item.icon} size={15} color={item.color} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.trendSuggestionTitle} numberOfLines={1}>{item.title}</Text>
+              <Text style={styles.trendSuggestionDetail} numberOfLines={2}>{item.detail}</Text>
+            </View>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
 }
 
 type ProgressMilestone = {
@@ -522,6 +2647,8 @@ type ProgressAnalyticsItem = {
   icon: any;
   color: string;
 };
+
+type VolumeDetailMode = 'balance' | 'workload';
 
 type TrainingSignalItem = {
   key: string;
@@ -572,6 +2699,35 @@ type TodayTrackSummary = {
   signals: TodayTrackSignal[];
 };
 
+type GoalOverviewStat = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  color?: string;
+};
+
+type GoalGraphPoint = {
+  key: string;
+  label: string;
+  executionPct: number | null;
+  secondaryPct: number | null;
+  secondaryValue: string;
+};
+
+type GoalExecutionOverview = {
+  blockStartDate: string;
+  blockEndDate: string;
+  dayLabel: string;
+  timeLeftLabel: string;
+  graphTitle: string;
+  graphSubtitle: string;
+  secondaryLabel: string;
+  secondaryColor: string;
+  points: GoalGraphPoint[];
+  stats: GoalOverviewStat[];
+};
+
 type ProgressPlanWeekWindow = { startDate: string; endDate: string };
 
 type ProgressDateWindow = {
@@ -586,13 +2742,8 @@ type ProgressDateWindow = {
 };
 
 const PR_MOMENTUM_WINDOW_DAYS = 30;
+const MUSCLE_DISTRIBUTION_WINDOW_DAYS = 30;
 const MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE = 4;
-const LEGACY_PROGRESS_OVERVIEW_TEST_IDS: Record<string, string> = {
-  'week-workouts': 'progress-overview-week-workouts',
-  'week-meals': 'progress-overview-week-meals',
-  'week-weight': 'progress-overview-week-weight',
-  'week-prs': 'progress-overview-week-prs',
-};
 
 const GOAL_LABELS: Record<ProgressGoalBucket, string> = {
   fat_loss: 'Fat loss',
@@ -727,6 +2878,59 @@ function establishedRecentPrs(history: WorkoutSession[], prs: PR[], sinceMs: num
   });
 }
 
+type StrengthChangeRow = StrengthTrendRow;
+
+type VolumeTrendRow = StrengthVolumeWindowSummary;
+type VolumeTrendBreakdown = {
+  loadBalance: StrengthLoadBalanceSummary;
+  tonnage: StrengthVolumeTrendBreakdown;
+};
+
+function buildVolumeTrendBreakdown(history: WorkoutSession[], weekStartDate?: string | null): VolumeTrendBreakdown {
+  return {
+    loadBalance: buildStrengthLoadBalance(history),
+    tonnage: buildStrengthVolumeTrend(history, { weekStartDate: weekStartDate ?? undefined }),
+  };
+}
+
+export type RecordBreakdownRow = {
+  pr: PR;
+  priorBest: { weightLbs: number; reps: number; date: string } | null;
+};
+
+/** For each PR within the window, the best loaded set logged before
+ *  the PR's date (the thing the PR beat). Returns chronologically
+ *  newest-first so the detail sheet shows freshest records on top. */
+function buildRecordsBreakdown(history: WorkoutSession[], prs: PR[], sinceMs: number): RecordBreakdownRow[] {
+  const recent = establishedRecentPrs(history, prs, sinceMs);
+  const completed = history.filter(s => s.completed && !s.skipped);
+  return recent
+    .map(pr => {
+      const key = pr.exerciseName.trim().toLowerCase();
+      const prMs = +new Date(pr.date);
+      let priorBest: { weightLbs: number; reps: number; date: string } | null = null;
+      for (const session of completed) {
+        const sMs = +new Date(session.date);
+        if (!Number.isFinite(sMs) || sMs >= prMs) continue;
+        for (const ex of session.exercises ?? []) {
+          if (ex.name?.trim().toLowerCase() !== key) continue;
+          for (const set of ex.sets ?? []) {
+            const w = Number((set as any).weightLbs ?? (set as any).weight_lbs ?? 0);
+            const r = Number((set as any).reps ?? 0);
+            if (!(w > 0) || !(r > 0)) continue;
+            if (!priorBest
+              || w > priorBest.weightLbs
+              || (w === priorBest.weightLbs && r > priorBest.reps)) {
+              priorBest = { weightLbs: w, reps: r, date: session.date };
+            }
+          }
+        }
+      }
+      return { pr, priorBest };
+    })
+    .sort((a, b) => +new Date(b.pr.date) - +new Date(a.pr.date));
+}
+
 function buildWorkoutHistoryIndex(history: WorkoutSession[]) {
   const muscleMap: Record<string, string> = {};
   const compoundMap: Record<string, boolean> = {};
@@ -788,7 +2992,12 @@ function OneRepMaxTrendCard({
     const d = new Date(point.date);
     return { x, y, v, label: `${d.getMonth() + 1}/${d.getDate()}`, i };
   });
+  const valueLabelIndexes = graphValueLabelIndexes(chartPoints.map(p => p.v));
   const polyPoints = chartPoints.map(p => `${p.x},${p.y}`).join(' ');
+  const e1rmBaselineY = padT + plotH;
+  const e1rmAreaPoints = chartPoints.length >= 2
+    ? `${polyPoints} ${chartPoints[chartPoints.length - 1].x},${e1rmBaselineY} ${chartPoints[0].x},${e1rmBaselineY}`
+    : null;
   const gridLines = 4;
   const gridVals = Array.from({ length: gridLines }, (_, i) =>
     Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
@@ -825,6 +3034,17 @@ function OneRepMaxTrendCard({
               </SvgText>
             );
           })}
+          {e1rmAreaPoints && (
+            <>
+              <Defs>
+                <SvgLinearGradient id="e1rmAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0%" stopColor={tc.primary} stopOpacity={0.22} />
+                  <Stop offset="100%" stopColor={tc.primary} stopOpacity={0.02} />
+                </SvgLinearGradient>
+              </Defs>
+              <Polygon points={e1rmAreaPoints} fill="url(#e1rmAreaGradient)" stroke="none" />
+            </>
+          )}
           <Polyline points={polyPoints}
             fill="none" stroke={tc.primary} strokeWidth={2.5}
             strokeLinejoin="round" strokeLinecap="round" />
@@ -834,6 +3054,38 @@ function OneRepMaxTrendCard({
               fill={p.i === chartPoints.length - 1 ? tc.accent : tc.primary}
               stroke={tc.surface} strokeWidth={1.5} />
           ))}
+          {chartPoints.map((p) => {
+            if (!valueLabelIndexes.has(p.i)) return null;
+            const label = String(weightChartValue(p.v, weightUnit));
+            const labelW = graphValueLabelWidth(label);
+            const labelX = graphValueLabelX(p.x, labelW, chartW, padL, padR);
+            const labelY = graphValueLabelY(p.y);
+            return (
+              <Fragment key={`v${p.i}`}>
+                <Rect
+                  x={labelX - labelW / 2}
+                  y={labelY - 11}
+                  width={labelW}
+                  height={15}
+                  rx={7.5}
+                  fill={tc.surfaceRaised}
+                  stroke={tc.border}
+                  strokeWidth={0.75}
+                  opacity={0.96}
+                />
+                <SvgText
+                  x={labelX}
+                  y={labelY}
+                  fontSize={9}
+                  fontWeight="800"
+                  fill={p.i === chartPoints.length - 1 ? tc.accent : tc.textPrimary}
+                  textAnchor="middle"
+                >
+                  {label}
+                </SvgText>
+              </Fragment>
+            );
+          })}
           {chartPoints.length <= 12 && chartPoints.map((p) => (
             <SvgText key={`d${p.i}`} x={p.x} y={chartH - 4}
               fontSize={9} fill={tc.textMuted} textAnchor="middle">
@@ -857,6 +3109,149 @@ function OneRepMaxTrendCard({
           </Text>
           <Text style={styles.chartStatLabel}>vs first estimate</Text>
         </View>
+      </View>
+    </View>
+  );
+}
+
+function WeightBodyFatTrendChart({
+  weightEntries,
+  bodyScanHistory,
+  weightUnit,
+  tc,
+  styles,
+}: {
+  weightEntries: WeightEntry[];
+  bodyScanHistory: BodyScanEntry[];
+  weightUnit: WeightUnit;
+  tc: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const weights = weightEntries
+    .map(entry => ({ date: entry.date.slice(0, 10), value: Number(entry.weightLbs) }))
+    .filter(point => point.date && Number.isFinite(point.value) && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const bodyFat = bodyScanHistory
+    .map(entry => ({ date: String(entry.date ?? '').slice(0, 10), value: Number(entry.bodyFatPct) }))
+    .filter(point => point.date && Number.isFinite(point.value) && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (!weights.length) return null;
+  if (weights.length < 2 && bodyFat.length < 2) return null;
+
+  const dates = Array.from(new Set([...weights.map(p => p.date), ...bodyFat.map(p => p.date)])).sort();
+  const dateIndex = new Map(dates.map((d, i) => [d, i]));
+  const chartW = 320;
+  const chartH = 154;
+  const padL = 40;
+  const padR = 32;
+  const padT = 18;
+  const padB = 28;
+  const plotW = chartW - padL - padR;
+  const plotH = chartH - padT - padB;
+  const rangeFor = (values: number[], minSpan: number) => {
+    const rawMin = Math.min(...values);
+    const rawMax = Math.max(...values);
+    const span = Math.max(minSpan, rawMax - rawMin);
+    return {
+      min: rawMin - span * 0.25,
+      max: rawMax + span * 0.25,
+    };
+  };
+  const weightRange = rangeFor(weights.map(p => p.value), 4);
+  const bodyFatRange = bodyFat.length >= 2 ? rangeFor(bodyFat.map(p => p.value), 2) : null;
+  const toX = (date: string) => {
+    const idx = dateIndex.get(date) ?? 0;
+    return padL + (dates.length > 1 ? (idx / (dates.length - 1)) * plotW : plotW / 2);
+  };
+  const toY = (value: number, range: { min: number; max: number }) =>
+    padT + plotH - ((value - range.min) / Math.max(1, range.max - range.min)) * plotH;
+  const weightPoints = weights.map(point => ({ ...point, x: toX(point.date), y: toY(point.value, weightRange) }));
+  const bodyFatPoints = bodyFatRange
+    ? bodyFat.map(point => ({ ...point, x: toX(point.date), y: toY(point.value, bodyFatRange) }))
+    : [];
+  const weightLine = weightPoints.map(p => `${p.x},${p.y}`).join(' ');
+  const bodyFatLine = bodyFatPoints.map(p => `${p.x},${p.y}`).join(' ');
+  const bodyFatArea = bodyFatPoints.length >= 2
+    ? [
+        `${bodyFatPoints[0].x},${chartH - padB}`,
+        ...bodyFatPoints.map(p => `${p.x},${p.y}`),
+        `${bodyFatPoints[bodyFatPoints.length - 1].x},${chartH - padB}`,
+      ].join(' ')
+    : '';
+  const weightDelta = weights.length >= 2 ? weights[weights.length - 1].value - weights[0].value : 0;
+  const bodyFatDelta = bodyFat.length >= 2 ? bodyFat[bodyFat.length - 1].value - bodyFat[0].value : 0;
+  const bodyFatColor = tc.warning ?? '#F59E0B';
+  const dateLabels = dates.length <= 10 ? dates : [dates[0], dates[dates.length - 1]];
+
+  return (
+    <View style={[styles.graphCard, { marginBottom: 10 }]}>
+      <View style={styles.graphHeader}>
+        <Text style={styles.graphTitle} numberOfLines={1}>Weight + body fat</Text>
+        <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted }}>
+          {formatSignedWeightDelta(weightDelta, weightUnit)}
+        </Text>
+      </View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 4 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+          <View style={{ width: 18, height: 3, borderRadius: 2, backgroundColor: tc.primary }} />
+          <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>Weight</Text>
+        </View>
+        {bodyFatPoints.length >= 2 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            <View style={{ width: 18, height: 3, borderRadius: 2, backgroundColor: bodyFatColor }} />
+            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>
+              Body fat {bodyFatDelta > 0 ? '+' : ''}{Math.round(bodyFatDelta * 10) / 10}%
+            </Text>
+          </View>
+        )}
+      </View>
+      <View style={{ alignItems: 'center', marginTop: 8 }}>
+        <Svg width={chartW} height={chartH}>
+          <Defs>
+            <SvgLinearGradient id="weightBodyFatAreaGradient" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0%" stopColor={bodyFatColor} stopOpacity="0.22" />
+              <Stop offset="62%" stopColor={bodyFatColor} stopOpacity="0.10" />
+              <Stop offset="100%" stopColor={bodyFatColor} stopOpacity="0.02" />
+            </SvgLinearGradient>
+          </Defs>
+          {[0, 1, 2].map(i => {
+            const y = padT + (plotH * i) / 2;
+            return <Line key={i} x1={padL} y1={y} x2={chartW - padR} y2={y} stroke={tc.border} strokeWidth={1} strokeDasharray="4,4" />;
+          })}
+          <SvgText x={padL - 6} y={padT + 4} fontSize={10} fill={tc.textMuted} textAnchor="end">
+            {weightChartValue(weightRange.max, weightUnit)}
+          </SvgText>
+          <SvgText x={padL - 6} y={padT + plotH + 4} fontSize={10} fill={tc.textMuted} textAnchor="end">
+            {weightChartValue(weightRange.min, weightUnit)}
+          </SvgText>
+          {bodyFatRange && (
+            <>
+              <SvgText x={chartW - padR + 6} y={padT + 4} fontSize={10} fill={bodyFatColor} textAnchor="start">
+                {Math.round(bodyFatRange.max)}%
+              </SvgText>
+              <SvgText x={chartW - padR + 6} y={padT + plotH + 4} fontSize={10} fill={bodyFatColor} textAnchor="start">
+                {Math.round(bodyFatRange.min)}%
+              </SvgText>
+            </>
+          )}
+          {bodyFatArea && <Polygon points={bodyFatArea} fill="url(#weightBodyFatAreaGradient)" />}
+          {weightPoints.length >= 2 && <Polyline points={weightLine} fill="none" stroke={tc.primary} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />}
+          {bodyFatPoints.length >= 2 && <Polyline points={bodyFatLine} fill="none" stroke={bodyFatColor} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />}
+          {weightPoints.map((p, i) => (
+            <Circle key={`w${p.date}`} cx={p.x} cy={p.y} r={i === weightPoints.length - 1 ? 4.5 : 3} fill={tc.primary} stroke={tc.surface} strokeWidth={1.25} />
+          ))}
+          {bodyFatPoints.map((p, i) => (
+            <Circle key={`bf${p.date}`} cx={p.x} cy={p.y} r={i === bodyFatPoints.length - 1 ? 4.5 : 3} fill={bodyFatColor} stroke={tc.surface} strokeWidth={1.25} />
+          ))}
+          {dateLabels.map(d => {
+            const parsed = new Date(`${d}T12:00:00`);
+            return (
+              <SvgText key={d} x={toX(d)} y={chartH - 5} fontSize={9} fill={tc.textMuted} textAnchor="middle">
+                {parsed.getMonth() + 1}/{parsed.getDate()}
+              </SvgText>
+            );
+          })}
+        </Svg>
       </View>
     </View>
   );
@@ -941,8 +3336,8 @@ function buildProgressMilestones(
   if (visibility.showWorkoutProgress && cardioMiles > 0) {
     cards.push({
       key: 'cardio-base',
-      title: 'Cardio base',
-	      value: formatDistance(cardioMiles, distanceUnit),
+      title: 'Cardio volume',
+      value: formatDistance(cardioMiles, distanceUnit),
       detail: `${paceHistory.length} distance-based cardio log${paceHistory.length === 1 ? '' : 's'}`,
       icon: 'pulse-outline',
       color: '#EF4444',
@@ -962,86 +3357,52 @@ function buildProgressMilestones(
 }
 
 function strengthIndexDelta(history: WorkoutSession[]): { value: string; detail: string; color: string } | null {
-  const now = Date.now();
-  const currentStart = now - 7 * 86400000;
-  const previousStart = now - 14 * 86400000;
-  const bestByExercise = (startMs: number, endMs: number): Map<string, number> => {
-    const out = new Map<string, number>();
-    for (const session of history) {
-      if (!session.completed || session.skipped) continue;
-      const sessionMs = parseDateKeyMs(session.date);
-      if (!sessionMs || sessionMs < startMs || sessionMs > endMs) continue;
-      for (const exercise of session.exercises ?? []) {
-        const key = exercise.name?.trim().toLowerCase();
-        if (!key) continue;
-        // Per-exercise category determines whether a 1RM read is
-        // valid here at all. Isolations skip — they don't feed any
-        // strength surface and should never compete in
-        // bestByExercise comparisons.
-        const cat = categorizeExercise({
-          isCompound: (exercise as any).isCompound ?? (exercise as any).is_compound ?? null,
-          isMachine: (exercise as any).isMachine ?? (exercise as any).is_machine ?? null,
-          name: exercise.name,
-        });
-        if (cat === 'isolation') continue;
-        for (const set of exercise.sets ?? []) {
-          const weight = Number((set as any).weightLbs ?? (set as any).weight_lbs ?? (set as any).actual_weight_lbs);
-          const reps = Number((set as any).reps ?? (set as any).actual_reps);
-          const rir = Number((set as any).rir ?? (set as any).actual_rir);
-          const e1rm = estimate1RM(weight, reps, { rir: Number.isFinite(rir) ? rir : null, category: cat });
-          if (e1rm == null || e1rm <= 0) continue;
-          out.set(key, Math.max(out.get(key) ?? 0, e1rm));
-        }
-      }
-    }
-    return out;
-  };
+  const summary = buildStrengthTrendSummary(history, {
+    estimateSet: estimate1RM,
+    categorizeExercise,
+  });
+  if (!summary || summary.rows.length === 0) return null;
+  const reviewWeeks = Math.round(summary.reviewDays / 7);
+  const matchedCount = summary.matchedRows.length;
+  const baselineCount = summary.baselineRows.length;
 
-  const current = bestByExercise(currentStart, now);
-  const previous = bestByExercise(previousStart, currentStart);
-  if (current.size === 0) return null;
+  if (summary.trendPct != null) {
+    const trendPct = summary.trendPct;
+    const baselineText = baselineCount > 0 ? `, ${baselineCount} new baseline${baselineCount === 1 ? '' : 's'}` : '';
+    return {
+      value: `${trendPct >= 0 ? '+' : ''}${trendPct}%`,
+      detail: `${reviewWeeks}-week repeat-lift trend (${matchedCount} matched lift${matchedCount === 1 ? '' : 's'}${baselineText})`,
+      color: trendPct >= 0 ? '#22C55E' : '#EF4444',
+    };
+  }
 
-  const common = Array.from(current.keys()).filter(key => (previous.get(key) ?? 0) > 0);
-  if (common.length > 0) {
-    const currentTotal = common.reduce((sum, key) => sum + (current.get(key) ?? 0), 0);
-    const previousTotal = common.reduce((sum, key) => sum + (previous.get(key) ?? 0), 0);
-    if (previousTotal > 0) {
-      const deltaPct = Math.round(((currentTotal - previousTotal) / previousTotal) * 100);
-      return {
-        value: `${deltaPct >= 0 ? '+' : ''}${deltaPct}%`,
-        detail: `overall strength, last 7d vs prior 7d (${common.length} matched lift${common.length === 1 ? '' : 's'})`,
-        color: deltaPct >= 0 ? '#22C55E' : '#EF4444',
-      };
-    }
+  if (matchedCount > 0) {
+    const row = summary.matchedRows[0];
+    const pct = row.deltaPct ?? 0;
+    return {
+      value: 'Tracking',
+      detail: `${row.name} ${pct >= 0 ? '+' : ''}${pct}% vs its prior session; ${summary.minMatchedLiftsForScore}+ matched lifts needed for overall trend`,
+      color: pct > 0 ? '#22C55E' : pct < 0 ? '#EF4444' : '#6366F1',
+    };
   }
 
   return {
     value: 'New',
-    detail: `${current.size} strength baseline${current.size === 1 ? '' : 's'} logged this week`,
+    detail: `${baselineCount} strength baseline${baselineCount === 1 ? '' : 's'} logged in the last ${reviewWeeks} weeks`,
     color: '#6366F1',
   };
 }
 
 function buildProgressAnalytics(
   history: WorkoutSession[],
-  summaries: StoredWorkoutSummary[],
   prs: PR[],
   plateaus: PlateauEntry[],
+  weightUnit: WeightUnit,
+  distanceUnit: DistanceUnit,
+  cardioSummary: CardioTrendSummary,
+  window?: ProgressDateWindow,
 ): ProgressAnalyticsItem[] {
   const completed = history.filter(s => s.completed && !s.skipped);
-  const workRows = (summaries.length > 0
-    ? summaries.map(s => ({
-        date: s.date,
-        sets: s.totalSets ?? 0,
-        minutes: Math.round((s.durationSeconds ?? 0) / 60),
-      }))
-    : completed.map(s => ({
-        date: s.date,
-        sets: s.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0),
-        minutes: Math.round((s.durationSeconds ?? 0) / 60),
-      })))
-    .filter(row => row.sets > 0 || row.minutes > 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
 
   const rows: ProgressAnalyticsItem[] = [];
   const strength = strengthIndexDelta(history);
@@ -1056,19 +3417,22 @@ function buildProgressAnalytics(
     });
   }
 
-  if (workRows.length >= 2) {
-    const recent = workRows.slice(-4);
-    const previous = workRows.slice(Math.max(0, workRows.length - 8), Math.max(0, workRows.length - 4));
-    const recentAvg = recent.reduce((sum, row) => sum + row.sets, 0) / Math.max(1, recent.length);
-    const previousAvg = previous.reduce((sum, row) => sum + row.sets, 0) / Math.max(1, previous.length);
-    const deltaPct = previous.length > 0 && previousAvg > 0 ? Math.round(((recentAvg - previousAvg) / previousAvg) * 100) : null;
+  const loadBalance = buildStrengthLoadBalance(history);
+  const hasStrengthSets = loadBalance.weeks.some(week => week.loadedSets > 0);
+  if (hasStrengthSets) {
+    // "Set targets" / load-balance gauge removed — it duplicates the Strength
+    // Profile radar, which already shows muscle balance.
+    const volumeTrend = buildStrengthVolumeTrend(history, {
+      weekStartDate: window?.startDate,
+      windowDays: window?.days,
+    });
     rows.push({
       key: 'volume-trend',
-      label: 'Volume trend',
-      value: deltaPct == null ? `${Math.round(recentAvg)} sets` : `${deltaPct >= 0 ? '+' : ''}${deltaPct}%`,
-      detail: previous.length > 0 ? 'last 4 sessions vs previous 4' : 'average sets in recent sessions',
+      label: 'Workload',
+      value: formatLoadVolume(volumeTrend.current.volumeLbs, weightUnit),
+      detail: strengthVolumeTrendDetail(volumeTrend, weightUnit),
       icon: 'analytics-outline',
-      color: deltaPct != null && deltaPct < 0 ? '#EF4444' : '#22C55E',
+      color: '#6366F1',
     });
   }
 
@@ -1086,17 +3450,20 @@ function buildProgressAnalytics(
     });
   }
 
-  if (plateaus.length > 0) {
-    const deloadCount = plateaus.filter(p => p.suggestion === 'deload').length;
+  const cardioVolume = cardioVolumeValue(cardioSummary, distanceUnit);
+  if (cardioSummary.hasData && cardioVolume) {
     rows.push({
-      key: 'plateau-watch',
-      label: 'Plateau watch',
-      value: `${plateaus.length}`,
-      detail: deloadCount > 0 ? `${deloadCount} may need a deload` : 'exercises flat over the review window',
-      icon: 'alert-circle-outline',
-      color: '#F59E0B',
+      key: 'cardio-volume',
+      label: 'Cardio volume',
+      value: cardioVolume,
+      detail: cardioVolumeDetail(cardioSummary, distanceUnit),
+      icon: 'pulse-outline',
+      color: '#06B6D4',
     });
   }
+
+  // "Plateau watch" gauge removed — plateaus + deload suggestions live on the
+  // Insights tab; the count here was redundant.
 
   if (rows.length < 4 && completed.length > 0) {
     const sessions30 = completed.filter(s => +new Date(s.date) >= thirtyDaysAgo).length;
@@ -1153,13 +3520,15 @@ function buildThisWeekOverview(
 
   const recentWorkoutDays = new Set(workoutRows.filter(row => inCurrent(row.date)).map(row => row.date.slice(0, 10))).size;
   const previousWorkoutDays = new Set(workoutRows.filter(row => inPrevious(row.date)).map(row => row.date.slice(0, 10))).size;
-  const recentSets = workoutRows.filter(row => inCurrent(row.date)).reduce((sum, row) => sum + row.sets, 0);
-  const previousSets = workoutRows.filter(row => inPrevious(row.date)).reduce((sum, row) => sum + row.sets, 0);
+  const recentLoadBalance = buildStrengthLoadBalance(history, {
+    today: window.endDate,
+    windowDays: window.days,
+  });
   const recentZone2 = summaries
-    .filter(row => inCurrent(row.date))
+    .filter(row => inCurrent(row.date) && isCardioHrZoneSource(row))
     .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
   const previousZone2 = summaries
-    .filter(row => inPrevious(row.date))
+    .filter(row => inPrevious(row.date) && isCardioHrZoneSource(row))
     .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
 
   const items: ProgressOverviewItem[] = [];
@@ -1174,15 +3543,15 @@ function buildThisWeekOverview(
       targetTab: 'trends',
     });
   }
-  if (visibility.showWorkoutProgress && recentSets > 0) {
+  if (visibility.showWorkoutProgress && recentLoadBalance.current.loadedSets > 0) {
     items.push({
       key: 'week-volume',
-      label: 'Lift volume',
-      value: `${recentSets}`,
-      detail: trendText(recentSets, previousSets, 'sets logged'),
-      icon: 'barbell-outline',
-      color: '#6366F1',
-	      targetTab: 'trends',
+      label: 'Set targets',
+      value: strengthLoadBalanceValue(recentLoadBalance, weightUnit),
+      detail: recentLoadBalance.detail || `${recentLoadBalance.current.loadedSets} hard set${recentLoadBalance.current.loadedSets === 1 ? '' : 's'} ${currentWindowText}`,
+      icon: 'body-outline',
+      color: strengthLoadBalanceColor(recentLoadBalance.status, recentLoadBalance.score),
+      targetTab: 'trends',
     });
   }
 
@@ -1270,11 +3639,21 @@ function clampPct(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-function todaySignalStatusLabel(status: TodaySignalStatus): string {
-  if (status === 'good') return 'on track';
-  if (status === 'watch') return 'watch';
-  if (status === 'off') return 'behind';
-  return 'need data';
+function workoutTrainingScore(summary?: StoredWorkoutSummary | null): number | null {
+  const raw = summary?.trainingScore ?? (summary as any)?.training_score;
+  const score = Number(raw);
+  return Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : null;
+}
+
+function workoutTrainingRating(summary?: StoredWorkoutSummary | null): string | null {
+  const raw = summary?.trainingRating ?? (summary as any)?.training_rating;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+function workoutTrainingScoreColor(score: number, tc: ReturnType<typeof getTheme>['colors']): string {
+  if (score >= 75) return tc.success;
+  if (score >= 55) return tc.warning;
+  return tc.error;
 }
 
 function resolveProgressGoalBucket(profile: UserProfile): ProgressGoalBucket {
@@ -1442,9 +3821,7 @@ function buildCardioGoalSignal(
   const previousDistance = paceHistory
     .filter(point => dateInWindow(point.date, previousStart, previousEnd))
     .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
-  const currentZone2 = summaries
-    .filter(row => dateInWindow(row.date, window.startDate, window.endDate))
-    .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
+  const currentZone2 = buildHrZoneSourceBreakdown(summaries, window.startDate, window.endDate).zoneMinutes[1];
 
   if (currentDistance > 0 || previousDistance > 0) {
     const deltaPct = previousDistance > 0 ? Math.round(((currentDistance - previousDistance) / previousDistance) * 100) : null;
@@ -1477,10 +3854,10 @@ function buildCardioGoalSignal(
   if (currentZone2 > 0) {
     return {
       key: 'week-zone2',
-      label: 'Cardio trend',
-      value: `${currentZone2}m`,
-      detail: `Zone 2 minutes in this ${window.source === 'plan_week' ? 'PlanWeek' : 'week'}`,
-      action: 'Keep easy cardio easy so it supports recovery.',
+      label: 'HR zones',
+      value: `${Math.round(currentZone2)}m`,
+      detail: `Zone 2 minutes from all sources in this ${window.source === 'plan_week' ? 'PlanWeek' : 'week'}`,
+      action: 'Keep easy work easy so it supports recovery.',
       icon: 'walk-outline',
       color: tc.success,
       targetTab: 'today',
@@ -1713,6 +4090,339 @@ function buildTodayTrackSummary(input: {
   };
 }
 
+const GOAL_EXECUTION_BLOCK_DAYS = 42;
+
+function validDateKeyOrToday(raw: string | null | undefined, today: string): string {
+  const key = String(raw ?? '').slice(0, 10);
+  return parseDateKeyMs(key) > 0 ? key : today;
+}
+
+function daysBetweenKeys(startKey: string, endKey: string): number {
+  const start = parseDateKeyMs(startKey);
+  const end = parseDateKeyMs(endKey);
+  if (!start || !end) return 0;
+  return Math.round((end - start) / 86400000);
+}
+
+function formatGoalTimelineDate(key: string): string {
+  const ms = parseDateKeyMs(key);
+  if (!ms) return key;
+  return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function compactAgoLabel(dateKeyValue: string, todayKeyValue: string): string {
+  const days = Math.max(0, daysBetweenKeys(dateKeyValue, todayKeyValue));
+  if (days === 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 14) return `${days}d ago`;
+  return `${Math.round(days / 7)}w ago`;
+}
+
+function stripGoalStartedCopy(text: string): string {
+  return text
+    .replace(/^(New goal|Started today|Started \d+ days? ago|Started \d+ weeks? ago);\s*/i, '')
+    .trim();
+}
+
+function latestWeightEntry(entries: WeightEntry[], todayKeyValue: string): WeightEntry | null {
+  return [...entries]
+    .filter(entry => Number.isFinite(entry.weightLbs) && entry.weightLbs > 0 && parseDateKeyMs(entry.date) > 0 && parseDateKeyMs(entry.date) <= parseDateKeyMs(todayKeyValue))
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date))
+    .at(-1) ?? null;
+}
+
+type GoalWeekWindow = {
+  index: number;
+  key: string;
+  label: string;
+  startDate: string;
+  endDate: string;
+  capDate: string;
+  elapsedDays: number;
+};
+
+function buildGoalWeekWindows(blockStartDate: string, todayKeyValue: string): GoalWeekWindow[] {
+  return Array.from({ length: 6 }, (_, index) => {
+    const startDate = shiftDateKey(blockStartDate, index * 7);
+    const endDate = shiftDateKey(startDate, 6);
+    const future = parseDateKeyMs(startDate) > parseDateKeyMs(todayKeyValue);
+    const capDate = future || parseDateKeyMs(endDate) <= parseDateKeyMs(todayKeyValue) ? endDate : todayKeyValue;
+    const elapsedDays = future ? 0 : Math.max(1, Math.min(7, daysBetweenKeys(startDate, capDate) + 1));
+    return { index, key: `week-${index + 1}`, label: `W${index + 1}`, startDate, endDate, capDate, elapsedDays };
+  });
+}
+
+function bodyScanValue(scan: BodyScanEntry | null | undefined): number | null {
+  const value = finiteOrNull(scan?.bodyFatPct);
+  return value != null && value > 0 ? value : null;
+}
+
+function latestBodyScanBefore(scans: BodyScanEntry[], capDate: string): BodyScanEntry | null {
+  const capMs = parseDateKeyMs(capDate);
+  return [...scans]
+    .filter(scan => bodyScanValue(scan) != null && parseDateKeyMs(scan.date) > 0 && parseDateKeyMs(scan.date) <= capMs)
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date))
+    .at(-1) ?? null;
+}
+
+function bestStrengthE1RMInWindow(history: WorkoutSession[], startDate: string, endDate: string): number | null {
+  let best: number | null = null;
+  for (const session of history) {
+    if (!session.completed || session.skipped || !dateInWindow(session.date, startDate, endDate)) continue;
+    for (const exercise of session.exercises ?? []) {
+      if (isNonStrengthExercise(exercise)) continue;
+      const category = categorizeExercise(exercise);
+      for (const set of exercise.sets ?? []) {
+        const estimate = estimate1RM((set as any).weightLbs ?? (set as any).weight_lbs, (set as any).reps, {
+          rir: (set as any).rir ?? (set as any).repsInReserve ?? (set as any).reps_in_reserve,
+          category,
+        });
+        if (estimate != null && (best == null || estimate > best)) best = estimate;
+      }
+    }
+  }
+  return best;
+}
+
+function buildGoalExecutionOverview(input: {
+  profile: UserProfile;
+  todayTrack: TodayTrackSummary;
+  goalForecast: GoalForecastModel | null;
+  weightEntries: WeightEntry[];
+  history: WorkoutSession[];
+  summaries: StoredWorkoutSummary[];
+  prs: PR[];
+  paceHistory: PaceHistoryPoint[];
+  mealHistory: Array<{ meal_date: string }> | null;
+  vo2Points: HealthBiometricHistoryPoint[];
+  bodyScanHistory: BodyScanEntry[];
+  weightUnit: WeightUnit;
+  distanceUnit: DistanceUnit;
+  tc: ThemeColors;
+  showWorkoutProgress: boolean;
+  showMealProgress: boolean;
+  today?: Date;
+}): GoalExecutionOverview {
+  const today = input.today ?? new Date();
+  const todayKeyValue = dateKey(today);
+  const originalStart = validDateKeyOrToday(input.profile.goalDetails?.goalStartedAt, todayKeyValue);
+  const elapsedSinceGoalStart = Math.max(0, daysBetweenKeys(originalStart, todayKeyValue));
+  const blockIndex = Math.floor(elapsedSinceGoalStart / GOAL_EXECUTION_BLOCK_DAYS);
+  const blockStartDate = shiftDateKey(originalStart, blockIndex * GOAL_EXECUTION_BLOCK_DAYS);
+  const blockEndDate = shiftDateKey(blockStartDate, GOAL_EXECUTION_BLOCK_DAYS - 1);
+  const dayInBlock = Math.max(1, Math.min(GOAL_EXECUTION_BLOCK_DAYS, daysBetweenKeys(blockStartDate, todayKeyValue) + 1));
+  const elapsedPct = clampPct((dayInBlock / GOAL_EXECUTION_BLOCK_DAYS) * 100);
+  const timeLeftPct = clampPct(100 - elapsedPct);
+  const remainingDays = Math.max(0, GOAL_EXECUTION_BLOCK_DAYS - dayInBlock);
+  const bucket = input.todayTrack.bucket;
+  const weightPrecision = input.weightUnit === 'kg' ? 1 : 0;
+  const latestWeight = latestWeightEntry(input.weightEntries, todayKeyValue);
+  const weightStaleDays = latestWeight ? daysBetweenKeys(latestWeight.date, todayKeyValue) : Number.POSITIVE_INFINITY;
+  const weeks = buildGoalWeekWindows(blockStartDate, todayKeyValue);
+  const targetDays = Math.max(1, Math.round(Number(input.profile.daysPerWeek) || 3));
+  const isBodyGoal = bucket === 'fat_loss' || bucket === 'muscle_gain' || bucket === 'body_recomp';
+  const isRecompGoal = bucket === 'body_recomp';
+  const isStrengthGoal = bucket === 'strength' || bucket === 'muscle_gain';
+  const isCardioGoal = bucket === 'endurance' || bucket === 'athletic';
+  const startBodyFatPct = finiteOrNull(input.profile.goalDetails?.startBodyFatPct);
+  const hasGoalStartBodyFat = startBodyFatPct != null && startBodyFatPct > 0;
+  const bodyScansSinceGoalStart = input.bodyScanHistory.filter(scan => bodyScanValue(scan) != null && dateInWindow(scan.date, originalStart, todayKeyValue));
+  const bodyFatInBlockAvailable = isBodyGoal && bodyScansSinceGoalStart.some(scan => dateInWindow(scan.date, blockStartDate, todayKeyValue));
+  const useBodyFatSecondary = isBodyGoal && (bodyFatInBlockAvailable || (isRecompGoal && hasGoalStartBodyFat));
+  const vo2Available = isCardioGoal && input.vo2Points.some(point => Number.isFinite(point.value) && dateInWindow(point.date, blockStartDate, todayKeyValue));
+  const secondaryLabel = isBodyGoal
+    ? useBodyFatSecondary ? 'Body fat' : 'Weight'
+    : isStrengthGoal
+      ? 'Strength'
+      : isCardioGoal
+        ? vo2Available ? 'VO2 max' : 'Cardio volume'
+        : 'Goal signal';
+  const secondaryColor = isBodyGoal
+    ? useBodyFatSecondary ? '#F59E0B' : '#14B8A6'
+    : isStrengthGoal
+      ? '#A78BFA'
+      : isCardioGoal
+        ? '#06B6D4'
+        : input.tc.textMuted;
+
+  const rawPoints = weeks.map(week => {
+    const elapsedDays = week.elapsedDays;
+    let executionPct: number | null = null;
+    if (elapsedDays > 0) {
+      let weightedScore = 0;
+      let totalWeight = 0;
+      if (input.showWorkoutProgress) {
+        const expectedWorkouts = elapsedDays < 7
+          ? Math.max(1, Math.ceil((targetDays / 7) * elapsedDays))
+          : targetDays;
+        const completed = loggedWorkoutDayKeys(input.history, input.summaries, week.startDate, week.endDate, week.capDate).size;
+        const trainingPct = clampPct((completed / Math.max(1, expectedWorkouts)) * 100) / 100;
+        const weight = isCardioGoal ? 0.8 : isStrengthGoal ? 0.75 : isBodyGoal ? 0.4 : 0.65;
+        weightedScore += Math.min(1.05, trainingPct) * weight;
+        totalWeight += weight;
+      }
+      if (input.showMealProgress) {
+        const mealDays = new Set((input.mealHistory ?? [])
+          .map(row => String(row.meal_date ?? '').slice(0, 10))
+          .filter(key => dateInWindow(key, week.startDate, week.endDate) && parseDateKeyMs(key) <= parseDateKeyMs(week.capDate))).size;
+        const nutritionPct = clampPct((mealDays / Math.max(1, elapsedDays)) * 100) / 100;
+        const weight = isBodyGoal ? 0.5 : isStrengthGoal ? 0.25 : isCardioGoal ? 0.2 : 0.35;
+        weightedScore += Math.min(1.05, nutritionPct) * weight;
+        totalWeight += weight;
+      }
+      if (isBodyGoal) {
+        const hasWeightLog = input.weightEntries.some(entry => dateInWindow(entry.date, week.startDate, week.endDate) && parseDateKeyMs(entry.date) <= parseDateKeyMs(week.capDate));
+        weightedScore += (hasWeightLog ? 1 : 0.35) * 0.1;
+        totalWeight += 0.1;
+      }
+      executionPct = totalWeight > 0 ? clampPct((weightedScore / totalWeight) * 100) : null;
+    }
+
+    let secondaryRaw: number | null = null;
+    let secondaryValue = 'Need data';
+    if (isBodyGoal) {
+      if (useBodyFatSecondary) {
+        const scan = latestBodyScanBefore(bodyScansSinceGoalStart, week.capDate);
+        const value = bodyScanValue(scan) ?? (isRecompGoal ? startBodyFatPct : null);
+        if (value != null && elapsedDays > 0) {
+          secondaryRaw = value;
+          secondaryValue = `${value.toFixed(1).replace(/\.0$/, '')}%`;
+        }
+      } else if (elapsedDays > 0) {
+        const latestInWeek = latestWeightEntry(input.weightEntries.filter(entry => parseDateKeyMs(entry.date) <= parseDateKeyMs(week.capDate)), week.capDate);
+        const fallback = latestInWeek?.weightLbs ?? finiteOrNull(input.profile.goalDetails?.startWeightLbs) ?? finiteOrNull(input.profile.physicalStats?.weightLbs);
+        if (fallback != null) {
+          secondaryRaw = fallback;
+          secondaryValue = formatWeight(fallback, input.weightUnit, { precision: weightPrecision });
+        }
+      }
+    } else if (isStrengthGoal && elapsedDays > 0) {
+      const best = bestStrengthE1RMInWindow(input.history, week.startDate, week.capDate);
+      if (best != null) {
+        secondaryRaw = best;
+        secondaryValue = formatWeight(best, input.weightUnit, { precision: weightPrecision });
+      }
+    } else if (isCardioGoal && elapsedDays > 0) {
+      if (vo2Available) {
+        const latestVo2 = [...input.vo2Points]
+          .filter(point => Number.isFinite(point.value) && parseDateKeyMs(point.date) <= parseDateKeyMs(week.capDate))
+          .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date))
+          .at(-1) ?? null;
+        if (latestVo2) {
+          secondaryRaw = latestVo2.value;
+          secondaryValue = latestVo2.value.toFixed(1).replace(/\.0$/, '');
+        }
+      } else {
+        const miles = input.paceHistory
+          .filter(point => dateInWindow(point.date, week.startDate, week.endDate) && parseDateKeyMs(point.date) <= parseDateKeyMs(week.capDate))
+          .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
+        if (miles > 0) {
+          secondaryRaw = miles;
+          secondaryValue = formatDistance(miles, input.distanceUnit);
+        }
+      }
+    }
+
+    return {
+      key: week.key,
+      label: week.label,
+      executionPct,
+      secondaryRaw,
+      secondaryValue,
+    };
+  });
+
+  const secondaryValues = rawPoints
+    .map(point => point.secondaryRaw)
+    .filter((value): value is number => value != null && Number.isFinite(value));
+  const rawMin = secondaryValues.length > 0 ? Math.min(...secondaryValues) : 0;
+  const rawMax = secondaryValues.length > 0 ? Math.max(...secondaryValues) : 0;
+  const rawSpan = Math.max(1, rawMax - rawMin);
+  const points: GoalGraphPoint[] = rawPoints.map(point => ({
+    key: point.key,
+    label: point.label,
+    executionPct: point.executionPct,
+    secondaryValue: point.secondaryValue,
+    secondaryPct: point.secondaryRaw == null
+      ? null
+      : secondaryValues.length < 2
+        ? 50
+        : clampPct(18 + ((point.secondaryRaw - rawMin) / rawSpan) * 64),
+  }));
+
+  const latestExecution = [...points].reverse().find(point => point.executionPct != null)?.executionPct ?? input.goalForecast?.executionPct ?? input.todayTrack.progressPct;
+  const latestSecondary = [...points].reverse().find(point => point.secondaryPct != null);
+  const latestBodyScan = latestBodyScanBefore(bodyScansSinceGoalStart, todayKeyValue);
+  const latestBodyFatPct = bodyScanValue(latestBodyScan) ?? (useBodyFatSecondary ? startBodyFatPct : null);
+  const latestEstablishedPr = establishedRecentPrs(input.history, input.prs, parseDateKeyMs(blockStartDate))
+    .filter(pr => dateInWindow(pr.date, blockStartDate, todayKeyValue))
+    .sort((a, b) => parseDateKeyMs(b.date) - parseDateKeyMs(a.date))[0] ?? null;
+  const stats: GoalOverviewStat[] = isBodyGoal
+    ? [
+        {
+          key: 'latest-weight',
+          label: 'Latest weight',
+          value: latestWeight ? formatWeight(latestWeight.weightLbs, input.weightUnit, { precision: weightPrecision }) : 'Need log',
+          detail: latestWeight ? (weightStaleDays > 7 ? 'weight update needed' : compactAgoLabel(latestWeight.date, todayKeyValue)) : 'weight update needed',
+          color: latestWeight && weightStaleDays <= 7 ? input.tc.textPrimary : input.tc.warning,
+        },
+        {
+          key: useBodyFatSecondary ? 'body-fat' : 'execution',
+          label: useBodyFatSecondary ? 'Body fat' : 'Execution',
+          value: useBodyFatSecondary && latestBodyFatPct != null ? `${latestBodyFatPct.toFixed(1).replace(/\.0$/, '')}%` : `${latestExecution}%`,
+          detail: useBodyFatSecondary ? (latestBodyScan ? formatGoalTimelineDate(latestBodyScan.date) : 'goal start') : 'latest week',
+          color: useBodyFatSecondary ? secondaryColor : input.tc.primary,
+        },
+      ]
+    : isStrengthGoal
+      ? [
+          {
+            key: 'strength-marker',
+            label: 'Strength',
+            value: latestSecondary?.secondaryValue ?? 'Need sets',
+            detail: latestEstablishedPr ? `PR ${compactAgoLabel(latestEstablishedPr.date, todayKeyValue)}` : 'weekly best e1RM',
+            color: secondaryColor,
+          },
+          { key: 'execution', label: 'Execution', value: `${latestExecution}%`, detail: 'latest week', color: input.tc.primary },
+        ]
+      : isCardioGoal
+        ? [
+            {
+              key: 'cardio-marker',
+              label: secondaryLabel,
+              value: latestSecondary?.secondaryValue ?? 'Need logs',
+              detail: vo2Available ? HEALTH_WEARABLE_LABEL : 'weekly distance',
+              color: secondaryColor,
+            },
+            { key: 'execution', label: 'Execution', value: `${latestExecution}%`, detail: 'latest week', color: input.tc.primary },
+          ]
+        : [
+            { key: 'execution', label: 'Execution', value: `${latestExecution}%`, detail: 'latest week', color: input.tc.primary },
+            { key: 'time-left', label: 'Time left', value: `${timeLeftPct}%`, detail: remainingDays === 0 ? 'checkpoint today' : `${remainingDays}d left`, color: input.tc.textPrimary },
+          ];
+
+  const graphSubtitle = isBodyGoal
+    ? `Execution vs ${secondaryLabel.toLowerCase()} across this 6-week block.`
+    : isStrengthGoal
+      ? 'Execution vs weekly strength markers.'
+      : isCardioGoal
+        ? `Execution vs ${secondaryLabel.toLowerCase()} across this 6-week block.`
+        : 'Execution across this 6-week block.';
+
+  return {
+    blockStartDate,
+    blockEndDate,
+    dayLabel: `Day ${dayInBlock}/${GOAL_EXECUTION_BLOCK_DAYS}`,
+    timeLeftLabel: `${timeLeftPct}% time left`,
+    graphTitle: '6-week execution',
+    graphSubtitle,
+    secondaryLabel,
+    secondaryColor,
+    points,
+    stats,
+  };
+}
+
 function serverCompletionIdFromLocalId(id?: string | null): number | undefined {
   const match = String(id ?? '').match(/^server(?:-summary)?-(\d+)$/);
   const parsed = match ? Number(match[1]) : NaN;
@@ -1755,23 +4465,40 @@ function normalizeHrZoneMinutes(raw?: number[] | null): [number, number, number,
 function mergeCompletionMetrics(summary: StoredWorkoutSummary, completion: WorkoutCompletionRecord): StoredWorkoutSummary {
   const hr = completion.hr_summary;
   const zones = normalizeHrZoneMinutes(hr?.zoneMinutes);
+  const completionRoute = completion.route_coords?.map(c => ({ lat: c.lat, lon: c.lon }));
+  const trainingScore = completion.training_score;
+  const trainingRating = completion.training_rating;
   return {
     ...summary,
     caloriesBurned: summary.caloriesBurned || completion.calories_burned || 0,
     hrAvg: summary.hrAvg ?? (hr?.avgBpm != null ? Math.round(Number(hr.avgBpm)) : undefined),
     hrMax: summary.hrMax ?? (hr?.maxBpm != null ? Math.round(Number(hr.maxBpm)) : undefined),
     hrZoneMinutes: summary.hrZoneMinutes ?? zones,
+    stimulus: summary.stimulus ?? completion.stimulus ?? null,
+    sourceContext: summary.sourceContext ?? completion.source_context ?? null,
+    activityCategory: summary.activityCategory ?? completion.activity_category ?? null,
+    activitySubtype: summary.activitySubtype ?? completion.activity_subtype ?? null,
+    activitySource: summary.activitySource ?? completion.activity_source ?? null,
+    cardioStyle: summary.cardioStyle ?? completion.cardio_style ?? null,
+    distanceMiles: summary.distanceMiles ?? completion.distance_miles ?? null,
+    importSource: summary.importSource ?? completion.import_source ?? null,
+    routeCoords: summary.routeCoords ?? completionRoute ?? null,
+    trainingScore: summary.trainingScore ?? (trainingScore != null ? Math.round(Number(trainingScore)) : undefined),
+    trainingRating: summary.trainingRating ?? (typeof trainingRating === 'string' ? trainingRating as any : undefined),
+    trainingPillars: summary.trainingPillars ?? (completion.training_pillars as any) ?? undefined,
+    trainingPillarBreakdown: summary.trainingPillarBreakdown ?? (completion.training_pillar_breakdown as any) ?? undefined,
   };
 }
 
 function summaryFromCompletion(completion: WorkoutCompletionRecord): StoredWorkoutSummary | null {
-  const hasHealthMetrics = Boolean(
+  const hasSummaryMetrics = Boolean(
     completion.calories_burned
     || completion.hr_summary?.avgBpm
     || completion.hr_summary?.maxBpm
-    || completion.hr_summary?.zoneMinutes?.some(m => Number(m) > 0),
+    || completion.hr_summary?.zoneMinutes?.some(m => Number(m) > 0)
+    || completion.training_score != null
   );
-  if (!hasHealthMetrics) return null;
+  if (!hasSummaryMetrics) return null;
   return mergeCompletionMetrics({
     id: `server-summary-${completion.id}`,
     date: completion.started_at ?? completion.ended_at ?? completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
@@ -1782,6 +4509,15 @@ function summaryFromCompletion(completion: WorkoutCompletionRecord): StoredWorko
     totalSets: 0,
     totalReps: 0,
     caloriesBurned: completion.calories_burned ?? 0,
+    stimulus: completion.stimulus ?? null,
+    sourceContext: completion.source_context ?? null,
+    activityCategory: completion.activity_category ?? null,
+    activitySubtype: completion.activity_subtype ?? null,
+    activitySource: completion.activity_source ?? null,
+    cardioStyle: completion.cardio_style ?? null,
+    distanceMiles: completion.distance_miles ?? null,
+    importSource: completion.import_source ?? null,
+    routeCoords: completion.route_coords?.map(c => ({ lat: c.lat, lon: c.lon })) ?? null,
     motivationMessage: 'Workout logged.',
     achievements: [],
     recommendations: [],
@@ -1806,12 +4542,18 @@ function targetRepsFromServerExercise(exercise: NonNullable<WorkoutSessionRecord
   return '';
 }
 
+function serverSetType(raw: unknown): string | null {
+  const value = String(raw ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (!value) return null;
+  return value === 'warm_up' ? 'warmup' : value;
+}
+
 function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
   const exercises = (row.exercises ?? []).map(exercise => {
-    const sets = (exercise.sets ?? [])
+    const allSets = (exercise.sets ?? [])
       .filter(set => set.completed !== false)
       .map((set, index) => ({
-        setNumber: Number(set.set_number ?? index + 1),
+        setNumber: Number(set.set_number ?? index + 1) > 0 ? Number(set.set_number ?? index + 1) : index + 1,
         reps: Number(set.actual_reps ?? set.target_reps_max ?? set.target_reps_min ?? 0),
         weightLbs: Number(set.actual_weight_lbs ?? set.target_weight_lbs ?? 0),
         durationSeconds: set.duration_seconds ?? undefined,
@@ -1821,7 +4563,14 @@ function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
         actualPace: set.actual_pace ?? undefined,
         heartRateAvg: set.heart_rate_avg ?? undefined,
         cardioMetrics: set.cardio_metrics ?? undefined,
+        setType: serverSetType(set.set_type) as any,
       }));
+    const warmupSets = allSets
+      .filter(set => set.setType === 'warmup')
+      .map((set, index) => ({ ...set, setNumber: index + 1 }));
+    const sets = allSets
+      .filter(set => set.setType !== 'warmup')
+      .map((set, index) => ({ ...set, setNumber: Number(set.setNumber) > 0 ? Number(set.setNumber) : index + 1 }));
     return {
       name: exercise.name,
       targetSets: sets.length,
@@ -1829,6 +4578,7 @@ function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
       targetRestSeconds: exercise.rest_seconds ?? 60,
       equipment: exercise.equipment ?? 'other',
       sets,
+      warmupSets,
       slug: exercise.exercise_slug_snapshot ?? undefined,
       primaryMuscle: exercise.primary_muscle_snapshot ?? undefined,
       primary_muscle: exercise.primary_muscle_snapshot ?? undefined,
@@ -1884,7 +4634,14 @@ function reconcileWorkoutProgressData(
   const completionKeys = new Set(
     completionsByKey.keys(),
   );
-  if (completionKeys.size === 0) return { history: [], summaries: [] };
+  const serverSessionKeys = new Set(
+    history
+      .filter(session => /^server-session-\d+$/.test(String(session.id ?? '')) && session.completed && !session.skipped)
+      .map(session => workoutSessionCompletionKey(session))
+      .filter((key): key is string => !!key),
+  );
+  const authoritativeKeys = new Set([...completionKeys, ...serverSessionKeys]);
+  if (authoritativeKeys.size === 0) return { history: [], summaries: [] };
 
   const scopedHistory = history
     .map(session => {
@@ -1894,7 +4651,7 @@ function reconcileWorkoutProgressData(
     })
     .filter(session => {
       const key = workoutSessionCompletionKey(session);
-      return !!key && completionKeys.has(key);
+      return !!key && authoritativeKeys.has(key);
     });
   const existingKeys = new Set(
     scopedHistory
@@ -1904,6 +4661,7 @@ function reconcileWorkoutProgressData(
   for (const completion of completions) {
     const key = serverCompletionKey(completion);
     if (!key || existingKeys.has(key)) continue;
+    const manualActivity = manualActivityFromCompletion(completion);
     scopedHistory.push({
       id: `server-${completion.id}`,
       date: completion.started_at ?? completion.ended_at ?? completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
@@ -1913,7 +4671,11 @@ function reconcileWorkoutProgressData(
       endedAt: completion.ended_at ?? completion.completed_at ?? undefined,
       exercises: [],
       completed: true,
-      ...(manualActivityFromCompletion(completion) ? { manualActivity: manualActivityFromCompletion(completion) } : {}),
+      ...(manualActivity ? { manualActivity } : {}),
+      ...(completion.route_coords && completion.route_coords.length > 0
+        ? { routeCoords: completion.route_coords.map(c => ({ lat: c.lat, lon: c.lon })) }
+        : {}),
+      ...(completion.import_source ? { importSource: completion.import_source } : {}),
     });
     existingKeys.add(key);
   }
@@ -1921,7 +4683,7 @@ function reconcileWorkoutProgressData(
 
   const scopedSummaries = summaries.filter(summary => {
     const key = workoutSummaryCompletionKey(summary);
-    return !!key && completionKeys.has(key);
+    return !!key && authoritativeKeys.has(key);
   });
   const summariesByKey = new Map(
     scopedSummaries
@@ -1998,22 +4760,16 @@ function buildTrainingSignals(
     icon: 'speedometer-outline',
     color: '#6366F1',
   });
-  signals.push({
-    key: 'hr-zones',
-    label: 'Heart-rate zones',
-    value: totalHrMinutes > 0
-      ? `${Math.round(hrTotals[1])}m Z2`
-      : healthKitAvailable && healthEnabled
-        ? 'No HR yet'
-        : 'Manual mode',
-    detail: totalHrMinutes > 0
-      ? `${Math.round(hrTotals[2] + hrTotals[3] + hrTotals[4])}m Z3+ across recent sessions`
-      : healthKitAvailable
-        ? `Connect ${HEALTH_PLATFORM_LABEL} or use a ${HEALTH_WEARABLE_LABEL} during workouts for zone trends.`
-        : `${HEALTH_PLATFORM_LABEL} is unavailable here; workout scoring falls back to sets, duration, and completion.`,
-    icon: 'pulse-outline',
-    color: '#EF4444',
-  });
+  if (totalHrMinutes > 0) {
+    signals.push({
+      key: 'hr-zones',
+      label: 'Heart-rate zones',
+      value: `${Math.round(hrTotals[1])}m Z2`,
+      detail: `${Math.round(hrTotals[2] + hrTotals[3] + hrTotals[4])}m Z3+ across recent sessions`,
+      icon: 'pulse-outline',
+      color: '#EF4444',
+    });
+  }
   signals.push({
     key: 'soreness',
     label: 'Soreness trend',
@@ -2076,7 +4832,18 @@ function AnimatedChartBar({
       useNativeDriver: false,
     }).start();
   }, [targetHeight, delay, height, reducedMotion]);
-  return <Animated.View style={[style, { height }]} />;
+  return (
+    <Animated.View style={[style, { height, overflow: 'hidden' }]}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(255,255,255,0.38)', 'rgba(255,255,255,0.08)', 'rgba(0,0,0,0.10)']}
+        locations={[0, 0.45, 1]}
+        start={{ x: 0.18, y: 0 }}
+        end={{ x: 0.82, y: 1 }}
+        style={StyleSheet.absoluteFillObject}
+      />
+    </Animated.View>
+  );
 }
 
 function AnimatedProgressFill({
@@ -2125,9 +4892,1171 @@ function AnimatedProgressFill({
         {
           width: animatedWidth,
           backgroundColor: color,
+          overflow: 'hidden',
         },
-      ]}
+      ]}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(255,255,255,0.36)', 'rgba(255,255,255,0.07)', 'rgba(0,0,0,0.08)']}
+        locations={[0, 0.48, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={StyleSheet.absoluteFillObject}
+      />
+    </Animated.View>
+  );
+}
+
+type ThemeColors = ReturnType<typeof getTheme>['colors'];
+
+function ProgressCardWash({
+  color,
+  secondaryColor,
+  intensity = 'soft',
+  cornerRadius = radius.lg,
+}: {
+  color: string;
+  secondaryColor?: string;
+  intensity?: 'soft' | 'medium' | 'strong';
+  cornerRadius?: number;
+}) {
+  const primaryAlpha = intensity === 'strong' ? '28' : intensity === 'medium' ? '1E' : '14';
+  const secondaryAlpha = intensity === 'strong' ? '1C' : intensity === 'medium' ? '14' : '0C';
+  return (
+    <LinearGradient
+      pointerEvents="none"
+      colors={[`${color}${primaryAlpha}`, `${secondaryColor ?? color}${secondaryAlpha}`, 'rgba(255,255,255,0)']}
+      locations={[0, 0.52, 1]}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 1 }}
+      style={[StyleSheet.absoluteFillObject, { borderRadius: cornerRadius }]}
     />
+  );
+}
+
+function AnimatedHealthSheen({
+  delay = 0,
+  opacity = 0.34,
+  repeat = true,
+  style,
+}: {
+  delay?: number;
+  opacity?: number;
+  repeat?: boolean;
+  style?: any;
+}) {
+  // Sliding "sheen" sweep removed per design. Kept as a no-op so the existing
+  // call sites stay stable; static layers and the pulse glyph remain.
+  return null;
+}
+
+function HealthPulseGlyph({
+  iconName,
+  color,
+  iconSize = 16,
+  delay = 0,
+  style,
+}: {
+  iconName: ComponentProps<typeof Ionicons>['name'];
+  color: string;
+  iconSize?: number;
+  delay?: number;
+  style?: any;
+}) {
+  const reducedMotion = useReducedMotion();
+  const pulse = useRef(new Animated.Value(reducedMotion ? 1 : 0)).current;
+
+  useEffect(() => {
+    if (reducedMotion) {
+      pulse.setValue(1);
+      return;
+    }
+    pulse.setValue(0);
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.delay(delay),
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 1900,
+          easing: TIMING_SMOOTH.easing,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [delay, pulse, reducedMotion]);
+
+  const ringOpacity = pulse.interpolate({
+    inputRange: [0, 0.72, 1],
+    outputRange: [0.3, 0.08, 0],
+  });
+  const ringScale = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.88, 1.55],
+  });
+  const iconScale = pulse.interpolate({
+    inputRange: [0, 0.42, 1],
+    outputRange: [1, 1.08, 1],
+  });
+
+  return (
+    <View style={[style, healthMotionStyles.pulseGlyph]}>
+      {!reducedMotion && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            StyleSheet.absoluteFillObject,
+            healthMotionStyles.pulseRing,
+            {
+              borderColor: color,
+              opacity: ringOpacity,
+              transform: [{ scale: ringScale }],
+            },
+          ]}
+        />
+      )}
+      <Animated.View style={{ transform: [{ scale: iconScale }] }}>
+        <Ionicons name={iconName} size={iconSize} color={color} />
+      </Animated.View>
+    </View>
+  );
+}
+
+const healthMotionStyles = StyleSheet.create({
+  sheen: {
+    position: 'absolute',
+    top: -34,
+    bottom: -34,
+    width: 88,
+  },
+  pulseGlyph: {
+    position: 'relative',
+    overflow: 'visible',
+  },
+  pulseRing: {
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+});
+
+function HealthDataImageCard({
+  title,
+  subtitle,
+  badge,
+  iconName = 'heart-outline',
+  imageUri = HEALTH_DATA_READY_IMAGE,
+  children,
+  tc,
+  styles,
+}: {
+  title: string;
+  subtitle: string;
+  badge?: string;
+  iconName?: ComponentProps<typeof Ionicons>['name'];
+  imageUri?: string;
+  children: ReactNode;
+  tc: ThemeColors;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  return (
+    <View style={[styles.vitalsCard, styles.healthDataImageCard]}>
+      <ImageBackground
+        source={{ uri: imageUri }}
+        resizeMode="cover"
+        imageStyle={styles.healthDataHeroImage}
+        style={styles.healthDataHero}>
+        <LinearGradient
+          colors={['rgba(0,0,0,0.04)', 'rgba(0,0,0,0.58)']}
+          style={StyleSheet.absoluteFill}
+        />
+        <LinearGradient
+          pointerEvents="none"
+          colors={[tc.primary + '54', '#14B8A62E', 'rgba(0,0,0,0)']}
+          locations={[0, 0.46, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <AnimatedHealthSheen delay={260} opacity={0.46} style={styles.healthDataHeroSheen} />
+        <View style={styles.healthDataHeroMeta}>
+          <HealthPulseGlyph iconName={iconName} iconSize={16} color="#FFFFFF" style={styles.healthDataHeroIcon} />
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.healthDataHeroEyebrow} numberOfLines={1}>Health signals</Text>
+            <Text style={styles.healthDataHeroTitle} numberOfLines={1}>{title}</Text>
+            <Text style={styles.healthDataHeroSubtitle} numberOfLines={2}>{subtitle}</Text>
+          </View>
+          {badge ? (
+            <View style={styles.healthDataHeroBadge}>
+              <Text style={styles.healthDataHeroBadgeText} numberOfLines={1}>{badge}</Text>
+            </View>
+          ) : null}
+        </View>
+      </ImageBackground>
+      <View style={styles.healthDataContent}>
+        <ProgressCardWash color={tc.primary} secondaryColor="#14B8A6" intensity="soft" cornerRadius={0} />
+        <LinearGradient
+          pointerEvents="none"
+          colors={['rgba(255,255,255,0.08)', 'rgba(255,255,255,0)', tc.primary + '10']}
+          locations={[0, 0.42, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        {children}
+      </View>
+    </View>
+  );
+}
+
+type ThalloPillarMeta = {
+  key: HealthPillarKey;
+  label: string;
+  shortLabel: string;
+  color: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
+  weight: number;
+};
+
+type ThalloScorePillar = ThalloPillarMeta & {
+  score: number;
+  shareRatio: number;
+  sharePct: number;
+  contributionPoints: number;
+  why: string;
+  improve: string[];
+  dataUsed: string[];
+  missing: string[];
+};
+
+type RadarMetric = {
+  key: string;
+  label: string;
+  shortLabel: string;
+  value: number | null;
+  detail: string;
+  rawValue?: string | number;
+  targetLabel?: string;
+  status?: 'strong' | 'ok' | 'focus' | 'high' | 'unknown';
+  reason?: string;
+  isEstimate?: boolean;
+};
+
+type RadarAxis = {
+  key: string;
+  label: string;
+  score: number;
+  rawValue?: string | number;
+  targetLabel?: string;
+  status?: 'strong' | 'ok' | 'focus' | 'high' | 'unknown';
+  reason?: string;
+  isEstimate?: boolean;
+};
+
+type RadarInsight = {
+  strongest?: RadarAxis;
+  focus?: RadarAxis;
+  enoughData: boolean;
+};
+
+function clampRadarScore(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function averageRadarScore(values: Array<number | null | undefined>): number | null {
+  const valid = values
+    .map(value => clampRadarScore(value))
+    .filter((value): value is number => value != null);
+  if (valid.length === 0) return null;
+  return Math.round(valid.reduce((sum, value) => sum + value, 0) / valid.length);
+}
+
+function radarStatusForScore(score: number | null | undefined, strongAt = 80, okAt = 55): RadarMetric['status'] {
+  if (score == null) return 'unknown';
+  if (score >= strongAt) return 'strong';
+  if (score >= okAt) return 'ok';
+  return 'focus';
+}
+
+function radarAxesFromMetrics(metrics: RadarMetric[]): RadarAxis[] {
+  return metrics
+    .map((metric): RadarAxis | null => {
+      const score = clampRadarScore(metric.value);
+      if (score == null) return null;
+      return {
+        key: metric.key,
+        label: metric.label,
+        score,
+        rawValue: metric.rawValue,
+        targetLabel: metric.targetLabel,
+        status: metric.status ?? radarStatusForScore(score),
+        reason: metric.reason ?? metric.detail,
+        isEstimate: metric.isEstimate,
+      } satisfies RadarAxis;
+    })
+    .filter((axis): axis is RadarAxis => axis != null);
+}
+
+function meaningfulRadarAxes(metrics: RadarMetric[]): RadarAxis[] {
+  return radarAxesFromMetrics(metrics).filter(axis => axis.status !== 'unknown');
+}
+
+function averageMeaningfulRadarScore(metrics: RadarMetric[]): number | null {
+  return averageRadarScore(meaningfulRadarAxes(metrics).map(axis => axis.score));
+}
+
+function deriveRadarInsights(
+  axes: RadarAxis[],
+  options: { minMeaningfulAxes?: number } = {},
+): RadarInsight {
+  const minMeaningfulAxes = options.minMeaningfulAxes ?? 3;
+  const meaningful = axes.filter(axis => Number.isFinite(axis.score) && axis.status !== 'unknown');
+  const enoughData = meaningful.length >= minMeaningfulAxes;
+  if (meaningful.length === 0) return { enoughData: false };
+
+  const hasReasonRank = (axis: RadarAxis) => axis.reason && axis.reason.trim().length > 0 ? 1 : 0;
+  const focusRank = (axis: RadarAxis) => {
+    if (axis.status === 'focus' || axis.status === 'high') return 3;
+    if (axis.status === 'ok') return 2;
+    if (axis.isEstimate) return 0;
+    return 1;
+  };
+
+  const strongest = [...meaningful].sort((a, b) =>
+    b.score - a.score
+      || hasReasonRank(b) - hasReasonRank(a)
+      || (a.isEstimate === b.isEstimate ? 0 : a.isEstimate ? 1 : -1)
+  )[0];
+  const focus = [...meaningful].sort((a, b) => {
+    const scoreDelta = a.score - b.score;
+    if (Math.abs(scoreDelta) > 8) return scoreDelta;
+    return focusRank(b) - focusRank(a)
+      || hasReasonRank(b) - hasReasonRank(a)
+      || scoreDelta;
+  })[0];
+
+  return { strongest, focus, enoughData };
+}
+
+function cardioVo2Score(vo2Max: number | null | undefined): number | null {
+  const value = Number(vo2Max);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value >= 50 ? 95 : value >= 42 ? 80 : value >= 35 ? 65 : value >= 28 ? 45 : 25;
+}
+
+function cardioEasyHardScore(easySharePct: number | null | undefined): number | null {
+  const share = Number(easySharePct);
+  if (!Number.isFinite(share)) return null;
+  return share >= 65 && share <= 90 ? 85
+    : share >= 50 && share <= 95 ? 70
+      : 45;
+}
+
+function radarScoreColor(score: number | null, tc: ThemeColors): string {
+  if (score == null) return tc.textMuted;
+  if (score >= 85) return tc.success;
+  if (score >= 65) return tc.primary;
+  if (score >= 45) return tc.warning;
+  return tc.error;
+}
+
+function radarScoreLabel(score: number | null, fallback = 'Building map'): string {
+  if (score == null) return fallback;
+  if (score >= 85) return 'Strong coverage';
+  if (score >= 65) return 'Good base';
+  if (score >= 45) return 'Building';
+  return 'Needs attention';
+}
+
+function RadarMap({
+  metrics,
+  size,
+  color,
+  trackColor,
+  axisColor,
+  labelColor,
+}: {
+  metrics: RadarMetric[];
+  size: number;
+  color: string;
+  trackColor: string;
+  axisColor: string;
+  labelColor: string;
+}) {
+  const safeMetrics = metrics.length >= 3 ? metrics : [
+    ...metrics,
+    ...Array.from({ length: 3 - metrics.length }, (_, index) => ({
+      key: `empty-${index}`,
+      label: '',
+      shortLabel: '',
+      value: null,
+      detail: '',
+    })),
+  ];
+  const center = size / 2;
+  const radius = size * 0.31;
+  const labelRadius = size * 0.43;
+  const angleFor = (index: number) => -Math.PI / 2 + (Math.PI * 2 * index) / safeMetrics.length;
+  const pointFor = (index: number, pct: number, baseRadius = radius) => {
+    const angle = angleFor(index);
+    const distance = baseRadius * Math.max(0, Math.min(1, pct));
+    return {
+      x: center + Math.cos(angle) * distance,
+      y: center + Math.sin(angle) * distance,
+    };
+  };
+  const outerPoints = safeMetrics.map((_, index) => pointFor(index, 1));
+  const reducedMotion = useReducedMotion();
+  const revealAnim = useRef(new Animated.Value(reducedMotion ? 1 : 0)).current;
+  const [revealProgress, setRevealProgress] = useState(reducedMotion ? 1 : 0);
+  const revealKey = safeMetrics
+    .map(metric => `${metric.key}:${clampRadarScore(metric.value) ?? 0}`)
+    .join('|');
+
+  useEffect(() => {
+    const listener = revealAnim.addListener(({ value }) => {
+      setRevealProgress(Math.max(0, Math.min(1, value)));
+    });
+    if (reducedMotion) {
+      revealAnim.setValue(1);
+      setRevealProgress(1);
+      return () => revealAnim.removeListener(listener);
+    }
+    revealAnim.stopAnimation();
+    revealAnim.setValue(0);
+    setRevealProgress(0);
+    Animated.timing(revealAnim, {
+      toValue: 1,
+      duration: 760,
+      delay: 80,
+      easing: TIMING_SMOOTH.easing,
+      useNativeDriver: false,
+    }).start();
+    return () => revealAnim.removeListener(listener);
+  }, [reducedMotion, revealAnim, revealKey]);
+
+  const valuePoints = safeMetrics.map((metric, index) => pointFor(index, ((clampRadarScore(metric.value) ?? 0) / 100) * revealProgress));
+  const polygonPoints = valuePoints.map(point => `${point.x},${point.y}`).join(' ');
+  const gradientId = `radarFillGradient-${size}-${safeMetrics.length}-${color.replace(/[^a-zA-Z0-9]/g, '')}`;
+  return (
+    <View style={{ width: size, height: size }}>
+      <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <Defs>
+          <SvgLinearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+            <Stop offset="0%" stopColor={color} stopOpacity="0.34" />
+            <Stop offset="58%" stopColor={color} stopOpacity="0.18" />
+            <Stop offset="100%" stopColor={color} stopOpacity="0.06" />
+          </SvgLinearGradient>
+        </Defs>
+        {[0.33, 0.66, 1].map(ring => (
+          <Polygon
+            key={`ring-${ring}`}
+            points={safeMetrics.map((_, index) => {
+              const p = pointFor(index, ring);
+              return `${p.x},${p.y}`;
+            }).join(' ')}
+            fill="none"
+            stroke={trackColor}
+            strokeWidth={1}
+            opacity={ring === 1 ? 0.9 : 0.55}
+          />
+        ))}
+        {outerPoints.map((point, index) => (
+          <Line
+            key={`axis-${safeMetrics[index].key}`}
+            x1={center}
+            y1={center}
+            x2={point.x}
+            y2={point.y}
+            stroke={axisColor}
+            strokeWidth={1}
+            opacity={0.5}
+          />
+        ))}
+        <Polygon
+          points={polygonPoints}
+          fill={`url(#${gradientId})`}
+          stroke={color}
+          strokeWidth={2}
+          strokeLinejoin="round"
+          opacity={0.36 + revealProgress * 0.64}
+        />
+        {valuePoints.map((point, index) => (
+          <Circle
+            key={`dot-${safeMetrics[index].key}`}
+            cx={point.x}
+            cy={point.y}
+            r={3.2}
+            fill={color}
+            stroke={trackColor}
+            strokeWidth={1}
+            opacity={0.22 + revealProgress * 0.78}
+          />
+        ))}
+        {safeMetrics.map((metric, index) => {
+          const angle = angleFor(index);
+          const x = center + Math.cos(angle) * labelRadius;
+          const y = center + Math.sin(angle) * labelRadius + 3;
+          return (
+            <SvgText
+              key={`label-${metric.key}`}
+              x={x}
+              y={y}
+              fill={labelColor}
+              fontSize={8.5}
+              fontWeight="800"
+              textAnchor="middle"
+            >
+              {metric.shortLabel}
+            </SvgText>
+          );
+        })}
+      </Svg>
+    </View>
+  );
+}
+
+function TrendsRadarCard({
+  testID,
+  title,
+  subtitle,
+  score,
+  metrics,
+  icon,
+  color,
+  detail,
+  compact = false,
+  onPress,
+  styles,
+  tc,
+}: {
+  testID: string;
+  title: string;
+  subtitle: string;
+  score: number | null;
+  metrics: RadarMetric[];
+  icon: ComponentProps<typeof Ionicons>['name'];
+  color: string;
+  detail: string;
+  compact?: boolean;
+  onPress: () => void;
+  styles: ReturnType<typeof createStyles>;
+  tc: ThemeColors;
+}) {
+  const chartSize = compact ? 122 : 188;
+  const axes = radarAxesFromMetrics(metrics);
+  const insight = deriveRadarInsights(axes);
+  return (
+    <TouchableOpacity
+      testID={testID}
+      activeOpacity={0.86}
+      accessibilityRole="button"
+      accessibilityLabel={`${title}: ${score == null ? 'building' : `${score} out of 100`}. ${detail}`}
+      onPress={onPress}
+      style={[
+        styles.trendsRadarCard,
+        compact && styles.trendsRadarCardCompact,
+        { borderColor: color + '55' },
+      ]}
+    >
+      <ProgressCardWash color={color} secondaryColor={tc.primary} intensity="medium" />
+      <View style={[styles.trendsRadarHeader, compact && styles.trendsRadarHeaderCompact]}>
+        <View style={[
+          styles.trendsRadarIcon,
+          compact && styles.trendsRadarIconCompact,
+          { backgroundColor: color + '20' },
+        ]}>
+          <Ionicons name={icon} size={compact ? 14 : 16} color={color} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.trendsRadarEyebrow} numberOfLines={1}>{subtitle}</Text>
+          <Text
+            style={[styles.trendsRadarTitle, compact && styles.trendsRadarTitleCompact]}
+            numberOfLines={2}>
+            {title}
+          </Text>
+        </View>
+        <View style={[
+          styles.trendsRadarScorePill,
+          compact && styles.trendsRadarScorePillCompact,
+          { backgroundColor: color + '16', borderColor: color + '45' },
+        ]}>
+          <Text style={[styles.trendsRadarScoreText, compact && styles.trendsRadarScoreTextCompact, { color }]} numberOfLines={1}>
+            {score == null ? '--' : score}
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={15} color={tc.textMuted} />
+      </View>
+      <View style={styles.trendsRadarBody}>
+        <View style={[styles.trendsRadarChartWrap, compact && styles.trendsRadarChartWrapCompact]}>
+          <RadarMap
+            metrics={metrics}
+            size={chartSize}
+            color={color}
+            trackColor={tc.border}
+            axisColor={tc.textMuted}
+            labelColor={tc.textSecondary}
+          />
+        </View>
+        {!compact ? (
+          <>
+            <View style={styles.trendsRadarInsightRow}>
+              <View style={[styles.trendsRadarInsightChip, { borderColor: color + '44', backgroundColor: color + '10' }]}>
+                <Text style={styles.trendsRadarInsightLabel}>Strongest</Text>
+                <Text style={[styles.trendsRadarInsightValue, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+                  {insight.enoughData && insight.strongest ? insight.strongest.label : 'More data'}
+                </Text>
+              </View>
+              <View style={[styles.trendsRadarInsightChip, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+                <Text style={styles.trendsRadarInsightLabel}>Focus</Text>
+                <Text style={[styles.trendsRadarInsightValue, { color: tc.textPrimary }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+                  {insight.enoughData && insight.focus ? insight.focus.label : 'Keep logging'}
+                </Text>
+              </View>
+            </View>
+            {/* Inline "Show breakdown" toggle removed — tap the card/graph to
+                open the full per-axis breakdown in the detail view. */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, marginTop: 10 }}>
+              <Ionicons name="stats-chart-outline" size={12} color={tc.textMuted} />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted }}>Tap for the full breakdown</Text>
+            </View>
+          </>
+        ) : null}
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+const THALLO_SCORE_WEIGHTS: Record<HealthPillarKey, number> = {
+  recovery: 25,
+  training: 20,
+  nutrition: 20,
+  cardio: 10,
+  strength: 10,
+  activity: 5,
+  gutSupport: 10,
+};
+
+function thalloPillarMetas(tc: ThemeColors): ThalloPillarMeta[] {
+  return [
+    { key: 'recovery', label: 'Recovery', shortLabel: 'Rec', color: '#22C55E', icon: 'moon-outline', weight: THALLO_SCORE_WEIGHTS.recovery },
+    { key: 'training', label: 'Training', shortLabel: 'Train', color: tc.primary, icon: 'barbell-outline', weight: THALLO_SCORE_WEIGHTS.training },
+    { key: 'nutrition', label: 'Nutrition', shortLabel: 'Fuel', color: '#84CC16', icon: 'restaurant-outline', weight: THALLO_SCORE_WEIGHTS.nutrition },
+    { key: 'cardio', label: 'Cardio', shortLabel: 'Cardio', color: '#06B6D4', icon: 'heart-outline', weight: THALLO_SCORE_WEIGHTS.cardio },
+    { key: 'strength', label: 'Strength', shortLabel: 'Power', color: '#A78BFA', icon: 'flash-outline', weight: THALLO_SCORE_WEIGHTS.strength },
+    { key: 'activity', label: 'Activity', shortLabel: 'Move', color: '#F59E0B', icon: 'walk-outline', weight: THALLO_SCORE_WEIGHTS.activity },
+    { key: 'gutSupport', label: 'Gut support', shortLabel: 'Gut', color: '#10B981', icon: 'leaf-outline', weight: THALLO_SCORE_WEIGHTS.gutSupport },
+  ];
+}
+
+function buildThalloScorePillars(hs: HealthScoreResult, tc: ThemeColors): ThalloScorePillar[] {
+  const metas = thalloPillarMetas(tc).filter(meta => hs.subScores[meta.key] != null);
+  const availableWeight = metas.reduce((sum, meta) => sum + meta.weight, 0) || 1;
+  return metas.map(meta => {
+    const score = Math.max(0, Math.min(100, hs.subScores[meta.key] ?? 0));
+    const missing = hs.missingByPillar[meta.key] ?? [];
+    return {
+      ...meta,
+      score,
+      shareRatio: meta.weight / availableWeight,
+      sharePct: Math.round((meta.weight / availableWeight) * 100),
+      contributionPoints: Math.round(score * (meta.weight / availableWeight)),
+      why: thalloPillarWhy(hs, meta, score),
+      improve: thalloPillarImprove(meta.key, score, missing),
+      dataUsed: thalloPillarDataUsed(hs, meta.key),
+      missing,
+    };
+  });
+}
+
+function thalloPillarWhy(hs: HealthScoreResult, meta: ThalloPillarMeta, score: number): string {
+  const prefix = `${meta.label}:`;
+  const explicit = hs.explanation.find(line => line.toLowerCase().startsWith(prefix.toLowerCase()));
+  if (explicit) return explicit.slice(prefix.length).trim();
+
+  if (meta.key === 'training') {
+    return 'Based on completed Thallo workouts over the last 14 days against your weekly target.';
+  }
+  if (meta.key === 'nutrition') {
+    return hs.pillarSources.nutritionScoreSource === 'server'
+      ? 'Using the server weekly nutrition score from logged meal days.'
+      : 'Using calorie, protein, macro, and fiber adherence from recent logs.';
+  }
+  if (meta.key === 'activity') {
+    return 'Based on daily steps and active energy when those signals are available.';
+  }
+
+  if (score >= 85) return `${meta.label} is a strong contributor right now.`;
+  if (score >= 70) return `${meta.label} is helping the score, with room to tighten the details.`;
+  if (score >= 55) return `${meta.label} is mixed today, so a few better signals can move it quickly.`;
+  return `${meta.label} is pulling the score down today.`;
+}
+
+function thalloPillarImprove(key: HealthPillarKey, score: number, missing: string[]): string[] {
+  const actions: Record<HealthPillarKey, string[]> = {
+    recovery: [
+      'Keep sleep consistent and protect a 7-9 hour window when possible.',
+      'Stack hard training after better sleep days and use easy/recovery days when RHR or HRV looks strained.',
+    ],
+    training: [
+      'Finish the planned sessions for this week and log them in Thallo.',
+      'Keep weekly cadence close to target instead of clustering all sessions into one or two days.',
+    ],
+    nutrition: [
+      'Log meals on at least 3 days this week so the weekly score stabilizes.',
+      'Prioritize protein and calorie target first, then use fiber-rich foods to lift quality.',
+    ],
+    cardio: [
+      'Add Zone 2 work toward 90-150 minutes per week.',
+      'Log cardio sessions or connect wearable VO2/RHR data so the trend has more signal.',
+    ],
+    strength: [
+      'Progress main lifts with small load or rep wins while keeping form consistent.',
+      'Log working sets so PR cadence and tonnage trends can be measured.',
+    ],
+    activity: [
+      'Build a repeatable walking baseline on non-training days.',
+      'Connect step and active-energy data for a cleaner movement read.',
+    ],
+    gutSupport: [
+      'Add plants, legumes, whole grains, or berries to raise fiber and variety.',
+      'Pair hydration with meals and include fermented foods a few times per week if they agree with you.',
+    ],
+  };
+  const result = [...actions[key]];
+  if (score >= 85) {
+    result[0] = 'Keep the current rhythm; this pillar is already doing real work for the score.';
+  }
+  if (missing.length > 0) {
+    result.push(`Improve accuracy: add ${missing.slice(0, 2).join(', ')}.`);
+  }
+  return result.slice(0, 3);
+}
+
+function thalloPillarDataUsed(hs: HealthScoreResult, key: HealthPillarKey): string[] {
+  const sources = hs.pillarSources;
+  switch (key) {
+    case 'recovery':
+      return sources.recoverySignalsUsed.map(signal => ({
+        sleep: 'Sleep score',
+        rhr: 'Resting HR',
+        hrv: 'HRV',
+        load: 'Training load',
+      }[signal]));
+    case 'training':
+      return ['Thallo workouts', 'Weekly target'];
+    case 'nutrition':
+      if (sources.nutritionScoreSource === 'server') return ['Server weekly score', 'Meal logs'];
+      if (sources.nutritionScoreSource === 'clientFallback') return ['Calories', 'Protein', 'Macros', 'Fiber'];
+      return [];
+    case 'cardio':
+      return sources.cardioSignalsUsed.map(signal => ({
+        vo2Max: 'VO2 max',
+        zone2Minutes: 'Zone 2 minutes',
+        cardioSessions: 'Cardio sessions',
+        rhrTrend: 'RHR trend',
+        hrRecovery: 'HR recovery',
+      }[signal]));
+    case 'strength':
+      return sources.strengthSignalsUsed.map(signal => ({
+        e1rmPRs: 'e1RM PRs',
+        volumePRs: 'Volume PRs',
+        repPRs: 'Rep PRs',
+        tonnageTrend: 'Tonnage trend',
+      }[signal]));
+    case 'activity':
+      return sources.activitySignalsUsed.map(signal => ({
+        steps: 'Steps',
+        activeEnergy: 'Active energy',
+      }[signal]));
+    case 'gutSupport':
+      return sources.gutSignalsUsed.map(signal => ({
+        fiber: 'Fiber',
+        plantVariety: 'Plant variety',
+        hydration: 'Hydration',
+        fermentedDays: 'Fermented foods',
+        giFlag: 'GI check-in',
+      }[signal]));
+  }
+}
+
+function defaultThalloPillarKey(pillars: ThalloScorePillar[]): HealthPillarKey | null {
+  const sorted = pillars.slice().sort((a, b) => a.score - b.score || b.weight - a.weight);
+  return sorted[0]?.key ?? null;
+}
+
+function ThalloScoreDonut({
+  score,
+  pillars,
+  size,
+  strokeWidth,
+  trackColor,
+  textColor,
+  mutedColor,
+  selectedKey = null,
+  onPillarPress,
+}: {
+  score: number | null;
+  pillars: ThalloScorePillar[];
+  size: number;
+  strokeWidth: number;
+  trackColor: string;
+  textColor: string;
+  mutedColor: string;
+  selectedKey?: HealthPillarKey | null;
+  onPillarPress?: (key: HealthPillarKey) => void;
+}) {
+  const reducedMotion = useReducedMotion();
+  const center = size / 2;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const active = pillars.filter(p => p.shareRatio > 0);
+  const gap = active.length > 1 ? Math.min(6, circumference * 0.014) : 0;
+  let cursor = 0;
+  const segments = active.map(pillar => {
+    const share = pillar.shareRatio;
+    const slotLength = Math.max(0, circumference * share - gap);
+    const earnedLength = slotLength * (pillar.score / 100);
+    const dashOffset = -cursor;
+    cursor += circumference * share;
+    return { pillar, slotLength, earnedLength, dashOffset };
+  });
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={StyleSheet.absoluteFill}>
+        <Circle
+          cx={center}
+          cy={center}
+          r={radius}
+          stroke={trackColor}
+          strokeWidth={strokeWidth}
+          fill="none"
+        />
+        {segments.map(({ pillar, slotLength, dashOffset }) => (
+          <Circle
+            key={`${pillar.key}-slot`}
+            cx={center}
+            cy={center}
+            r={radius}
+            stroke={pillar.color}
+            strokeWidth={selectedKey === pillar.key ? strokeWidth + 1 : strokeWidth}
+            strokeLinecap="round"
+            strokeDasharray={`${slotLength} ${circumference - slotLength}`}
+            strokeDashoffset={dashOffset}
+            transform={`rotate(-90 ${center} ${center})`}
+            opacity={selectedKey == null || selectedKey === pillar.key ? 0.22 : 0.10}
+            fill="none"
+            onPress={onPillarPress ? () => onPillarPress(pillar.key) : undefined}
+          />
+        ))}
+        {segments.map(({ pillar, earnedLength, dashOffset }) => (
+          <Circle
+            key={`${pillar.key}-earned`}
+            cx={center}
+            cy={center}
+            r={radius}
+            stroke={pillar.color}
+            strokeWidth={selectedKey === pillar.key ? strokeWidth + 2 : strokeWidth}
+            strokeLinecap="round"
+            strokeDasharray={`${earnedLength} ${circumference - earnedLength}`}
+            strokeDashoffset={dashOffset}
+            transform={`rotate(-90 ${center} ${center})`}
+            opacity={selectedKey == null || selectedKey === pillar.key ? 1 : 0.34}
+            fill="none"
+            onPress={onPillarPress ? () => onPillarPress(pillar.key) : undefined}
+          />
+        ))}
+      </Svg>
+      {score == null ? (
+        <Text
+          style={{ fontSize: 32, lineHeight: size >= 120 ? 44 : 28, fontWeight: '900', color: textColor }}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.68}>
+          —
+        </Text>
+      ) : (
+        <AnimatedNumber
+          value={score}
+          from={0}
+          animateOnMount={!reducedMotion}
+          duration={760}
+          style={{ fontSize: size >= 120 ? 40 : 24, lineHeight: size >= 120 ? 44 : 28, fontWeight: '900', color: textColor }}
+        />
+      )}
+      <Text style={{ fontSize: size >= 120 ? 10 : 8, lineHeight: 12, fontWeight: '900', color: mutedColor }}>
+        /100
+      </Text>
+    </View>
+  );
+}
+
+function GoalEstimateMiniVisual({
+  pct,
+  color,
+  mutedColor,
+  trackColor,
+  surfaceColor,
+}: {
+  pct: number;
+  color: string;
+  mutedColor: string;
+  trackColor: string;
+  surfaceColor: string;
+}) {
+  const safePct = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
+  const endY = Math.max(13, Math.min(44, 45 - safePct * 0.28));
+  const midY = Math.max(16, Math.min(43, endY + (safePct >= 75 ? 8 : safePct >= 55 ? 4 : -2)));
+  const earlyY = Math.max(22, Math.min(46, midY + (safePct >= 55 ? 7 : 2)));
+  const actualPoints = `8,46 34,${earlyY} 62,${midY} 94,${endY}`;
+
+  return (
+    <View style={{
+      width: 118,
+      height: 62,
+      borderRadius: 12,
+      backgroundColor: trackColor,
+      alignItems: 'center',
+      justifyContent: 'center',
+      overflow: 'hidden',
+    }}>
+      <Svg width={118} height={62} viewBox="0 0 118 62">
+        <Line x1={9} y1={50} x2={108} y2={50} stroke={mutedColor} strokeWidth={1} opacity={0.16} />
+        <Line
+          x1={10}
+          y1={44}
+          x2={108}
+          y2={17}
+          stroke={mutedColor}
+          strokeWidth={2}
+          strokeDasharray="5 5"
+          strokeLinecap="round"
+          opacity={0.55}
+        />
+        <Polyline
+          points={actualPoints}
+          fill="none"
+          stroke={color}
+          strokeWidth={4}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        <Circle cx={94} cy={endY} r={5} fill={color} stroke={surfaceColor} strokeWidth={2} />
+      </Svg>
+    </View>
+  );
+}
+
+function GoalExecutionGraph({
+  overview,
+  width,
+  color,
+  tc,
+  styles,
+}: {
+  overview: GoalExecutionOverview;
+  width: number;
+  color: string;
+  tc: ThemeColors;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const chartW = Math.round(width);
+  const chartH = 156;
+  const padL = 30;
+  const padR = 14;
+  const padT = 30;
+  const padB = 26;
+  const plotW = chartW - padL - padR;
+  const plotH = chartH - padT - padB;
+  const toY = (pct: number) => padT + plotH - (Math.max(0, Math.min(100, pct)) / 100) * plotH;
+  const labelAnchor = (x: number): 'start' | 'middle' | 'end' => (
+    x <= padL + 10 ? 'start'
+    : x >= chartW - padR - 10 ? 'end'
+    : 'middle'
+  );
+  const labelY = (y: number, offset = 9) => Math.max(11, y - offset);
+  const renderPointValueLabel = (
+    key: string,
+    label: string,
+    x: number,
+    y: number,
+    fill: string,
+  ) => (
+    <Fragment key={key}>
+      <SvgText
+        x={x}
+        y={y}
+        fontSize={9}
+        fontWeight="800"
+        fill={tc.surface}
+        stroke={tc.surface}
+        strokeWidth={3}
+        textAnchor={labelAnchor(x)}>
+        {label}
+      </SvgText>
+      <SvgText
+        x={x}
+        y={y}
+        fontSize={9}
+        fontWeight="800"
+        fill={fill}
+        textAnchor={labelAnchor(x)}>
+        {label}
+      </SvgText>
+    </Fragment>
+  );
+  const points = overview.points.map((point, index) => {
+    const x = padL + (overview.points.length > 1 ? (index / (overview.points.length - 1)) * plotW : plotW / 2);
+    return {
+      ...point,
+      x,
+      execY: point.executionPct == null ? null : toY(point.executionPct),
+      secondaryY: point.secondaryPct == null ? null : toY(point.secondaryPct),
+    };
+  });
+  const execPoints = points.filter(point => point.execY != null);
+  const secondaryPoints = points.filter(point => point.secondaryY != null);
+  const execLine = execPoints.map(point => `${point.x},${point.execY}`).join(' ');
+  const secondaryLine = secondaryPoints.map(point => `${point.x},${point.secondaryY}`).join(' ');
+  const baselineY = padT + plotH;
+  const areaPoints = execPoints.length >= 2
+    ? `${execLine} ${execPoints[execPoints.length - 1].x},${baselineY} ${execPoints[0].x},${baselineY}`
+    : null;
+
+  return (
+    <View style={styles.goalExecutionGraph}>
+      <View style={styles.goalExecutionGraphHeader}>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.goalExecutionGraphTitle} numberOfLines={1}>{overview.graphTitle}</Text>
+          <Text style={styles.goalExecutionGraphSubtitle} numberOfLines={2}>{overview.graphSubtitle}</Text>
+        </View>
+        <View style={styles.goalExecutionGraphMeta}>
+          <Text style={[styles.goalExecutionGraphMetaText, { color }]} numberOfLines={1}>{overview.dayLabel}</Text>
+          <Text style={styles.goalExecutionGraphMetaSub} numberOfLines={1}>{overview.timeLeftLabel}</Text>
+        </View>
+      </View>
+      <View style={styles.goalExecutionLegend}>
+        <View style={styles.goalExecutionLegendItem}>
+          <View style={[styles.goalExecutionLegendLine, { backgroundColor: color }]} />
+          <Text style={styles.goalExecutionLegendText}>Execution</Text>
+        </View>
+        <View style={styles.goalExecutionLegendItem}>
+          <View style={[styles.goalExecutionLegendLine, { backgroundColor: overview.secondaryColor }]} />
+          <Text style={styles.goalExecutionLegendText}>{overview.secondaryLabel}</Text>
+        </View>
+      </View>
+      <View style={{ alignItems: 'center', marginTop: 6 }}>
+        <Svg width={chartW} height={chartH}>
+          <Defs>
+            <SvgLinearGradient id="goalExecGraphArea" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0%" stopColor={color} stopOpacity={0.24} />
+              <Stop offset="100%" stopColor={color} stopOpacity={0.02} />
+            </SvgLinearGradient>
+          </Defs>
+          {[0, 50, 100].map(value => {
+            const y = toY(value);
+            return (
+              <Line
+                key={`grid-${value}`}
+                x1={padL}
+                y1={y}
+                x2={chartW - padR}
+                y2={y}
+                stroke={tc.border}
+                strokeWidth={1}
+                strokeDasharray={value === 0 ? undefined : '4 4'}
+                opacity={value === 0 ? 0.8 : 0.55}
+              />
+            );
+          })}
+          {[0, 50, 100].map(value => (
+            <SvgText key={`axis-${value}`} x={padL - 7} y={toY(value) + 4} fontSize={9} fill={tc.textMuted} textAnchor="end">
+              {value}
+            </SvgText>
+          ))}
+          {areaPoints && <Polygon points={areaPoints} fill="url(#goalExecGraphArea)" stroke="none" />}
+          {execPoints.length >= 2 && (
+            <Polyline
+              points={execLine}
+              fill="none"
+              stroke={color}
+              strokeWidth={3}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+          {secondaryPoints.length >= 2 && (
+            <Polyline
+              points={secondaryLine}
+              fill="none"
+              stroke={overview.secondaryColor}
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.92}
+            />
+          )}
+          {points.map(point => (
+            <Fragment key={`week-${point.key}`}>
+              {(() => {
+                let execLabelY = point.execY == null ? null : labelY(point.execY);
+                let secondaryLabelY = point.secondaryY == null ? null : labelY(point.secondaryY);
+                if (execLabelY != null && secondaryLabelY != null && Math.abs(execLabelY - secondaryLabelY) < 11) {
+                  if ((point.execY ?? 0) <= (point.secondaryY ?? 0)) {
+                    execLabelY = labelY(point.execY ?? 0, 18);
+                    secondaryLabelY = labelY(point.secondaryY ?? 0, 6);
+                  } else {
+                    secondaryLabelY = labelY(point.secondaryY ?? 0, 18);
+                    execLabelY = labelY(point.execY ?? 0, 6);
+                  }
+                }
+                return (
+                  <>
+                    {point.execY != null && execLabelY != null
+                      ? renderPointValueLabel(`exec-label-${point.key}`, `${Math.round(point.executionPct ?? 0)}%`, point.x, execLabelY, color)
+                      : null}
+                    {point.secondaryY != null && secondaryLabelY != null && point.secondaryValue !== 'Need data'
+                      ? renderPointValueLabel(`secondary-label-${point.key}`, point.secondaryValue, point.x, secondaryLabelY, overview.secondaryColor)
+                      : null}
+                  </>
+                );
+              })()}
+              {point.execY != null && (
+                <Circle
+                  cx={point.x}
+                  cy={point.execY}
+                  r={point.key === execPoints[execPoints.length - 1]?.key ? 4.5 : 3.5}
+                  fill={color}
+                  stroke={tc.surface}
+                  strokeWidth={1.5}
+                />
+              )}
+              {point.secondaryY != null && (
+                <Circle
+                  cx={point.x}
+                  cy={point.secondaryY}
+                  r={3.5}
+                  fill={overview.secondaryColor}
+                  stroke={tc.surface}
+                  strokeWidth={1.5}
+                />
+              )}
+              <SvgText x={point.x} y={chartH - 6} fontSize={9} fill={tc.textMuted} textAnchor="middle">
+                {point.label}
+              </SvgText>
+            </Fragment>
+          ))}
+        </Svg>
+      </View>
+    </View>
   );
 }
 
@@ -2159,6 +6088,1512 @@ function PulseOnChange({
     <Animated.View style={[style, { transform: [{ scale }] }]}>
       {children}
     </Animated.View>
+  );
+}
+
+function formatSleepHM(hours: number | null | undefined): string {
+  if (hours == null || !Number.isFinite(hours) || hours <= 0) return 'n/a';
+  const totalMin = Math.round(hours * 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+function formatBedtimeMinutes(minutes: number | null | undefined): string {
+  if (minutes == null || !Number.isFinite(minutes)) return 'cal.';
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const hour24 = Math.floor(normalized / 60);
+  const min = normalized % 60;
+  const hour12 = hour24 % 12 || 12;
+  return `${hour12}:${String(min).padStart(2, '0')} ${hour24 >= 12 ? 'PM' : 'AM'}`;
+}
+
+function bedtimeWithinWindow(minutes: number | null | undefined, window: BedtimeWindow | null): boolean | null {
+  if (minutes == null || !Number.isFinite(minutes) || !window) return null;
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const start = ((Math.round(window.startMinutes) % 1440) + 1440) % 1440;
+  const end = ((Math.round(window.endMinutes) % 1440) + 1440) % 1440;
+  return start <= end
+    ? normalized >= start && normalized <= end
+    : normalized >= start || normalized <= end;
+}
+
+function formatSleepTimelineTime(dateIso: string | null | undefined): string {
+  if (!dateIso) return '--';
+  const date = new Date(dateIso);
+  if (!Number.isFinite(date.getTime())) return '--';
+  const hour24 = date.getHours();
+  const min = date.getMinutes();
+  const hour12 = hour24 % 12 || 12;
+  return `${hour12}:${String(min).padStart(2, '0')} ${hour24 >= 12 ? 'PM' : 'AM'}`;
+}
+
+type SleepConstellationNode = {
+  key: string;
+  label: string;
+  value: string;
+  pct: number;
+  sentence: string;
+  description: string;
+  recommendation: string;
+  color: string;
+  needsAttention: boolean;
+  /** Bedtime node only — the user's consistency-derived sleep window. */
+  windowHint?: string;
+};
+
+type SleepContextInsight = {
+  key: string;
+  title: string;
+  detail: string;
+  action: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
+  color: string;
+  priority: number;
+};
+
+function sleepFactorPhrase(label: string, pct: number, value: string): string {
+  const verb = pct >= 0.85
+    ? 'helped your score'
+    : pct >= 0.65
+      ? 'mostly supported your score, with room to improve'
+      : pct >= 0.45
+        ? 'needs attention'
+        : 'held your score back';
+  return `${label} ${verb}. ${value}`;
+}
+
+function clampSleepRadarPct(value: number, floor = 0.05): number {
+  if (!Number.isFinite(value)) return floor;
+  return Math.max(floor, Math.min(1, value));
+}
+
+function idealRangePct(
+  value: number | null | undefined,
+  idealMin: number,
+  idealMax: number,
+  tolerance: number,
+  floor = 0.08,
+  missing = 0.45,
+): number {
+  if (value == null || !Number.isFinite(value) || tolerance <= 0) return missing;
+  if (value >= idealMin && value <= idealMax) return 1;
+  const distance = value < idealMin ? idealMin - value : value - idealMax;
+  const curve = Math.exp(-(distance * distance) / (2 * tolerance * tolerance));
+  return clampSleepRadarPct(floor + (1 - floor) * curve, floor);
+}
+
+function idealMinimumPct(
+  value: number | null | undefined,
+  idealMin: number,
+  tolerance: number,
+  floor = 0.08,
+  missing = 0.45,
+): number {
+  if (value == null || !Number.isFinite(value) || tolerance <= 0) return missing;
+  if (value >= idealMin) return 1;
+  const distance = idealMin - value;
+  const curve = Math.exp(-(distance * distance) / (2 * tolerance * tolerance));
+  return clampSleepRadarPct(floor + (1 - floor) * curve, floor);
+}
+
+function buildSleepConstellationNodes(ss: SleepScore, bedtimeWindow: BedtimeWindow | null): SleepConstellationNode[] {
+  const personalized = ss.mode === 'personalized';
+  const max = {
+    duration: personalized ? 28 : 32,
+    efficiency: personalized ? 17 : 18,
+    hrv: personalized ? 18 : 20,
+    deepSleep: personalized ? 9 : 10,
+    remSleep: personalized ? 4 : 5,
+    healthFlags: personalized ? 5 : 10,
+    regularity: 15,
+  };
+  const pillarPct = (value: number | null | undefined, maxValue: number, missing = 0.45) => {
+    if (value == null || !Number.isFinite(value) || maxValue <= 0) return missing;
+    return clampSleepRadarPct(value / maxValue);
+  };
+  // Percentage suffix is reserved for sleep-stage components (Deep, REM) and
+  // shows that stage's share of total sleep — NOT the calculation weight.
+  const stageShareLabel = (label: string, stageHours: number) => {
+    if (ss.duration <= 0 || stageHours <= 0) return label;
+    return `${label} (${Math.round((stageHours / ss.duration) * 100)}%)`;
+  };
+  const durationPct = idealRangePct(ss.duration, 7, 9, 0.9);
+  const efficiencyPct = idealRangePct(ss.efficiency, 0.92, 1, 0.075);
+  const hrvPct = pillarPct(ss.pillars.hrv, max.hrv, ss.hrvAvg != null ? 0.30 : 0.40);
+  const deepPct = ss.stages.deep > 0
+    ? idealMinimumPct(ss.stages.deep, 1.5, 0.45)
+    : pillarPct(ss.pillars.deepSleep ?? null, max.deepSleep, 0.45);
+  const remPct = ss.stages.rem > 0
+    ? idealRangePct(ss.stages.rem / Math.max(0.1, ss.duration), 0.18, 0.25, 0.06)
+    : pillarPct(ss.pillars.remSleep ?? null, max.remSleep, 0.45);
+  const hasVitals = ss.restingHeartRate != null || ss.respiratoryRate != null || ss.oxygenSaturation != null;
+  const vitalsPct = hasVitals ? pillarPct(ss.pillars.healthFlags, max.healthFlags) : 0.45;
+  const hasRegularityScore = ss.pillars.regularity != null;
+  const regularityPct = hasRegularityScore ? pillarPct(ss.pillars.regularity, max.regularity) : 0.72;
+  const efficiencyValue = ss.efficiency != null ? `${Math.round(ss.efficiency * 100)}%` : 'n/a';
+  const bedtimeValue = formatBedtimeMinutes(ss.bedtimeMinutes);
+  const bedtimeInWindow = bedtimeWithinWindow(ss.bedtimeMinutes, bedtimeWindow);
+  const bedtimeSentence = hasRegularityScore
+    ? ss.bedtimeMinutes != null
+      ? bedtimeInWindow === true
+        ? `Bedtime was around ${bedtimeValue}, inside your target window.`
+        : bedtimeInWindow === false
+          ? `Bedtime was around ${bedtimeValue}, outside your target window.`
+          : `Bedtime was around ${bedtimeValue}.`
+      : 'Bedtime consistency was included in this score.'
+    : 'Bedtime consistency is still calibrating.';
+  // Consistency-derived window — the full-credit bedtime target for this user,
+  // surfaced once there are enough nights to be meaningful.
+  const bedtimeWindowHint = bedtimeWindow
+    ? `Target window: ${formatBedtimeMinutes(bedtimeWindow.startMinutes)} - ${formatBedtimeMinutes(bedtimeWindow.endMinutes)}`
+    : undefined;
+  const vitalsValue = ss.restingHeartRate != null
+    ? `${ss.restingHeartRate} bpm`
+    : ss.respiratoryRate != null
+      ? `${ss.respiratoryRate}/min`
+      : ss.oxygenSaturation != null
+        ? `${ss.oxygenSaturation}%`
+        : 'n/a';
+  // Awake-time node. `ss.stages.awake` is hours awake mid-sleep (after
+  // first falling asleep). 30+ minutes meaningfully fragments recovery,
+  // so the pct curve rewards <20m and penalizes >45m.
+  const awakeMinutes = Math.max(0, Math.round((ss.stages.awake ?? 0) * 60));
+  const hasAwakeData = ss.stages.awake > 0 || ss.pillars.awakeFragmentation != null;
+  const awakePct = hasAwakeData
+    ? awakeMinutes <= 15
+      ? 1
+      : awakeMinutes <= 30
+        ? 0.78
+        : awakeMinutes <= 45
+          ? 0.55
+          : awakeMinutes <= 75
+            ? 0.35
+            : 0.18
+    : 0.45;
+  const awakeValue = hasAwakeData ? `${awakeMinutes}m` : 'n/a';
+  const awakeSentence = hasAwakeData
+    ? `You were awake about ${awakeMinutes} min after first falling asleep.`
+    : 'Wake-time data was unavailable.';
+  return [
+    {
+      key: 'duration',
+      label: 'Dur.',
+      value: formatSleepHM(ss.duration),
+      pct: durationPct,
+      sentence: sleepFactorPhrase('Duration', durationPct, `You slept ${formatSleepHM(ss.duration)}.`),
+      description: 'Total time asleep last night. Most adults recover best in a 7–9 hour window. Too little caps recovery; chronic oversleep can signal under-recovery.',
+      recommendation: durationPct < 0.65
+        ? 'Protect the sleep window first: move the next alarm or bedtime enough to create 7+ hours in bed, then keep wake time steady tomorrow.'
+        : 'Keep this sleep window consistent; duration is the foundation the other recovery markers sit on.',
+      color: '#38BDF8',
+      needsAttention: durationPct < 0.65,
+    },
+    {
+      key: 'efficiency',
+      label: 'Eff.',
+      value: efficiencyValue,
+      pct: efficiencyPct,
+      sentence: sleepFactorPhrase('Efficiency', efficiencyPct, ss.efficiency != null ? `Sleep efficiency was ${efficiencyValue}.` : 'Sleep efficiency was unavailable.'),
+      description: 'Share of time in bed that you were actually asleep. High efficiency (90%+) means you fell asleep quickly and stayed asleep — a strong recovery signal.',
+      recommendation: efficiencyPct < 0.65
+        ? 'Tonight, bias toward a cool, dark room, lighter late fluids, and a slower final hour. If caffeine or alcohol was logged late, move it earlier first.'
+        : 'Repeat the same wind-down and room setup; efficiency is supporting the score.',
+      color: '#14B8A6',
+      needsAttention: efficiencyPct < 0.65,
+    },
+    {
+      key: 'hrv',
+      label: 'HRV',
+      value: ss.hrvAvg != null ? `${ss.hrvAvg} ms` : 'n/a',
+      pct: hrvPct,
+      sentence: sleepFactorPhrase('HRV', hrvPct, ss.hrvAvg != null ? `HRV averaged ${ss.hrvAvg} ms.` : 'HRV was unavailable.'),
+      description: 'Heart rate variability overnight. Higher HRV reflects a relaxed nervous system and stronger recovery. We compare against your own recent baseline once enough nights are logged.',
+      recommendation: hrvPct < 0.65
+        ? 'Treat low HRV as a recovery-pressure signal: keep hard training conservative today and look for logged triggers such as late alcohol, large meals, illness, or stress.'
+        : 'HRV is supporting recovery; keep the same meal timing, caffeine cutoff, and training rhythm when possible.',
+      color: '#A78BFA',
+      needsAttention: hrvPct < 0.65,
+    },
+    {
+      key: 'vitals',
+      label: 'Vitals',
+      value: vitalsValue,
+      pct: vitalsPct,
+      sentence: sleepFactorPhrase('Vitals', vitalsPct, ss.restingHeartRate != null ? `Resting heart rate was ${ss.restingHeartRate} bpm.` : 'Overnight vitals were unavailable.'),
+      description: 'Overnight resting heart rate, respiratory rate, and SpO₂. Elevated values vs. your baseline can flag stress, illness, or under-recovery before they show up elsewhere.',
+      recommendation: vitalsPct < 0.65
+        ? 'Pair this with how you feel. If RHR or breathing is up, favor hydration, easy movement, and lower intensity rather than forcing max-effort work.'
+        : 'Vitals look steady enough to support normal training decisions.',
+      color: '#F97316',
+      needsAttention: vitalsPct < 0.65,
+    },
+    {
+      key: 'deep',
+      label: stageShareLabel('Deep', ss.stages.deep),
+      value: formatSleepHM(ss.stages.deep),
+      pct: deepPct,
+      sentence: sleepFactorPhrase('Deep sleep', deepPct, `Deep sleep was ${formatSleepHM(ss.stages.deep)}.`),
+      description: 'Slow-wave sleep — when growth hormone peaks and the body does its heaviest physical repair. Typically 13–23% of total sleep in healthy adults.',
+      recommendation: deepPct < 0.65
+        ? 'Prioritize the first half of the night: consistent bedtime, cool room, and no large meals or alcohol close to bed.'
+        : 'Deep sleep is doing its job; keep the early-night routine stable.',
+      color: '#6366F1',
+      needsAttention: deepPct < 0.65,
+    },
+    {
+      key: 'rem',
+      label: stageShareLabel('REM', ss.stages.rem),
+      value: formatSleepHM(ss.stages.rem),
+      pct: remPct,
+      sentence: sleepFactorPhrase('REM sleep', remPct, `REM sleep was ${formatSleepHM(ss.stages.rem)}.`),
+      description: 'Dreaming stage — central to memory consolidation, learning, and emotional regulation. Most REM happens in the last third of the night, so cut-short sleep hits REM hardest.',
+      recommendation: remPct < 0.65
+        ? 'Give the last third of the night room to happen: avoid cutting sleep short and move alcohol/caffeine earlier.'
+        : 'REM is in a useful range; keep protecting the back half of the night.',
+      color: '#EC4899',
+      needsAttention: remPct < 0.65,
+    },
+    {
+      key: 'awake',
+      label: 'Awake',
+      value: awakeValue,
+      pct: awakePct,
+      sentence: sleepFactorPhrase('Awake time', awakePct, awakeSentence),
+      description: 'Minutes awake after first falling asleep. Brief wake-ups are normal; sustained fragmentation (30+ min) blocks deep / REM cycles and undercuts recovery.',
+      recommendation: awakePct < 0.55
+        ? 'For tonight, check the practical disruptors first: room temperature, light, late caffeine/alcohol, big fluids, and heavy food close to bed.'
+        : 'Wake time stayed controlled; keep the same environment and late-evening routine.',
+      color: '#94A3B8',
+      needsAttention: awakePct < 0.55,
+    },
+    {
+      key: 'regularity',
+      label: 'Bedtime',
+      value: bedtimeValue,
+      pct: regularityPct,
+      sentence: hasRegularityScore ? sleepFactorPhrase('Bedtime consistency', regularityPct, bedtimeSentence) : bedtimeSentence,
+      description: 'How close last night\'s bedtime was to your recent average. A steady schedule keeps your circadian rhythm dialed in, which improves sleep depth and morning alertness.',
+      recommendation: hasRegularityScore && regularityPct < 0.65
+        ? 'Nudge bedtime back toward the target window tonight rather than making a huge one-night correction.'
+        : 'Keep bedtime anchored near this window; regularity makes the score more predictable.',
+      color: '#F59E0B',
+      needsAttention: hasRegularityScore && regularityPct < 0.65,
+      windowHint: bedtimeWindowHint,
+    },
+  ];
+}
+
+type TimedMealContext = {
+  meal: MealHistoryEntry;
+  consumedAt: Date;
+  hoursBeforeSleep: number;
+  calories: number;
+  fatG: number;
+  label: string;
+};
+
+const SLEEP_ALCOHOL_RX = /\b(wine|beer|ipa|lager|cocktail|vodka|whisk(?:e)?y|tequila|rum|gin|margarita|martini|seltzer|alcohol)\b/i;
+const SLEEP_CAFFEINE_RX = /\b(coffee|espresso|latte|cold brew|cappuccino|americano|energy drink|pre[-\s]?workout|caffeine|matcha|black tea|green tea)\b/i;
+const SLEEP_DECAF_RX = /\bdecaf|caffeine[-\s]?free\b/i;
+
+function parseDateOrNull(raw: string | null | undefined): Date | null {
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function sleepStartDateForScore(ss: SleepScore, timeline?: SleepStageTimeline | null): Date | null {
+  const fromTimeline = parseDateOrNull(timeline?.startDate);
+  if (fromTimeline) return fromTimeline;
+  if (ss.bedtimeMinutes == null || !Number.isFinite(ss.bedtimeMinutes)) return null;
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  if (ss.bedtimeMinutes >= 12 * 60) d.setDate(d.getDate() - 1);
+  d.setMinutes(Math.round(ss.bedtimeMinutes));
+  return d;
+}
+
+function sleepStartDateForHistoryPoint(point: ProgressSleepHistoryPoint): Date | null {
+  if (!point.night || point.bedtimeMinutes == null || !Number.isFinite(point.bedtimeMinutes)) return null;
+  const baseMs = parseDateKeyMs(point.night);
+  if (!baseMs) return null;
+  const d = new Date(baseMs);
+  if (point.bedtimeMinutes >= 12 * 60) d.setDate(d.getDate() - 1);
+  d.setHours(0, 0, 0, 0);
+  d.setMinutes(Math.round(point.bedtimeMinutes));
+  return d;
+}
+
+function mealConsumedAt(meal: MealHistoryEntry): Date | null {
+  return parseDateOrNull(meal.consumed_at ?? meal.created_at ?? null);
+}
+
+function mealCalories(meal: MealHistoryEntry): number {
+  const total = Number(meal.totals?.calories);
+  if (Number.isFinite(total) && total > 0) return total;
+  return (meal.items ?? []).reduce((sum, item) => sum + Math.max(0, Number(item.calories) || 0), 0);
+}
+
+function mealFat(meal: MealHistoryEntry): number {
+  const total = Number(meal.totals?.fat_g);
+  if (Number.isFinite(total) && total > 0) return total;
+  return (meal.items ?? []).reduce((sum, item) => sum + Math.max(0, Number(item.fat_g) || 0), 0);
+}
+
+function mealLabel(meal: MealHistoryEntry): string {
+  return String(meal.name || meal.meal_type || 'meal').trim() || 'meal';
+}
+
+function mealText(meal: MealHistoryEntry): string {
+  return [
+    meal.name,
+    meal.meal_type,
+    ...(meal.items ?? []).map(item => item.food_name),
+  ].filter(Boolean).join(' ');
+}
+
+function mealHasAlcohol(meal: MealHistoryEntry): boolean {
+  if ((meal.items ?? []).some(item => (item as any).alcohol === true)) return true;
+  return SLEEP_ALCOHOL_RX.test(mealText(meal));
+}
+
+function mealHasCaffeine(meal: MealHistoryEntry): boolean {
+  const text = mealText(meal);
+  return !SLEEP_DECAF_RX.test(text) && SLEEP_CAFFEINE_RX.test(text);
+}
+
+function timedMealsBeforeSleep(meals: MealHistoryEntry[] | null | undefined, sleepStart: Date, maxHours: number): TimedMealContext[] {
+  return (meals ?? [])
+    .map((meal): TimedMealContext | null => {
+      const consumedAt = mealConsumedAt(meal);
+      if (!consumedAt) return null;
+      const hoursBeforeSleep = (sleepStart.getTime() - consumedAt.getTime()) / 3600000;
+      if (hoursBeforeSleep <= 0 || hoursBeforeSleep > maxHours) return null;
+      return {
+        meal,
+        consumedAt,
+        hoursBeforeSleep,
+        calories: mealCalories(meal),
+        fatG: mealFat(meal),
+        label: mealLabel(meal),
+      };
+    })
+    .filter((row): row is TimedMealContext => row != null)
+    .sort((a, b) => a.hoursBeforeSleep - b.hoursBeforeSleep);
+}
+
+function formatBeforeSleep(hours: number): string {
+  const totalMin = Math.max(1, Math.round(hours * 60));
+  if (totalMin < 60) return `${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function lateMealPatternText(meals: MealHistoryEntry[] | null | undefined, sleepHistory: ProgressSleepHistoryPoint[] | null | undefined): string | null {
+  const points = (sleepHistory ?? []).filter(point => point.score != null && point.score > 0);
+  if (points.length < 6) return null;
+  const lateScores: number[] = [];
+  const otherScores: number[] = [];
+  for (const point of points) {
+    const sleepStart = sleepStartDateForHistoryPoint(point);
+    if (!sleepStart || point.score == null) continue;
+    const lateMeals = timedMealsBeforeSleep(meals, sleepStart, 3.5)
+      .filter(meal => meal.calories >= 350 || meal.fatG >= 20);
+    if (lateMeals.length > 0) lateScores.push(point.score);
+    else otherScores.push(point.score);
+  }
+  if (lateScores.length < 2 || otherScores.length < 2) return null;
+  const avg = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const lateAvg = avg(lateScores);
+  const otherAvg = avg(otherScores);
+  const gap = otherAvg - lateAvg;
+  if (gap < 5) return null;
+  return `Across logged nights, sleep scores after late/heavy meals are averaging ${Math.round(gap)} pts lower.`;
+}
+
+function latestHardWorkoutBeforeSleep(
+  sleepStart: Date,
+  history: WorkoutSession[] | null | undefined,
+  summaries: StoredWorkoutSummary[] | null | undefined,
+): { label: string; hoursBeforeSleep: number } | null {
+  const candidates: Array<{ label: string; endedAt: Date; hard: boolean }> = [];
+  for (const session of history ?? []) {
+    const endedAt = parseDateOrNull(session.endedAt ?? session.startedAt ?? session.date);
+    if (!endedAt || session.skipped) continue;
+    const manual = (session as any).manualActivity;
+    const category = String(manual?.category ?? '').toLowerCase();
+    const intensity = String(manual?.intensity ?? '').toLowerCase();
+    const durationMin = Math.max(0, Number(session.durationSeconds ?? 0) / 60);
+    candidates.push({
+      label: String(session.focus || manual?.subtype || 'Workout'),
+      endedAt,
+      hard: intensity === 'hard' || (durationMin >= 20 && category !== 'recovery' && category !== 'mobility'),
+    });
+  }
+  for (const summary of summaries ?? []) {
+    const endedAt = parseDateOrNull(summary.endedAt ?? summary.startedAt ?? summary.date);
+    if (!endedAt) continue;
+    const category = String(summary.activityCategory ?? '').toLowerCase();
+    candidates.push({
+      label: String(summary.focus || 'Workout'),
+      endedAt,
+      hard: (summary.trainingScore ?? 0) >= 75 || ((summary.durationSeconds ?? 0) >= 20 * 60 && category !== 'recovery' && category !== 'mobility'),
+    });
+  }
+  return candidates
+    .map(candidate => ({
+      label: candidate.label,
+      hard: candidate.hard,
+      hoursBeforeSleep: (sleepStart.getTime() - candidate.endedAt.getTime()) / 3600000,
+    }))
+    .filter(candidate => candidate.hard && candidate.hoursBeforeSleep > 0 && candidate.hoursBeforeSleep <= 1.5)
+    .sort((a, b) => a.hoursBeforeSleep - b.hoursBeforeSleep)[0] ?? null;
+}
+
+function buildSleepContextInsights({
+  sleepScore,
+  sleepTimeline,
+  sleepHistory,
+  mealHistory,
+  workoutHistory,
+  workoutSummaries,
+  nodes,
+}: {
+  sleepScore: SleepScore;
+  sleepTimeline?: SleepStageTimeline | null;
+  sleepHistory?: ProgressSleepHistoryPoint[] | null;
+  mealHistory?: MealHistoryEntry[] | null;
+  workoutHistory?: WorkoutSession[] | null;
+  workoutSummaries?: StoredWorkoutSummary[] | null;
+  nodes: SleepConstellationNode[];
+}): SleepContextInsight[] {
+  const sleepStart = sleepStartDateForScore(sleepScore, sleepTimeline);
+  const hrvOff = nodes.find(n => n.key === 'hrv')?.needsAttention ?? false;
+  const vitalsOff = nodes.find(n => n.key === 'vitals')?.needsAttention ?? false;
+  const awakeOff = nodes.find(n => n.key === 'awake')?.needsAttention ?? false;
+  const deepOff = nodes.find(n => n.key === 'deep')?.needsAttention ?? false;
+  const remOff = nodes.find(n => n.key === 'rem')?.needsAttention ?? false;
+  const stressSignal = hrvOff || vitalsOff || awakeOff;
+  const insights: SleepContextInsight[] = [];
+
+  if (sleepStart) {
+    const mealsBeforeBed = timedMealsBeforeSleep(mealHistory, sleepStart, 8);
+    const alcohol = mealsBeforeBed.find(row => row.hoursBeforeSleep <= 4 && mealHasAlcohol(row.meal));
+    if (alcohol && (stressSignal || remOff || deepOff)) {
+      insights.push({
+        key: 'late-alcohol',
+        title: 'Late alcohol is the strongest logged clue',
+        detail: `${alcohol.label} was logged ${formatBeforeSleep(alcohol.hoursBeforeSleep)} before sleep. Alcohol can reduce REM, fragment sleep, and keep HR/RHR higher overnight, so it is a plausible contributor to this read.`,
+        action: 'When recovery matters, skip alcohol or keep it well away from bedtime and pair it with food and water earlier in the evening.',
+        icon: 'wine-outline',
+        color: '#F97316',
+        priority: 100,
+      });
+    }
+
+    const caffeine = mealsBeforeBed.find(row => row.hoursBeforeSleep <= 8 && mealHasCaffeine(row.meal));
+    if (caffeine && (awakeOff || remOff || sleepScore.duration < 7)) {
+      insights.push({
+        key: 'late-caffeine',
+        title: 'Caffeine timing may explain the lighter night',
+        detail: `${caffeine.label} was logged ${formatBeforeSleep(caffeine.hoursBeforeSleep)} before sleep. Caffeine sensitivity varies, but late intake commonly shortens or fragments sleep even when you still fall asleep.`,
+        action: 'Try a 6-8 hour caffeine cutoff for a week; use the sleep score and HRV trend to see if your baseline rebounds.',
+        icon: 'cafe-outline',
+        color: '#A78BFA',
+        priority: 92,
+      });
+    }
+
+    const caloriesWindow = timedMealsBeforeSleep(mealHistory, sleepStart, 16)
+      .reduce((sum, row) => sum + row.calories, 0);
+    const largeLateMeal = mealsBeforeBed
+      .filter(row => row.hoursBeforeSleep <= 3.5)
+      .filter(row => row.calories >= 600 || row.fatG >= 25 || (caloriesWindow > 0 && row.calories / caloriesWindow >= 0.35))
+      .sort((a, b) => (b.calories + b.fatG * 8) - (a.calories + a.fatG * 8))[0];
+    if (largeLateMeal && (stressSignal || deepOff)) {
+      const pattern = lateMealPatternText(mealHistory, sleepHistory);
+      insights.push({
+        key: 'large-late-meal',
+        title: hrvOff || vitalsOff ? 'Large late meal likely pressured HRV' : 'Large late meal may have cost deep sleep',
+        detail: `${largeLateMeal.label} (${Math.round(largeLateMeal.calories)} kcal) landed ${formatBeforeSleep(largeLateMeal.hoursBeforeSleep)} before bed. Heavy digestion close to sleep can raise overnight heart rate and make HRV look suppressed. ${pattern ?? 'This is a logged clue, not a diagnosis.'}`,
+        action: 'Move the largest meal 3+ hours before bedtime. If you are hungry later, keep the snack smaller and easier to digest.',
+        icon: 'restaurant-outline',
+        color: '#14B8A6',
+        priority: hrvOff || vitalsOff ? 95 : 82,
+      });
+    }
+
+    const hardWorkout = latestHardWorkoutBeforeSleep(sleepStart, workoutHistory, workoutSummaries);
+    if (hardWorkout && (awakeOff || hrvOff || vitalsOff)) {
+      insights.push({
+        key: 'late-hard-workout',
+        title: 'Late hard training may have delayed downshift',
+        detail: `${hardWorkout.label} ended ${formatBeforeSleep(hardWorkout.hoursBeforeSleep)} before sleep. Most evening exercise is fine, but vigorous work ending close to bed can keep core temperature and sympathetic drive elevated.`,
+        action: 'Keep intense sessions at least 90 minutes from bedtime when possible; add an easy cooldown and a lower-light final hour.',
+        icon: 'barbell-outline',
+        color: '#EF4444',
+        priority: 78,
+      });
+    }
+  }
+
+  if ((hrvOff || vitalsOff || awakeOff || deepOff) && (!mealHistory || mealHistory.length === 0)) {
+    insights.push({
+      key: 'meal-timing-missing',
+      title: 'Meal timing is the missing context',
+      detail: 'HRV and wake-time changes are easier to explain when dinner, caffeine, alcohol, and snack timing have timestamps.',
+      action: 'For the next few nights, note the final meal or drink time so sleep dips have clearer context.',
+      icon: 'time-outline',
+      color: '#38BDF8',
+      priority: 35,
+    });
+  }
+
+  const unique = new Map<string, SleepContextInsight>();
+  for (const insight of insights.sort((a, b) => b.priority - a.priority)) {
+    if (!unique.has(insight.key)) unique.set(insight.key, insight);
+  }
+  return Array.from(unique.values()).slice(0, 3);
+}
+
+const sleepConstellationStyles = StyleSheet.create({
+  card: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 0,
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+  hero: {
+    height: 124,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  heroSheen: {
+    top: -38,
+    bottom: -38,
+    width: 72,
+  },
+  heroImage: {
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+  },
+  heroMeta: {
+    padding: 13,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  heroEyebrow: { color: '#FFFFFF', fontSize: 9, lineHeight: 12, fontWeight: '900', textTransform: 'uppercase', ...overPhotoTextShadow },
+  heroTitle: { color: '#FFFFFF', fontSize: 20, lineHeight: 24, fontWeight: '900', marginTop: 2, ...overPhotoTextShadow },
+  heroSubtitle: { color: '#FFFFFF', fontSize: 11, lineHeight: 14, fontWeight: '800', opacity: 0.9, marginTop: 1, ...overPhotoTextShadow },
+  heroScorePill: {
+    minWidth: 42,
+    minHeight: 34,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 9,
+  },
+  heroScoreValue: { color: '#FFFFFF', fontSize: 17, lineHeight: 20, fontWeight: '900' },
+  heroButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.26)',
+  },
+  content: { padding: 14, paddingTop: 12 },
+  center: {
+    position: 'absolute',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    elevation: 4,
+    overflow: 'hidden',
+  },
+  scoreHalo: {
+    position: 'absolute',
+    borderWidth: 1,
+    opacity: 0.2,
+  },
+  centerValue: { fontSize: 30, lineHeight: 33, fontWeight: '900', fontVariant: ['tabular-nums'] as any },
+  centerLabel: { fontSize: 9, lineHeight: 11, fontWeight: '900', textTransform: 'uppercase' },
+  radarTouch: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  stageCard: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginTop: 0,
+    marginBottom: 10,
+  },
+  stageHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 8 },
+  stageTitle: { fontSize: 10, lineHeight: 13, fontWeight: '900', textTransform: 'uppercase' },
+  stageRange: { flexShrink: 1, fontSize: 10, lineHeight: 13, fontWeight: '800', textAlign: 'right' },
+  stageGraphRow: { flexDirection: 'row', alignItems: 'center' },
+  stageAxisLabel: { width: 38, height: 19, fontSize: 9, lineHeight: 19, fontWeight: '800' },
+  stageGraph: { flex: 1, height: 76, position: 'relative', overflow: 'hidden' },
+  stageGridLine: { position: 'absolute', left: 0, right: 0, height: 1 },
+  stageBlock: { position: 'absolute', borderRadius: 4 },
+  stageTicks: { marginLeft: 38, marginTop: 5, flexDirection: 'row', justifyContent: 'space-between' },
+  stageTick: { fontSize: 9, fontWeight: '700' },
+  pressureCard: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 10,
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  pressureIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pressureEyebrow: { fontSize: 9, lineHeight: 12, fontWeight: '900', textTransform: 'uppercase' },
+  pressureTitle: { fontSize: 12, lineHeight: 16, fontWeight: '900', marginTop: 1 },
+  pressureDetail: { fontSize: 10.5, lineHeight: 14, fontWeight: '700', marginTop: 2 },
+  pressureValue: { fontSize: 16, lineHeight: 20, fontWeight: '900', fontVariant: ['tabular-nums'] as any },
+  readout: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  readoutLabel: { fontSize: 10, fontWeight: '900', textTransform: 'uppercase' },
+  readoutText: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  readoutWindow: { flexShrink: 1, fontSize: 11.5, lineHeight: 15, fontWeight: '800', marginTop: 5 },
+  readoutDescription: { fontSize: 11, lineHeight: 16, marginTop: 6 },
+  readoutValue: { fontSize: 18, fontWeight: '900', fontVariant: ['tabular-nums'] as any },
+  insightList: { gap: 8, marginTop: 10 },
+  insightRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 7 },
+  insightText: { flex: 1, fontSize: 11, lineHeight: 15 },
+  quickInsightList: { gap: 8, marginTop: 4 },
+  quickInsightRow: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 9,
+  },
+  quickInsightIcon: {
+    width: 25,
+    height: 25,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  quickInsightTitle: { fontSize: 11, lineHeight: 14, fontWeight: '900' },
+  quickInsightText: { fontSize: 11.5, lineHeight: 16, marginTop: 2 },
+  quickInsightAction: { fontSize: 10.5, lineHeight: 14, fontWeight: '800', marginTop: 3 },
+  quickInsightButton: {
+    marginTop: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    overflow: 'hidden',
+  },
+  quickInsightSheen: {
+    top: -22,
+    bottom: -22,
+    width: 54,
+  },
+  quickInsightButtonHint: { fontSize: 10.5, lineHeight: 14, fontWeight: '700', marginTop: 2 },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.58)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    maxHeight: '82%',
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 20,
+  },
+  modalHandleTap: {
+    minHeight: 18,
+    paddingBottom: 14,
+    justifyContent: 'flex-start',
+  },
+  modalHandle: {
+    width: 42,
+    height: 4,
+    borderRadius: 999,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  modalIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalEyebrow: { fontSize: 10, lineHeight: 12, fontWeight: '900', textTransform: 'uppercase' },
+  modalTitle: { fontSize: 18, lineHeight: 23, fontWeight: '900' },
+  modalScroll: { maxHeight: 520 },
+  modalMetricRow: { flexDirection: 'row', gap: 8 },
+  modalMetric: {
+    flex: 1,
+    minHeight: 78,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+  },
+  modalMetricLabel: { fontSize: 9, lineHeight: 12, fontWeight: '900', textTransform: 'uppercase' },
+  modalMetricValue: { fontSize: 21, lineHeight: 27, fontWeight: '900', marginTop: 4, fontVariant: ['tabular-nums'] as any },
+  modalSection: { marginTop: 14 },
+  modalSectionTitle: { fontSize: 10, lineHeight: 13, fontWeight: '900', textTransform: 'uppercase', marginBottom: 6 },
+  modalBody: { fontSize: 13, lineHeight: 18 },
+  modalWindowHint: { fontSize: 12, lineHeight: 16, fontWeight: '900', marginTop: 7 },
+  modalMuted: { fontSize: 11.5, lineHeight: 16, marginTop: 12 },
+  unavailableText: { fontSize: 12, lineHeight: 17, marginTop: 8 },
+});
+
+const SLEEP_STAGE_ROWS = [
+  { stage: 'awake', label: 'Awake', color: '#F97316' },
+  { stage: 'rem', label: 'REM', color: '#EC4899' },
+  { stage: 'core', label: 'Core', color: '#38BDF8' },
+  { stage: 'deep', label: 'Deep', color: '#6366F1' },
+] as const;
+
+function SleepStageTimelineChart({
+  timeline,
+  tc,
+}: {
+  timeline: SleepStageTimeline | null | undefined;
+  tc: ReturnType<typeof getTheme>['colors'];
+}) {
+  if (!timeline || timeline.durationMinutes <= 0 || !Array.isArray(timeline.segments) || timeline.segments.length === 0) {
+    return null;
+  }
+  const rowHeight = 19;
+  const blockHeight = 11;
+  const stageIndex = new Map(SLEEP_STAGE_ROWS.map((row, index) => [row.stage, index]));
+  const colorFor = new Map(SLEEP_STAGE_ROWS.map(row => [row.stage, row.color]));
+  const range = `${formatSleepTimelineTime(timeline.startDate)} - ${formatSleepTimelineTime(timeline.endDate)}`;
+
+  return (
+    <View style={[sleepConstellationStyles.stageCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+      <View style={sleepConstellationStyles.stageHeader}>
+        <Text style={[sleepConstellationStyles.stageTitle, { color: tc.textPrimary }]}>Sleep stages</Text>
+        <Text style={[sleepConstellationStyles.stageRange, { color: tc.textMuted }]} numberOfLines={1}>
+          {range}
+        </Text>
+      </View>
+      <View style={sleepConstellationStyles.stageGraphRow}>
+        <View>
+          {SLEEP_STAGE_ROWS.map(row => (
+            <Text key={row.stage} style={[sleepConstellationStyles.stageAxisLabel, { color: tc.textMuted }]}>
+              {row.label}
+            </Text>
+          ))}
+        </View>
+        <View style={sleepConstellationStyles.stageGraph}>
+          {SLEEP_STAGE_ROWS.map((row, index) => (
+            <View
+              key={`grid-${row.stage}`}
+              style={[
+                sleepConstellationStyles.stageGridLine,
+                {
+                  top: index * rowHeight + rowHeight / 2,
+                  backgroundColor: tc.border,
+                  opacity: 0.42,
+                },
+              ]}
+            />
+          ))}
+          {timeline.segments.map((segment, index) => {
+            const row = stageIndex.get(segment.stage);
+            if (row == null || segment.durationMinutes <= 0) return null;
+            const leftPct = Math.max(0, Math.min(100, (segment.startOffsetMinutes / timeline.durationMinutes) * 100));
+            const widthPct = Math.max(0.8, Math.min(100 - leftPct, (segment.durationMinutes / timeline.durationMinutes) * 100));
+            return (
+              <View
+                key={`${segment.stage}-${index}-${segment.startOffsetMinutes}`}
+                style={[
+                  sleepConstellationStyles.stageBlock,
+                  {
+                    left: `${leftPct}%`,
+                    width: `${widthPct}%`,
+                    top: row * rowHeight + (rowHeight - blockHeight) / 2,
+                    height: blockHeight,
+                    backgroundColor: colorFor.get(segment.stage) ?? tc.textMuted,
+                  },
+                ]}
+              />
+            );
+          })}
+        </View>
+      </View>
+      <View style={sleepConstellationStyles.stageTicks}>
+        <Text style={[sleepConstellationStyles.stageTick, { color: tc.textMuted }]}>{formatSleepTimelineTime(timeline.startDate)}</Text>
+        <Text style={[sleepConstellationStyles.stageTick, { color: tc.textMuted }]}>{formatSleepTimelineTime(timeline.endDate)}</Text>
+      </View>
+    </View>
+  );
+}
+
+function formatSleepPressureDuration(hours: number, capped: boolean): string {
+  const total = Math.round(Math.max(0, Number(hours) || 0) * 60);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  const suffix = capped ? '+' : '';
+  if (h <= 0) return m > 0 ? `${m}m${suffix}` : 'Clear';
+  return m > 0 ? `${h}h ${m}m${suffix}` : `${h}h${suffix}`;
+}
+
+function sleepPressureAccent(status: import('../services/api').SleepPressureStatus, tc: ReturnType<typeof getTheme>['colors']): string {
+  if (status === 'high') return '#EF4444';
+  if (status === 'moderate') return '#F59E0B';
+  if (status === 'low') return '#38BDF8';
+  if (status === 'clear') return tc.success ?? '#22C55E';
+  return tc.textMuted;
+}
+
+function SleepPressureCard({
+  sleepPressure,
+  tc,
+}: {
+  sleepPressure: import('../services/api').SleepPressureResponse | null | undefined;
+  tc: ReturnType<typeof getTheme>['colors'];
+}) {
+  if (!sleepPressure || sleepPressure.status === 'not_enough_data') return null;
+  const color = sleepPressureAccent(sleepPressure.status, tc);
+  const value = sleepPressure.status === 'clear'
+    ? 'Clear'
+    : formatSleepPressureDuration(sleepPressure.display_hours, sleepPressure.is_capped);
+  const detail = sleepPressure.status === 'clear'
+    ? `${sleepPressure.nights_count} nights · need ${formatSleepPressureDuration(sleepPressure.sleep_need_hours, false)}`
+    : sleepPressure.detail;
+
+  return (
+    <View style={[sleepConstellationStyles.pressureCard, { borderColor: color + '30' }]}>
+      <View style={[sleepConstellationStyles.pressureIcon, { backgroundColor: color + '18' }]}>
+        <Ionicons name={sleepPressure.status === 'clear' ? 'battery-full-outline' : 'battery-half-outline'} size={16} color={color} />
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={[sleepConstellationStyles.pressureEyebrow, { color: tc.textMuted }]}>Sleep gap</Text>
+        <Text style={[sleepConstellationStyles.pressureTitle, { color }]} numberOfLines={1}>
+          {sleepPressure.headline}
+        </Text>
+        <Text style={[sleepConstellationStyles.pressureDetail, { color: tc.textSecondary }]} numberOfLines={2}>
+          {detail}
+        </Text>
+      </View>
+      <Text style={[sleepConstellationStyles.pressureValue, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+function SleepScoreHalo({
+  color,
+  style,
+}: {
+  color: string;
+  style: any;
+}) {
+  const reducedMotion = useReducedMotion();
+  const pulse = useRef(new Animated.Value(reducedMotion ? 0.5 : 0)).current;
+
+  useEffect(() => {
+    if (reducedMotion) {
+      pulse.setValue(0.5);
+      return;
+    }
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 1800,
+          easing: TIMING_SMOOTH.easing,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [pulse, reducedMotion]);
+
+  const opacity = pulse.interpolate({
+    inputRange: [0, 0.72, 1],
+    outputRange: [0.22, 0.08, 0],
+  });
+  const scale = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.94, 1.32],
+  });
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        sleepConstellationStyles.scoreHalo,
+        style,
+        {
+          borderColor: color,
+          opacity,
+          transform: [{ scale }],
+        },
+      ]}
+    />
+  );
+}
+
+function SleepConstellationCard({
+  sleepScore,
+  sleepTimeline,
+  bedtimeWindow,
+  sleepHistory,
+  sleepPressure,
+  mealHistory,
+  workoutHistory,
+  workoutSummaries,
+  tc,
+  width,
+  onInfo,
+  onHistory,
+  wearableLabel,
+  platformLabel,
+}: {
+  sleepScore: SleepScore | null;
+  sleepTimeline?: SleepStageTimeline | null;
+  bedtimeWindow: BedtimeWindow | null;
+  sleepHistory?: ProgressSleepHistoryPoint[] | null;
+  sleepPressure?: import('../services/api').SleepPressureResponse | null;
+  mealHistory?: MealHistoryEntry[] | null;
+  workoutHistory?: WorkoutSession[] | null;
+  workoutSummaries?: StoredWorkoutSummary[] | null;
+  tc: ReturnType<typeof getTheme>['colors'];
+  width: number;
+  onInfo: () => void;
+  onHistory?: () => void;
+  wearableLabel: string;
+  platformLabel: string;
+}) {
+  const nodes = useMemo(() => sleepScore ? buildSleepConstellationNodes(sleepScore, bedtimeWindow) : [], [sleepScore, bedtimeWindow]);
+  const defaultNode = useMemo(
+    () => nodes.length > 0 ? [...nodes].sort((a, b) => a.pct - b.pct)[0] : null,
+    [nodes],
+  );
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [sleepInsightsOpen, setSleepInsightsOpen] = useState(false);
+  useEffect(() => {
+    if (defaultNode && !nodes.some(n => n.key === selectedKey)) setSelectedKey(defaultNode.key);
+  }, [defaultNode, nodes, selectedKey]);
+  const selected = nodes.find(n => n.key === selectedKey) ?? defaultNode;
+  const detailNode = nodes.find(n => n.key === detailKey) ?? null;
+  const contextInsights = useMemo(
+    () => sleepScore ? buildSleepContextInsights({
+      sleepScore,
+      sleepTimeline,
+      sleepHistory,
+      mealHistory,
+      workoutHistory,
+      workoutSummaries,
+      nodes,
+    }) : [],
+    [sleepScore, sleepTimeline, sleepHistory, mealHistory, workoutHistory, workoutSummaries, nodes],
+  );
+  const chartSize = Math.min(286, Math.max(220, Math.round(width - 112)));
+  const center = { x: chartSize / 2, y: chartSize / 2 };
+  const radarRadius = Math.round(chartSize * 0.25);
+  const labelBoxWidth = Math.max(58, Math.min(70, Math.round(chartSize * 0.21)));
+  const labelBoxHeight = 42; // touch target only — visible text is ~22px
+  const labelTextHalfHeight = 12;
+  const labelInset = 6;
+  // Cap by visible text bounds (not touch-target) so we get real breathing
+  // room between the ring and the labels. Floor enforces a minimum gap so
+  // labels never sit on top of the outer ring at any chartSize.
+  const labelRadius = Math.round(Math.max(
+    radarRadius + labelTextHalfHeight + 12,
+    Math.min(
+      radarRadius + chartSize * 0.22,
+      (chartSize - labelBoxWidth - labelInset * 2) / 2,
+      (chartSize - labelTextHalfHeight * 2 - labelInset * 2) / 2,
+    ),
+  ));
+  const centerSize = 68;
+  const axisStep = nodes.length > 0 ? 360 / nodes.length : 0;
+  const angleFor = (index: number) => -90 + index * axisStep;
+  const polarPoint = (radius: number, index: number) => {
+    const angle = (angleFor(index) * Math.PI) / 180;
+    return {
+      x: center.x + Math.cos(angle) * radius,
+      y: center.y + Math.sin(angle) * radius,
+    };
+  };
+  const pointText = (point: { x: number; y: number }) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`;
+  const reducedMotion = useReducedMotion();
+  const radarRevealAnim = useRef(new Animated.Value(reducedMotion ? 1 : 0)).current;
+  const [radarRevealProgress, setRadarRevealProgress] = useState(reducedMotion ? 1 : 0);
+  const radarRevealKey = nodes.map(node => `${node.key}:${node.pct.toFixed(3)}`).join('|');
+
+  useEffect(() => {
+    const listener = radarRevealAnim.addListener(({ value }) => {
+      setRadarRevealProgress(Math.max(0, Math.min(1, value)));
+    });
+    if (reducedMotion || nodes.length === 0) {
+      radarRevealAnim.setValue(1);
+      setRadarRevealProgress(1);
+      return () => radarRevealAnim.removeListener(listener);
+    }
+    radarRevealAnim.stopAnimation();
+    radarRevealAnim.setValue(0);
+    setRadarRevealProgress(0);
+    Animated.timing(radarRevealAnim, {
+      toValue: 1,
+      duration: 860,
+      delay: 120,
+      easing: TIMING_SMOOTH.easing,
+      useNativeDriver: false,
+    }).start();
+    return () => radarRevealAnim.removeListener(listener);
+  }, [nodes.length, radarRevealAnim, radarRevealKey, reducedMotion]);
+
+  const actualPoints = nodes.map((node, index) => pointText(polarPoint(radarRadius * node.pct * radarRevealProgress, index))).join(' ');
+  const labelPoint = (index: number) => polarPoint(labelRadius, index);
+  const scoreColor = sleepScore
+    ? sleepScore.score >= 80 ? '#22C55E' : sleepScore.score >= 60 ? '#F59E0B' : '#EF4444'
+    : tc.textMuted;
+  const scoreInsights = Array.isArray(sleepScore?.insights) ? sleepScore.insights : [];
+  const fallbackQuickInsight: SleepContextInsight | null = selected ? {
+    key: `selected-${selected.key}`,
+    title: selected.needsAttention ? `${selected.label} needs attention` : `${selected.label} is the top signal`,
+    detail: selected.sentence,
+    action: selected.recommendation,
+    icon: selected.needsAttention ? 'alert-circle-outline' : 'checkmark-circle-outline',
+    color: selected.color,
+    priority: selected.needsAttention ? 50 : 10,
+  } : scoreInsights[0] ? {
+    key: 'score-insight',
+    title: 'Sleep score note',
+    detail: scoreInsights[0],
+    action: 'Use the detailed attributes to decide whether tonight needs schedule, food timing, caffeine, or environment changes.',
+    icon: 'moon-outline',
+    color: scoreColor,
+    priority: 10,
+  } : null;
+  const quickInsights = contextInsights.length > 0
+    ? contextInsights
+    : fallbackQuickInsight ? [fallbackQuickInsight] : [];
+  const showStageTimelineInDetail = !!detailNode && ['deep', 'rem', 'awake'].includes(detailNode.key);
+
+  return (
+    <View testID="progress-today-sleep-constellation-card" style={[sleepConstellationStyles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+      <ImageBackground
+        source={SLEEP_SCORE_IMAGE}
+        resizeMode="cover"
+        imageStyle={sleepConstellationStyles.heroImage}
+        style={sleepConstellationStyles.hero}>
+        <LinearGradient
+          colors={['rgba(0,0,0,0.02)', 'rgba(0,0,0,0.62)']}
+          style={StyleSheet.absoluteFill}
+        />
+        <LinearGradient
+          pointerEvents="none"
+          colors={[scoreColor + '36', 'rgba(99,102,241,0.12)', 'rgba(0,0,0,0.24)']}
+          locations={[0, 0.5, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <AnimatedHealthSheen
+          delay={180}
+          opacity={0.28}
+          repeat={false}
+          style={sleepConstellationStyles.heroSheen}
+        />
+        <View style={sleepConstellationStyles.heroMeta}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={sleepConstellationStyles.heroEyebrow}>Recovery signal</Text>
+            <Text style={sleepConstellationStyles.heroTitle}>Sleep Score</Text>
+            <Text style={sleepConstellationStyles.heroSubtitle} numberOfLines={1}>
+              {sleepScore ? `${sleepScore.rating} · ideal-range radar` : 'Waiting for sleep data'}
+            </Text>
+          </View>
+          {sleepScore ? (
+            <View style={[sleepConstellationStyles.heroScorePill, { borderColor: scoreColor + 'AA', backgroundColor: scoreColor + '35' }]}>
+              <AnimatedNumber
+                value={sleepScore.score}
+                from={0}
+                animateOnMount={!reducedMotion}
+                duration={760}
+                style={sleepConstellationStyles.heroScoreValue}
+              />
+            </View>
+          ) : null}
+          {onHistory && (
+            <TouchableOpacity onPress={onHistory} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={sleepConstellationStyles.heroButton}>
+              <Ionicons name="time-outline" size={16} color="#FFFFFF" />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity onPress={onInfo} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={sleepConstellationStyles.heroButton}>
+            <Ionicons name="information-circle-outline" size={18} color="#FFFFFF" />
+          </TouchableOpacity>
+        </View>
+      </ImageBackground>
+
+      <View style={sleepConstellationStyles.content}>
+        {sleepScore ? (
+        <>
+          <View style={{ width: chartSize, height: chartSize, alignSelf: 'center', marginTop: 2 }}>
+            <Svg width={chartSize} height={chartSize} style={StyleSheet.absoluteFill}>
+              {[0.34, 0.67, 1].map((fraction) => (
+                <Circle
+                  key={`ring-${fraction}`}
+                  cx={center.x}
+                  cy={center.y}
+                  r={radarRadius * fraction}
+                  fill="none"
+                  stroke={fraction === 1 ? tc.textMuted : tc.border}
+                  strokeWidth={fraction === 1 ? 1.4 : 1}
+                  strokeDasharray={fraction === 1 ? undefined : '3 6'}
+                  opacity={fraction === 1 ? 0.4 : 0.55}
+                />
+              ))}
+              {nodes.map((node, index) => {
+                const edge = polarPoint(radarRadius, index);
+                return (
+                  <Line
+                    key={`line-${node.key}`}
+                    x1={center.x}
+                    y1={center.y}
+                    x2={edge.x}
+                    y2={edge.y}
+                    stroke={node.color}
+                    strokeWidth={1}
+                    opacity={0.22}
+                  />
+                );
+              })}
+              <Polygon
+                points={actualPoints}
+                fill={scoreColor + '22'}
+                stroke={scoreColor}
+                strokeWidth={2.4}
+                opacity={0.32 + radarRevealProgress * 0.64}
+              />
+              {nodes.map((node, index) => {
+                const point = polarPoint(radarRadius * node.pct * radarRevealProgress, index);
+                const selectedNode = selected?.key === node.key;
+                return (
+                  <Circle
+                    key={`point-${node.key}`}
+                    cx={point.x}
+                    cy={point.y}
+                    r={selectedNode ? 7 : 5.2}
+                    fill={node.color}
+                    stroke={tc.surface}
+                    strokeWidth={selectedNode ? 3 : 2}
+                    opacity={selectedNode ? Math.max(0.34, radarRevealProgress) : 0.18 + radarRevealProgress * 0.74}
+                  />
+                );
+              })}
+              {nodes.map((node, index) => {
+                const label = labelPoint(index);
+                const selectedNode = selected?.key === node.key;
+                const attentionX = Math.max(8, Math.min(chartSize - 8, label.x + labelBoxWidth / 2 - 6));
+                const attentionY = Math.max(8, Math.min(chartSize - 8, label.y - labelBoxHeight / 2 + 9));
+                return (
+                  <Fragment key={`label-${node.key}`}>
+                    <SvgText
+                      x={label.x}
+                      y={label.y - 2}
+                      fill={selectedNode ? node.color : tc.textMuted}
+                      fontSize={8}
+                      fontWeight="900"
+                      textAnchor="middle"
+                    >
+                      {node.label}
+                    </SvgText>
+                    <SvgText
+                      x={label.x}
+                      y={label.y + 11}
+                      fill={selectedNode ? node.color : tc.textSecondary}
+                      fontSize={10}
+                      fontWeight="800"
+                      textAnchor="middle"
+                    >
+                      {node.value}
+                    </SvgText>
+                    {node.needsAttention ? (
+                      <>
+                        <Circle cx={attentionX} cy={attentionY} r={5.4} fill="#EF4444" />
+                        <SvgText
+                          x={attentionX}
+                          y={attentionY + 3.5}
+                          fill="#FFFFFF"
+                          fontSize={8}
+                          fontWeight="900"
+                          textAnchor="middle"
+                        >
+                          !
+                        </SvgText>
+                      </>
+                    ) : null}
+                  </Fragment>
+                );
+              })}
+            </Svg>
+            <SleepScoreHalo
+              color={scoreColor}
+              style={{
+                left: center.x - centerSize / 2 - 7,
+                top: center.y - centerSize / 2 - 7,
+                width: centerSize + 14,
+                height: centerSize + 14,
+                borderRadius: (centerSize + 14) / 2,
+              }}
+            />
+            <View style={[sleepConstellationStyles.center, { left: center.x - centerSize / 2, top: center.y - centerSize / 2, width: centerSize, height: centerSize, borderRadius: centerSize / 2, borderColor: scoreColor + '77', backgroundColor: tc.surfaceRaised, shadowColor: scoreColor }]}>
+              <ProgressCardWash color={scoreColor} secondaryColor="#6366F1" intensity="medium" cornerRadius={centerSize / 2} />
+              <AnimatedNumber
+                value={sleepScore.score}
+                from={0}
+                animateOnMount={!reducedMotion}
+                duration={820}
+                style={[sleepConstellationStyles.centerValue, { color: scoreColor }]}
+              />
+              <Text style={[sleepConstellationStyles.centerLabel, { color: tc.textMuted }]}>Sleep</Text>
+            </View>
+            {nodes.map((node, index) => {
+              const label = labelPoint(index);
+              return (
+                <TouchableOpacity
+                  key={node.key}
+                  activeOpacity={0.68}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${node.label}: ${node.value}. ${node.sentence}`}
+                  onPress={() => {
+                    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                    setSelectedKey(node.key);
+                    setDetailKey(node.key);
+                  }}
+                  style={[
+                    sleepConstellationStyles.radarTouch,
+                    { left: label.x - labelBoxWidth / 2, top: label.y - labelBoxHeight / 2, width: labelBoxWidth, height: labelBoxHeight },
+                  ]}
+                />
+              );
+            })}
+          </View>
+          {/* Sleep stages timeline shown directly under the constellation
+              radar (self-guards to null when no stage timeline exists). */}
+          <SleepStageTimelineChart timeline={sleepTimeline} tc={tc} />
+          <SleepPressureCard sleepPressure={sleepPressure} tc={tc} />
+          {quickInsights.length > 0 ? (
+            <TouchableOpacity
+              testID="sleep-insights-button"
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel={`Sleep notes: ${quickInsights[0].title}. Tap for the full explanation.`}
+              onPress={() => {
+                import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                setSleepInsightsOpen(true);
+              }}
+              style={[sleepConstellationStyles.quickInsightButton, { backgroundColor: tc.surfaceRaised, borderColor: quickInsights[0].color + '36' }]}>
+              <ProgressCardWash color={quickInsights[0].color} intensity="soft" cornerRadius={12} />
+              <AnimatedHealthSheen
+                delay={320}
+                opacity={0.18}
+                repeat={false}
+                style={sleepConstellationStyles.quickInsightSheen}
+              />
+              <View style={[sleepConstellationStyles.quickInsightIcon, { backgroundColor: quickInsights[0].color + '18' }]}>
+                <Ionicons name={quickInsights[0].icon} size={14} color={quickInsights[0].color} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={[sleepConstellationStyles.quickInsightTitle, { color: quickInsights[0].color }]} numberOfLines={1}>
+                  {quickInsights[0].title}
+                </Text>
+                <Text style={[sleepConstellationStyles.quickInsightButtonHint, { color: tc.textMuted }]} numberOfLines={1}>
+                  {quickInsights.length > 1 ? `Tap to read ${quickInsights.length} sleep notes` : 'Tap to read the full note'}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
+            </TouchableOpacity>
+          ) : null}
+        </>
+      ) : (
+        <Text style={[sleepConstellationStyles.unavailableText, { color: tc.textSecondary }]}>
+          No sleep score yet. Use a sleep-capable {wearableLabel} overnight, then open Thallo after {platformLabel} syncs.
+        </Text>
+        )}
+      </View>
+      <Modal
+        visible={sleepInsightsOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSleepInsightsOpen(false)}>
+        <View style={sleepConstellationStyles.modalBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setSleepInsightsOpen(false)}
+          />
+          <View style={[sleepConstellationStyles.modalSheet, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+            <BottomSheetDismissHandle
+              onClose={() => setSleepInsightsOpen(false)}
+              color={tc.border}
+              containerStyle={sleepConstellationStyles.modalHandleTap}
+              handleStyle={sleepConstellationStyles.modalHandle}
+            />
+            <View style={sleepConstellationStyles.modalHeader}>
+              <View style={[sleepConstellationStyles.modalIcon, { backgroundColor: scoreColor + '18' }]}>
+                <Ionicons name="moon-outline" size={18} color={scoreColor} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={[sleepConstellationStyles.modalEyebrow, { color: tc.textMuted }]}>SLEEP NOTES</Text>
+                <Text style={[sleepConstellationStyles.modalTitle, { color: tc.textPrimary }]} numberOfLines={2}>What shaped last night</Text>
+              </View>
+              <TouchableOpacity onPress={() => setSleepInsightsOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={sleepConstellationStyles.modalScroll} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={false}>
+              {quickInsights.map((insight) => (
+                <View key={insight.key} style={sleepConstellationStyles.modalSection}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <View style={[sleepConstellationStyles.quickInsightIcon, { backgroundColor: insight.color + '18' }]}>
+                      <Ionicons name={insight.icon} size={14} color={insight.color} />
+                    </View>
+                    <Text style={[sleepConstellationStyles.modalSectionTitle, { color: insight.color, marginTop: 0, flex: 1 }]} numberOfLines={3}>
+                      {insight.title}
+                    </Text>
+                  </View>
+                  <Text style={[sleepConstellationStyles.modalBody, { color: tc.textSecondary, marginTop: 6 }]}>{insight.detail}</Text>
+                  <Text style={[sleepConstellationStyles.modalBody, { color: tc.textMuted, marginTop: 4 }]}>{insight.action}</Text>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={detailNode != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDetailKey(null)}>
+        <View style={sleepConstellationStyles.modalBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setDetailKey(null)}
+          />
+          <View style={[sleepConstellationStyles.modalSheet, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+            <BottomSheetDismissHandle
+              onClose={() => setDetailKey(null)}
+              color={tc.border}
+              containerStyle={sleepConstellationStyles.modalHandleTap}
+              handleStyle={sleepConstellationStyles.modalHandle}
+            />
+            {detailNode ? (
+              <>
+                <View style={sleepConstellationStyles.modalHeader}>
+                  <View style={[sleepConstellationStyles.modalIcon, { backgroundColor: detailNode.color + '18' }]}>
+                    <Ionicons
+                      name={detailNode.needsAttention ? 'alert-circle-outline' : 'checkmark-circle-outline'}
+                      size={18}
+                      color={detailNode.color}
+                    />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={[sleepConstellationStyles.modalEyebrow, { color: tc.textMuted }]}>SLEEP ATTRIBUTE</Text>
+                    <Text style={[sleepConstellationStyles.modalTitle, { color: tc.textPrimary }]} numberOfLines={2}>
+                      {detailNode.label}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setDetailKey(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Ionicons name="close" size={20} color={tc.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                <ScrollView style={sleepConstellationStyles.modalScroll} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={false}>
+                  <View style={sleepConstellationStyles.modalMetricRow}>
+                    <View style={[sleepConstellationStyles.modalMetric, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                      <Text style={[sleepConstellationStyles.modalMetricLabel, { color: tc.textMuted }]}>Value</Text>
+                      <Text style={[sleepConstellationStyles.modalMetricValue, { color: detailNode.color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                        {detailNode.value}
+                      </Text>
+                    </View>
+                    <View style={[sleepConstellationStyles.modalMetric, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                      <Text style={[sleepConstellationStyles.modalMetricLabel, { color: tc.textMuted }]}>Support</Text>
+                      <Text style={[sleepConstellationStyles.modalMetricValue, { color: detailNode.color }]} numberOfLines={1}>
+                        {Math.round(detailNode.pct * 100)}%
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={sleepConstellationStyles.modalSection}>
+                    <Text style={[sleepConstellationStyles.modalSectionTitle, { color: tc.textMuted }]}>Read</Text>
+                    <Text style={[sleepConstellationStyles.modalBody, { color: tc.textSecondary }]}>{detailNode.sentence}</Text>
+                  </View>
+                  <View style={sleepConstellationStyles.modalSection}>
+                    <Text style={[sleepConstellationStyles.modalSectionTitle, { color: tc.textMuted }]}>Why it matters</Text>
+                    <Text style={[sleepConstellationStyles.modalBody, { color: tc.textSecondary }]}>{detailNode.description}</Text>
+                  </View>
+                  <View style={sleepConstellationStyles.modalSection}>
+                    <Text style={[sleepConstellationStyles.modalSectionTitle, { color: tc.textMuted }]}>Next move</Text>
+                    <Text style={[sleepConstellationStyles.modalBody, { color: tc.textSecondary }]}>{detailNode.recommendation}</Text>
+                    {detailNode.windowHint ? (
+                      <Text style={[sleepConstellationStyles.modalWindowHint, { color: detailNode.color }]}>{detailNode.windowHint}</Text>
+                    ) : null}
+                  </View>
+                  {showStageTimelineInDetail ? (
+                    <SleepStageTimelineChart timeline={sleepTimeline} tc={tc} />
+                  ) : null}
+                  <Text style={[sleepConstellationStyles.modalMuted, { color: tc.textMuted }]}>
+                    Sleep score is fitness guidance, not a medical diagnosis. Wearable stage and vital estimates can be noisy, so repeated patterns matter more than one night.
+                  </Text>
+                </ScrollView>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+    </View>
   );
 }
 
@@ -2222,9 +7657,11 @@ function AnimatedPressable({
   );
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout, showWorkoutProgress: showWorkoutProgressProp, showMealProgress: showMealProgressProp }: ProgressScreenProps) {
+function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout, showWorkoutProgress: showWorkoutProgressProp, showMealProgress: showMealProgressProp, webMode = false, resetToTodayToken = 0, focusTarget = null, focusTargetToken = 0, onRequestPreviousSurface }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
-  const styles = useMemo(() => createStyles(tc), [themeName]);
+  const styles = useMemo(() => createStyles(tc, webMode), [themeName, webMode]);
+  const { width: screenWidth } = useWindowDimensions();
+  const trajectoryChartWidth = Math.min(360, Math.max(280, Math.round(screenWidth - 64)));
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
   const meta = useMetaData();
   const isProTier = tierOf(userProfile) === 'pro';
@@ -2235,14 +7672,100 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const showMealProgress = showMealProgressProp ?? shouldShowMeals(userProfile);
   const showMixedGoalProgress = showWorkoutProgress && showMealProgress;
   const visibleProgressTabs = useMemo(() => {
-    const tabs: Array<readonly [ProgressTab, string]> = [['today', 'Today']];
-    if (showWorkoutProgress) tabs.push(['trends', 'Trends']);
-    tabs.push(['body', 'Body'], ['health', 'Health']);
+    const tabs: Array<readonly [ProgressTab, string, string]> = [['today', 'Today', 'today-outline']];
+    if (showWorkoutProgress) tabs.push(['trends', 'Trends', 'trending-up-outline']);
+    tabs.push(['body', 'Body', 'body-outline']);
+    tabs.push(['health', 'Health', 'pulse-outline']);
+    if (isProTier) tabs.push(['insights', 'Insights', 'sparkles-outline']);
     return tabs;
-  }, [showWorkoutProgress]);
+  }, [isProTier, showWorkoutProgress]);
   const [tab, setTab] = useState<ProgressTab>('today');
+  const progressTabRef = useRef<ProgressTab>('today');
+  const todayScrollRef = useRef<ScrollView | null>(null);
+  const todaySleepCardYRef = useRef<number | null>(null);
+  const pendingFocusTargetRef = useRef<ProgressFocusTarget | null>(null);
+  const handledFocusTokenRef = useRef(0);
+  useEffect(() => { progressTabRef.current = tab; }, [tab]);
+  const selectProgressTab = useCallback((next: ProgressTab) => {
+    progressTabRef.current = next;
+    setTab(next);
+  }, []);
+  const scrollToTodaySleep = useCallback((animated = true) => {
+    const y = todaySleepCardYRef.current;
+    const scroll = todayScrollRef.current;
+    if (y == null || !scroll) return false;
+    scroll.scrollTo({ y: Math.max(0, y - 12), animated });
+    return true;
+  }, []);
+  const handleTodaySleepLayout = useCallback((event: LayoutChangeEvent) => {
+    todaySleepCardYRef.current = event.nativeEvent.layout.y;
+    if (pendingFocusTargetRef.current !== 'sleep') return;
+    requestAnimationFrame(() => {
+      if (scrollToTodaySleep(true)) pendingFocusTargetRef.current = null;
+    });
+  }, [scrollToTodaySleep]);
+  useEffect(() => {
+    if (!resetToTodayToken) return;
+    selectProgressTab('today');
+  }, [resetToTodayToken, selectProgressTab]);
+  useEffect(() => {
+    if (isActive) return;
+    pendingFocusTargetRef.current = null;
+  }, [isActive]);
+  useEffect(() => {
+    if (!isActive || !focusTarget || !focusTargetToken) return undefined;
+    if (handledFocusTokenRef.current === focusTargetToken) return undefined;
+    handledFocusTokenRef.current = focusTargetToken;
+    pendingFocusTargetRef.current = focusTarget;
+    selectProgressTab(focusTarget === 'weight' ? 'body' : 'today');
+
+    const attemptFocus = () => {
+      if (focusTarget === 'sleep' && scrollToTodaySleep(true)) {
+        pendingFocusTargetRef.current = null;
+      } else if (focusTarget === 'weight') {
+        pendingFocusTargetRef.current = null;
+      }
+    };
+
+    const frame = requestAnimationFrame(() => {
+      attemptFocus();
+      requestAnimationFrame(attemptFocus);
+    });
+    const timerOne = setTimeout(attemptFocus, 320);
+    const timerTwo = setTimeout(attemptFocus, 760);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timerOne);
+      clearTimeout(timerTwo);
+      if (pendingFocusTargetRef.current === focusTarget) {
+        pendingFocusTargetRef.current = null;
+      }
+    };
+  }, [focusTarget, focusTargetToken, isActive, scrollToTodaySleep, selectProgressTab]);
+  const hapticSelection = useCallback(() => {
+    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+  }, []);
+  const progressTabIndex = visibleProgressTabs.findIndex(([key]) => key === tab);
+  const swipeProgressTab = useCallback((direction: -1 | 1) => {
+    const current = progressTabRef.current;
+    const idx = visibleProgressTabs.findIndex(([key]) => key === current);
+    if (idx < 0) return;
+    const next = visibleProgressTabs[idx + direction]?.[0];
+    if (next) {
+      hapticSelection();
+      selectProgressTab(next);
+      return;
+    }
+    if (direction === -1 && idx === 0 && onRequestPreviousSurface) {
+      hapticSelection();
+      onRequestPreviousSurface();
+    }
+  }, [hapticSelection, onRequestPreviousSurface, selectProgressTab, visibleProgressTabs]);
+  const canSwipeProgressPrev = progressTabIndex > 0 || (progressTabIndex === 0 && !!onRequestPreviousSurface);
+  const canSwipeProgressNext = progressTabIndex >= 0 && progressTabIndex < visibleProgressTabs.length - 1;
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [showLogActivity, setShowLogActivity] = useState(false);
+  const [appleHealthAttachSession, setAppleHealthAttachSession] = useState<WorkoutSession | null>(null);
   const fitnessScoreRef = useRef<ViewShot>(null);
   const bodyScanShareRef = useRef<ViewShot>(null);
   const [shareLoading, setShareLoading] = useState(false);
@@ -2273,38 +7796,58 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // pure render-time slicing.
   const [visibleSummaryCount, setVisibleSummaryCount] = useState(30);
   const [visibleWorkoutCount, setVisibleWorkoutCount] = useState(30);
+  // Free-text search over the workout history list — matches exercise
+  // names, focus labels, and logged activities so the user can find
+  // when they last did a thing.
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [historyDateFilter, setHistoryDateFilter] = useState<WorkoutHistoryDateFilter>('all');
+  const [historyTypeFilter, setHistoryTypeFilter] = useState<WorkoutHistoryTypeFilter>('all');
+  useEffect(() => {
+    setVisibleWorkoutCount(30);
+  }, [historyQuery, historyDateFilter, historyTypeFilter]);
+  // Activities the user wants a nudge about if they go stale (haven't
+  // been logged in a while). Loaded on mount; re-evaluated whenever
+  // history changes so the scheduled local notifications track real data.
+  const [stalenessWatches, setStalenessWatches] = useState<StalenessWatch[]>([]);
+  useEffect(() => {
+    if (!isActive) return undefined;
+    let cancelled = false;
+    import('../utils/stalenessReminders').then(m => {
+      if (cancelled) return;
+      m.loadStalenessWatches().then(w => { if (!cancelled) setStalenessWatches(w); }).catch(() => {});
+      m.evaluateStalenessReminders(history).catch(() => {});
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [history, isActive]);
   const [goalHistory, setGoalHistory] = useState<GoalHistoryEntry[]>([]);
   const [planChanges, setPlanChanges] = useState<PlanChangeEntry[]>([]);
   const [bodyScanLoading, setBodyScanLoading] = useState(false);
   const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
+  // Flips true once the body-scan loader resolves (success OR error). Used to
+  // gate the goal-execution card so we don't display incorrect numbers built
+  // from an empty bodyScanHistory while the load is still in flight.
+  const [bodyScanLoaded, setBodyScanLoaded] = useState(false);
   const bodyScanHistoryLoadedRef = useRef(false);
+  // User's actual TDEE + calorie adjustments. Used to personalize the
+  // goal-forecast weekly rate (the static pace constants overstate
+  // fat-loss for small users and understate it for large ones).
+  const [calorieRanges, setCalorieRanges] = useState<CalorieRanges | null>(null);
   const [bodyScanPrepSource, setBodyScanPrepSource] = useState<'camera' | 'library' | null>(null);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const healthLiveLoadedRef = useRef(false);
-  const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
-  // Last 30 nights cached locally. We carry the recovery-marker fields
-  // (hrv / restingHr / respiratoryRate / spo2Percent / bedtimeMinutes)
-  // alongside `sleepHours` so the history ribbon can run each night
-  // through the same `scoreSleep` function the today-card uses. This
-  // keeps the ribbon's color/score in lock-step with the user-visible
-  // sleep score instead of being a separate hours-only band. Stage
-  // detail (deep / REM / inBed) isn't persisted per night, so the
-  // score is unavoidably an approximation — pillars that depend on
-  // stages get neutral fallbacks inside scoreSleep — but it's far
-  // closer than the prior "duration only" coloring.
-  const [sleepHistory, setSleepHistory] = useState<Array<{
-    night: string;
-    sleepHours: number | null;
-    hrv: number | null;
-    restingHr: number | null;
-    respiratoryRate: number | null;
-    spo2Percent: number | null;
-    bedtimeMinutes: number | null;
-  }>>([]);
+  // Last 30 nights, merged from local HealthKit cache + backend
+  // SleepLog rows. Stored score wins so dots match the Sleep Score
+  // card; recalculation is only a fallback for older rows without a
+  // persisted score.
+  const [sleepHistory, setSleepHistory] = useState<ProgressSleepHistoryPoint[]>([]);
+  const [sleepPressure, setSleepPressure] = useState<import('../services/api').SleepPressureResponse | null>(null);
   const [sleepHistoryOpen, setSleepHistoryOpen] = useState(false);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
+  const [healthReading, setHealthReading] = useState<boolean>(false);
+  const [appleNutritionSnapshot, setAppleNutritionSnapshot] = useState<DailyNutritionSnapshot | null>(null);
+  const [appleNutritionReading, setAppleNutritionReading] = useState(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
   // Bulk rolling-e1RM map keyed by lowercased exercise name. Powers
@@ -2317,6 +7860,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // bodyweight ratio, and target ratio so the user can see exactly
   // what makes their score.
   const [strengthScoreDetailOpen, setStrengthScoreDetailOpen] = useState(false);
+  // Detail sheets for the Trends-tab summary rows.
+  const [strengthTrendDetailOpen, setStrengthTrendDetailOpen] = useState(false);
+  const [volumeDetailMode, setVolumeDetailMode] = useState<VolumeDetailMode | null>(null);
+  // The Thallo Score is shown as a trailing 28-day average of the daily
+  // score, not just today's reading. `null` until the first sample loads.
+  const [thalloScoreAverage, setThalloScoreAverage] = useState<ThalloScoreAverage | null>(null);
+  const [dailyThalloScoreResult, setDailyThalloScoreResult] = useState<HealthScoreResult | null>(null);
+  const [dailyRecompForecast, setDailyRecompForecast] = useState<{ scopeKey: string; forecast: GoalForecastModel } | null>(null);
+  const [goalScore, setGoalScore] = useState<GoalScoreResult | null>(null);
+  const [recordsDetailOpen, setRecordsDetailOpen] = useState(false);
   // 1RM history for the top lift — fetched lazily after `oneRepMaxLifts`
   // resolves so the bars render immediately. Used to draw the trend chart
   // below the bar list.
@@ -2325,12 +7878,124 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [plateauModalVisible, setPlateauModalVisible] = useState(false);
   const [plateauDismissed, setPlateauDismissed] = useState(true);
   const [quickDetailSheet, setQuickDetailSheet] = useState<'today' | 'forecast' | null>(null);
+  const [strengthRadarDetailOpen, setStrengthRadarDetailOpen] = useState(false);
+  const [cardioScoreDetailOpen, setCardioScoreDetailOpen] = useState(false);
+  // Edit Trends — which Trends-tab sections are shown (persisted on device).
+  const [editTrendsOpen, setEditTrendsOpen] = useState(false);
+  const [trendsHidden, setTrendsHidden] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    AsyncStorage.getItem('trendsHiddenSections_v1').then(raw => {
+      if (!raw) return;
+      try {
+        const decoded = JSON.parse(raw);
+        const parsed = Array.isArray(decoded) ? decoded as string[] : [];
+        const next = new Set(parsed);
+        if (next.has('charts')) {
+          next.delete('charts');
+          next.add('strength-charts');
+          next.add('cardio-progression');
+          AsyncStorage.setItem('trendsHiddenSections_v1', JSON.stringify([...next])).catch(() => {});
+        }
+        setTrendsHidden(next);
+      } catch {}
+    }).catch(() => {});
+  }, []);
+  const setTrendsSectionVisible = useCallback((id: string, visible: boolean) => {
+    setTrendsHidden(prev => {
+      const next = new Set(prev);
+      if (visible) next.delete(id); else next.add(id);
+      AsyncStorage.setItem('trendsHiddenSections_v1', JSON.stringify([...next])).catch(() => {});
+      return next;
+    });
+  }, []);
+  const showAllTrends = useCallback(() => {
+    setTrendsHidden(new Set());
+    AsyncStorage.removeItem('trendsHiddenSections_v1').catch(() => {});
+  }, []);
+  const hideAllTrends = useCallback(() => {
+    const next = new Set(TRENDS_SECTIONS.map(section => section.id));
+    setTrendsHidden(next);
+    AsyncStorage.setItem('trendsHiddenSections_v1', JSON.stringify([...next])).catch(() => {});
+  }, []);
+  const trendsShown = useCallback((id: string) => !trendsHidden.has(id), [trendsHidden]);
+  const [editHighValueTrendsOpen, setEditHighValueTrendsOpen] = useState(false);
+  const [hiddenHighValueTrendCards, setHiddenHighValueTrendCards] = useState<Set<string>>(new Set());
+  const [editActivityHighlightsOpen, setEditActivityHighlightsOpen] = useState(false);
+  const [hiddenActivityHighlightCards, setHiddenActivityHighlightCards] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEYS.ui.highValueTrendHiddenCards)
+      .then(raw => setHiddenHighValueTrendCards(parseHiddenIdSet(raw)))
+      .catch(() => {});
+    AsyncStorage.getItem(STORAGE_KEYS.ui.activityHighlightHiddenCards)
+      .then(raw => setHiddenActivityHighlightCards(parseHiddenIdSet(raw)))
+      .catch(() => {});
+  }, []);
+  const setHighValueTrendCardVisible = useCallback((id: string, visible: boolean) => {
+    setHiddenHighValueTrendCards(prev => {
+      const next = new Set(prev);
+      if (visible) next.delete(id); else next.add(id);
+      AsyncStorage.setItem(STORAGE_KEYS.ui.highValueTrendHiddenCards, JSON.stringify([...next])).catch(() => {});
+      return next;
+    });
+  }, []);
+  const showAllHighValueTrendCards = useCallback(() => {
+    setHiddenHighValueTrendCards(new Set());
+    AsyncStorage.removeItem(STORAGE_KEYS.ui.highValueTrendHiddenCards).catch(() => {});
+  }, []);
+  const setActivityHighlightCardVisible = useCallback((id: string, visible: boolean) => {
+    setHiddenActivityHighlightCards(prev => {
+      const next = new Set(prev);
+      if (visible) next.delete(id); else next.add(id);
+      AsyncStorage.setItem(STORAGE_KEYS.ui.activityHighlightHiddenCards, JSON.stringify([...next])).catch(() => {});
+      return next;
+    });
+  }, []);
+  const showAllActivityHighlightCards = useCallback(() => {
+    setHiddenActivityHighlightCards(new Set());
+    AsyncStorage.removeItem(STORAGE_KEYS.ui.activityHighlightHiddenCards).catch(() => {});
+  }, []);
+  // Edit Health — which Health-tab sections are shown (persisted on device).
+  const [editHealthOpen, setEditHealthOpen] = useState(false);
+  const [healthHidden, setHealthHidden] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    AsyncStorage.getItem('healthHiddenSections_v1').then(raw => {
+      if (!raw) return;
+      try { setHealthHidden(new Set(JSON.parse(raw) as string[])); } catch {}
+    }).catch(() => {});
+  }, []);
+  const setHealthSectionVisible = useCallback((id: string, visible: boolean) => {
+    setHealthHidden(prev => {
+      const next = new Set(prev);
+      if (visible) next.delete(id); else next.add(id);
+      AsyncStorage.setItem('healthHiddenSections_v1', JSON.stringify([...next])).catch(() => {});
+      return next;
+    });
+  }, []);
+  const showAllHealth = useCallback(() => {
+    setHealthHidden(new Set());
+    AsyncStorage.removeItem('healthHiddenSections_v1').catch(() => {});
+  }, []);
+  const healthShown = useCallback((id: string) => !healthHidden.has(id), [healthHidden]);
+  const [selectedCardioExercise, setSelectedCardioExercise] = useState<string | null>(null);
+  const [cardioChartMode, setCardioChartMode] = useState<CardioChartMode>('distance');
   // Bottom-sheet explainer for the Health Score card. Opened by the
   // `info` icon next to the title — testers kept asking what the
   // number meant and where it came from, and the locked-state copy
   // alone wasn't enough.
   const [healthScoreExplainOpen, setHealthScoreExplainOpen] = useState(false);
+  const [selectedHealthScorePillar, setSelectedHealthScorePillar] = useState<HealthPillarKey | null>(null);
+  const [sleepScoreExplainOpen, setSleepScoreExplainOpen] = useState(false);
+  const [selectedBiometric, setSelectedBiometric] = useState<HealthBiometricKey | null>(null);
+  const [biometricHistoryOpen, setBiometricHistoryOpen] = useState(false);
+  const [healthBiometricsExpanded, setHealthBiometricsExpanded] = useState(false);
+  const [biometricHistoryWindow, setBiometricHistoryWindow] = useState<BiometricHistoryWindow>(30);
+  const [dailyHealthHistory, setDailyHealthHistory] = useState<import('../services/api').DailyHealthHistoryItem[] | null>(null);
+  const [dailyHealthHistoryDays, setDailyHealthHistoryDays] = useState(0);
+  const [dailyHealthHistoryLoading, setDailyHealthHistoryLoading] = useState(false);
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
+  // Flips true after loadWeightHistory resolves (success OR error). Empty
+  // array on its own can't be distinguished from "not yet loaded".
+  const [weightEntriesLoaded, setWeightEntriesLoaded] = useState(false);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
   const [weightInputError, setWeightInputError] = useState('');
@@ -2346,7 +8011,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
   const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
-  const [mealInsightPatterns, setMealInsightPatterns] = useState<Record<string, any> | null>(null);
   const [nutritionScoreWeekly, setNutritionScoreWeekly] = useState<import('../services/api').NutritionScoreWeekly | null>(null);
   const [proteinBreakdown, setProteinBreakdown] = useState<import('../services/api').ProteinBreakdown | null>(null);
   const [proteinBreakdownExpanded, setProteinBreakdownExpanded] = useState(false);
@@ -2362,6 +8026,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
   const paceLoadedRef = useRef(false);
   const nutritionRefreshSeenRef = useRef(nutritionLogRefreshKey);
+  const refreshAppleNutritionSnapshot = useCallback(async (): Promise<DailyNutritionSnapshot | null> => {
+    if (!isHealthKitAvailable()) {
+      setAppleNutritionSnapshot(null);
+      return null;
+    }
+    setAppleNutritionReading(true);
+    try {
+      const now = new Date();
+      const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const dayEnd = dayStart + 86400000;
+      const snapshot = await readDailyNutritionSnapshot(dayStart, dayEnd);
+      setAppleNutritionSnapshot(snapshot);
+      return snapshot;
+    } finally {
+      setAppleNutritionReading(false);
+    }
+  }, []);
 
   // ─── Exercise property lookup maps ────────────────────────────────────────
   // Built from workout history — prefers structured fields from the planner
@@ -2415,6 +8096,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     return categorizeExercise({ name: selectedExercise });
   }, [history, selectedExercise]);
   const selectedExerciseIsIsolation = selectedExerciseCategory === 'isolation';
+  const progressWeekWindow = useMemo(
+    () => buildProgressDateWindow(planWeekWindow),
+    [planWeekWindow?.startDate, planWeekWindow?.endDate],
+  );
+  const cardioTrendSummary = useMemo(
+    () => buildCardioTrendSummary(paceHistory, summaries, healthSummary, progressWeekWindow),
+    [healthSummary, paceHistory, progressWeekWindow, summaries],
+  );
   const localSelectedE1rmHistory = useMemo(
     () => selectedExerciseIsIsolation
       ? buildLocalBestSetHistory(history, selectedExercise)
@@ -2431,22 +8120,110 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       : (e1rmHistory.length >= 2 ? e1rmHistory : localSelectedE1rmHistory),
     [e1rmHistory, localSelectedE1rmHistory, selectedExerciseIsIsolation],
   );
-  const cardioInsightsMemo = useMemo(() => showWorkoutProgress ? buildCardioInsights(paceHistory, distanceUnit) : [], [distanceUnit, paceHistory, showWorkoutProgress]);
-  const paceExerciseGroups = useMemo(() => {
-    const groups = new Map<string, PaceHistoryPoint[]>();
+  const cardioInsightsMemo = useMemo(
+    () => showWorkoutProgress ? buildCardioInsights(cardioTrendSummary, distanceUnit) : [],
+    [cardioTrendSummary, distanceUnit, showWorkoutProgress],
+  );
+  const highValueTrendCards = useMemo(
+    () => showWorkoutProgress ? buildHighValueTrendCards({
+      history,
+      summaries,
+      sleepHistory,
+      healthSummary,
+      weightEntries,
+      bodyScanHistory,
+      mealAverages,
+      nutritionScoreWeekly,
+      cardioSummary: cardioTrendSummary,
+      weightUnit,
+      distanceUnit,
+      showMealProgress,
+    }) : [],
+    [
+      bodyScanHistory,
+      cardioTrendSummary,
+      distanceUnit,
+      healthSummary,
+      history,
+      mealAverages,
+      nutritionScoreWeekly,
+      showMealProgress,
+      showWorkoutProgress,
+      sleepHistory,
+      summaries,
+      weightEntries,
+      weightUnit,
+    ],
+  );
+  const activityTrendCards = useMemo(
+    () => showWorkoutProgress ? buildActivityTrendCards(history, distanceUnit) : [],
+    [distanceUnit, history, showWorkoutProgress],
+  );
+  const visibleHighValueTrendCards = useMemo(
+    () => highValueTrendCards.filter(card => !hiddenHighValueTrendCards.has(card.key)),
+    [hiddenHighValueTrendCards, highValueTrendCards],
+  );
+  const highValueTrendEditSections = useMemo(
+    () => trendActivityCardEditSections(highValueTrendCards),
+    [highValueTrendCards],
+  );
+  const visibleActivityTrendCards = useMemo(
+    () => activityTrendCards.filter(card => !hiddenActivityHighlightCards.has(card.key)),
+    [activityTrendCards, hiddenActivityHighlightCards],
+  );
+  const activityHighlightEditSections = useMemo(
+    () => trendActivityCardEditSections(activityTrendCards),
+    [activityTrendCards],
+  );
+  const trendMetricSuggestions = useMemo(
+    () => showWorkoutProgress ? buildTrendMetricSuggestions({
+      history,
+      summaries,
+      cardioSummary: cardioTrendSummary,
+      bodyScanHistory,
+      weightEntries,
+      nutritionScoreWeekly,
+      showMealProgress,
+    }) : [],
+    [
+      bodyScanHistory,
+      cardioTrendSummary,
+      history,
+      nutritionScoreWeekly,
+      showMealProgress,
+      showWorkoutProgress,
+      summaries,
+      weightEntries,
+    ],
+  );
+  const paceExerciseGroups = useMemo<CardioExerciseGroup[]>(() => {
+    const groups = new Map<string, { name: string; points: PaceHistoryPoint[] }>();
     for (const point of paceHistory) {
-      groups.set(point.exercise, [...(groups.get(point.exercise) ?? []), point]);
+      const key = cardioExerciseKey(point.exercise);
+      const current = groups.get(key);
+      groups.set(key, {
+        name: current?.name ?? cardioExerciseDisplayName(point.exercise),
+        points: [...(current?.points ?? []), point],
+      });
     }
-    return Array.from(groups.entries()).map(([name, points]) => {
-      const distancePoints = points.filter(p => p.distance != null);
+    return Array.from(groups.entries()).map(([key, group]) => {
+      const points = group.points.slice().sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+      const distancePoints = points.filter(p => p.distance != null && p.distance > 0);
+      const pacePoints = points.filter(p => paceSeconds(p.pace) != null);
+      const durationPoints = points.filter(p => p.duration_seconds != null && p.duration_seconds > 0);
       const distances = distancePoints.map(p => p.distance!);
+      const durations = durationPoints.map(p => p.duration_seconds!);
       return {
-        name,
+        key,
+        name: group.name,
         points,
         distancePoints,
+        pacePoints,
+        durationPoints,
         maxDistance: Math.max(...distances, 0.1),
+        maxDurationSec: Math.max(...durations, 1),
       };
-    });
+    }).sort((a, b) => b.points.length - a.points.length || a.name.localeCompare(b.name));
   }, [paceHistory]);
   const cardioBestsMemo = useMemo(() => paceExerciseGroups.map(({ name, points }) => {
     const bestDist = points.reduce((best, p) => p.distance != null && p.distance > (best ?? 0) ? p.distance : best, null as number | null);
@@ -2456,7 +8233,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     const extraKeys = Array.from(new Set(points.flatMap(p => p.metrics ? Object.keys(p.metrics) : [])));
     const extraBests: Record<string, string> = {};
     extraKeys.forEach(k => {
-      const vals = points.filter(p => p.metrics?.[k]).map(p => parseFloat(p.metrics![k])).filter(v => !isNaN(v));
+      const vals = points.map(p => Number(p.metrics?.[k])).filter(v => Number.isFinite(v));
       if (vals.length) extraBests[k] = String(Math.max(...vals));
     });
     return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: points.length };
@@ -2464,7 +8241,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const localOneRepMaxLifts = useMemo<import('../services/api').OneRepMaxLift[]>(() => {
     const stats = exerciseHistoryStats(history);
     return prs
-      .map(pr => {
+      .map((pr): import('../services/api').OneRepMaxLift | null => {
         const oneRepMaxLbs = Math.round((Number(pr.weightLbs) * (1 + Number(pr.reps) / 30)) * 10) / 10;
         if (!Number.isFinite(oneRepMaxLbs) || oneRepMaxLbs <= 0) return null;
         const stat = stats.get(pr.exerciseName.toLowerCase());
@@ -2478,6 +8255,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           sessionCount,
           confidence: Math.round(Math.min(1, sessionCount / 6) * 100) / 100,
           lastPerformedOn: pr.date ? pr.date.slice(0, 10) : null,
+          // Local fallback (no auth / pre-server). It can't know about
+          // session position or per-set RIR, so it labels itself as
+          // "rough" data quality. The UI uses this to show a
+          // "based on raw top sets" caveat.
+          trend28dPct: null,
+          trend56dPct: null,
+          freshSetCount: 0,
+          signalConfidence: 'low',
+          dataQuality: 'rough',
         };
       })
       .filter((lift): lift is import('../services/api').OneRepMaxLift => lift != null)
@@ -2489,23 +8275,158 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, displayedOneRepMaxLifts, weightUnit, distanceUnit, { showWorkoutProgress, showMealProgress }),
     [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, weightUnit],
   );
+
+  // Comprehensive Health Score — modular pillar blend powered by
+  // src/utils/healthScore.ts. Builds the four optional contexts the
+  // scorer accepts (nutrition, gutSupport, strength, baselines) from
+  // data that's already loaded on this screen, then calls the
+  // shared scorer. Pillars without backing data are excluded; the
+  // returned `dataCoverage` + `confidence` tell us how complete the
+  // read is.
+  const comprehensiveHealthScore = useMemo(() => {
+    // ── Nutrition context — prefer the server's pre-computed weekly
+    //    score (richer than ratios alone). Fall back to ratio-based
+    //    scoring when the weekly score isn't available. ────────────
+    const nutritionCtx: HealthNutritionContext | null = nutritionScoreWeekly
+      ? {
+          weeklyNutritionScore: nutritionScoreWeekly.avg_score,
+          weeklyDaysWithData: nutritionScoreWeekly.days_with_data,
+          fiberGramsPerDay: gutHealthWindow?.avg_fiber_g ?? null,
+          goal: userProfile?.goal ?? null,
+        }
+      : null;
+
+    // ── Gut support — fiber + plant variety from the gut window.
+    //    Hydration / fermented are not always available client-side
+    //    so they're omitted (the pillar handles missing fields). ──
+    const gutCtx: HealthGutContext | null = gutHealthWindow
+      ? {
+          fiberGramsPerDay: gutHealthWindow.avg_fiber_g,
+          plantVariety7d: gutHealthWindow.distinct_plant_foods_week,
+          // Average fermented servings per day (window-normalized) →
+          // approximate "days with at least one fermented food" by
+          // capping at 7. Imperfect but better than dropping the
+          // signal entirely.
+          fermentedFoodDays7d: Math.min(
+            7,
+            Math.round((gutHealthWindow.avg_fermented_servings ?? 0) * 7),
+          ),
+        }
+      : null;
+
+    // ── Strength context — count established PRs in the last 28 days.
+    //    `derivePersonalRecords` returns one heaviest-set record per
+    //    exercise with no `kind` tag, so we feed every recent PR into
+    //    the e1RM bucket (it's the heaviest-loaded-set dimension).
+    //    Using `establishedRecentPrs` keeps this consistent with the
+    //    Trends tab's "Records" tile, which filters out first-session
+    //    PRs so brand-new exercises don't inflate the count.
+    const cutoff28d = Date.now() - 28 * 86400000;
+    const recentEstablishedPrs = establishedRecentPrs(history, prs ?? [], cutoff28d);
+    const e1rmPrs = recentEstablishedPrs.length;
+    // hasRecentStrengthWork: any logged set in last 14d on a
+    // non-cardio exercise. We already have `history` shaped this way.
+    const cutoff14d = Date.now() - 14 * 86400000;
+    let hasRecentStrengthWork = false;
+    for (const session of history) {
+      if (!session.completed || session.skipped) continue;
+      const t = +new Date(session.date);
+      if (t < cutoff14d) continue;
+      for (const exercise of session.exercises ?? []) {
+        const sets = (exercise.sets ?? []).filter(
+          (s: any) => Number(s?.weightLbs ?? s?.weight_lbs ?? 0) > 0
+            && Number(s?.reps ?? 0) > 0,
+        );
+        if (sets.length > 0) {
+          hasRecentStrengthWork = true;
+          break;
+        }
+      }
+      if (hasRecentStrengthWork) break;
+    }
+    const strengthCtx: HealthStrengthContext = {
+      e1rmPrs28d: e1rmPrs,
+      hasRecentStrengthWork,
+    };
+
+    // ── Personal RHR / HRV baselines from the persisted nightly
+    //    sleep history. Median is more robust than mean against
+    //    one-off outlier readings. ───────────────────────────────
+    const median = (xs: number[]): number | null => {
+      const valid = xs.filter(v => Number.isFinite(v) && v > 0).slice().sort((a, b) => a - b);
+      if (valid.length === 0) return null;
+      const mid = Math.floor(valid.length / 2);
+      return valid.length % 2 === 0 ? (valid[mid - 1] + valid[mid]) / 2 : valid[mid];
+    };
+    const recent = sleepHistory.slice(-30);
+    const last7 = sleepHistory.slice(-7);
+    const baselines = {
+      rhrMedian7d: median(last7.map(n => Number(n.restingHr ?? 0))),
+      rhrMedian30d: median(recent.map(n => Number(n.restingHr ?? 0))),
+      hrvMedian7d: median(last7.map(n => Number(n.hrv ?? 0))),
+      hrvMedian30d: median(recent.map(n => Number(n.hrv ?? 0))),
+    };
+    const rhrTrendBpm7dVs30d = baselines.rhrMedian7d != null && baselines.rhrMedian30d != null
+      ? Math.round((baselines.rhrMedian7d - baselines.rhrMedian30d) * 10) / 10
+      : null;
+
+    // ── Cardio context — combines wearable VO2, in-app pace/distance,
+    //    HR-zone minutes, and personal RHR trend so cardio-focused users
+    //    get a real read without hiding it from strength users.
+    const hasCardioSignals = healthSummary?.vo2Max != null
+      || cardioTrendSummary.zone2Minutes7d > 0
+      || cardioTrendSummary.cardioSessions7d > 0
+      || rhrTrendBpm7dVs30d != null;
+    const cardioCtx: HealthCardioContext | null = hasCardioSignals
+      ? {
+          vo2Max: healthSummary?.vo2Max ?? null,
+          zone2Minutes7d: cardioTrendSummary.zone2Minutes7d > 0 ? cardioTrendSummary.zone2Minutes7d : null,
+          cardioSessions7d: cardioTrendSummary.cardioSessions7d > 0 ? cardioTrendSummary.cardioSessions7d : null,
+          rhrTrendBpm7dVs30d,
+        }
+      : null;
+
+    const ctx: HealthScoreContext = {
+      appWorkouts14d: history.filter(s => {
+        if (!s.completed || s.skipped) return false;
+        const t = +new Date(s.date);
+        return t >= Date.now() - 14 * 86400000;
+      }).length,
+      targetDaysPerWeek: userProfile?.daysPerWeek ?? 4,
+      health: healthSummary,
+      nutrition: nutritionCtx,
+      gutSupport: gutCtx,
+      cardio: cardioCtx,
+      strength: strengthCtx,
+      baselines,
+    };
+
+    return calculateHealthScore(ctx);
+  }, [
+    history,
+    prs,
+    nutritionScoreWeekly,
+    gutHealthWindow,
+    healthSummary,
+    cardioTrendSummary,
+    sleepHistory,
+    userProfile?.goal,
+    userProfile?.daysPerWeek,
+  ]);
+
   const progressAnalytics = useMemo(
-    () => showWorkoutProgress ? buildProgressAnalytics(history, summaries, prs, plateaus) : [],
-    [history, plateaus, prs, showWorkoutProgress, summaries],
+    () => showWorkoutProgress ? buildProgressAnalytics(history, prs, plateaus, weightUnit, distanceUnit, cardioTrendSummary, progressWeekWindow) : [],
+    [cardioTrendSummary, distanceUnit, history, plateaus, progressWeekWindow, prs, showWorkoutProgress, weightUnit],
   );
   const coachInsightVisuals = useMemo(
     () => buildCoachInsightVisuals(insights, guardrails, coachMemory, progressionHint, { showWorkoutProgress, showMealProgress }),
     [coachMemory, guardrails, insights, progressionHint, showMealProgress, showWorkoutProgress],
   );
-  const progressWeekWindow = useMemo(
-    () => buildProgressDateWindow(planWeekWindow),
-    [planWeekWindow?.startDate, planWeekWindow?.endDate],
-  );
   const thisWeekOverview = useMemo(
     () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow, { showWorkoutProgress, showMealProgress }),
     [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, showMealProgress, showWorkoutProgress, summaries, weightEntries, weightUnit],
   );
-  const goalForecast = useMemo(
+  const liveGoalForecast = useMemo(
     () => showMixedGoalProgress ? buildGoalForecast({
       profile: userProfile,
       weightEntries,
@@ -2517,12 +8438,77 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       paceHistory,
       oneRepMaxLifts: displayedOneRepMaxLifts,
       bodyScanHistory,
+      calorieRanges: calorieRanges ? {
+        maintenanceCalories: calorieRanges.maintenance_calories,
+        cutAdjustmentKcal: calorieRanges.cut_adjustment_kcal ?? null,
+        bulkAdjustmentKcal: calorieRanges.bulk_adjustment_kcal ?? null,
+      } : null,
       vo2Max: healthSummary?.vo2Max ?? null,
+      avgSleepHours: healthSummary?.avgSleepHours7d ?? null,
       weightUnit,
       distanceUnit,
     }) : null,
-    [bodyScanHistory, displayedOneRepMaxLifts, distanceUnit, healthSummary?.vo2Max, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
+    [bodyScanHistory, calorieRanges, displayedOneRepMaxLifts, distanceUnit, healthSummary?.avgSleepHours7d, healthSummary?.vo2Max, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
   );
+  const recompForecastNutritionSignal = useMemo(() => {
+    if (!showMealProgress) return 'disabled';
+    if (!authToken) return 'offline';
+    if (mealAverages == null && mealHistory == null && nutritionScoreWeekly == null) return 'loading';
+    const mealHistoryDays = new Set(
+      (mealHistory ?? [])
+        .map(row => String(row.meal_date ?? '').slice(0, 10))
+        .filter(key => /^\d{4}-\d{2}-\d{2}$/.test(key)),
+    ).size;
+    const averageDays = Math.round(Number(mealAverages?.days_with_data) || 0);
+    const scoreDays = Math.round(Number(nutritionScoreWeekly?.days_with_data) || 0);
+    return Math.max(mealHistoryDays, averageDays, scoreDays) > 0 ? 'has-meals' : 'no-meals';
+  }, [authToken, mealAverages, mealHistory, nutritionScoreWeekly, showMealProgress]);
+  const recompForecastScopeKey = useMemo(() => {
+    if (liveGoalForecast?.bucket !== 'body_recomp') return null;
+    if (recompForecastNutritionSignal === 'loading') return null;
+    const details = userProfile.goalDetails ?? {};
+    return JSON.stringify({
+      goal: userProfile.goal,
+      pace: details.pace ?? null,
+      startWeightLbs: details.startWeightLbs ?? null,
+      targetWeightLbs: details.targetWeightLbs ?? null,
+      startBodyFatPct: details.startBodyFatPct ?? null,
+      goalStartedAt: details.goalStartedAt ?? null,
+      nutritionSignal: recompForecastNutritionSignal,
+      weightUnit,
+      distanceUnit,
+    });
+  }, [
+    distanceUnit,
+    liveGoalForecast?.bucket,
+    recompForecastNutritionSignal,
+    userProfile.goal,
+    userProfile.goalDetails?.goalStartedAt,
+    userProfile.goalDetails?.pace,
+    userProfile.goalDetails?.startBodyFatPct,
+    userProfile.goalDetails?.startWeightLbs,
+    userProfile.goalDetails?.targetWeightLbs,
+    weightUnit,
+  ]);
+  useEffect(() => {
+    let cancelled = false;
+    if (loading) {
+      return () => { cancelled = true; };
+    }
+    if (liveGoalForecast?.bucket !== 'body_recomp' || !recompForecastScopeKey) {
+      setDailyRecompForecast(null);
+      return () => { cancelled = true; };
+    }
+    import('../utils/dailyProgressSnapshots').then(m =>
+      m.getStableDailyRecompForecast(liveGoalForecast, recompForecastScopeKey),
+    ).then(snapshot => {
+      if (!cancelled) setDailyRecompForecast({ scopeKey: snapshot.scopeKey, forecast: snapshot.forecast });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [liveGoalForecast, loading, recompForecastScopeKey]);
+  const goalForecast = liveGoalForecast?.bucket === 'body_recomp'
+    ? (dailyRecompForecast?.scopeKey === recompForecastScopeKey ? dailyRecompForecast.forecast : liveGoalForecast)
+    : liveGoalForecast;
   const todayTrack = useMemo(
     () => buildTodayTrackSummary({
       profile: userProfile,
@@ -2546,19 +8532,551 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     : goalForecast?.tone === 'warning'
       ? tc.warning
       : tc.primary;
-  const goalForecastConfidenceColor = goalForecast?.confidence === 'high'
-    ? tc.success
-    : goalForecast?.confidence === 'medium'
-      ? tc.warning
-      : tc.textMuted;
-  const planWeekZone2 = useMemo(() => {
-    const current = summaries
-      .filter(row => dateInWindow(row.date, progressWeekWindow.startDate, progressWeekWindow.endDate))
-      .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
-    const previous = summaries
-      .filter(row => dateInWindow(row.date, progressWeekWindow.previousStartDate, progressWeekWindow.previousEndDate))
-      .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
-    return { current, previous };
+  const goalScoreColor = goalScore
+    ? goalScore.executionScore >= 75
+      ? tc.success
+      : goalScore.executionScore >= 55
+        ? tc.warning
+        : tc.error
+    : goalForecastColor;
+  const hasGoalScoreDetail = !!goalScore || !!goalForecast;
+  const todayHeroColor = goalScore ? goalScoreColor : goalForecast ? goalForecastColor : todayTrack.color;
+  const todayHeroStatus = goalScore
+    ? goalScore.executionLabel
+    : goalForecast
+    ? goalForecast.tone === 'success'
+      ? 'On pace'
+      : goalForecast.tone === 'warning'
+        ? 'Needs signal'
+        : 'Close'
+    : todayTrack.title;
+  const todayHeroTitle = goalScore
+    ? formatGoalScoreHeroTitle(goalScore)
+    : goalForecast
+    ? goalForecast.headline.replace(/^At current pace:\s*/i, '')
+    : todayTrack.title;
+  const todayHeroSubtitle = goalScore ? null : goalForecast ? stripGoalStartedCopy(goalForecast.subheadline) : todayTrack.subtitle;
+  const todayHeroMetricLabel = goalScore || goalForecast ? 'Execution' : 'Goal signal';
+  const todayHeroMetricValue = goalScore ? `${goalScore.executionScore}%` : goalForecast ? `${goalForecast.executionPct}%` : `${todayTrack.progressPct}%`;
+  const todayHeroImageUri = goalEstimateImageUri(userProfile.goal, userProfile.physicalStats?.gender);
+  const goalVo2Points = useMemo(
+    () => buildBiometricHistoryPoints('vo2', sleepHistory, dailyHealthHistory, healthSummary, GOAL_EXECUTION_BLOCK_DAYS),
+    [dailyHealthHistory, healthSummary, sleepHistory],
+  );
+  const goalExecutionOverview = useMemo(
+    () => buildGoalExecutionOverview({
+      profile: userProfile,
+      todayTrack,
+      goalForecast,
+      weightEntries,
+      history,
+      summaries,
+      prs,
+      paceHistory,
+      mealHistory,
+      vo2Points: goalVo2Points,
+      bodyScanHistory,
+      weightUnit,
+      distanceUnit,
+      tc,
+      showWorkoutProgress,
+      showMealProgress,
+    }),
+    [bodyScanHistory, distanceUnit, goalForecast, goalVo2Points, history, mealHistory, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, tc, todayTrack, userProfile, weightEntries, weightUnit],
+  );
+  // Lock today's computed Thallo Score to the first valid read of the
+  // local day, then show the trailing 28-day average. Later meal,
+  // workout, sleep, or wearable syncs can update tomorrow's snapshot
+  // but do not move the displayed score throughout the day.
+  useEffect(() => {
+    let cancelled = false;
+    if (loading) {
+      return () => { cancelled = true; };
+    }
+    import('../utils/thalloScoreHistory').then(m => {
+      if (cancelled) return;
+      m.getStableDailyThalloScore(comprehensiveHealthScore).then(snapshot => {
+        if (cancelled) return;
+        setDailyThalloScoreResult(snapshot.result);
+        setThalloScoreAverage(snapshot.average);
+      }).catch(() => {});
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [comprehensiveHealthScore, loading]);
+  const displayedThalloScore = dailyThalloScoreResult ?? comprehensiveHealthScore;
+  // Thallo Score removed for now — card + explainer modal no longer rendered.
+  // THALLO_SCORE_ENABLED is false, so this dormant builder short-circuits each
+  // render; flip it to re-enable. (Typed `boolean`, not literal `false`, so
+  // flow-narrowing inside the IIFE stays valid for the type checker.)
+  const thalloScoreCard = THALLO_SCORE_ENABLED && isProTier && showWorkoutProgress && showMealProgress ? (() => {
+    const hs = displayedThalloScore;
+    // Headline = trailing 28-day average of the daily score (falls back
+    // to today's value before any history exists).
+    const overall = thalloScoreAverage != null ? thalloScoreAverage.average : hs.overallScore;
+    const pillars = buildThalloScorePillars(hs, tc);
+    const defaultPillar = defaultThalloPillarKey(pillars);
+    const topPillars = pillars
+      .slice()
+      .sort((a, b) => b.contributionPoints - a.contributionPoints || b.score - a.score)
+      .slice(0, 3);
+    const coveragePct = Math.round(hs.dataCoverage * 100);
+    const scoreColor = overall == null ? tc.textMuted
+      : overall >= 80 ? '#22C55E'
+      : overall >= 65 ? '#84CC16'
+      : overall >= 45 ? '#F59E0B'
+      : '#EF4444';
+    const scoreStatus = overall == null ? 'Building'
+      : overall >= 80 ? 'Strong'
+      : overall >= 65 ? 'Balanced'
+      : overall >= 45 ? 'Needs signal'
+      : 'Watch';
+    const leadPillar = topPillars[0] ?? null;
+    const supportLabel = leadPillar ? `Top support: ${leadPillar.label}` : `${coveragePct}% data coverage`;
+
+    return (
+      <TouchableOpacity
+        testID="progress-thallo-score-card"
+        activeOpacity={0.85}
+        accessibilityRole="button"
+        accessibilityLabel={`${hs.scoreLabel}: ${overall ?? 'building'}. Open score breakdown.`}
+        onPress={() => {
+          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+          setSelectedHealthScorePillar(defaultPillar);
+          setHealthScoreExplainOpen(true);
+        }}
+        style={[
+          styles.thalloScoreFloat,
+          { borderColor: scoreColor + '44', backgroundColor: tc.surface + 'F2' },
+        ]}
+      >
+        <View style={[styles.thalloScoreFloatHalo, { backgroundColor: scoreColor + '12' }]}>
+          <ThalloScoreDonut
+            score={overall}
+            pillars={pillars}
+            size={58}
+            strokeWidth={6}
+            trackColor={tc.border}
+            textColor={scoreColor}
+            mutedColor={tc.textMuted}
+            onPillarPress={key => {
+              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+              setSelectedHealthScorePillar(key);
+              setHealthScoreExplainOpen(true);
+            }}
+          />
+        </View>
+        <View style={styles.thalloScoreFloatCopy}>
+          <Text style={[styles.thalloScoreTodayEyebrow, { color: scoreColor }]}>28d Thallo Score</Text>
+          <Text style={[styles.thalloScoreFloatTitle, { color: tc.textPrimary }]} numberOfLines={1}>
+            {overall == null ? hs.scoreLabel : `${overall} · ${scoreStatus}`}
+          </Text>
+          <Text style={[styles.thalloScoreFloatSubtitle, { color: tc.textMuted }]} numberOfLines={1}>
+            {supportLabel}
+          </Text>
+        </View>
+        <View style={styles.thalloScoreFloatRight}>
+          <View style={[styles.thalloScoreTodayStatusPill, { borderColor: scoreColor + '55', backgroundColor: scoreColor + '18' }]}>
+            <Text style={[styles.thalloScoreTodayStatusText, { color: scoreColor }]} numberOfLines={1}>{coveragePct}%</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={15} color={tc.textMuted} />
+        </View>
+      </TouchableOpacity>
+    );
+  })() : null;
+  const bedtimeWindow = useMemo(
+    () => bedtimeWindowFromHistory(sleepHistory.map(n => n.bedtimeMinutes ?? -1)),
+    [sleepHistory],
+  );
+  const hasSleepCardData = !!healthSummary && (
+    healthSummary.sleepScore != null
+    || healthSummary.sleepTimeline != null
+    || healthSummary.lastNightSleepHours != null
+    || healthSummary.avgSleepHours7d != null
+  );
+  const todaySleepConstellationCard = isProTier && healthEnabled && isHealthKitAvailable() && hasSleepCardData ? (
+    <SleepConstellationCard
+      sleepScore={healthSummary!.sleepScore ?? null}
+      sleepTimeline={healthSummary!.sleepTimeline ?? null}
+      bedtimeWindow={bedtimeWindow}
+      sleepHistory={sleepHistory}
+      sleepPressure={sleepPressure}
+      mealHistory={mealHistory}
+      workoutHistory={history}
+      workoutSummaries={summaries}
+      tc={tc}
+      width={screenWidth}
+      wearableLabel={HEALTH_WEARABLE_LABEL}
+      platformLabel={HEALTH_PLATFORM_LABEL}
+      onInfo={() => setSleepScoreExplainOpen(true)}
+      onHistory={sleepHistory.length > 0 ? () => {
+        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+        setSleepHistoryOpen(true);
+      } : undefined}
+    />
+  ) : null;
+  const openBiometricHistory = useCallback((key: HealthBiometricKey) => {
+    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+    setSelectedBiometric(key);
+    setBiometricHistoryOpen(true);
+  }, []);
+  const healthVitalsOverviewCard = isProTier && isHealthKitAvailable() ? (() => {
+    const hs = healthSummary;
+    const hasAnyData = hasDisplayableHealthSummaryData(hs);
+
+    const handleConnect = async () => {
+      Alert.alert(
+        APPLE_HEALTH_PERMISSION_COPY.title,
+        APPLE_HEALTH_PERMISSION_COPY.body,
+        [
+          { text: 'Not now', style: 'cancel' },
+          {
+            text: 'Continue',
+            onPress: async () => {
+              setHealthConnecting(true);
+              try {
+                const granted = await requestHealthPermissions();
+                try { await persistAppleHealthEnabled(granted); } catch {}
+                setHealthEnabled(granted);
+                const age = userProfile.physicalStats?.age ?? null;
+                const fresh = await readHealthSummary({ age });
+                if (fresh) {
+                  setHealthSummary(fresh);
+                  saveHealthSummary(fresh).catch(() => null);
+                }
+                if (granted) {
+                  import('../services/healthDataSummary')
+                    .then(({ backfillSnapshotsToBackend, refreshHealthDataSummary }) => {
+                      refreshHealthDataSummary({ age }).catch(() => null);
+                      backfillSnapshotsToBackend(180).catch(() => null);
+                    })
+                    .catch(() => null);
+                }
+                const hasAny = hasDisplayableHealthSummaryData(fresh);
+                if (granted && !hasAny) {
+                  Alert.alert('Connected - waiting for data', 'Apple Health is connected. If this card stays empty, open iPhone Settings -> Privacy & Security -> Health -> Thallo and turn on the categories you want to share.');
+                } else if (!granted) {
+                  const err = getLastHealthKitError();
+                  Alert.alert('Apple Health not connected', `${APPLE_HEALTH_PERMISSION_COPY.denied}\n\n${err ?? ''}`.trim());
+                }
+              } catch (e: any) {
+                Alert.alert('Apple Health error', String(e?.message ?? e));
+              } finally {
+                setHealthConnecting(false);
+              }
+            },
+          },
+        ],
+      );
+    };
+
+    const handleOpenSettings = () => {
+      Linking.openURL('app-settings:').catch(() => {
+        Alert.alert('Unable to open Settings', 'Go to iPhone Settings -> Privacy & Security -> Health -> Thallo manually.');
+      });
+    };
+
+    if (!healthEnabled) {
+      return (
+        <HealthDataImageCard
+          tc={tc}
+          styles={styles}
+          title={`${HEALTH_DATA_LABEL} is optional`}
+          subtitle="Connect Apple Health or source apps when you want shared signals folded into Thallo."
+          badge="Optional"
+          iconName="heart-outline"
+          imageUri={HEALTH_DATA_CONNECT_IMAGE}>
+          <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+            <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginBottom: 14 }}>
+              Optional sync for health categories that actually have data from your iPhone, Apple Watch, or connected apps. Missing categories stay hidden until Apple Health returns samples.{showWorkoutProgress ? ' Thallo can also write completed workout details back to Apple Health.' : ''}
+            </Text>
+            <TouchableOpacity
+              style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 32 }}
+              onPress={handleConnect}
+              disabled={healthConnecting}
+            >
+              {healthConnecting
+                ? <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+                : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 14 }}>Connect Apple Health</Text>}
+            </TouchableOpacity>
+          </View>
+        </HealthDataImageCard>
+      );
+    }
+
+    if (!hasAnyData && (healthReading || healthConnecting)) {
+      return (
+        <HealthDataImageCard
+          tc={tc}
+          styles={styles}
+          title={`Reading ${HEALTH_DATA_LABEL}`}
+          subtitle="Pulling shared health samples that are available on this device."
+          badge="Syncing"
+          iconName="sync-outline"
+          imageUri={HEALTH_DATA_SYNC_IMAGE}>
+          <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+            <ActivityIndicator color={tc.primary} />
+            <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4 }}>
+              This can take a moment. Rows only appear for categories Apple Health returns.
+            </Text>
+          </View>
+        </HealthDataImageCard>
+      );
+    }
+
+    if (!hasAnyData) {
+      return (
+        <HealthDataImageCard
+          tc={tc}
+          styles={styles}
+          title={`No ${HEALTH_DATA_LABEL.toLowerCase()} data yet`}
+          subtitle="Connected, but Apple Health has not returned displayable samples."
+          badge="Empty"
+          iconName="cloud-offline-outline"
+          imageUri={HEALTH_DATA_EMPTY_IMAGE}>
+          <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+            <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginBottom: 12 }}>
+              Thallo still works normally. Tap Refresh to retry, or open iOS Settings to share categories that your iPhone, Apple Watch, or connected apps are recording.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TouchableOpacity
+                style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 22 }}
+                disabled={healthConnecting}
+                onPress={async () => {
+                  setHealthConnecting(true);
+                  healthLiveLoadedRef.current = false;
+                  try {
+                    const age = userProfile.physicalStats?.age ?? null;
+                    const fresh = await readFreshProgressHealthSummary(age, true);
+                    if (fresh) {
+                      healthLiveLoadedRef.current = true;
+                      setHealthSummary(fresh);
+                      saveHealthSummary(fresh).catch(() => null);
+                      loadProgressSleepHistory(authToken, fresh).then(setSleepHistory).catch(() => null);
+                    } else {
+                      Alert.alert(
+                        'No Apple Health data returned',
+                        'Apple Health did not return displayable samples this time. In iOS Settings -> Privacy & Security -> Health -> Thallo, share the categories your iPhone, Apple Watch, or connected apps are recording.',
+                      );
+                    }
+                  } finally {
+                    setHealthConnecting(false);
+                  }
+                }}
+              >
+                {healthConnecting
+                  ? <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+                  : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 13 }}>Refresh</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 22 }}
+                onPress={handleOpenSettings}
+              >
+                <Text style={{ color: tc.textPrimary, fontWeight: '600', fontSize: 13 }}>iOS Settings</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </HealthDataImageCard>
+      );
+    }
+
+    const availableSignals = getHealthSummarySignalAvailability(hs);
+    const medianOf = (xs: number[]): number | null => {
+      const valid = xs.filter(v => Number.isFinite(v) && v > 0).slice().sort((a, b) => a - b);
+      if (valid.length === 0) return null;
+      const mid = Math.floor(valid.length / 2);
+      return valid.length % 2 === 0 ? (valid[mid - 1] + valid[mid]) / 2 : valid[mid];
+    };
+    const recent30 = sleepHistory.slice(-30);
+    const rhrBaseline30 = medianOf(recent30.map(n => Number(n.restingHr ?? 0)));
+    const hrvBaseline30 = medianOf(recent30.map(n => Number(n.hrv ?? 0)));
+    type HealthMetricTone = 'good' | 'onTrack' | 'below' | 'neutral';
+    const metricTone = (trend: VitalTrendResult | null): HealthMetricTone => {
+      if (trend?.trend === 'improving') return 'good';
+      if (trend?.trend === 'onTrack') return 'onTrack';
+      if (trend?.trend === 'monitor') return 'below';
+      return 'neutral';
+    };
+    const toneColor = (tone: HealthMetricTone, fallback: string): string => {
+      if (tone === 'good') return tc.success ?? '#22C55E';
+      if (tone === 'onTrack') return tc.primary;
+      if (tone === 'below') return tc.warning ?? '#F59E0B';
+      return fallback;
+    };
+    const formatSleepDuration = (hours: number | null | undefined) => {
+      if (hours == null || !Number.isFinite(hours) || hours <= 0) return null;
+      const total = Math.round(hours * 60);
+      const h = Math.floor(total / 60), m = total % 60;
+      return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    };
+    type HealthVitalOverviewItem = {
+      key: string;
+      icon: ComponentProps<typeof Ionicons>['name'];
+      label: string;
+      value: string | number | null;
+      unit?: string;
+      trend?: VitalTrendResult;
+      historyKey?: HealthBiometricKey;
+    };
+    const items: HealthVitalOverviewItem[] = [];
+    const addItem = (
+      key: string,
+      icon: ComponentProps<typeof Ionicons>['name'],
+      label: string,
+      value: string | number | null,
+      unit?: string,
+      trend?: VitalTrendResult,
+      historyKey?: HealthBiometricKey,
+    ) => {
+      items.push({ key, icon, label, value, unit, trend, historyKey });
+    };
+    if (availableSignals.restingHeartRate) addItem('rhr', 'pulse-outline', 'Resting HR', hs!.restingHeartRate, 'bpm', classifyRestingHeartRate(hs!.restingHeartRate, rhrBaseline30), 'rhr');
+    if (availableSignals.hrvAvg) addItem('hrv', 'analytics-outline', 'HRV', hs!.hrvAvg, 'ms', classifyHrv(hs!.hrvAvg, hrvBaseline30), 'hrv');
+    if (availableSignals.avgSleepHours7d) addItem('sleep', 'moon-outline', 'Sleep avg', formatSleepDuration(hs!.avgSleepHours7d), undefined, classifyAvgSleepHours(hs!.avgSleepHours7d), 'sleep');
+    if (availableSignals.avgSteps7d) addItem('steps', 'walk-outline', 'Steps avg', hs!.avgSteps7d, undefined, classifyAvgSteps(hs!.avgSteps7d), 'steps');
+    if (availableSignals.activeEnergy7d) addItem('active-energy', 'flame-outline', 'Active calories', hs!.activeEnergy7d, 'kcal', classifyActiveEnergy(hs!.activeEnergy7d), 'active-energy');
+    if (availableSignals.workouts) {
+      const workouts = Array.isArray(hs?.workoutDetails) ? hs.workoutDetails : [];
+      const minutes = workouts.reduce((sum, workout) => sum + (Number(workout.duration ?? 0) || 0), 0);
+      addItem('workouts', 'fitness-outline', 'Workouts', workouts.length, minutes > 0 ? `${Math.round(minutes)} min` : undefined, undefined, 'workouts');
+    }
+    if (availableSignals.vo2Max) addItem('vo2', 'speedometer-outline', 'VO2 Max', Math.round(hs!.vo2Max! * 10) / 10, 'ml/kg/min', undefined, 'vo2');
+    if (availableSignals.respiratoryRate) addItem('respiratory', 'leaf-outline', 'Respiratory rate', hs!.respiratoryRate, 'brpm');
+    if (availableSignals.oxygenSaturation) addItem('oxygen', 'water-outline', 'Blood oxygen', hs!.oxygenSaturation, '%');
+    if (availableSignals.standingHours7d) addItem('standing', 'body-outline', 'Standing hours', hs!.standingHours7d, 'hrs');
+    if (availableSignals.mindfulMinutes7d) addItem('mindful', 'flower-outline', 'Mindful minutes', hs!.mindfulMinutes7d, 'min');
+    if (availableSignals.basalEnergy7d) addItem('basal', 'flash-outline', 'Basal energy', hs!.basalEnergy7d, 'kcal');
+
+    if (items.length === 0) return null;
+
+    const mainBiometricKeys = new Set(['rhr', 'hrv', 'sleep', 'steps']);
+    const orderedOverviewItems = [
+      ...items.filter(item => mainBiometricKeys.has(item.key)),
+      ...items.filter(item => !mainBiometricKeys.has(item.key)),
+    ];
+    const collapsedItems = orderedOverviewItems.slice(0, 4);
+    const visibleItems = healthBiometricsExpanded ? orderedOverviewItems : collapsedItems;
+    const hiddenBiometricCount = Math.max(0, orderedOverviewItems.length - collapsedItems.length);
+    const signalPctFor = (trend: VitalTrendResult | null, index: number): number => {
+      if (trend?.trend === 'improving') return 88;
+      if (trend?.trend === 'onTrack') return 72;
+      if (trend?.trend === 'monitor') return 46;
+      return 58 + ((index % 3) * 7);
+    };
+
+    return (
+      <HealthDataImageCard
+        tc={tc}
+        styles={styles}
+        title={HEALTH_DATA_LABEL}
+        subtitle="Rolling 7-day snapshot from shared signals Apple Health returned."
+        badge="7D"
+        iconName="heart-outline"
+        imageUri={HEALTH_DATA_READY_IMAGE}>
+        <View style={styles.healthVitalsOverviewGrid}>
+          {visibleItems.map((item, index) => {
+            const trend = item.trend?.trend ? item.trend : null;
+            const tone = metricTone(trend);
+            const neutralColor = item.historyKey ? BIOMETRIC_HISTORY_CONFIG[item.historyKey].accent : tc.textMuted;
+            const color = toneColor(tone, neutralColor);
+            const canOpenHistory = item.historyKey != null;
+            const signalPct = signalPctFor(trend, index);
+            const status = biometricStatusFromTrend(item.trend, item.value != null);
+            const statusColor =
+              status.tone === 'good' ? (tc.success ?? '#22C55E')
+              : status.tone === 'onTrack' ? tc.primary
+              : status.tone === 'monitor' ? (tc.warning ?? '#F59E0B')
+              : status.tone === 'waiting' ? tc.textMuted
+              : neutralColor;
+            return (
+              <AnimatedPressable
+                key={item.key}
+                disabled={!canOpenHistory}
+                onPress={() => {
+                  if (item.historyKey) openBiometricHistory(item.historyKey);
+                }}
+                scaleDown={0.975}
+                accessibilityRole={canOpenHistory ? 'button' : undefined}
+                accessibilityLabel={canOpenHistory ? `${item.label} history. ${status.label}${item.trend?.label ? `, ${item.trend.label}` : ''}` : undefined}
+                style={[styles.healthVitalsOverviewRow, { backgroundColor: tc.surfaceRaised, borderColor: color + (tone === 'neutral' ? '28' : '4A') }]}
+              >
+                {/* Gradient wash + colored gradient + sliding sheen removed
+                    per design — biometric tiles stay flat; only the pulse
+                    glyph animates. */}
+                <View style={styles.healthVitalsOverviewTopRow}>
+                  <HealthPulseGlyph
+                    iconName={item.icon}
+                    iconSize={15}
+                    color={color}
+                    delay={staggerDelay(index, 70)}
+                    style={[styles.healthVitalsOverviewIcon, { backgroundColor: color + '18' }]}
+                  />
+                  <View style={styles.healthVitalsOverviewStatusRail}>
+                    <View style={[styles.healthVitalsStatusPill, { backgroundColor: statusColor + '16', borderColor: statusColor + '44' }]}>
+                      <Text style={[styles.healthVitalsStatusText, { color: statusColor }]} numberOfLines={1}>
+                        {status.label}
+                      </Text>
+                    </View>
+                    {canOpenHistory ? <Ionicons name="chevron-forward" size={14} color={tc.textMuted} /> : null}
+                  </View>
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={[styles.healthVitalsOverviewLabel, { color: tc.textMuted }]} numberOfLines={2}>{item.label}</Text>
+                  <Text style={[styles.healthVitalsOverviewValue, { color: item.value != null ? tc.textPrimary : tc.textMuted }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+                    {item.value != null ? (typeof item.value === 'number' ? item.value.toLocaleString() : item.value) : '--'}
+                  </Text>
+                  {item.value != null && item.unit ? (
+                    <Text style={[styles.healthVitalsOverviewUnit, { color: tc.textMuted }]} numberOfLines={1}>
+                      {item.unit}
+                    </Text>
+                  ) : null}
+                  {trend ? (
+                    <View style={styles.healthVitalsTrendRow}>
+                      <View style={[styles.healthVitalsTrendDot, { backgroundColor: color }]} />
+                      <Text style={[styles.healthVitalsTrendText, { color }]} numberOfLines={1}>{trend.label}</Text>
+                    </View>
+                  ) : null}
+                </View>
+                <View style={[styles.healthVitalsSignalLine, { backgroundColor: color + '22' }]}>
+                  <AnimatedProgressFill
+                    pct={signalPct}
+                    color={color}
+                    minPct={18}
+                    delay={staggerDelay(index, 50)}
+                    duration={520}
+                    style={styles.healthVitalsSignalFill}
+                  />
+                </View>
+              </AnimatedPressable>
+            );
+          })}
+        </View>
+        {hiddenBiometricCount > 0 ? (
+          <TouchableOpacity
+            activeOpacity={0.78}
+            onPress={() => {
+              configureExpandAnimation(300);
+              setHealthBiometricsExpanded(prev => !prev);
+            }}
+            style={[styles.healthVitalsOverviewMoreButton, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}
+          >
+            <Text style={[styles.healthVitalsOverviewMoreText, { color: tc.textSecondary }]}>
+              {healthBiometricsExpanded ? 'Show main biometrics' : `Show ${hiddenBiometricCount} more biometrics`}
+            </Text>
+            <Ionicons name={healthBiometricsExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+          </TouchableOpacity>
+        ) : null}
+      </HealthDataImageCard>
+    );
+  })() : null;
+  const planWeekZones = useMemo(() => {
+    const current = buildHrZoneSourceBreakdown(summaries, progressWeekWindow.startDate, progressWeekWindow.endDate);
+    const previous = buildHrZoneSourceBreakdown(summaries, progressWeekWindow.previousStartDate, progressWeekWindow.previousEndDate);
+    return {
+      current: current.zoneMinutes,
+      contributors: current.contributors,
+      zone2Current: Math.round(current.zoneMinutes[1]),
+      zone2Previous: Math.round(previous.zoneMinutes[1]),
+    };
   }, [progressWeekWindow, summaries]);
   const mealHistoryDailyRows = useMemo(
     () => (mealHistory == null ? null : aggregateDailyFromHistory(mealHistory as any)),
@@ -2597,9 +9115,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
   useEffect(() => {
     if (!visibleProgressTabs.some(([key]) => key === tab)) {
-      setTab('today');
+      selectProgressTab('today');
     }
-  }, [tab, visibleProgressTabs]);
+  }, [selectProgressTab, tab, visibleProgressTabs]);
 
   useEffect(() => {
     if (!showWorkoutProgress || tab !== 'trends') return;
@@ -2614,6 +9132,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   }, [filteredChartExercises, selectedExercise, showWorkoutProgress, tab]);
 
   useEffect(() => {
+    if (!showWorkoutProgress || tab !== 'trends') return;
+    if (paceExerciseGroups.length === 0) {
+      if (selectedCardioExercise) setSelectedCardioExercise(null);
+      return;
+    }
+    const stillVisible = selectedCardioExercise
+      ? paceExerciseGroups.some(group => group.key === selectedCardioExercise)
+      : false;
+    if (!stillVisible) setSelectedCardioExercise(paceExerciseGroups[0].key);
+  }, [paceExerciseGroups, selectedCardioExercise, showWorkoutProgress, tab]);
+
+  useEffect(() => {
     if (!isActive) return;
     if (!showWorkoutProgress) return;
     if (tab === 'trends' && authToken && !paceLoadedRef.current) {
@@ -2622,202 +9152,313 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }
   }, [tab, authToken, isActive, showWorkoutProgress]);
 
+  const progressHydratedRef = useRef(false);
   useEffect(() => {
     if (!isActive) return;
-    Promise.all([
-      loadWorkoutHistory(),
-      loadWorkoutSummaries(),
-      loadGoalHistory(),
-      loadPlanChanges(),
-      authToken ? listWorkoutSessions(authToken, { limit: 60, skip: 0 }).catch(() => null) : Promise.resolve(null),
-      authToken ? listWorkoutCompletions(authToken, { limit: 100, skip: 0 }).catch(() => null) : Promise.resolve(null),
-    ]).then(([h, s, g, c, serverSessions, completions]) => {
-      const historyWithServerSets = mergeWorkoutSessionSources(h, serverSessions);
-      const scoped = reconcileWorkoutProgressData(historyWithServerSets, s, completions);
-      const p = derivePersonalRecords(scoped.history);
-      setPrs(p);
+    let cancelled = false;
+    // Only show the full skeleton on the very first hydration. On
+    // re-activation (tab away→back) we already have data rendered, so
+    // refresh in the background instead of flashing the skeleton and
+    // dropping the list.
+    if (!progressHydratedRef.current) setLoading(true);
+    (async () => {
+      const localProgressPromise = Promise.allSettled([
+        loadWorkoutHistory(),
+        loadWorkoutSummaries(),
+        loadGoalHistory(),
+        loadPlanChanges(),
+      ]);
+      const serverProgressPromise = authToken
+        ? Promise.allSettled([
+            listWorkoutSessions(authToken, {
+              limit: PROGRESS_SERVER_SESSION_LIMIT,
+              skip: 0,
+              fresh: true,
+              timeoutMs: PROGRESS_SERVER_HYDRATE_TIMEOUT_MS,
+              noRetry: true,
+            }),
+            listWorkoutCompletions(authToken, {
+              limit: PROGRESS_SERVER_COMPLETION_LIMIT,
+              skip: 0,
+              fresh: true,
+              timeoutMs: PROGRESS_SERVER_HYDRATE_TIMEOUT_MS,
+              noRetry: true,
+            }),
+          ])
+        : null;
+      const [historyResult, summaryResult, goalResult, planChangeResult] = await localProgressPromise;
+      if (cancelled) return;
+      progressHydratedRef.current = true;
+
+      const localHistory = historyResult.status === 'fulfilled' ? historyResult.value : [];
+      const localSummaries = summaryResult.status === 'fulfilled' ? summaryResult.value : [];
+      const localGoals = goalResult.status === 'fulfilled' ? goalResult.value : [];
+      const localPlanChanges = planChangeResult.status === 'fulfilled' ? planChangeResult.value : [];
+
+      setGoalHistory(localGoals);
+      setPlanChanges(localPlanChanges);
+
+      if (!serverProgressPromise) {
+        setPrs(derivePersonalRecords(localHistory));
+        setHistory(localHistory);
+        setSummaries(localSummaries);
+        setLoading(false);
+        return;
+      }
+
+      const [serverSessionsResult, completionsResult] = await serverProgressPromise;
+      if (cancelled) return;
+      const serverSessions = serverSessionsResult.status === 'fulfilled' ? serverSessionsResult.value : null;
+      const completions = completionsResult.status === 'fulfilled' ? completionsResult.value : null;
+      if (!serverSessions && !completions) {
+        setPrs(derivePersonalRecords(localHistory));
+        setHistory(localHistory);
+        setSummaries(localSummaries);
+        setLoading(false);
+        return;
+      }
+
+      const historyWithServerSets = mergeWorkoutSessionSources(localHistory, serverSessions);
+      const scoped = reconcileWorkoutProgressData(historyWithServerSets, localSummaries, completions);
+      setPrs(derivePersonalRecords(scoped.history));
       setHistory(scoped.history);
       setSummaries(scoped.summaries);
+      setLoading(false);
       if (completions) {
         AsyncStorage.setItem('workoutHistory', JSON.stringify(scoped.history.slice(0, 100))).catch(() => {});
         AsyncStorage.setItem('workoutSummaries', JSON.stringify(scoped.summaries.slice(0, 100))).catch(() => {});
       }
-      console.log(`[Progress] history=${scoped.history.length} completed=${scoped.history.filter((x: any) => x.completed).length} summaries=${scoped.summaries.length} sample_date=${scoped.history[0]?.date ?? 'none'} completions=${completions?.length ?? 'cache'}`);
-      setGoalHistory(g);
-      setPlanChanges(c);
-      setLoading(false);
-      if (authToken && isProTier && showWorkoutProgress && p.length > 0) {
-        getProgressionInsights(authToken, p[0].exerciseName)
-          .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
-          .catch(() => null);
-      } else {
-        setProgressionHint('');
-      }
-      import('../utils/weightHistory').then(({ loadWeightHistory }) =>
-        Promise.all([
-          loadWeightHistory(),
-          authToken ? getWeightEntries(authToken).catch(() => null) : Promise.resolve(null),
-        ]).then(([local, server]) => {
-          if (server != null) {
-            const remote = server
-              .map(normalizeRemoteWeightEntry)
-              .filter((entry): entry is import('../types').WeightEntry => entry != null)
-              .sort((a, b) => a.date.localeCompare(b.date));
-            setWeightEntries(remote);
-            AsyncStorage.setItem('weightHistory', JSON.stringify(remote)).catch(() => {});
-            return;
-          }
-          setWeightEntries(local);
-        }).catch(() => null)
-      );
-      if (authToken && isProTier && showWorkoutProgress) {
-        import('../services/api').then(({ getFatigueScore }) => {
-          getFatigueScore(authToken).then(fs => setMuscleFatigue({
-            score: fs.readiness_score, label: fs.readiness_label,
-            topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {},
-          })).catch(() => null);
-        });
-      } else {
-        setMuscleFatigue(null);
-      }
-      if (authToken && isProTier && showWorkoutProgress) {
-        import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
-          getOneRepMaxShowcase(authToken)
-            .then(async (lifts) => {
-              setOneRepMaxLifts(lifts);
-              // After the bar list resolves, fetch history for the top
-              // lift only. Five history calls would saturate the user's
-              // network on Progress-tab open; one is invisible. Skipped
-              // when the user has < 3 sessions of the top lift since a
-              // 1- or 2-point chart isn't a trend.
-              const top = lifts.length > 0
-                ? lifts.reduce((best, lift) => (lift.oneRepMaxLbs > best.oneRepMaxLbs ? lift : best), lifts[0])
-                : null;
-              if (top && top.sessionCount >= 3) {
-                try {
-                  const resp = await getE1RMHistory(authToken, top.name);
-                  if (resp?.history && resp.history.length >= 3) {
-                    setTopLiftHistory({ name: top.name, points: resp.history });
-                  } else {
-                    setTopLiftHistory(null);
-                  }
-                } catch { setTopLiftHistory(null); }
+    })().catch(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authToken, isActive]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isActive || !authToken || !showMixedGoalProgress) {
+      setGoalScore(null);
+      return () => { cancelled = true; };
+    }
+    getGoalScores(authToken, { window: 'rolling_7d' })
+      .then(response => {
+        if (!cancelled) setGoalScore(response.scores?.[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setGoalScore(null);
+      });
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    isActive,
+    showMixedGoalProgress,
+    userProfile.goal,
+    nutritionLogRefreshKey,
+    history.length,
+    summaries.length,
+    bodyScanHistory.length,
+    healthSummary?.avgSleepHours7d,
+  ]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    let cancelled = false;
+    import('../utils/weightHistory').then(({ loadWeightHistory }) =>
+      loadWeightHistory()
+        .then((history) => {
+          if (cancelled) return;
+          setWeightEntries(history);
+        })
+        .catch(() => null)
+        .finally(() => {
+          if (!cancelled) setWeightEntriesLoaded(true);
+        })
+    );
+    return () => { cancelled = true; };
+  }, [authToken, isActive]);
+
+  useEffect(() => {
+    if (!isActive || !authToken) {
+      setInsights(null);
+      setGuardrails([]);
+      setCoachMemory([]);
+      return;
+    }
+    // Coach insights only surface on the Today + Insights tabs — don't
+    // pay for these network calls on a cold open of Trends/Body/Health.
+    if (tab !== 'today' && tab !== 'insights') return;
+    getInsights(authToken).then(setInsights).catch(() => null);
+    getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
+    if (isProTier) {
+      getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+    } else {
+      setCoachMemory([]);
+    }
+  }, [authToken, isActive, isProTier, tab]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || !showWorkoutProgress || prs.length === 0 || tab !== 'trends') {
+      setProgressionHint('');
+      return;
+    }
+    getProgressionInsights(authToken, prs[0].exerciseName)
+      .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
+      .catch(() => null);
+  }, [authToken, isActive, isProTier, prs, showWorkoutProgress, tab]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || !showWorkoutProgress) {
+      setMuscleFatigue(null);
+      return;
+    }
+    import('../services/api').then(({ getFatigueScore }) => {
+      getFatigueScore(authToken).then(fs => setMuscleFatigue({
+        score: fs.muscle_recovery_score ?? fs.readiness_score,
+        label: fs.muscle_recovery_label ?? fs.readiness_label,
+        topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {},
+      })).catch(() => null);
+    });
+  }, [authToken, isActive, isProTier, showWorkoutProgress]);
+
+  useEffect(() => {
+    if (!isActive || !authToken || !isProTier || !showWorkoutProgress) {
+      setOneRepMaxLifts([]);
+      setTopLiftHistory(null);
+      setPlateaus([]);
+      setPlateauDismissed(true);
+      setBulkE1RMMap({});
+      setMuscleBalance(null);
+      return;
+    }
+    if (tab !== 'trends' && tab !== 'insights') return;
+    import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
+      getOneRepMaxShowcase(authToken)
+        .then(async (lifts) => {
+          setOneRepMaxLifts(lifts);
+          // After the bar list resolves, fetch history for the top lift only.
+          const top = lifts.length > 0
+            ? lifts.reduce((best, lift) => (lift.oneRepMaxLbs > best.oneRepMaxLbs ? lift : best), lifts[0])
+            : null;
+          if (top && top.sessionCount >= 3) {
+            try {
+              const resp = await getE1RMHistory(authToken, top.name);
+              if (resp?.history && resp.history.length >= 3) {
+                setTopLiftHistory({ name: top.name, points: resp.history });
               } else {
                 setTopLiftHistory(null);
               }
-            })
-            .catch(() => setOneRepMaxLifts([]))
-        );
-        // Bulk e1RM map for the Strength Score card. Independent of the
-        // showcase so it loads in parallel; Strength Score reads both
-        // sources and prefers whichever has the higher number.
-        import('../services/api').then(({ getAllE1RM }) =>
-          getAllE1RM(authToken)
-            .then(r => setBulkE1RMMap(r?.exercises ?? {}))
-            .catch(() => setBulkE1RMMap({}))
-        );
-        import('../services/api').then(({ getPlateaus }) =>
-          getPlateaus(authToken, 4)
-            .then(r => {
-              setPlateaus(r.plateaus || []);
-              AsyncStorage.getItem('plateauDismissedAt').then(raw => {
-                if (raw) {
-                  const dismissed = Date.now() - parseInt(raw, 10) < 7 * 24 * 60 * 60 * 1000;
-                  setPlateauDismissed(dismissed);
-                } else {
-                  setPlateauDismissed(false);
-                }
-              }).catch(() => setPlateauDismissed(false));
-            })
-            .catch(() => setPlateaus([]))
-        );
-      } else {
-        setOneRepMaxLifts([]);
-        setTopLiftHistory(null);
-        setPlateaus([]);
-        setPlateauDismissed(true);
-      }
-    });
-    if (authToken) {
-      getInsights(authToken).then(setInsights).catch(() => null);
-      getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
-      if (isProTier) {
-        getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
-      } else {
-        setCoachMemory([]);
-      }
-      if (showMealProgress) {
-        import('../services/api').then(({ getMealAverages }) =>
-          getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
-        );
-        // Pull the same meal history the meal tab uses; the Facts card's
-        // dailyRows will re-aggregate from this so both surfaces agree.
-        import('../services/api').then(({ getMealHistory }) =>
-          getMealHistory(authToken, 14)
-            .then(r => setMealHistory(r.meals ?? []))
-            .catch(() => setMealHistory(null))
-        );
-      } else {
+            } catch { setTopLiftHistory(null); }
+          } else {
+            setTopLiftHistory(null);
+          }
+        })
+        .catch(() => setOneRepMaxLifts([]))
+    );
+    import('../services/api').then(({ getAllE1RM }) =>
+      getAllE1RM(authToken)
+        .then(r => setBulkE1RMMap(r?.exercises ?? {}))
+        .catch(() => setBulkE1RMMap({}))
+    );
+    import('../services/api').then(({ getPlateaus }) =>
+      getPlateaus(authToken, 4)
+        .then(r => {
+          setPlateaus(r.plateaus || []);
+          AsyncStorage.getItem('plateauDismissedAt').then(raw => {
+            if (raw) {
+              const dismissed = Date.now() - parseInt(raw, 10) < 7 * 24 * 60 * 60 * 1000;
+              setPlateauDismissed(dismissed);
+            } else {
+              setPlateauDismissed(false);
+            }
+          }).catch(() => setPlateauDismissed(false));
+        })
+        .catch(() => setPlateaus([]))
+    );
+    import('../services/api').then(({ getMuscleBalance }) =>
+      getMuscleBalance(authToken, MUSCLE_DISTRIBUTION_WINDOW_DAYS).then(setMuscleBalance).catch(() => null)
+    );
+  }, [authToken, isActive, isProTier, showWorkoutProgress, tab]);
+
+  useEffect(() => {
+    const shouldLoadMealData =
+      isActive && !!authToken && showMealProgress && (tab === 'today' || tab === 'health' || tab === 'insights');
+    if (!shouldLoadMealData) {
+      if (!showMealProgress || !authToken) {
         setMealAverages(null);
         setMealHistory(null);
-      }
-      if (isProTier) {
-        if (showMealProgress) {
-          import('../services/api').then(({ getMealInsights }) =>
-            getMealInsights(authToken)
-              .then(r => setMealInsightPatterns(r.patterns ?? null))
-              .catch(() => setMealInsightPatterns(null))
-          );
-          import('../services/api').then(({ getNutritionScore }) =>
-            getNutritionScore(authToken, 14)
-              .then(r => setNutritionScoreWeekly(r.weekly ?? null))
-              .catch(() => setNutritionScoreWeekly(null))
-          );
-          import('../services/api').then(({ getGutHealth }) =>
-            getGutHealth(authToken, 14).then(r => {
-              setGutHealthWindow(r.window);
-            }).catch(() => null)
-          );
-        } else {
-          setMealInsightPatterns(null);
-          setNutritionScoreWeekly(null);
-          setGutHealthWindow(null);
-        }
-        if (showWorkoutProgress) {
-          import('../services/api').then(({ getMuscleBalance }) =>
-            getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
-          );
-        } else {
-          setMuscleBalance(null);
-        }
-      } else {
-        setMealInsightPatterns(null);
         setNutritionScoreWeekly(null);
-        setMuscleBalance(null);
         setGutHealthWindow(null);
       }
+      return;
     }
-    if (!isProTier) {
-      setBodyScanHistory([]);
-      bodyScanHistoryLoadedRef.current = false;
+    import('../services/api').then(({ getMealAverages }) =>
+      getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
+    );
+    // Pull the same meal history the meal tab uses; the Facts card's
+    // dailyRows will re-aggregate from this so both surfaces agree.
+    import('../services/api').then(({ getMealHistory }) =>
+      getMealHistory(authToken, 14)
+        .then(r => setMealHistory(r.meals ?? []))
+        .catch(() => setMealHistory(null))
+    );
+    if (isProTier) {
+      import('../services/api').then(({ getNutritionScore }) =>
+        getNutritionScore(authToken, 14)
+          .then(r => setNutritionScoreWeekly(r.weekly ?? null))
+          .catch(() => setNutritionScoreWeekly(null))
+      );
+      import('../services/api').then(({ getGutHealth }) =>
+        getGutHealth(authToken, 14).then(r => {
+          setGutHealthWindow(r.window);
+        }).catch(() => null)
+      );
+    } else {
+      setNutritionScoreWeekly(null);
+      setGutHealthWindow(null);
     }
+  }, [authToken, isActive, isProTier, showMealProgress, tab]);
 
+  useEffect(() => {
+    if (isProTier) return;
+    setBodyScanHistory([]);
+    bodyScanHistoryLoadedRef.current = false;
+    healthLiveLoadedRef.current = false;
+    setHealthEnabled(false);
+    setHealthSummary(null);
+    setHealthScore(null);
+    setNutritionScoreWeekly(null);
+    setMuscleBalance(null);
+    setGutHealthWindow(null);
+  }, [isProTier]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'health' || !isProTier || !showMealProgress) {
+      setGutInsights(null);
+      return;
+    }
+    let cancelled = false;
     // ── Gut / longevity insights — compute from existing meal data ──
-    if (isProTier && showMealProgress) (async () => {
+    (async () => {
       try {
         const today = new Date();
         const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-        // Rebuild a 7-day window of plans + checks by date for the diversity counter.
         const plansByDate: Record<string, import('../types').DailyNutritionPlan> = {};
         const checksByDate: Record<string, Record<string, boolean>> = {};
+        const dayKeys: string[] = [];
         for (let i = 0; i < 7; i++) {
           const d = new Date(today.getTime() - i * 86400000);
-          const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-          const raw = await AsyncStorage.getItem(`mealPlan_${k}`);
-          if (raw) { try { plansByDate[k] = JSON.parse(raw); } catch {} }
-          checksByDate[k] = await getMealChecks(k).catch(() => ({}));
+          dayKeys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
         }
-        // Fall back to today's passed-in nutritionPlan if AsyncStorage didn't have it.
+        // Batch the week's reads instead of 14 serial AsyncStorage /
+        // getMealChecks round-trips.
+        const [planRaws, checkResults] = await Promise.all([
+          AsyncStorage.multiGet(dayKeys.map(k => `mealPlan_${k}`)),
+          Promise.all(dayKeys.map(k => getMealChecks(k).catch(() => ({})))),
+        ]);
+        planRaws.forEach(([, raw], idx) => {
+          if (raw) { try { plansByDate[dayKeys[idx]] = JSON.parse(raw); } catch {} }
+        });
+        dayKeys.forEach((k, idx) => { checksByDate[k] = checkResults[idx]; });
         if (!plansByDate[todayKey] && nutritionPlan) plansByDate[todayKey] = nutritionPlan;
 
         const diversity = computePlantDiversity(plansByDate, checksByDate, 7);
@@ -2831,6 +9472,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         const proteinInsights = proteinTimingInsights(plansByDate[todayKey] ?? null);
         const proteinFlag = proteinInsights[0] ? { tier: proteinInsights[0].tier, detail: proteinInsights[0].detail } : null;
 
+        if (cancelled) return;
         setGutInsights({
           plantCount: diversity.distinctCount,
           plantTier: diversity.tier,
@@ -2842,31 +9484,40 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         console.warn('[Progress] gut insights failed:', e);
       }
     })();
-    else setGutInsights(null);
-    // Cheap cached values are okay on mount; live HealthKit refresh is
-    // deferred until the Health tab opens.
-    if (isProTier) loadHealthSummary().then(setHealthSummary);
-    else setHealthSummary(null);
-    if (isProTier) loadHealthScore().then(setHealthScore);
-    else setHealthScore(null);
-    if (!isProTier) {
-      healthLiveLoadedRef.current = false;
-      setHealthEnabled(false);
-    }
-  }, [authToken, isActive, isProTier, nutritionPlan, showMealProgress, showWorkoutProgress, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+    return () => { cancelled = true; };
+  }, [isActive, isProTier, nutritionPlan, showMealProgress, tab, userProfile.goal, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
 
   useEffect(() => {
-    if (!isActive || tab !== 'body' || !isProTier || bodyScanHistoryLoadedRef.current) return;
+    if (!isActive || !isProTier || (tab !== 'today' && tab !== 'health')) return;
+    // Cheap cached values are okay on mount; live HealthKit refresh kicks
+    // off as soon as Progress is active so sleep is ready on Today too.
+    loadHealthSummary().then(setHealthSummary);
+    loadHealthScore().then(setHealthScore);
+  }, [isActive, isProTier, tab]);
+
+  useEffect(() => {
+    // Also load body scans on the Today tab — the goal-execution card lives
+    // there and depends on bodyScanHistory; without this, the card would
+    // render empty body scans first and then "switch" to correct numbers once
+    // the user visited the Body tab.
+    if (!isActive || (tab !== 'body' && tab !== 'today') || !isProTier || bodyScanHistoryLoadedRef.current) return;
     bodyScanHistoryLoadedRef.current = true;
     let cancelled = false;
-    AsyncStorage.getItem('bodyScanHistory').then(async raw => {
+    AsyncStorage.getItem(BODY_SCAN_CACHE_KEY).then(async raw => {
       const RECENT_CAP = 20;
       const parsed = raw ? JSON.parse(raw) : [];
       const localRows = Array.isArray(parsed) ? parsed : [];
       const local: BodyScanEntry[] = localRows
         .map(normalizeBodyScanEntry)
         .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
-      const localSorted = [...local].sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
+      const localOnly = local.filter(entry => !bodyScanHasServerId(entry));
+      if (localOnly.length > 0) {
+        await quarantineLegacyBodyScans(localOnly, 'bodyScanHistory local-only row ignored; DB is canonical');
+      }
+      const localSorted = onlyServerBackedBodyScans(local).sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
+      if (localOnly.length > 0) {
+        await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(localSorted));
+      }
       if (!cancelled && localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
       if (authToken) {
         try {
@@ -2875,63 +9526,184 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             .map(normalizeBodyScanEntry)
             .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
           if (cancelled) return;
-          const merged = new Map<string, BodyScanEntry>();
-          for (const e of local) merged.set(bodyScanMergeKey(e), e);
-          for (const e of remote) merged.set(bodyScanMergeKey(e), e);
-          const sorted = Array.from(merged.values()).sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
+          const sorted = onlyServerBackedBodyScans(remote)
+            .sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
           setBodyScanHistory(sorted.slice(0, RECENT_CAP));
-          await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
+          await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(sorted));
         } catch { /* non-fatal */ }
       }
-    }).catch(() => {});
+    })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setBodyScanLoaded(true); });
     return () => { cancelled = true; };
   }, [authToken, isActive, isProTier, tab]);
 
   useEffect(() => {
-    if (!isActive || tab !== 'health' || !isProTier || healthLiveLoadedRef.current) return;
-    healthLiveLoadedRef.current = true;
+    if (!authToken || !isActive) return;
+    let cancelled = false;
+    getCalorieRanges(authToken)
+      .then(r => { if (!cancelled) setCalorieRanges(r); })
+      .catch(() => { if (!cancelled) setCalorieRanges(null); });
+    return () => { cancelled = true; };
+  }, [authToken, isActive, userProfile.goal, userProfile.goalDetails?.pace, userProfile.physicalStats?.weightLbs, userProfile.physicalStats?.age, userProfile.physicalStats?.gender, userProfile.daysPerWeek]);
+
+  useEffect(() => {
+    if (!isActive || !isProTier) return;
+    // Only short-circuit when we've successfully loaded today's data
+    // already. Pre-fix this ref flipped to true on every entry to the
+    // tab — including when the underlying fetch failed or produced no
+    // summary — so a user landing on a stale cache would never see a
+    // refresh. Now we re-attempt whenever there's no fresh summary.
+    if (healthLiveLoadedRef.current) return;
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return;
+      setHealthReading(true);
+      void (async () => {
+        try {
+          if (!isHealthKitAvailable()) return;
+          const enabled = await isAppleHealthEnabled();
+          if (cancelled) return;
+          setHealthEnabled(enabled);
+          if (!enabled) return;
+          const age = userProfile.physicalStats?.age ?? null;
+          const fresh = await readFreshProgressHealthSummary(age, true);
+          if (cancelled || !fresh) return;
+          // Mark the cache hot only after a successful read. A failed or
+          // empty read leaves the ref unset so the next active refresh retries
+          // — which is what the user expected when iOS Settings shows
+          // HealthKit as authorized but the app shows no data.
+          healthLiveLoadedRef.current = true;
+          setHealthSummary(fresh);
+          saveHealthSummary(fresh).catch(() => null);
+          try {
+            const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
+            await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
+          } catch { /* watch may be unavailable */ }
+          try {
+            setSleepHistory(await loadProgressSleepHistory(authToken, fresh));
+          } catch {}
+        } catch {
+        } finally {
+          if (!cancelled) setHealthReading(false);
+        }
+      })();
+    });
+    return () => { cancelled = true; task.cancel?.(); setHealthReading(false); };
+  }, [authToken, isActive, isProTier, userProfile.physicalStats?.age]);
+
+  useEffect(() => {
+    if (!authToken || !isActive || !isProTier) {
+      setSleepPressure(null);
+      return;
+    }
+    let cancelled = false;
+    import('../services/api').then(({ getSleepPressure }) => {
+      getSleepPressure(authToken, 14)
+        .then(result => { if (!cancelled) setSleepPressure(result); })
+        .catch(() => { if (!cancelled) setSleepPressure(null); });
+    }).catch(() => { if (!cancelled) setSleepPressure(null); });
+    return () => { cancelled = true; };
+  }, [authToken, healthSummary?.sleepScore?.score, isActive, isProTier, sleepHistory.length]);
+
+  useEffect(() => {
+    if (!biometricHistoryOpen || !selectedBiometric || !authToken || !isProTier) return;
+    if (selectedBiometric === 'sleep') return;
+    if (dailyHealthHistory && dailyHealthHistoryDays >= biometricHistoryWindow) return;
+    let cancelled = false;
+    setDailyHealthHistoryLoading(true);
+    import('../services/api').then(({ getDailyHealthHistory }) => {
+      getDailyHealthHistory(authToken, biometricHistoryWindow)
+        .then(rows => {
+          if (cancelled) return;
+          setDailyHealthHistory(Array.isArray(rows) ? rows : []);
+          setDailyHealthHistoryDays(biometricHistoryWindow);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDailyHealthHistory([]);
+            setDailyHealthHistoryDays(biometricHistoryWindow);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDailyHealthHistoryLoading(false);
+        });
+    }).catch(() => {
+      if (!cancelled) {
+        setDailyHealthHistory([]);
+        setDailyHealthHistoryDays(biometricHistoryWindow);
+        setDailyHealthHistoryLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    biometricHistoryOpen,
+    biometricHistoryWindow,
+    dailyHealthHistory,
+    dailyHealthHistoryDays,
+    isProTier,
+    selectedBiometric,
+  ]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'today' || !authToken || !isProTier || !showWorkoutProgress) return;
+    if (dailyHealthHistory && dailyHealthHistoryDays >= GOAL_EXECUTION_BLOCK_DAYS) return;
+    let cancelled = false;
+    setDailyHealthHistoryLoading(true);
+    import('../services/api').then(({ getDailyHealthHistory }) => {
+      getDailyHealthHistory(authToken, GOAL_EXECUTION_BLOCK_DAYS)
+        .then(rows => {
+          if (cancelled) return;
+          setDailyHealthHistory(Array.isArray(rows) ? rows : []);
+          setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDailyHealthHistory([]);
+            setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDailyHealthHistoryLoading(false);
+        });
+    }).catch(() => {
+      if (!cancelled) {
+        setDailyHealthHistory([]);
+        setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+        setDailyHealthHistoryLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    dailyHealthHistory,
+    dailyHealthHistoryDays,
+    isActive,
+    isProTier,
+    showWorkoutProgress,
+    tab,
+  ]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'health' || !isProTier || !showMealProgress) return;
     let cancelled = false;
     (async () => {
       try {
         if (!isHealthKitAvailable()) return;
         const enabled = await isAppleHealthEnabled();
-        if (cancelled) return;
-        setHealthEnabled(enabled);
-        if (!enabled) return;
-        const age = userProfile.physicalStats?.age ?? null;
-        const { getHealthDataSummary } = await import('../services/healthDataSummary');
-        const agg = await getHealthDataSummary({ age });
-        if (cancelled) return;
-        const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
-        if (cancelled || !fresh) return;
-        setHealthSummary(fresh);
-        saveHealthSummary(fresh).catch(() => null);
-        try {
-          const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
-          await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
-        } catch { /* watch may be unavailable */ }
-        try {
-          const hist = await loadSleepHistory();
-          setSleepHistoryCount(hist.length);
-          // Slice + map to the minimum we render in the dots ribbon.
-          // Sorted newest-first; UI renders chronologically.
-          const recent = hist
-            .slice(-30)
-            .map(n => ({
-              night: n.night,
-              sleepHours: n.sleepHours,
-              hrv: n.hrv ?? null,
-              restingHr: n.restingHr ?? null,
-              respiratoryRate: n.respiratoryRate ?? null,
-              spo2Percent: n.spo2Percent ?? null,
-              bedtimeMinutes: n.bedtimeMinutes ?? null,
-            }));
-          setSleepHistory(recent);
-        } catch {}
-      } catch {}
+        if (cancelled || !enabled) {
+          if (!cancelled) setAppleNutritionSnapshot(null);
+          return;
+        }
+        const snapshot = await refreshAppleNutritionSnapshot();
+        if (!cancelled) setAppleNutritionSnapshot(snapshot);
+      } catch {
+        if (!cancelled) setAppleNutritionSnapshot(null);
+      }
     })();
     return () => { cancelled = true; };
-  }, [isActive, isProTier, tab, userProfile.physicalStats?.age]);
+  }, [isActive, isProTier, refreshAppleNutritionSnapshot, showMealProgress, tab]);
 
   const handleDeletePlanChange = (change: PlanChangeEntry) => {
     if (!change.id) return;
@@ -2990,7 +9762,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     if (!showMealProgress) {
       setMealAverages(null);
       setMealHistory(null);
-      setMealInsightPatterns(null);
       setNutritionScoreWeekly(null);
       setGutHealthWindow(null);
       return;
@@ -3009,19 +9780,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       if (historyResp) setMealHistory(historyResp.meals ?? []);
 
       if (!isProTier) {
-        setMealInsightPatterns(null);
         setNutritionScoreWeekly(null);
         setGutHealthWindow(null);
         return;
       }
 
-      const [insights, score, gut] = await Promise.all([
-        api.getMealInsights(authToken).catch(() => undefined),
+      const [score, gut] = await Promise.all([
         api.getNutritionScore(authToken, 14).catch(() => undefined),
         api.getGutHealth(authToken, 14).catch(() => undefined),
       ]);
       if (cancelled) return;
-      if (insights) setMealInsightPatterns(insights.patterns ?? null);
       if (score) setNutritionScoreWeekly(score.weekly ?? null);
       if (gut) setGutHealthWindow(gut.window);
     })().catch(() => {});
@@ -3044,6 +9812,43 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     } catch {
       Alert.alert('Error', 'Could not share the body scan.');
     }
+  };
+
+  const handleDeleteBodyScan = (entry: BodyScanEntry) => {
+    const targetKey = bodyScanMergeKey(entry);
+    Alert.alert(
+      'Delete this scan?',
+      'Removes this body scan from your history. Your weight, measurements, and workout data stay unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (!bodyScanHasServerId(entry)) {
+                await quarantineLegacyBodyScans([entry], 'bodyScanHistory local-only delete ignored by DB');
+              } else {
+                if (!authToken) throw new Error('Sign in required to delete body scans.');
+                const { deleteBodyScan } = await import('../services/api');
+                await deleteBodyScan(authToken, entry.id);
+              }
+              const updated = bodyScanHistory.filter(e =>
+                bodyScanMergeKey(e) !== targetKey && String(e.id) !== String(entry.id)
+              );
+              setBodyScanHistory(updated);
+              await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(onlyServerBackedBodyScans(updated)));
+              if (String(bodyScanResult?.id ?? '') === String(entry.id)) {
+                setBodyScanResult(null);
+              }
+              import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+            } catch (e: any) {
+              Alert.alert('Could not delete scan', String(e?.message ?? e));
+            }
+          },
+        },
+      ],
+    );
   };
 
   const [sharingScore, setSharingScore] = useState(false);
@@ -3077,37 +9882,130 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     const { requirePro } = await import('../utils/subscription');
     if (!requirePro(userProfile, 'ai_body_scan')) return;
     try {
+      // Permission gate — without an explicit request iOS silently
+      // returns `{canceled: true}` on a previously-denied prompt
+      // (library "does nothing") and the auto-prompt path can crash
+      // launchCameraAsync under SDK 54. Mirrors the gear / profile
+      // photo flows.
+      if (source === 'camera') {
+        const cam = await ImagePicker.requestCameraPermissionsAsync();
+        if (!cam.granted) {
+          Alert.alert(
+            'Camera permission needed',
+            'Allow camera access in Settings to take a body scan photo.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => {}) },
+            ],
+          );
+          return;
+        }
+      } else {
+        const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!lib.granted) {
+          Alert.alert(
+            'Photo access needed',
+            'Allow photo library access in Settings to choose a body scan photo.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => {}) },
+            ],
+          );
+          return;
+        }
+      }
+      // Quality choice — the prior 0.7 + the (silently-ignored)
+      // maxWidth/maxHeight props produced 4–8 MB base64 strings on
+      // recent iPhones. JSON.stringify on those + the RN bridge
+      // marshalling crashed the app (OOM) on lower-RAM devices.
+      // 0.4 lands the encoded image around 800 KB – 1.5 MB which the
+      // bridge handles cleanly. Vision quality stays good enough for
+      // body-fat estimation; the model is forgiving on JPEG artifacts.
       const opts = {
         mediaTypes: 'images' as any,
         base64: true,
-        quality: 0.7,
-        maxWidth: 1200,
-        maxHeight: 1200,
+        quality: 0.4,
       };
       const result = source === 'camera'
         ? await ImagePicker.launchCameraAsync(opts)
         : await ImagePicker.launchImageLibraryAsync(opts);
-      if (result.canceled || !result.assets?.[0]?.base64) return;
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset || !asset.base64) {
+        // Library path occasionally returns assets with a URI but no
+        // base64 (Photos privacy mode, iCloud-only items not yet
+        // downloaded, certain HEIC sources). The picker doesn't error
+        // — it just hands back an unusable asset — so we have to
+        // surface this ourselves rather than firing a malformed
+        // upload that the backend then rejects with a 400.
+        Alert.alert(
+          'Couldn’t read that photo',
+          source === 'library'
+            ? 'That photo couldn’t be loaded. It may still be syncing from iCloud, or it’s in a format we can’t read. Try a different photo, or take a new one with the camera.'
+            : 'The camera didn’t return a usable photo. Please try again.',
+        );
+        return;
+      }
+
+      // Sanitize the base64 before upload. Two real-world failure modes
+      // we've seen on the library path:
+      //   • Some sources include a data URL prefix
+      //     ("data:image/jpeg;base64,/9j/...") which the backend's
+      //     magic-byte sniff in `_fix_image_mime` can't decode.
+      //   • Some HEIC re-encodes inject whitespace / newlines into the
+      //     base64 stream during the bridge marshalling, which Python
+      //     base64 also rejects.
+      // Both crash the backend at decode-time and bubble up as a
+      // generic 400/500 on the client. Strip them defensively here.
+      let base64 = asset.base64;
+      const prefixMatch = base64.match(/^data:image\/[a-z+.-]+;base64,/i);
+      if (prefixMatch) base64 = base64.slice(prefixMatch[0].length);
+      base64 = base64.replace(/\s+/g, '');
+
+      // Defensive guard — if even after quality=0.4 the base64 is over
+      // ~3 MB (4 million chars), bail with a friendly message rather
+      // than letting JSON.stringify + the native bridge crash. This
+      // can happen with very high-resolution source images from photo
+      // library (the camera path tops out lower).
+      const MAX_BASE64_CHARS = 4_000_000;
+      if (base64.length > MAX_BASE64_CHARS) {
+        Alert.alert(
+          'Photo too large',
+          'That image is bigger than we can upload safely. Take a fresh photo with the camera, or pick a different photo from your library.',
+        );
+        return;
+      }
+      if (base64.length < 100) {
+        // Could happen if the picker returns a corrupt empty asset —
+        // catch it before it round-trips to a useless 400.
+        Alert.alert(
+          'Couldn’t read that photo',
+          'The photo data appears to be empty. Try a different photo, or take a new one with the camera.',
+        );
+        return;
+      }
 
       setBodyScanLoading(true);
       setBodyScanResult(null);
-      const asset = result.assets[0];
       const stats = userProfile.physicalStats;
       const heightInches = (stats.heightFeet ?? 0) * 12 + (stats.heightInches ?? 0);
 
       const scanResult = await scanBody(authToken, {
-        image_base64: asset.base64!,
+        image_base64: base64,
         mime_type: 'image/jpeg',
         gender: stats.gender,
         weight_lbs: stats.weightLbs,
         height_inches: heightInches > 0 ? heightInches : undefined,
         age: stats.age,
       });
+      if (!scanResult.id) {
+        throw new Error('The scan was analyzed but was not saved to your account. Please try again.');
+      }
       setBodyScanResult(scanResult);
 
       // Save to history
       const entry: BodyScanEntry = {
-        id: String(scanResult.id ?? Date.now()),
+        id: String(scanResult.id),
         date: scanResult.date ?? scanResult.scan_date ?? new Date().toISOString(),
         photoUri: asset.uri,
         bodyFatPct: scanResult.bodyFatPct,
@@ -3117,16 +10015,97 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         strengths: scanResult.strengths,
         improvements: scanResult.improvements,
         assessment: scanResult.assessment,
+        confidence: scanResult.confidence,
+        photoQuality: scanResult.photoQuality,
+        qualityFlags: scanResult.qualityFlags ?? [],
+        needsRetake: scanResult.needsRetake,
+        sensitivePhoto: Boolean(scanResult.sensitivePhoto),
+        photoHidden: Boolean(scanResult.photoHidden || scanResult.sensitivePhoto),
+        method: scanResult.method,
+        visualEstimatePct: scanResult.visualEstimatePct ?? null,
+        measurementEstimatePct: scanResult.measurementEstimatePct ?? null,
         weightLbs: stats.weightLbs,
       };
-      const updated = [entry, ...bodyScanHistory].slice(0, 20);
+      const updated = [entry, ...onlyServerBackedBodyScans(bodyScanHistory).filter(existing => String(existing.id) !== String(entry.id))].slice(0, 20);
       setBodyScanHistory(updated);
-      await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(updated));
+      await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(updated));
     } catch (e: any) {
-      Alert.alert('Scan Failed', e?.message || 'Could not complete the body scan.');
+      const detail: string = e?.message || 'Could not complete the body scan.';
+      // Most common failure mode is a server-side rejection of the
+      // image (4xx) — surface the actual detail so the user can act on
+      // it, and give a one-tap fallback to the alternative source.
+      const altSource: 'camera' | 'library' = source === 'library' ? 'camera' : 'library';
+      Alert.alert(
+        'Scan failed',
+        detail,
+        [
+          { text: 'OK', style: 'cancel' },
+          {
+            text: altSource === 'camera' ? 'Try camera' : 'Try library',
+            onPress: () => handleBodyScan(altSource),
+          },
+        ],
+      );
     } finally {
       setBodyScanLoading(false);
     }
+  };
+
+  const renderBodyScanHistoryTile = (entry: BodyScanEntry, idx: number) => {
+    const d = new Date(entry.date);
+    const dateLabel = Number.isNaN(d.getTime()) ? 'SCAN' : `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`;
+    const showPhoto = bodyScanPhotoVisibleInHistory(entry);
+    return (
+      <View key={`${entry.id}-${idx}`} style={{
+        width: 76,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: idx === 0 ? tc.primary + '88' : tc.border,
+        backgroundColor: idx === 0 ? tc.primary + '0F' : tc.surfaceRaised,
+        padding: 5,
+      }}>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Delete body scan"
+          onPress={() => handleDeleteBodyScan(entry)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{
+            position: 'absolute',
+            right: 2,
+            top: 2,
+            zIndex: 2,
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: tc.surface,
+            borderWidth: 1,
+            borderColor: tc.border,
+          }}>
+          <Ionicons name="trash-outline" size={12} color={tc.textMuted} />
+        </TouchableOpacity>
+        <View style={{
+          height: 58,
+          borderRadius: 7,
+          overflow: 'hidden',
+          backgroundColor: tc.surface,
+          alignItems: 'center',
+          justifyContent: 'center',
+          marginBottom: 5,
+        }}>
+          {showPhoto ? (
+            <Image source={{ uri: entry.photoUri! }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+          ) : (
+            <Ionicons name={entry.photoHidden || entry.sensitivePhoto ? 'eye-off-outline' : 'body-outline'} size={20} color={tc.textMuted} />
+          )}
+        </View>
+        <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary, textAlign: 'center' }}>{entry.bodyFatPct}%</Text>
+        <Text style={{ fontSize: 9, color: idx === 0 ? tc.primary : tc.textMuted, fontWeight: '700', textAlign: 'center', marginTop: 1 }}>
+          {idx === 0 ? 'LATEST' : dateLabel}
+        </Text>
+      </View>
+    );
   };
 
   // Legacy per-session top-set aggregation left behind for any
@@ -3183,15 +10162,349 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   }, [authToken, isActive, selectedExercise, showWorkoutProgress]);
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
-  const currentWeight = userProfile.physicalStats.weightLbs;
+  const latestTrackedWeight = weightEntries.length > 0 ? weightEntries[weightEntries.length - 1]?.weightLbs : null;
+  const currentWeight = latestTrackedWeight ?? userProfile.physicalStats.weightLbs;
   const targetWeight = userProfile.goalDetails.targetWeightLbs;
-  const estimate = getGoalEstimate(userProfile, meta.goalConfig);
-  const recompProjection = getRecompProjection(userProfile, meta.goalConfig);
+  const goalProgressProfile: UserProfile = useMemo(() => ({
+    ...userProfile,
+    physicalStats: { ...userProfile.physicalStats, weightLbs: currentWeight },
+    weightEntries: weightEntries.map(entry => ({
+      date: entry.date,
+      weight_lbs: entry.weightLbs,
+      source: entry.source,
+      logged_at: entry.loggedAt,
+    })),
+  }), [userProfile, currentWeight, weightEntries]);
+  const estimate = useMemo(() => getGoalEstimate(goalProgressProfile, meta.goalConfig), [goalProgressProfile, meta.goalConfig]);
+  const recompProjection = useMemo(() => getRecompProjection(goalProgressProfile, meta.goalConfig), [goalProgressProfile, meta.goalConfig]);
+  const goalProgressBar = useMemo(() => computeGoalProgressBar(goalProgressProfile, meta.goalConfig), [goalProgressProfile, meta.goalConfig]);
+  const recompTrajectory = useMemo(() => computeRecompTrajectory(goalProgressProfile, meta.goalConfig, bodyScanHistory), [goalProgressProfile, meta.goalConfig, bodyScanHistory]);
+  const latestBodyScanEntry = useMemo(() => bodyScanHistory.length > 0
+    ? [...bodyScanHistory].sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')))[0]
+    : null, [bodyScanHistory]);
+  const goalBucket = resolveGoalBucket(userProfile.goal);
+  const fatMassProgress = useMemo(() => computeFatMassProgress({
+    startWeightLbs: userProfile.goalDetails.startWeightLbs,
+    startBodyFatPct: userProfile.goalDetails.startBodyFatPct,
+    currentWeightLbs: currentWeight,
+    currentBodyFatPct: latestBodyScanEntry?.bodyFatPct,
+    goalBucket,
+  }), [userProfile.goalDetails.startWeightLbs, userProfile.goalDetails.startBodyFatPct, currentWeight, latestBodyScanEntry, goalBucket]);
+  const latestLoggedWeightForStrength = weightEntries.length > 0
+    ? weightEntries[weightEntries.length - 1]?.weightLbs
+    : null;
+  const strengthScoreWeightLbs = (Number.isFinite(latestLoggedWeightForStrength) && (latestLoggedWeightForStrength ?? 0) > 0
+    ? latestLoggedWeightForStrength
+    : null)
+    ?? userProfile.physicalStats?.weightLbs
+    ?? null;
+  const strengthScoreSummary = useMemo(() => computeStrengthScore({
+    bulkE1RMMap,
+    showcase: oneRepMaxLifts,
+    bodyweightLbs: strengthScoreWeightLbs,
+  }), [bulkE1RMMap, oneRepMaxLifts, strengthScoreWeightLbs]);
+  const strengthScoreEmpty = strengthScoreSummary.band === 'unknown' || strengthScoreSummary.liftsCovered === 0;
+  const strengthScoreColor =
+    strengthScoreSummary.band === 'elite' ? '#22C55E'
+    : strengthScoreSummary.band === 'advanced' ? '#84CC16'
+    : strengthScoreSummary.band === 'intermediate' ? tc.primary
+    : strengthScoreSummary.band === 'developing' ? '#F59E0B'
+    : strengthScoreSummary.band === 'novice' ? tc.textMuted
+    : tc.textMuted;
+  const strengthScoreDetail = strengthScoreEmpty
+    ? (strengthScoreWeightLbs && strengthScoreWeightLbs > 0
+      ? 'Strength trends need set-level data — log lifts in-app or import a Strong CSV.'
+      : 'Set bodyweight to score strength.')
+    : `${strengthScoreSummary.loggedLiftCount}/${strengthScoreSummary.totalLiftCount} lifts · ${strengthConfidenceLabel(strengthScoreSummary.confidence).toLowerCase()}`;
+  const cardioScoreColor = cardioTrendSummary.score == null ? tc.textMuted
+    : cardioTrendSummary.score >= 85 ? tc.success
+      : cardioTrendSummary.score >= 65 ? tc.primary
+        : cardioTrendSummary.score >= 45 ? tc.warning
+          : tc.error;
+  const cardioScoreDrivers = buildCardioInsights(cardioTrendSummary, distanceUnit);
+  const strengthRadarProfiles = useMemo(
+    () => buildRelativeStrengthProfiles(history, strengthScoreWeightLbs, {
+      today: progressWeekWindow.endDate,
+      bulkE1RMMap,
+      showcase: oneRepMaxLifts,
+      sex: userProfile.physicalStats?.gender,
+    }),
+    [bulkE1RMMap, history, oneRepMaxLifts, progressWeekWindow.endDate, strengthScoreWeightLbs, userProfile.physicalStats?.gender],
+  );
+  const strengthRadarMetrics = useMemo<RadarMetric[]>(() => {
+    const byMuscle = new Map(strengthRadarProfiles.map(row => [row.muscle, row] as const));
+    const order: Array<{ key: string; label: string; shortLabel: string }> = [
+      { key: 'chest', label: 'Chest', shortLabel: 'Chst' },
+      { key: 'back', label: 'Back', shortLabel: 'Back' },
+      { key: 'shoulders', label: 'Shoulders', shortLabel: 'Shld' },
+      { key: 'biceps', label: 'Biceps', shortLabel: 'Bi' },
+      { key: 'triceps', label: 'Triceps', shortLabel: 'Tri' },
+      { key: 'quads', label: 'Quads', shortLabel: 'Quad' },
+      { key: 'hamstrings', label: 'Hams', shortLabel: 'Ham' },
+      { key: 'glutes', label: 'Glutes', shortLabel: 'Glut' },
+    ];
+    return order.map(item => {
+      const profile = byMuscle.get(item.key);
+      const axisStatus = profile ? radarStatusForScore(profile.score, 80, 55) : 'unknown';
+      const sourceLabel = profile?.source === 'secondary'
+        ? 'secondary credit'
+        : profile?.source === 'rolling'
+          ? 'best-ever (no recent set)'
+          : 'best recent set';
+      // When the muscle has 2+ qualifying contributors, mention the
+      // diversity so the user sees this can reflect multiple compounds.
+      const supportCount = Math.max(0, (profile?.contributingExercises ?? 0) - 1);
+      const supportSuffix = supportCount > 0
+        ? ` (+${supportCount} supporting lift${supportCount === 1 ? '' : 's'})`
+        : '';
+      const reason = !profile
+        ? strengthScoreWeightLbs && strengthScoreWeightLbs > 0
+          ? 'No loaded strength estimate for this muscle in the last 30 days.'
+          : 'Set bodyweight to compare strength against expected ranges.'
+        : profile.score >= 80
+          ? `${profile.exercise} is strong relative to bodyweight${supportSuffix}.`
+          : profile.score >= 55
+            ? `${profile.exercise} is around the expected bodyweight-relative range${supportSuffix}.`
+            : `${profile.exercise} is below the expected bodyweight-relative range${supportSuffix}.`;
+      return {
+        key: item.key,
+        label: item.label,
+        shortLabel: item.shortLabel,
+        value: profile?.score ?? null,
+        status: axisStatus,
+        reason,
+        rawValue: profile
+          ? `${profile.ratio}x`
+          : '--',
+        targetLabel: profile ? `target ${profile.targetRatio}x BW` : undefined,
+        isEstimate: profile?.source !== 'primary',
+        detail: profile
+          ? profile.source === 'secondary'
+            // Secondary credit is a fraction of another lift's e1RM, NOT a
+            // direct 1RM for this muscle — spell that out so the number is
+            // traceable (e.g. "≈150 lb = 60% of Barbell Squat est. 1RM").
+            ? `≈${formatWeight(profile.estimatedStrengthLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}${profile.contributionPct ? ` = ${profile.contributionPct}% of ${profile.exercise} est. 1RM` : ` secondary credit from ${profile.exercise}`}${profile.date ? ` · ${formatDate(profile.date)}` : ''}`
+            : `${formatWeight(profile.estimatedStrengthLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} est. 1RM · ${sourceLabel}${profile.date ? ` · ${formatDate(profile.date)}` : ''}`
+          : 'needs recent loaded sets',
+      };
+    });
+  }, [strengthRadarProfiles, strengthScoreWeightLbs, weightUnit]);
+  const strengthRadarRawScore = averageMeaningfulRadarScore(strengthRadarMetrics);
+  const strengthRadarInsight = deriveRadarInsights(radarAxesFromMetrics(strengthRadarMetrics));
+  const strengthRadarScore = strengthRadarRawScore ?? (strengthScoreEmpty ? null : strengthScoreSummary.score);
+  const strengthRadarColor = STRENGTH_PROFILE_COLOR;
+  const strengthRadarDetail = strengthScoreWeightLbs == null || strengthScoreWeightLbs <= 0
+    ? 'Set bodyweight to compare muscle strength against expected ranges.'
+    : !strengthRadarInsight.enoughData
+      ? 'Log loaded sets across muscles to fill this 30-day relative-strength profile.'
+      : `${strengthRadarInsight.strongest?.label ?? 'Strength'} leads · focus ${strengthRadarInsight.focus?.label ?? 'coverage'}`;
+  const cardioRadarMetrics = useMemo<RadarMetric[]>(() => {
+    // Cardio profile runs on a 30-day window. Training inputs still appear
+    // in detail rows, but the axes are framed as fitness qualities.
+    const hasHrZoneSplit = cardioTrendSummary.easySharePct30d != null
+      || cardioTrendSummary.easyZoneMinutes30d > 0
+      || cardioTrendSummary.hardZoneMinutes30d > 0;
+    const hasAerobicBaseSignal = cardioTrendSummary.zone2Minutes30d > 0 || hasHrZoneSplit;
+    const zone2BaseScore = hasAerobicBaseSignal
+      ? clampRadarScore(cardioTrendSummary.zone2Minutes30d >= 640 ? 95
+        : cardioTrendSummary.zone2Minutes30d >= 385 ? 75
+          : cardioTrendSummary.zone2Minutes30d >= 195 ? 55
+            : cardioTrendSummary.zone2Minutes30d >= 65 ? 35
+              : 20)
+      : null;
+    const aerobicFromVo2 = cardioVo2Score(cardioTrendSummary.vo2Max);
+    const aerobicBaseScore = aerobicFromVo2 ?? zone2BaseScore;
+    const intensityScore = cardioTrendSummary.hardZoneMinutes30d > 0
+      ? clampRadarScore(Math.min(72, 35 + (cardioTrendSummary.hardZoneMinutes30d / 96) * 37))
+      : null;
+    const enduranceScore = cardioTrendSummary.longestDurationSec > 0
+      ? clampRadarScore((cardioTrendSummary.longestDurationSec / 3600) * 100)
+      : cardioTrendSummary.distance30dMiles > 0
+        ? clampRadarScore((cardioTrendSummary.distance30dMiles / 21) * 100)
+        : null;
+    const consistencyScore = cardioTrendSummary.cardioSessions30d > 0
+      ? clampRadarScore((cardioTrendSummary.cardioSessions30d / 13) * 100)
+      : null;
+    const efficiencyScore = cardioEasyHardScore(cardioTrendSummary.easySharePct30d);
+    const speedScore = cardioTrendSummary.bestPaceDeltaSec != null
+      ? cardioPaceTrendScore(cardioTrendSummary.bestPaceDeltaSec)
+      : null;
+    return [
+      {
+        key: 'aerobic-base',
+        label: 'Aerobic Base',
+        shortLabel: 'Base',
+        value: aerobicBaseScore,
+        status: radarStatusForScore(aerobicBaseScore, 75, 55),
+        rawValue: aerobicFromVo2 != null
+          ? cardioTrendSummary.vo2Max?.toFixed(1)
+          : hasAerobicBaseSignal ? `${Math.round(cardioTrendSummary.zone2Minutes30d)}m` : '--',
+        reason: aerobicBaseScore == null
+          ? 'Track VO2 or HR zones to fill aerobic base.'
+          : aerobicFromVo2 != null ? 'VO2 max anchors your aerobic base.'
+            : cardioTrendSummary.zone2Minutes30d >= 385 ? 'Easy aerobic volume is supporting your base.'
+              : 'Add one easy Zone 2 session.',
+        targetLabel: aerobicFromVo2 != null ? 'VO2 bands' : '~390-640m / 30d',
+        detail: aerobicFromVo2 != null
+          ? `${cardioTrendSummary.vo2Max?.toFixed(1)} VO2`
+          : hasAerobicBaseSignal ? `${Math.round(cardioTrendSummary.zone2Minutes30d)}m Zone 2` : 'needs VO2 or HR zones',
+        isEstimate: aerobicFromVo2 == null && zone2BaseScore != null,
+      },
+      {
+        key: 'endurance',
+        label: 'Endurance',
+        shortLabel: 'End',
+        value: enduranceScore,
+        status: radarStatusForScore(enduranceScore, 80, 55),
+        rawValue: cardioTrendSummary.longestDurationSec > 0
+          ? formatDuration(Math.round(cardioTrendSummary.longestDurationSec))
+          : cardioTrendSummary.distance30dMiles > 0
+            ? formatDistance(cardioTrendSummary.distance30dMiles, distanceUnit)
+            : '--',
+        reason: enduranceScore == null
+          ? 'Track duration or distance to fill endurance.'
+          : cardioTrendSummary.longestDurationSec >= 2700 ? 'Longest session shows a useful endurance base.'
+            : 'Extend one easy session gradually.',
+        isEstimate: cardioTrendSummary.longestDurationSec <= 0 && cardioTrendSummary.distance30dMiles > 0,
+        detail: cardioTrendSummary.longestDurationSec > 0
+          ? `${formatDuration(Math.round(cardioTrendSummary.longestDurationSec))} longest`
+          : cardioTrendSummary.distance30dMiles > 0
+            ? `${formatDistance(cardioTrendSummary.distance30dMiles, distanceUnit)} 30d`
+            : 'needs duration',
+      },
+      {
+        key: 'speed-pace',
+        label: 'Speed / Pace',
+        shortLabel: 'Pace',
+        value: speedScore,
+        status: speedScore == null ? 'unknown' : radarStatusForScore(speedScore, 80, 55),
+        rawValue: cardioTrendSummary.bestPaceDeltaSec != null ? formatPaceDelta(cardioTrendSummary.bestPaceDeltaSec) : '--',
+        reason: speedScore == null
+          ? 'Repeat the same modality or route to compare pace honestly.'
+          : cardioTrendSummary.bestPaceDeltaSec != null && cardioTrendSummary.bestPaceDeltaSec < -15
+            ? 'Comparable pace is improving.'
+            : cardioTrendSummary.bestPaceDeltaSec != null && cardioTrendSummary.bestPaceDeltaSec > 15
+              ? 'Comparable pace has slowed.'
+              : 'Comparable pace is holding steady.',
+        detail: cardioTrendSummary.bestPaceDeltaSec != null
+          ? `${formatPaceDelta(cardioTrendSummary.bestPaceDeltaSec)} ${cardioTrendSummary.bestPaceExercise ?? ''}`.trim()
+          : 'needs comparable pace',
+      },
+      {
+        key: 'intensity',
+        label: 'Intensity',
+        shortLabel: 'Int',
+        value: intensityScore,
+        status: intensityScore == null ? 'unknown' : radarStatusForScore(intensityScore, 80, 55),
+        rawValue: intensityScore != null ? `${Math.round(cardioTrendSummary.hardZoneMinutes30d)}m` : '--',
+        reason: intensityScore == null
+          ? 'Hard-zone minutes or interval sessions fill this axis.'
+          : 'Hard-zone work is present without crowding the easy base.',
+        detail: intensityScore != null
+          ? `${Math.round(cardioTrendSummary.hardZoneMinutes30d)}m hard zones`
+          : 'needs hard-zone data',
+      },
+      {
+        key: 'efficiency',
+        label: 'Efficiency',
+        shortLabel: 'Eff',
+        value: efficiencyScore,
+        status: efficiencyScore == null ? 'unknown' : radarStatusForScore(efficiencyScore, 80, 60),
+        rawValue: cardioTrendSummary.easySharePct30d == null ? '--' : `${cardioTrendSummary.easySharePct30d}%`,
+        reason: efficiencyScore == null
+          ? 'HR zones are needed to judge sustainable output.'
+          : (cardioTrendSummary.easySharePct30d ?? 0) < 50 ? 'Hard work is crowding the aerobic base.'
+            : (cardioTrendSummary.easySharePct30d ?? 0) > 95 ? 'Add controlled intensity when recovery is good.'
+              : 'Easy and hard work are reasonably balanced.',
+        detail: cardioTrendSummary.easySharePct30d == null ? 'needs HR zones' : `${cardioTrendSummary.easySharePct30d}% easy`,
+      },
+      {
+        key: 'consistency',
+        label: 'Consistency',
+        shortLabel: 'Cons',
+        value: consistencyScore,
+        status: radarStatusForScore(consistencyScore, 80, 55),
+        rawValue: `${cardioTrendSummary.cardioSessions30d}`,
+        reason: consistencyScore == null
+          ? 'Log cardio sessions to build consistency.'
+          : cardioTrendSummary.cardioSessions30d >= 13 ? 'Cardio frequency is on target.'
+            : 'Spread cardio across 10-13 sessions a month.',
+        detail: `${cardioTrendSummary.cardioSessions30d} / 13 sessions`,
+      },
+    ];
+  }, [cardioTrendSummary, distanceUnit]);
+  const cardioRadarInsight = useMemo(
+    () => deriveRadarInsights(radarAxesFromMetrics(cardioRadarMetrics)),
+    [cardioRadarMetrics],
+  );
+  const cardioBalanceRawScore = averageMeaningfulRadarScore(cardioRadarMetrics);
+  const cardioMeaningfulAxes = meaningfulRadarAxes(cardioRadarMetrics);
+  const cardioHasOnlySessionProxy = cardioMeaningfulAxes.length > 0
+    && cardioMeaningfulAxes.every(axis => axis.key === 'consistency');
+  const cardioHasPhysiologySignal = cardioMeaningfulAxes.some(axis => axis.key === 'aerobic-base' && !axis.isEstimate);
+  const cardioBalanceScore = cardioBalanceRawScore == null
+    ? null
+    : cardioHasOnlySessionProxy
+      ? Math.min(cardioBalanceRawScore, 55)
+      : cardioMeaningfulAxes.length < 3
+        ? Math.min(cardioBalanceRawScore, cardioHasPhysiologySignal ? 78 : 65)
+        : cardioBalanceRawScore;
+  const cardioBalanceColor = CARDIO_PROFILE_COLOR;
+  const cardioBalanceDetail = !cardioTrendSummary.hasData
+    ? 'Log cardio duration, HR zones, pace, or VO2 to build this profile.'
+    : !cardioRadarInsight.enoughData
+      ? 'More HR, pace, duration, or VO2 data will sharpen this profile.'
+      : `${cardioRadarInsight.strongest?.label ?? 'Base'} is strongest · focus ${cardioRadarInsight.focus?.label ?? 'consistency'}`;
+  const cardioActivityMix = useMemo(() => {
+    const today = dateKey(new Date());
+    return buildCardioActivityMix(paceHistory, summaries, healthSummary, shiftDateKey(today, -29), today);
+  }, [healthSummary, paceHistory, summaries]);
+  const selectedCardioGroup = selectedCardioExercise
+    ? paceExerciseGroups.find(group => group.key === selectedCardioExercise) ?? paceExerciseGroups[0] ?? null
+    : paceExerciseGroups[0] ?? null;
+  const cardioModeAvailable = selectedCardioGroup ? {
+    distance: selectedCardioGroup.distancePoints.length >= 1,
+    pace: selectedCardioGroup.pacePoints.length >= 1,
+    duration: selectedCardioGroup.durationPoints.length >= 1,
+  } : { distance: false, pace: false, duration: false };
+  const effectiveCardioChartMode: CardioChartMode = selectedCardioGroup && cardioModeAvailable[cardioChartMode]
+    ? cardioChartMode
+    : cardioModeAvailable.distance ? 'distance'
+      : cardioModeAvailable.pace ? 'pace'
+        : cardioModeAvailable.duration ? 'duration'
+          : 'distance';
+  const selectedBiometricConfig = selectedBiometric ? BIOMETRIC_HISTORY_CONFIG[selectedBiometric] : null;
+  const biometricHistoryPoints = selectedBiometric
+    ? buildBiometricHistoryPoints(selectedBiometric, sleepHistory, dailyHealthHistory, healthSummary, biometricHistoryWindow)
+    : [];
+  const biometricReadingRows = biometricHistoryPoints.slice().reverse();
+  const biometricHistoryValues = biometricHistoryPoints.map(point => point.value);
+  const biometricLatestPoint = biometricHistoryPoints[biometricHistoryPoints.length - 1] ?? null;
+  const biometricFirstPoint = biometricHistoryPoints[0] ?? null;
+  const biometricAverage = biometricHistoryValues.length > 0
+    ? biometricHistoryValues.reduce((sum, value) => sum + value, 0) / biometricHistoryValues.length
+    : null;
+  const biometricChartMin = biometricHistoryValues.length > 0 ? Math.min(...biometricHistoryValues) : 0;
+  const biometricChartMax = biometricHistoryValues.length > 0 ? Math.max(...biometricHistoryValues) : 1;
+  const biometricChartSpan = Math.max(1, biometricChartMax - biometricChartMin);
+  const biometricDelta = biometricLatestPoint && biometricFirstPoint
+    ? biometricLatestPoint.value - biometricFirstPoint.value
+    : null;
+  const biometricTrendGood = selectedBiometricConfig && biometricDelta != null
+    ? selectedBiometricConfig.better === 'neutral'
+      ? null
+      : selectedBiometricConfig.better === 'higher'
+        ? biometricDelta >= 0
+        : biometricDelta <= 0
+    : null;
+  const biometricTrendColor = biometricTrendGood == null ? tc.textMuted : biometricTrendGood ? tc.success : tc.warning;
+  const biometricWindowOptions: BiometricHistoryWindow[] = [14, 30, 90];
   const lostOrGained = Math.abs(currentWeight - startWeight);
   const direction = currentWeight <= startWeight ? 'down' : 'up';
   const remainingLbs = targetWeight != null ? Math.abs(currentWeight - targetWeight) : null;
   return (
     <View style={[styles.container, noHeader && styles.inlineContainer]}>
+      {!noHeader && <MovingGradientBackground colors={tc} intensity="quiet" />}
       {/* Top "← Back / Progress" header is hidden when rendered inline
           as a bottom-tab — the bottom nav handles navigation. */}
       {!noHeader && (
@@ -3204,127 +10517,195 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </View>
       )}
 
-      <View style={styles.tabs}>
-        {visibleProgressTabs.map(([key, label]) => (
-          <Pressable
-            key={key}
-            testID={`progress-subtab-${key}`}
-            style={[styles.tab, tab === key && styles.tabActive]}
-            accessibilityRole="tab"
-            accessibilityLabel={label}
-            accessibilityState={{ selected: tab === key }}
-            onPressIn={() => {
-              if (tab !== key) setTab(key);
-            }}
-            onPress={() => {
-              if (tab === key) return;
-              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-              setTab(key);
-            }}>
-            <Text
-              onPress={() => {
-                if (tab !== key) setTab(key);
+      <View style={styles.tabPillRow}>
+        {visibleProgressTabs.map(([key, label]) => {
+          const active = tab === key;
+          return (
+            <Pressable
+              key={key}
+              testID={`progress-subtab-${key}`}
+              accessibilityRole="tab"
+              accessibilityLabel={label}
+              accessibilityState={{ selected: active }}
+              onPressIn={() => {
+                if (progressTabRef.current !== key) {
+                  hapticSelection();
+                  selectProgressTab(key);
+                }
               }}
-              style={[styles.tabText, tab === key && styles.tabTextActive]}>
-              {label}
-            </Text>
-          </Pressable>
-        ))}
+              onPress={() => {
+                if (progressTabRef.current === key) return;
+                hapticSelection();
+                selectProgressTab(key);
+              }}
+              style={[
+                styles.tabPillBtn,
+                {
+                  backgroundColor: active ? tc.primary + '22' : tc.surface,
+                  borderColor: active ? tc.primary : tc.border,
+                },
+              ]}>
+              <Text
+                style={[
+                  styles.tabPillText,
+                  { color: active ? tc.primary : tc.textSecondary },
+                ]}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.82}>
+                {label}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
 
-      {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={colors.primary} />
-        </View>
-      ) : (
-      <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
-      {tab === 'today' ? (
-        <ScrollView contentContainerStyle={styles.content}>
-          {/* Collapsed today card — just the headline + percent pill +
-              "Details" affordance. The full subtitle / action / signal
-              breakdown lives in the bottom sheet that opens on tap. */}
-          <AnimatedPressable
-            testID="progress-today-status-card"
-            style={[styles.todayStatusCard, { borderColor: todayTrack.color + '66' }]}
-            accessibilityRole="button"
-            accessibilityLabel={`${todayTrack.title}. Tap for details.`}
-            onPress={() => {
-              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-              setQuickDetailSheet('today');
-            }}
-          >
-            <View style={styles.todayStatusHeader}>
-              <View style={[styles.todayStatusIcon, { backgroundColor: todayTrack.color + '20' }]}>
-                <Ionicons name={todayTrack.icon} size={22} color={todayTrack.color} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.todayStatusTitle} numberOfLines={2}>{todayTrack.title}</Text>
-              </View>
-              <View style={[styles.todayStatusPill, { borderColor: todayTrack.color + '77', backgroundColor: todayTrack.color + '14' }]}>
-                <Text style={[styles.todayStatusPillText, { color: todayTrack.color }]}>{todayTrack.progressPct}%</Text>
-              </View>
-            </View>
-            <View style={styles.quickDetailHint}>
-              <Text style={styles.quickDetailHintText}>Tap for details</Text>
-              <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
-            </View>
-          </AnimatedPressable>
+      <TabDragWrapper
+        canGoPrev={canSwipeProgressPrev}
+        canGoNext={canSwipeProgressNext}
+        resetKey={tab}
+        onCommit={swipeProgressTab}>
+        {loading ? (
+          <View style={styles.center}>
+            <ActivityIndicator color={colors.primary} />
+          </View>
+        ) : (
+        <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
+        {tab === 'today' ? (
+        <ScrollView ref={todayScrollRef} contentContainerStyle={styles.content}>
+          <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6}>
+            <AnimatedPressable
+              testID="progress-today-how-am-i-doing-card"
+              style={[styles.todayHeroCard, { borderColor: todayHeroColor + '66' }]}
+              accessibilityRole="button"
+              accessibilityLabel={`${todayHeroStatus}. ${todayHeroTitle}${todayHeroSubtitle ? `. ${todayHeroSubtitle}` : ''}. View details.`}
+              onPress={() => {
+                import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                setQuickDetailSheet(hasGoalScoreDetail ? 'forecast' : 'today');
+              }}
+            >
+              <ImageBackground
+                source={{ uri: todayHeroImageUri }}
+                resizeMode="cover"
+                imageStyle={styles.todayHeroImage}
+                style={styles.todayHeroImageWrap}>
+                <LinearGradient
+                  colors={['rgba(0,0,0,0.05)', 'rgba(0,0,0,0.58)']}
+                  style={StyleSheet.absoluteFill}
+                />
+                <View style={styles.todayHeroImageMeta}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.todayHeroImageEyebrow}>Quick goal estimate</Text>
+                    <Text style={styles.todayHeroImageGoal} numberOfLines={1}>
+                      {goalScore ? humanizeToken(goalScore.goalType) : goalForecast?.title ?? todayTrack.goalLabel}
+                    </Text>
+                  </View>
+                  <View style={[styles.todayHeroPill, { backgroundColor: '#FFFFFF24', borderColor: '#FFFFFF66' }]}>
+                    <Text style={styles.todayHeroImagePillText} numberOfLines={1}>
+                      {todayHeroStatus}
+                    </Text>
+                  </View>
+                </View>
+              </ImageBackground>
 
-          {goalForecast && (
-          <AnimatedPressable
-            testID="progress-goal-forecast-card"
-            style={[styles.goalForecastCard, { borderColor: goalForecastColor + '55' }]}
-            accessibilityRole="button"
-            accessibilityLabel={`${goalForecast.headline}. ${goalForecast.subheadline}. View details.`}
-            onPress={() => {
-              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-              setQuickDetailSheet('forecast');
-            }}
-          >
-            <View style={styles.goalForecastHeader}>
-              <View style={[styles.goalForecastIcon, { backgroundColor: goalForecastColor + '20' }]}>
-                <Ionicons name="analytics-outline" size={18} color={goalForecastColor} />
+              <View style={styles.todayHeroContent}>
+                <View style={styles.todayHeroBody}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.todayHeroHeadline} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.78}>
+                      {todayHeroTitle}
+                    </Text>
+                    {todayHeroSubtitle ? (
+                      <Text style={styles.todayHeroSubheadline} numberOfLines={2}>
+                        {todayHeroSubtitle}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <View style={[styles.todayHeroScoreBubble, { backgroundColor: todayHeroColor + '18', borderColor: todayHeroColor + '55' }]}>
+                    <Text style={[styles.todayHeroScoreValue, { color: todayHeroColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.68}>
+                      {todayHeroMetricValue}
+                    </Text>
+                    <Text style={styles.todayHeroScoreLabel}>{todayHeroMetricLabel}</Text>
+                  </View>
+                </View>
+
+                {(
+                  // Stay on the spinner until every input the overview
+                  // actually consumes has hydrated — `loading` alone covers
+                  // only the workout-history batch; the stats and graph also
+                  // need weight entries, body scans, and (when meals are
+                  // tracked) the meal history. Showing them earlier flashed
+                  // incorrect numbers + a partial line first.
+                  loading
+                  || !weightEntriesLoaded
+                  || !bodyScanLoaded
+                  || (showMealProgress && mealHistory == null)
+                ) ? (
+                  <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: 28 }}>
+                    <ActivityIndicator color={todayHeroColor} />
+                    <Text style={{ color: tc.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 0.4, marginTop: 8 }}>
+                      Loading goal execution…
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.goalOverviewStatsRow}>
+                      {goalExecutionOverview.stats.map(stat => (
+                        <View key={stat.key} style={styles.goalOverviewStat}>
+                          <Text style={styles.goalOverviewStatLabel} numberOfLines={1}>{stat.label}</Text>
+                          <Text
+                            style={[styles.goalOverviewStatValue, stat.color ? { color: stat.color } : null]}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.68}>
+                            {stat.value}
+                          </Text>
+                          <Text style={styles.goalOverviewStatDetail} numberOfLines={1}>{stat.detail}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    <GoalExecutionGraph
+                      overview={goalExecutionOverview}
+                      width={trajectoryChartWidth}
+                      color={todayHeroColor}
+                      tc={tc}
+                      styles={styles}
+                    />
+                  </>
+                )}
               </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.goalForecastEyebrow}>GOAL ESTIMATE · UPDATED DAILY</Text>
-                <Text style={styles.goalForecastTitle}>{goalForecast.title}</Text>
-              </View>
-              <View style={[styles.goalForecastPill, { borderColor: goalForecastConfidenceColor + '88', backgroundColor: goalForecastConfidenceColor + '16' }]}>
-                <Text style={[styles.goalForecastPillText, { color: goalForecastConfidenceColor }]}>
-                  {goalForecast.executionPct}%
-                </Text>
-              </View>
+            </AnimatedPressable>
+          </FadeInView>
+
+          {todaySleepConstellationCard && (
+            <View
+              testID="progress-today-sleep-card-anchor"
+              collapsable={false}
+              onLayout={handleTodaySleepLayout}>
+              <FadeInView delay={20} duration={TIMING_STANDARD.duration} slideDistance={6}>
+                {todaySleepConstellationCard}
+              </FadeInView>
             </View>
-            <Text testID="progress-goal-forecast-headline" style={styles.goalForecastHeadline} numberOfLines={2}>
-              {goalForecast.headline}
-            </Text>
-            <Text style={styles.goalForecastSubheadline} numberOfLines={2}>
-              {goalForecast.subheadline}
-            </Text>
-            <View style={styles.quickForecastFooter}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.goalForecastStatLabel}>{goalForecast.metricLabel}</Text>
-                <PulseOnChange trigger={`${goalForecast.metricLabel}-${goalForecast.metricValue}`}>
-                  <Text
-                    style={[styles.goalForecastMetricValue, { color: goalForecastColor }]}
-                    numberOfLines={1}
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.72}
-                  >
-                    {goalForecast.metricValue}
-                  </Text>
-                </PulseOnChange>
-              </View>
-              <View style={styles.quickDetailHint}>
-                <Text style={styles.quickDetailHintText}>Details</Text>
-                <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
-              </View>
-            </View>
-          </AnimatedPressable>
           )}
 
+          <FadeInView delay={30} duration={TIMING_STANDARD.duration} slideDistance={6}>
+            <DailyStressTimelineCard
+              authToken={authToken}
+              themeName={themeName}
+              active={isActive && tab === 'today'}
+              healthEnabled={isProTier && healthEnabled}
+              healthSummary={healthSummary}
+              mealHistory={mealHistory}
+              nutritionPlan={nutritionPlan}
+              workoutHistory={history}
+              inProgressWorkout={inProgressWorkout}
+              showMealProgress={showMealProgress}
+              showWorkoutProgress={showWorkoutProgress}
+            />
+          </FadeInView>
+
           {showWorkoutProgress && inProgressWorkout && (
-            <FadeInView delay={20} duration={TIMING_STANDARD.duration} slideDistance={6}>
+            <FadeInView delay={40} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <View
                 testID="progress-today-in-progress-workout-card"
                 style={{
@@ -3393,7 +10774,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
 
           {showWorkoutProgress && isProTier && authToken && (
-            <FadeInView delay={40} duration={TIMING_STANDARD.duration} slideDistance={6}>
+            <FadeInView delay={80} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <WeeklyCheckinCard
                 authToken={authToken}
                 themeName={userProfile.themePreference}
@@ -3402,154 +10783,109 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
 
           {showWorkoutProgress && isProTier && authToken && (
-            <FadeInView delay={80} duration={TIMING_STANDARD.duration} slideDistance={6}>
+            <FadeInView delay={120} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <Zone2TargetCard
                 authToken={authToken}
                 themeName={userProfile.themePreference}
-                currentMinutes={planWeekZone2.current}
-                previousMinutes={planWeekZone2.previous}
+                currentMinutes={planWeekZones.zone2Current}
+                previousMinutes={planWeekZones.zone2Previous}
+                weeklyZoneMinutes={planWeekZones.current}
+                weeklyZoneSources={planWeekZones.contributors}
                 weekEndDate={progressWeekWindow.endDate}
                 weekLabel={progressWeekWindow.label}
                 previousWeekLabel={progressWeekWindow.previousLabel}
               />
             </FadeInView>
           )}
-
-          <Text style={styles.sectionLabel}>What matters today</Text>
-          <View style={styles.todaySignalGrid}>
-            {todayTrack.signals.map((item, index) => (
-              <FadeInView
-                key={item.key}
-                delay={staggerDelay(index, 45)}
-                duration={TIMING_STANDARD.duration}
-                slideDistance={6}
-                style={{ flexGrow: 1, flexBasis: '47%' }}
-              >
-                <AnimatedPressable
-                  testID={LEGACY_PROGRESS_OVERVIEW_TEST_IDS[item.key] ?? `progress-today-${item.key}`}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${item.label}: ${item.value}. ${item.detail}`}
-                  style={styles.todaySignalTile}
-                  onPress={() => {
-                    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                    setTab(item.targetTab);
-                  }}>
-                  <View style={styles.todaySignalTileHeader}>
-                    <View style={[styles.todaySignalIcon, { backgroundColor: item.color + '20' }]}>
-                      <Ionicons name={item.icon} size={15} color={item.color} />
-                    </View>
-                    <View style={[styles.todaySignalPill, { backgroundColor: item.color + '16' }]}>
-                      <Text style={[styles.todaySignalPillText, { color: item.color }]}>
-                        {todaySignalStatusLabel(item.status)}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={styles.todaySignalLabel} numberOfLines={1}>{item.label}</Text>
-                  <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                    <Text style={[styles.todaySignalValue, { color: item.color }]} numberOfLines={1}>{item.value}</Text>
-                  </PulseOnChange>
-                  {item.pct != null && (
-                    <View style={styles.todaySignalTrack}>
-                      <AnimatedProgressFill
-                        pct={item.pct}
-                        minPct={5}
-                        color={item.color}
-                        delay={140 + index * 35}
-                        style={styles.todaySignalFill}
-                      />
-                    </View>
-                  )}
-                  <Text style={styles.todaySignalDetail} numberOfLines={2}>{item.detail}</Text>
-                </AnimatedPressable>
-              </FadeInView>
-            ))}
-          </View>
         </ScrollView>
       ) : tab === 'trends' && showWorkoutProgress ? (
         <ScrollView contentContainerStyle={styles.content}>
-          {(() => {
-            // Comprehensive strength score — replaces the prior single-
-            // lift "Top strength marker" tile. Scores the user's logged
-            // 1RMs against intermediate-trainee bodyweight ratios across
-            // squat / bench / deadlift / OHP / row / front squat / RDL /
-            // lat pulldown, then averages. Tap → per-lift breakdown.
-            //
-            // Bodyweight resolution: prefer the most recently logged
-            // weight entry (the user's actual current weight) and fall
-            // back to the onboarding/profile snapshot. Profile snapshot
-            // can drift as the user gains/loses; logged entries are
-            // truth.
-            const latestLoggedWeight = weightEntries.length > 0
-              ? weightEntries[weightEntries.length - 1]?.weightLbs
-              : null;
-            const userWeightLbs = (Number.isFinite(latestLoggedWeight) && (latestLoggedWeight ?? 0) > 0
-              ? latestLoggedWeight
-              : null)
-              ?? userProfile.physicalStats?.weightLbs
-              ?? null;
-            const strength = computeStrengthScore({
-              bulkE1RMMap,
-              showcase: oneRepMaxLifts,
-              bodyweightLbs: userWeightLbs,
-            });
-            const tileColor =
-              strength.band === 'elite' ? '#22C55E'
-              : strength.band === 'advanced' ? tc.primary
-              : strength.band === 'intermediate' ? '#F59E0B'
-              : strength.band === 'novice' ? tc.textMuted
-              : tc.textMuted;
-            const empty = strength.band === 'unknown' || strength.liftsCovered === 0;
-            return (
-              <View testID="progress-strength-score" style={{ marginBottom: 16 }}>
-                <Text style={styles.sectionLabel}>Strength score</Text>
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  onPress={() => {
-                    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                    setStrengthScoreDetailOpen(true);
-                  }}
-                  style={{
-                    backgroundColor: tc.surfaceRaised,
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: tc.border,
-                    padding: 14,
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                  }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
-                      {empty ? 'Not enough data' : strengthBandLabel(strength.band)}
-                    </Text>
-                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }} numberOfLines={2}>
-                      {empty
-                        ? (userWeightLbs && userWeightLbs > 0
-                          ? 'Log a few key compound lifts to unlock your score.'
-                          : 'Set your bodyweight in Settings to unlock your score.')
-                        : `${strength.liftsCovered}/${strength.liftsTotal} lifts · tap for breakdown`}
-                    </Text>
-                  </View>
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Text
-                      style={{ fontSize: 36, fontWeight: '900', color: tileColor, fontVariant: ['tabular-nums'] as any }}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.72}
-                    >
-                      {empty ? '—' : strength.score}
-                    </Text>
-                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>
-                      {empty ? '—' : 'out of 100'}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              </View>
-            );
-          })()}
+          <View style={{ alignItems: 'flex-end', marginBottom: 8 }}>
+            <TouchableOpacity
+              testID="progress-edit-trends"
+              accessibilityRole="button"
+              accessibilityLabel="Edit Trends"
+              activeOpacity={0.78}
+              onPress={() => { import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); setEditTrendsOpen(true); }}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surface }}>
+              <Ionicons name="options-outline" size={15} color={tc.textSecondary} />
+              <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textSecondary }}>Edit Trends</Text>
+            </TouchableOpacity>
+          </View>
 
-          {progressAnalytics.length > 0 && (
+          {TRENDS_SECTIONS.every(section => !trendsShown(section.id)) && (
+            <View style={[styles.emptyBox, { paddingTop: 36, paddingBottom: 28 }]}>
+              <Ionicons name="eye-off-outline" size={38} color={tc.textMuted} />
+              <Text style={styles.emptyTitle}>All trend sections hidden</Text>
+              <Text style={styles.emptyBody}>Use Edit Trends to bring back any section whenever you want it.</Text>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={showAllTrends}
+                style={{ paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, backgroundColor: tc.primary }}>
+                <Text style={{ color: getContrastingTextColor(tc.primary), fontSize: 13, fontWeight: '800' }}>Show all sections</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Lead with actual trends: weekly training-volume + recent PRs,
+              above the snapshot radars below. */}
+          {trendsShown('trends-overview') && (
+          <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6}>
+            <TrendsOverviewCard
+              history={history}
+              prs={prs}
+              weightUnit={weightUnit}
+              themeName={themeName}
+              weekStartDate={progressWeekWindow.startDate}
+              windowDays={progressWeekWindow.days}
+            />
+          </FadeInView>
+          )}
+
+          <View style={styles.trendsRadarStack}>
+            {trendsShown('strength-profile') && (
+            <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6} style={styles.trendsRadarGridItem}>
+              <TrendsRadarCard
+                testID="progress-strength-radar"
+                title="Relative Strength Profile"
+                subtitle={strengthRadarScore == null ? 'Needs strength data' : '30D vs bodyweight'}
+                score={strengthRadarScore}
+                metrics={strengthRadarMetrics}
+                icon="barbell-outline"
+                color={strengthRadarColor}
+                detail={strengthRadarDetail}
+                styles={styles}
+                tc={tc}
+                onPress={() => {
+                  import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                  setStrengthRadarDetailOpen(true);
+                }}
+              />
+            </FadeInView>
+            )}
+            {trendsShown('cardio-profile') && (
+            <FadeInView delay={45} duration={TIMING_STANDARD.duration} slideDistance={6} style={styles.trendsRadarGridItem}>
+              <TrendsRadarCard
+                testID="progress-cardio-radar"
+                title="Cardio Fitness Profile"
+                subtitle={cardioBalanceScore == null ? 'Need cardio data' : '30D fitness qualities'}
+                score={cardioBalanceScore}
+                metrics={cardioRadarMetrics}
+                icon="pulse-outline"
+                color={cardioBalanceColor}
+                detail={cardioBalanceDetail}
+                styles={styles}
+                tc={tc}
+                onPress={() => {
+                  import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                  setCardioScoreDetailOpen(true);
+                }}
+              />
+            </FadeInView>
+            )}
+          </View>
+
+          {trendsShown('performance-gauges') && progressAnalytics.length > 0 && (
             <View style={styles.performanceGaugeCard}>
               <View style={styles.performanceGaugeHeader}>
                 <Ionicons name="speedometer-outline" size={17} color={tc.primary} />
@@ -3559,33 +10895,65 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {progressAnalytics.map((item, index) => {
                   const numeric = Number(String(item.value).replace(/[^0-9.-]/g, ''));
                   const fill = Number.isFinite(numeric)
-                    ? item.value.includes('%') ? Math.min(100, Math.abs(numeric)) : Math.min(100, Math.abs(numeric) * 10)
+                    ? item.key === 'load-balance'
+                      ? Math.min(100, Math.max(0, Math.abs(numeric)))
+                      : item.value.includes('%') ? Math.min(100, Math.abs(numeric)) : Math.min(100, Math.abs(numeric) * 10)
                     : 30;
+                  const onTap = item.key === 'strength-index'
+                    ? () => setStrengthTrendDetailOpen(true)
+                    : item.key === 'recent-records'
+                      ? () => setRecordsDetailOpen(true)
+                      : item.key === 'load-balance'
+                        ? () => setVolumeDetailMode('balance')
+                        : item.key === 'volume-trend'
+                          ? () => setVolumeDetailMode('workload')
+                        : null;
                   return (
                     <FadeInView
                       key={item.key}
                       delay={staggerDelay(index, 45)}
                       duration={TIMING_STANDARD.duration}
                       slideDistance={6}
-                      style={styles.performanceGaugeTile}
+                      style={[styles.performanceGaugeTile, { borderColor: item.color + '36' }]}
                     >
-                      <View style={[styles.performanceGaugeIcon, { backgroundColor: item.color + '1F' }]}>
-                        <Ionicons name={item.icon} size={15} color={item.color} />
-                      </View>
-                      <Text style={styles.performanceGaugeLabel} numberOfLines={1}>{item.label}</Text>
-                      <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                        <Text style={[styles.performanceGaugeValue, { color: item.color }]} numberOfLines={1}>{item.value}</Text>
-                      </PulseOnChange>
-                      <View style={styles.performanceGaugeTrack}>
-                        <AnimatedProgressFill
-                          pct={fill}
-                          minPct={5}
-                          color={item.color}
-                          delay={120 + index * 40}
-                          style={styles.performanceGaugeFill}
-                        />
-                      </View>
-                      <Text style={styles.performanceGaugeDetail} numberOfLines={2}>{item.detail}</Text>
+                      <ProgressCardWash color={item.color} intensity="soft" cornerRadius={radius.md} />
+                      <TouchableOpacity
+                        activeOpacity={onTap ? 0.85 : 1}
+                        disabled={!onTap}
+                        onPress={onTap ? () => {
+                          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                          onTap();
+                        } : undefined}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <View style={[styles.performanceGaugeIcon, { backgroundColor: item.color + '1F' }]}>
+                            <Ionicons name={item.icon} size={15} color={item.color} />
+                          </View>
+                          {onTap && (
+                            <Ionicons name="chevron-forward" size={14} color={tc.textMuted} style={{ marginBottom: 7 }} />
+                          )}
+                        </View>
+                        <Text style={styles.performanceGaugeLabel} numberOfLines={1}>{item.label}</Text>
+                        <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                          <Text
+                            style={[styles.performanceGaugeValue, { color: item.color }]}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.72}>
+                            {item.value}
+                          </Text>
+                        </PulseOnChange>
+                        <View style={styles.performanceGaugeTrack}>
+                          <AnimatedProgressFill
+                            pct={fill}
+                            minPct={5}
+                            color={item.color}
+                            delay={120 + index * 40}
+                            style={styles.performanceGaugeFill}
+                          />
+                        </View>
+                        <Text style={styles.performanceGaugeDetail} numberOfLines={2}>{item.detail}</Text>
+                      </TouchableOpacity>
                     </FadeInView>
                   );
                 })}
@@ -3593,7 +10961,37 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
-          {chartExerciseOptions.length === 0 && paceHistory.length < 2 ? (
+          {trendsShown('high-value-trends') && highValueTrendCards.length > 0 && (
+            <HighValueTrendCardsCard
+              cards={visibleHighValueTrendCards}
+              availableCount={highValueTrendCards.length}
+              onEdit={() => {
+                import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                setEditHighValueTrendsOpen(true);
+              }}
+              tc={tc}
+              styles={styles}
+            />
+          )}
+
+          {trendsShown('activity-highlights') && activityTrendCards.length > 0 && (
+            <ActivityTrendHighlightsCard
+              cards={visibleActivityTrendCards}
+              availableCount={activityTrendCards.length}
+              onEdit={() => {
+                import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                setEditActivityHighlightsOpen(true);
+              }}
+              tc={tc}
+              styles={styles}
+            />
+          )}
+
+          {trendsShown('metric-suggestions') && (
+            <TrendMetricSuggestionsCard suggestions={trendMetricSuggestions} tc={tc} styles={styles} />
+          )}
+
+          {(trendsShown('strength-charts') || trendsShown('cardio-progression')) && (chartExerciseOptions.length === 0 && paceExerciseGroups.length === 0 && cardioInsightsMemo.length === 0 ? (
             <View style={styles.emptyBox}>
               <Ionicons name="analytics-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
               <Text style={styles.emptyTitle}>Complete 2 tracked sessions to see charts</Text>
@@ -3601,7 +10999,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              {chartExerciseOptions.length > 0 && (
+              {trendsShown('strength-charts') && chartExerciseOptions.length > 0 && (
                 <>
                   <Text style={styles.sectionLabel}>Filter by muscle</Text>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.exerciseChipScroller}>
@@ -3648,7 +11046,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </>
               )}
 
-              {topLiftHistory && topLiftHistory.points.length >= 3 && (
+              {trendsShown('strength-charts') && topLiftHistory && topLiftHistory.points.length >= 3 && (
                 <View style={{ marginTop: 6 }}>
                   <Text style={styles.sectionLabel}>Estimated 1RM Trend</Text>
                   <OneRepMaxTrendCard
@@ -3662,7 +11060,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               )}
 
-              {selectedExercise ? (() => {
+              {trendsShown('strength-charts') && (selectedExercise ? (() => {
                 const trend = selectedExerciseTrend;
                 if (trend.length < 2) {
                   return (
@@ -3703,11 +11101,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     label: (() => { const d = new Date(selectedE1rmHistory[i].date); return `${d.getMonth() + 1}/${d.getDate()}`; })(),
                     conf: selectedE1rmHistory[i].confidence,
                   }));
+                  const valueLabelIndexes = graphValueLabelIndexes(e1rmValues);
                   const polyPoints = pts.map(p => `${p.x},${p.y}`).join(' ');
+                  const e1rmBaselineY = padT + plotH;
+                  const e1rmAreaPoints = pts.length >= 2
+                    ? `${polyPoints} ${pts[pts.length - 1].x},${e1rmBaselineY} ${pts[0].x},${e1rmBaselineY}`
+                    : null;
                   const gridLines = 4;
                   const gridVals = Array.from({ length: gridLines }, (_, i) =>
                     Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
                   );
+                  const metricLabel = selectedExerciseIsIsolation ? 'best set' : 'e1RM';
                   return (
                     <View testID="progress-selected-exercise-chart" style={styles.graphCard}>
                       <View style={styles.graphHeader}>
@@ -3753,6 +11157,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                               </SvgText>
                             );
                           })}
+                          {e1rmAreaPoints && (
+                            <>
+                              <Defs>
+                                <SvgLinearGradient id="strengthTrendAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                                  <Stop offset="0%" stopColor={tc.primary} stopOpacity={0.22} />
+                                  <Stop offset="100%" stopColor={tc.primary} stopOpacity={0.02} />
+                                </SvgLinearGradient>
+                              </Defs>
+                              <Polygon points={e1rmAreaPoints} fill="url(#strengthTrendAreaGradient)" stroke="none" />
+                            </>
+                          )}
                           <Polyline points={polyPoints}
                             fill="none" stroke={tc.primary} strokeWidth={2.5}
                             strokeLinejoin="round" strokeLinecap="round" />
@@ -3762,6 +11177,38 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                               fill={i === pts.length - 1 ? tc.accent : tc.primary}
                               stroke={tc.surface} strokeWidth={1.5} />
                           ))}
+                          {pts.map((p, i) => {
+                            if (!valueLabelIndexes.has(i)) return null;
+                            const label = String(weightChartValue(p.val, weightUnit));
+                            const labelW = graphValueLabelWidth(label);
+                            const labelX = graphValueLabelX(p.x, labelW, chartW, padL, padR);
+                            const labelY = graphValueLabelY(p.y);
+                            return (
+                              <Fragment key={`v${i}`}>
+                                <Rect
+                                  x={labelX - labelW / 2}
+                                  y={labelY - 11}
+                                  width={labelW}
+                                  height={15}
+                                  rx={7.5}
+                                  fill={tc.surfaceRaised}
+                                  stroke={tc.border}
+                                  strokeWidth={0.75}
+                                  opacity={0.96}
+                                />
+                                <SvgText
+                                  x={labelX}
+                                  y={labelY}
+                                  fontSize={9}
+                                  fontWeight="800"
+                                  fill={i === pts.length - 1 ? tc.accent : tc.textPrimary}
+                                  textAnchor="middle"
+                                >
+                                  {label}
+                                </SvgText>
+                              </Fragment>
+                            );
+                          })}
                           {pts.length <= 12 && pts.map((p, i) => (
                             <SvgText key={`d${i}`} x={p.x} y={chartH - 4}
                               fontSize={9} fill={tc.textMuted} textAnchor="middle">
@@ -3773,17 +11220,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <View style={styles.chartSummaryRow}>
                         <View style={styles.chartStat}>
                           <Text style={styles.chartStatValue}>{formatWeight(e1rmValues[e1rmValues.length - 1], weightUnit)}</Text>
-                          <Text style={styles.chartStatLabel}>Current e1RM</Text>
+                          <Text style={styles.chartStatLabel}>Current {metricLabel}</Text>
                         </View>
                         <View style={styles.chartStat}>
                           <Text style={styles.chartStatValue}>{formatWeight(Math.max(...e1rmValues), weightUnit)}</Text>
-                          <Text style={styles.chartStatLabel}>Peak e1RM</Text>
+                          <Text style={styles.chartStatLabel}>Peak {metricLabel}</Text>
                         </View>
                         <View style={styles.chartStat}>
                           <Text style={[styles.chartStatValue, { color: e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? tc.primary : tc.error }]}>
                             {formatSignedWeightDelta(e1rmValues[e1rmValues.length - 1] - e1rmValues[0], weightUnit)}
                           </Text>
-                          <Text style={styles.chartStatLabel}>vs first estimate</Text>
+                          <Text style={styles.chartStatLabel}>{selectedExerciseIsIsolation ? 'vs first best set' : 'vs first estimate'}</Text>
                         </View>
                       </View>
                     </View>
@@ -3799,6 +11246,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const unit = effectiveMode === 'weight' ? ` ${weightUnit}` : effectiveMode === 'duration' ? ' min' : '';
                 return (
                   <View testID="progress-selected-exercise-chart" style={styles.graphCard}>
+                    <ProgressCardWash color={tc.primary} secondaryColor={tc.accent} intensity="soft" />
                     <View style={styles.graphHeader}>
                       <Text style={styles.graphTitle} numberOfLines={2}>{selectedExercise}</Text>
                       <View style={styles.chartModeGroup}>
@@ -3885,78 +11333,343 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <View style={styles.emptyBox}>
                   <Text style={styles.emptyBody}>Tap an exercise above to see its progress chart.</Text>
                 </View>
-              ) : null}
+              ) : null)}
 
-              {cardioInsightsMemo.length > 0 && (
-                <View style={{ marginTop: 20 }}>
-                  <Text style={styles.sectionLabel}>Cardio Insights</Text>
-                  <View style={[styles.graphCard, { gap: 10 }]}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                      <Ionicons name="pulse-outline" size={17} color={tc.primary} />
-                      <Text style={[styles.graphTitle, { flex: 1 }]}>Endurance trend</Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                      {cardioInsightsMemo.map((item, index) => (
-                        <FadeInView
-                          key={item.label}
-                          delay={staggerDelay(index, 45)}
-                          duration={TIMING_STANDARD.duration}
-                          slideDistance={5}
-                          style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surface, borderRadius: 10, borderWidth: 1, borderColor: tc.border, padding: 10 }}
-                        >
-                          <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
-                          <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.4, textTransform: 'uppercase', marginTop: 2 }}>{item.label}</Text>
-                          <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4 }} numberOfLines={2}>{item.detail}</Text>
-                        </FadeInView>
-                      ))}
-                    </View>
-                  </View>
+              {trendsShown('strength-charts') && chartExerciseOptions.length === 0 && !topLiftHistory && (
+                <View style={[styles.emptyBox, { paddingTop: 36, paddingBottom: 18 }]}>
+                  <Ionicons name="barbell-outline" size={34} color={tc.textMuted} />
+                  <Text style={styles.emptyTitle}>No strength charts yet</Text>
+                  <Text style={styles.emptyBody}>Log loaded sets across two sessions to start strength, best-set, and 1RM charts.</Text>
                 </View>
               )}
 
-              {/* ── Cardio Pace Progression ── */}
-              {paceHistory.length >= 2 && (
-                  <View style={{ marginTop: 20 }}>
-                    <Text style={styles.sectionLabel}>Cardio Pace Progression</Text>
-                    {paceExerciseGroups.map(({ name: exName, distancePoints: pts, maxDistance: maxDist }) => {
-                      if (pts.length < 2) return null;
-                      return (
-                        <View key={exName} style={[styles.graphCard, { marginBottom: 10 }]}>
-                          <Text style={[styles.graphTitle, { marginBottom: 8 }]} numberOfLines={2}>{exName}</Text>
-                          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 4, height: 80 }}>
-                            {pts.map((p, pi) => {
-                              const h = Math.max(8, Math.round((p.distance! / maxDist) * 70));
-                              const isLast = pi === pts.length - 1;
-                              const d = new Date(p.date);
-                              return (
-                                <View key={pi} style={{ flex: 1, alignItems: 'center' }}>
-                                  <Text style={{ fontSize: 9, color: isLast ? tc.primary : tc.textSecondary, fontWeight: '600' }}>
-                                    {p.distance!.toFixed(1)}
+              {trendsShown('cardio-progression') && (cardioInsightsMemo.length > 0 || paceExerciseGroups.length > 0) && (
+                <View style={{ marginTop: 20 }}>
+                  <Text style={styles.sectionLabel}>Cardio</Text>
+                  <View style={[styles.graphCard, styles.cardioSectionCard]}>
+                    <ProgressCardWash color={cardioScoreColor} secondaryColor="#06B6D4" intensity="soft" />
+                    <View style={styles.cardioSectionHeader}>
+                      <View style={[styles.performanceGaugeIcon, { backgroundColor: cardioScoreColor + '1F', marginBottom: 0 }]}>
+                        <Ionicons name="pulse-outline" size={15} color={cardioScoreColor} />
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.graphTitle} numberOfLines={1}>Cardio progression</Text>
+                        <Text style={[styles.graphSubtitle, { marginBottom: 0 }]} numberOfLines={2}>
+                          Filter by activity and metric to inspect distance, pace, or duration.
+                        </Text>
+                      </View>
+                    </View>
+
+                    {cardioInsightsMemo.length > 0 && (
+                      <View style={styles.cardioInsightGrid}>
+                        {cardioInsightsMemo.slice(0, 4).map((item, index) => (
+                          <FadeInView
+                            key={item.label}
+                            delay={staggerDelay(index, 35)}
+                            duration={TIMING_STANDARD.duration}
+                            slideDistance={5}
+                            style={[styles.cardioInsightTile, { borderColor: cardioScoreColor + '30' }]}
+                          >
+                            <ProgressCardWash color={cardioScoreColor} secondaryColor="#06B6D4" intensity="soft" cornerRadius={radius.md} />
+                            <Text style={styles.cardioInsightValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>{item.value}</Text>
+                            <Text style={styles.cardioInsightLabel} numberOfLines={1}>{item.label}</Text>
+                            <Text style={styles.cardioInsightDetail} numberOfLines={2}>{item.detail}</Text>
+                          </FadeInView>
+                        ))}
+                      </View>
+                    )}
+
+                    <CardioHrZonesCard authToken={authToken} themeName={themeName} />
+                    {/* Cardio Load (TRIMP) — analogue to weekly strength
+                        volume. Auto-hides when the user has no cardio_load
+                        signal yet, so it doesn't crowd new accounts. */}
+                    <View style={{ marginTop: 12 }}>
+                      <CardioLoadCard token={authToken} themeName={themeName} />
+                    </View>
+                    {/* Cardio progression — PRs + 28d pace trend. Auto-hides
+                        when the user has no run/ride history. */}
+                    <View style={{ marginTop: 12 }}>
+                      <CardioProgressionCard token={authToken} themeName={themeName} />
+                    </View>
+
+                    {paceExerciseGroups.length > 0 ? (
+                      <>
+                        {selectedCardioGroup && (
+                          <>
+                            <Text style={[styles.sectionLabel, { marginTop: 4 }]}>Metric</Text>
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.exerciseChipScroller}>
+                              {([
+                                ['distance', 'Distance'],
+                                ['pace', 'Pace'],
+                                ['duration', 'Duration'],
+                              ] as Array<[CardioChartMode, string]>).map(([mode, label]) => {
+                                const active = effectiveCardioChartMode === mode;
+                                const available = cardioModeAvailable[mode];
+                                return (
+                                  <AnimatedPressable
+                                    key={mode}
+                                    disabled={!available}
+                                    style={[styles.exerciseChip, active && styles.exerciseChipActive, !available && styles.disabledChip]}
+                                    onPress={() => setCardioChartMode(mode)}
+                                    scaleDown={0.95}>
+                                    <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive, !available && styles.disabledChipText]} numberOfLines={1}>
+                                      {label}
+                                    </Text>
+                                  </AnimatedPressable>
+                                );
+                              })}
+                            </ScrollView>
+                          </>
+                        )}
+
+                        <Text style={styles.sectionLabel}>Select cardio</Text>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.exerciseChipScroller}>
+                          {paceExerciseGroups.map(group => (
+                            <AnimatedPressable
+                              key={group.key}
+                              style={[styles.exerciseChip, selectedCardioGroup?.key === group.key && styles.exerciseChipActive]}
+                              onPress={() => setSelectedCardioExercise(group.key)}
+                              scaleDown={0.95}>
+                              <Text
+                                style={[styles.exerciseChipText, selectedCardioGroup?.key === group.key && styles.exerciseChipTextActive]}
+                                numberOfLines={1}
+                                ellipsizeMode="tail">
+                                {group.name}
+                              </Text>
+                            </AnimatedPressable>
+                          ))}
+                        </ScrollView>
+
+                        {selectedCardioGroup ? (() => {
+                          const mode = effectiveCardioChartMode;
+                          const rows = mode === 'pace'
+                            ? selectedCardioGroup.pacePoints
+                            : mode === 'duration'
+                              ? selectedCardioGroup.durationPoints
+                              : selectedCardioGroup.distancePoints;
+                          if (rows.length < 2) {
+                            return (
+                              <View style={styles.cardioChartEmpty}>
+                                <Ionicons name="trending-up-outline" size={30} color={tc.textMuted} />
+                                <Text style={styles.emptyTitle}>Need one more {mode} log</Text>
+                                <Text style={styles.emptyBody}>
+                                  {selectedCardioGroup.name} has {rows.length} usable {mode} log{rows.length === 1 ? '' : 's'}.
+                                </Text>
+                              </View>
+                            );
+                          }
+
+                          if (mode === 'pace') {
+                            const paceValues = rows.map(p => paceSeconds(p.pace)!).filter(v => v != null);
+                            const durationSourceNote = cardioDurationSourceNote(rows);
+                            const paceMin = Math.min(...paceValues);
+                            const paceMax = Math.max(...paceValues);
+                            const chartW = Math.max(320, rows.length * 52);
+                            const chartH = 150;
+                            const padL = 42;
+                            const padR = 16;
+                            const padT = 16;
+                            const padB = 30;
+                            const plotW = chartW - padL - padR;
+                            const plotH = chartH - padT - padB;
+                            const rangeMin = Math.max(0, paceMin - 20);
+                            const rangeMax = paceMax + 20;
+                            const rangeDelta = rangeMax - rangeMin || 1;
+                            const pts = paceValues.map((v, i) => ({
+                              x: padL + (paceValues.length > 1 ? (i / (paceValues.length - 1)) * plotW : plotW / 2),
+                              y: padT + ((v - rangeMin) / rangeDelta) * plotH,
+                              val: v,
+                              label: (() => { const d = new Date(rows[i].date); return `${d.getMonth() + 1}/${d.getDate()}`; })(),
+                            }));
+                            const paceAreaPoints = [
+                              `${pts[0].x},${chartH - padB}`,
+                              ...pts.map(p => `${p.x},${p.y}`),
+                              `${pts[pts.length - 1].x},${chartH - padB}`,
+                            ].join(' ');
+                            const latest = paceValues[paceValues.length - 1];
+                            const first = paceValues[0];
+                            const best = Math.min(...paceValues);
+                            const delta = latest - first;
+                            return (
+                              <View testID="progress-cardio-chart" style={styles.cardioChartPanel}>
+                                <View style={styles.graphHeader}>
+                                  <Text style={styles.graphTitle} numberOfLines={2}>{selectedCardioGroup.name}</Text>
+                                  <Text style={[styles.graphScore, { color: delta <= 0 ? tc.primary : tc.error }]}>
+                                    {formatPaceDelta(delta)}
                                   </Text>
-                                  <AnimatedChartBar
-                                    targetHeight={h}
-                                    delay={pi * 35}
-                                    style={{ width: '80%', backgroundColor: isLast ? tc.primary : tc.accent, borderRadius: 4, marginVertical: 2 }}
-                                  />
-                                  <Text style={{ fontSize: 8, color: tc.textMuted }}>{d.getMonth() + 1}/{d.getDate()}</Text>
                                 </View>
-                              );
-                            })}
-                          </View>
-                          {pts[pts.length - 1]?.pace && (
-                            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 6 }}>
-                              Latest pace: {pts[pts.length - 1].pace}
-                            </Text>
-                          )}
-                        </View>
-                      );
-                    })}
+                                <Text style={styles.graphSubtitle}>
+                                  Pace over time. Lower is faster.{durationSourceNote ? ` ${durationSourceNote}` : ''}
+                                </Text>
+                                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                                  <Svg width={chartW} height={chartH}>
+                                    <Defs>
+                                      <SvgLinearGradient id="paceAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                                        <Stop offset="0%" stopColor={tc.primary} stopOpacity="0.22" />
+                                        <Stop offset="62%" stopColor={tc.primary} stopOpacity="0.10" />
+                                        <Stop offset="100%" stopColor={tc.primary} stopOpacity="0.02" />
+                                      </SvgLinearGradient>
+                                    </Defs>
+                                    {[rangeMin, (rangeMin + rangeMax) / 2, rangeMax].map((gv, gi) => {
+                                      const gy = padT + ((gv - rangeMin) / rangeDelta) * plotH;
+                                      return (
+                                        <Fragment key={`pace-grid-${gi}`}>
+                                          <Line x1={padL} y1={gy} x2={chartW - padR} y2={gy} stroke={tc.border} strokeWidth={1} strokeDasharray="4,4" />
+                                          <SvgText x={padL - 7} y={gy + 4} fontSize={10} fill={tc.textMuted} textAnchor="end">
+                                            {formatPaceSeconds(gv)}
+                                          </SvgText>
+                                        </Fragment>
+                                      );
+                                    })}
+                                    <Polygon points={paceAreaPoints} fill="url(#paceAreaGradient)" />
+                                    <Polyline
+                                      points={pts.map(p => `${p.x},${p.y}`).join(' ')}
+                                      fill="none"
+                                      stroke={tc.primary}
+                                      strokeWidth={2.5}
+                                      strokeLinejoin="round"
+                                      strokeLinecap="round"
+                                    />
+                                    {pts.map((p, i) => (
+                                      <Fragment key={`pace-point-${i}`}>
+                                        <Circle
+                                          cx={p.x}
+                                          cy={p.y}
+                                          r={i === pts.length - 1 ? 5 : 3.5}
+                                          fill={i === pts.length - 1 ? tc.accent : tc.primary}
+                                          stroke={tc.surface}
+                                          strokeWidth={1.5}
+                                        />
+                                        {pts.length <= 10 && (
+                                          <SvgText x={p.x} y={chartH - 8} fontSize={9} fill={tc.textMuted} textAnchor="middle">
+                                            {p.label}
+                                          </SvgText>
+                                        )}
+                                      </Fragment>
+                                    ))}
+                                  </Svg>
+                                </ScrollView>
+                                <View style={styles.chartSummaryRow}>
+                                  <View style={styles.chartStat}>
+                                    <Text style={styles.chartStatValue}>{formatPaceSeconds(latest)}</Text>
+                                    <Text style={styles.chartStatLabel}>Latest pace</Text>
+                                  </View>
+                                  <View style={styles.chartStat}>
+                                    <Text style={styles.chartStatValue}>{formatPaceSeconds(best)}</Text>
+                                    <Text style={styles.chartStatLabel}>Best pace</Text>
+                                  </View>
+                                  <View style={styles.chartStat}>
+                                    <Text style={[styles.chartStatValue, { color: delta <= 0 ? tc.primary : tc.error }]}>
+                                      {formatPaceDelta(delta)}
+                                    </Text>
+                                    <Text style={styles.chartStatLabel}>vs first</Text>
+                                  </View>
+                                </View>
+                              </View>
+                            );
+                          }
+
+                          const values = rows.map(p => mode === 'duration' ? Math.round((p.duration_seconds ?? 0) / 60) : (p.distance ?? 0));
+                          const durationSourceNote = mode === 'duration' ? cardioDurationSourceNote(rows) : null;
+                          const maxVal = Math.max(...values, 1);
+                          const latest = values[values.length - 1];
+                          const first = values[0];
+                          const best = Math.max(...values);
+                          const delta = latest - first;
+                          const chartMinWidth = Math.max(Math.round(screenWidth - 58), rows.length * 48);
+                          const formatMetric = (value: number) => mode === 'duration'
+                            ? `${Math.round(value)}m`
+                            : formatDistance(value, distanceUnit, { suffix: false });
+                          return (
+                            <View testID="progress-cardio-chart" style={styles.cardioChartPanel}>
+                              <View style={styles.graphHeader}>
+                                <Text style={styles.graphTitle} numberOfLines={2}>{selectedCardioGroup.name}</Text>
+                                <Text style={[styles.graphScore, { color: delta >= 0 ? tc.primary : tc.error }]}>
+                                  {delta >= 0 ? '+' : '-'}{mode === 'duration' ? `${Math.round(Math.abs(delta))}m` : formatDistance(Math.abs(delta), distanceUnit)}
+                                </Text>
+                              </View>
+                              <Text style={styles.graphSubtitle}>
+                                {mode === 'duration'
+                                  ? `Duration per session${durationSourceNote ? ` - ${durationSourceNote}` : ''}`
+                                  : `Distance per session (${distanceUnit})`}
+                              </Text>
+                              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                                <View style={[styles.cardioGraphBars, { minWidth: chartMinWidth }]}>
+                                  {rows.map((point, i) => {
+                                    const val = values[i];
+                                    const h = Math.max(12, Math.round((val / maxVal) * 106));
+                                    const isLast = i === rows.length - 1;
+                                    const d = new Date(point.date);
+                                    return (
+                                      <View
+                                        key={`${point.date}-${i}`}
+                                        style={styles.cardioGraphBarCol}
+                                        accessible
+                                        accessibilityLabel={`${selectedCardioGroup.name} ${mode} on ${point.date}: ${formatMetric(val)}`}>
+                                        <Text style={[styles.graphBarValue, isLast && { color: tc.primary }]} numberOfLines={1}>
+                                          {formatMetric(val)}
+                                        </Text>
+                                        <AnimatedChartBar
+                                          targetHeight={h}
+                                          delay={i * 35}
+                                          style={[styles.cardioGraphBar, isLast && { backgroundColor: tc.primary }]}
+                                        />
+                                        <Text style={styles.graphBarLabel}>{d.getMonth() + 1}/{d.getDate()}</Text>
+                                      </View>
+                                    );
+                                  })}
+                                </View>
+                              </ScrollView>
+                              <View style={styles.chartSummaryRow}>
+                                <View style={styles.chartStat}>
+                                  <Text style={styles.chartStatValue}>{formatMetric(latest)}</Text>
+                                  <Text style={styles.chartStatLabel}>Latest</Text>
+                                </View>
+                                <View style={styles.chartStat}>
+                                  <Text style={styles.chartStatValue}>{formatMetric(best)}</Text>
+                                  <Text style={styles.chartStatLabel}>{mode === 'duration' ? 'Longest' : 'Best distance'}</Text>
+                                </View>
+                                <View style={styles.chartStat}>
+                                  <Text style={[styles.chartStatValue, { color: delta >= 0 ? tc.primary : tc.error }]}>
+                                    {delta >= 0 ? '+' : '-'}{mode === 'duration' ? `${Math.round(Math.abs(delta))}m` : formatDistance(Math.abs(delta), distanceUnit)}
+                                  </Text>
+                                  <Text style={styles.chartStatLabel}>vs first</Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                        })() : null}
+                      </>
+                    ) : (
+                      <View style={styles.cardioChartEmpty}>
+                        <Ionicons name="walk-outline" size={30} color={tc.textMuted} />
+                        <Text style={styles.emptyTitle}>No cardio charts yet</Text>
+                        <Text style={styles.emptyBody}>Log distance, pace, or duration to start a cardio chart.</Text>
+                      </View>
+                    )}
                   </View>
+                </View>
+              )}
+              {trendsShown('cardio-progression') && cardioInsightsMemo.length === 0 && paceExerciseGroups.length === 0 && (
+                <View style={[styles.emptyBox, { paddingTop: 36, paddingBottom: 18 }]}>
+                  <Ionicons name="pulse-outline" size={34} color={tc.textMuted} />
+                  <Text style={styles.emptyTitle}>No cardio trends yet</Text>
+                  <Text style={styles.emptyBody}>Log distance, pace, duration, or HR zones to build cardio progression.</Text>
+                </View>
               )}
             </>
-          )}
+          ))}
         </ScrollView>
-      ) : (tab as string) === 'insights' ? (
+      ) : tab === 'insights' ? (
+        <HealthInsightsScreen
+          authToken={authToken}
+          themeName={themeName}
+          days={14}
+          embedded
+          showHeader={false}
+        />
+      ) : false ? (
+        /* Legacy catch-all Insights view disabled; the dedicated Insights tab above is the active surface. */
         <ScrollView contentContainerStyle={styles.content} style={!noHeader ? { backgroundColor: tc.background } : undefined}>
           {coachInsightVisuals.length > 0 && (
             <View style={styles.insightsCard}>
@@ -4088,26 +11801,51 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.sectionLabel}>Trend Summary</Text>
               <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-                {progressAnalytics.map((item, index) => (
-                  <FadeInView key={item.key} delay={staggerDelay(index, 35)} duration={TIMING_STANDARD.duration} slideDistance={4}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
-                      <Ionicons name={item.icon} size={16} color={item.color} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                        {item.label}
-                      </Text>
-                      <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
-                        {item.detail}
-                      </Text>
-                    </View>
-                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                      <Text style={{ fontSize: 19, fontWeight: '900', color: item.color }}>{item.value}</Text>
-                    </PulseOnChange>
-                  </View>
-                  </FadeInView>
-                ))}
+                {progressAnalytics.map((item, index) => {
+                  const onTap = item.key === 'strength-index'
+                    ? () => setStrengthTrendDetailOpen(true)
+                    : item.key === 'recent-records'
+                      ? () => setRecordsDetailOpen(true)
+                      : item.key === 'load-balance'
+                        ? () => setVolumeDetailMode('balance')
+                        : item.key === 'volume-trend'
+                          ? () => setVolumeDetailMode('workload')
+                        : null;
+                  return (
+                    <FadeInView key={item.key} delay={staggerDelay(index, 35)} duration={TIMING_STANDARD.duration} slideDistance={4}>
+                    <TouchableOpacity
+                      activeOpacity={onTap ? 0.85 : 1}
+                      disabled={!onTap}
+                      onPress={onTap ? () => {
+                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                        onTap();
+                      } : undefined}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
+                        <Ionicons name={item.icon} size={16} color={item.color} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                          {item.label}
+                        </Text>
+                        <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
+                          {item.detail}
+                        </Text>
+                      </View>
+                      <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                        <Text
+                          style={{ fontSize: 19, fontWeight: '900', color: item.color }}
+                          numberOfLines={1}
+                          adjustsFontSizeToFit
+                          minimumFontScale={0.72}>
+                          {item.value}
+                        </Text>
+                      </PulseOnChange>
+                      {onTap && <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />}
+                    </TouchableOpacity>
+                    </FadeInView>
+                  );
+                })}
               </View>
             </View>
           )}
@@ -4149,7 +11887,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                         {pr.bestDist != null && (
                           <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
-                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{pr.bestDist.toFixed(1)}</Text>
+                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{formatDistance(pr.bestDist, distanceUnit)}</Text>
                             <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>BEST DIST</Text>
                           </View>
                         )}
@@ -4253,18 +11991,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {/* 1RM trend chart for the top lift — only renders when there
                   are 3+ data points. Pure SVG sparkline, matches the body-
                   fat timeline pattern below for visual consistency. */}
-              {topLiftHistory && topLiftHistory.points.length >= 3 && (
-                <View style={{ marginTop: 14 }}>
-                  <OneRepMaxTrendCard
-                    title={`${topLiftHistory.name} · 1RM trend`}
-                    subtitle="Rolling estimated 1-rep max from logged working sets"
-                    points={topLiftHistory.points}
-                    weightUnit={weightUnit}
-                    tc={tc}
-                    styles={styles}
-                  />
-                </View>
-              )}
+              {(() => {
+                const topLiftTrend = topLiftHistory!;
+                if (!topLiftHistory || topLiftTrend.points.length < 3) return null;
+                return (
+                  <View style={{ marginTop: 14 }}>
+                    <OneRepMaxTrendCard
+                      title={`${topLiftTrend.name} · 1RM trend`}
+                      subtitle="Rolling estimated 1-rep max from logged working sets"
+                      points={topLiftTrend.points}
+                      weightUnit={weightUnit}
+                      tc={tc}
+                      styles={styles}
+                    />
+                  </View>
+                );
+              })()}
             </View>
           )}
 
@@ -4466,12 +12208,32 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.emptyTitle}>No workouts yet</Text>
               <Text style={styles.emptyBody}>Start from Workouts {'->'} Plan or log a custom activity. Your calendar, streak, and session details will appear here.</Text>
             </View>
-          ) : (
+          ) : (() => {
+            const loweredHistoryQuery = historyQuery.trim().toLowerCase();
+            const matchedHistory = filterWorkoutHistory(history, {
+              query: historyQuery,
+              dateFilter: historyDateFilter,
+              typeFilter: historyTypeFilter,
+            });
+            const shownHistory = matchedHistory.slice(0, visibleWorkoutCount);
+            const hasHistoryFilters = historyDateFilter !== 'all' || historyTypeFilter !== 'all';
+            // History is newest-first, so the first match is the most recent.
+            const lastMatchDate = loweredHistoryQuery && matchedHistory.length > 0
+              ? matchedHistory[0].date
+              : '';
+            const lastMatchLabel = lastMatchDate
+              ? `Last logged ${formatDate(lastMatchDate)} · ${workoutHistoryDaysAgoLabel(lastMatchDate)}`
+              : '';
+            const queryAlreadyWatched = loweredHistoryQuery !== ''
+              && stalenessWatches.some(w => w.term.toLowerCase() === loweredHistoryQuery);
+            return (
             <>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <Text style={styles.sectionLabel}>
-                  {history.length} workout{history.length !== 1 ? 's' : ''}
-                  {history.length > visibleWorkoutCount ? ` · showing ${visibleWorkoutCount}` : ''}
+                  {loweredHistoryQuery || hasHistoryFilters
+                    ? `${matchedHistory.length} match${matchedHistory.length !== 1 ? 'es' : ''}`
+                    : `${history.length} workout${history.length !== 1 ? 's' : ''}`}
+                  {matchedHistory.length > visibleWorkoutCount ? ` · showing ${visibleWorkoutCount}` : ''}
                 </Text>
                 <View style={{ flexDirection: 'row', gap: 6 }}>
                   <TouchableOpacity
@@ -4494,10 +12256,159 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </TouchableOpacity>
                 </View>
               </View>
-              {history.slice(0, visibleWorkoutCount).map((session, i) => {
+              <View style={{
+                flexDirection: 'row', alignItems: 'center', gap: 8,
+                backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
+                borderRadius: 10, paddingHorizontal: 10, marginBottom: 8,
+              }}>
+                <Ionicons name="search" size={15} color={tc.textMuted} />
+                <TextInput
+                  value={historyQuery}
+                  onChangeText={setHistoryQuery}
+                  placeholder="Search exercises, focus, activities…"
+                  placeholderTextColor={tc.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="search"
+                  style={{ flex: 1, fontSize: 13, color: tc.textPrimary, paddingVertical: 8 }}
+                />
+                {historyQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setHistoryQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Ionicons name="close-circle" size={16} color={tc.textMuted} />
+                  </TouchableOpacity>
+                )}
+              </View>
+              <View style={styles.historyFilterGroup}>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.historyFilterScroller}>
+                  {HISTORY_DATE_FILTER_OPTIONS.map(opt => {
+                    const active = historyDateFilter === opt.key;
+                    return (
+                      <AnimatedPressable
+                        key={opt.key}
+                        onPress={() => setHistoryDateFilter(opt.key)}
+                        scaleDown={0.95}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        style={[
+                          styles.historyFilterChip,
+                          { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surface },
+                        ]}>
+                        <Text style={[styles.historyFilterChipText, { color: active ? tc.primary : tc.textSecondary }]}>{opt.label}</Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </ScrollView>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.historyFilterScroller}>
+                  {HISTORY_TYPE_FILTER_OPTIONS.map(opt => {
+                    const active = historyTypeFilter === opt.key;
+                    return (
+                      <AnimatedPressable
+                        key={opt.key}
+                        onPress={() => setHistoryTypeFilter(opt.key)}
+                        scaleDown={0.95}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        style={[
+                          styles.historyFilterChip,
+                          { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surface },
+                        ]}>
+                        <Ionicons name={opt.icon} size={12} color={active ? tc.primary : tc.textMuted} />
+                        <Text style={[styles.historyFilterChipText, { color: active ? tc.primary : tc.textSecondary }]}>{opt.label}</Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+              {stalenessWatches.length > 0 && (
+                <View style={{ marginBottom: 8 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textMuted, marginBottom: 4 }}>
+                    Reminders if you skip these
+                  </Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                    {stalenessWatches.map(w => (
+                      <View
+                        key={w.term}
+                        style={{ flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 9, paddingRight: 6, paddingVertical: 5, borderRadius: 13, backgroundColor: tc.primary + '12', borderWidth: 1, borderColor: tc.primary + '44' }}>
+                        <TouchableOpacity
+                          onPress={() => setHistoryQuery(w.term)}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 2 }}
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="notifications" size={11} color={tc.primary} />
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.primary }}>{w.term}</Text>
+                          <Text style={{ fontSize: 10, color: tc.primary + 'BB' }}>{w.thresholdDays}d</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={async () => {
+                            const m = await import('../utils/stalenessReminders');
+                            setStalenessWatches(await m.removeStalenessWatch(w.term));
+                          }}
+                          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}>
+                          <Ionicons name="close" size={13} color={tc.primary} />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+              {loweredHistoryQuery !== '' && matchedHistory.length > 0 && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                  <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>{lastMatchLabel}</Text>
+                  <TouchableOpacity
+                    onPress={async () => {
+                      const m = await import('../utils/stalenessReminders');
+                      const next = queryAlreadyWatched
+                        ? await m.removeStalenessWatch(historyQuery.trim())
+                        : await m.addStalenessWatch(historyQuery.trim());
+                      setStalenessWatches(next);
+                    }}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 4,
+                      paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+                      backgroundColor: queryAlreadyWatched ? tc.primary + '18' : tc.surface,
+                      borderWidth: 1, borderColor: queryAlreadyWatched ? tc.primary : tc.border,
+                    }}>
+                    <Ionicons name={queryAlreadyWatched ? 'notifications' : 'notifications-outline'} size={13} color={queryAlreadyWatched ? tc.primary : tc.textSecondary} />
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: queryAlreadyWatched ? tc.primary : tc.textSecondary }}>
+                      {queryAlreadyWatched ? 'Reminder on' : 'Remind me'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {(loweredHistoryQuery !== '' || hasHistoryFilters) && matchedHistory.length === 0 && (
+                <View style={styles.emptyBox}>
+                  <Ionicons name="search-outline" size={32} color={tc.textMuted} style={{ marginBottom: 6 }} />
+                  <Text style={styles.emptyTitle}>No matches</Text>
+                  <Text style={styles.emptyBody}>
+                    {loweredHistoryQuery
+                      ? `Nothing in your history matches "${historyQuery.trim()}". Try an exercise name like "bench" or a focus like "legs".`
+                      : 'No workouts match those filters. Try All time or All activity.'}
+                  </Text>
+                </View>
+              )}
+              {shownHistory.map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
                 const isExpanded = expandedSessionId === session.id;
                 const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
+                const trainingScore = workoutTrainingScore(summary);
+                const trainingRating = workoutTrainingRating(summary);
+                const trainingScoreColor = trainingScore != null ? workoutTrainingScoreColor(trainingScore, tc) : tc.primary;
+                const trainingScoreStat = trainingScore != null ? (
+                  <>
+                    <Text style={styles.sessionStatDot}>·</Text>
+                    <View style={[
+                      styles.workoutScorePill,
+                      {
+                        backgroundColor: trainingScoreColor + '18',
+                        borderColor: trainingScoreColor + '44',
+                      },
+                    ]}>
+                      <Ionicons name="trophy-outline" size={12} color={trainingScoreColor} />
+                      <Text style={[styles.workoutScorePillText, { color: trainingScoreColor }]}>
+                        Score {trainingScore}{trainingRating ? ` · ${trainingRating}` : ''}
+                      </Text>
+                    </View>
+                  </>
+                ) : null;
                 // Composite key: id + index. HK auto-imports can collide
                 // on session.id when the dedup helper sees the same HK
                 // workout twice across import attempts; the index makes
@@ -4555,7 +12466,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={styles.sessionFocus}>
                             {session.manualActivity
                               ? `${humanizeToken(session.manualActivity.category)}${session.manualActivity.subtype ? ' · ' + humanizeToken(session.manualActivity.subtype) : ''}${session.manualActivity.intensity ? ' (' + session.manualActivity.intensity + ')' : ''}`
-                              : session.focus}
+                              : displayFocusForExercises(session.focus, session.exercises)}
                           </Text>
                           {summary?.totalSets != null && summary.totalSets > 0 && (
                             <View style={{ backgroundColor: tc.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
@@ -4585,20 +12496,80 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       )}
                       <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={tc.textMuted} style={{ marginLeft: 6 }} />
                     </View>
-                    <View style={styles.sessionStats}>
-                      <Text style={styles.sessionStat}>{session.exercises.length} exercises</Text>
-                      <Text style={styles.sessionStatDot}>·</Text>
-                      <Text style={styles.sessionStat}>{totalSets} sets</Text>
-                      {summary && (
-                        <>
-                          <Text style={styles.sessionStatDot}>·</Text>
-                          <Text style={styles.sessionStat}>~{summary.caloriesBurned} kcal</Text>
-                        </>
-                      )}
-                    </View>
+                    {(session.manualActivity || session.exercises.length === 0) ? (
+                      <View style={styles.sessionStats}>
+                        {/* Manual / imported activity (Strong, Strava, Apple
+                            Health): no per-set data, so surface distance +
+                            the estimated calorie burn instead of an empty
+                            "0 exercises · 0 sets". */}
+                        <Text style={styles.sessionStat}>
+                          {[
+                            session.manualActivity?.distanceMiles && session.manualActivity.distanceMiles > 0
+                              ? formatDistance(session.manualActivity.distanceMiles, distanceUnit)
+                              : null,
+                            Number.isFinite(Number(session.manualActivity?.details?.elevationGainFt)) && Number(session.manualActivity?.details?.elevationGainFt) > 0
+                              ? `${Math.round(Number(session.manualActivity?.details?.elevationGainFt))} ft elev`
+                              : null,
+                            Number.isFinite(Number(session.manualActivity?.details?.avgWatts)) && Number(session.manualActivity?.details?.avgWatts) > 0
+                              ? `${Math.round(Number(session.manualActivity?.details?.avgWatts))} W`
+                              : null,
+                            (session.manualActivity?.caloriesBurned ?? summary?.caloriesBurned ?? 0) > 0
+                              ? `~${Math.round(session.manualActivity?.caloriesBurned ?? summary?.caloriesBurned ?? 0)} kcal`
+                              : null,
+                          ].filter(Boolean).join('   ·   ') || 'Activity logged'}
+                        </Text>
+                        {trainingScoreStat}
+                      </View>
+                    ) : (
+                      <View style={styles.sessionStats}>
+                        <Text style={styles.sessionStat}>{session.exercises.length} exercises</Text>
+                        <Text style={styles.sessionStatDot}>·</Text>
+                        <Text style={styles.sessionStat}>{totalSets} sets</Text>
+                        {summary && summary.caloriesBurned > 0 && (
+                          <>
+                            <Text style={styles.sessionStatDot}>·</Text>
+                            <Text style={styles.sessionStat}>~{summary.caloriesBurned} kcal</Text>
+                          </>
+                        )}
+                        {trainingScoreStat}
+                      </View>
+                    )}
 
                     {isExpanded && (
                       <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
+                        {session.routeCoords && session.routeCoords.length > 1 ? (
+                          <RouteSummaryMap
+                            themeName={themeName}
+                            coords={session.routeCoords}
+                            height={180}
+                          />
+                        ) : null}
+                        {Platform.OS === 'ios' && (
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={(e) => {
+                              e.stopPropagation?.();
+                              setAppleHealthAttachSession(session);
+                            }}
+                            style={{
+                              alignSelf: 'flex-start',
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 6,
+                              paddingHorizontal: 10,
+                              paddingVertical: 7,
+                              borderRadius: 8,
+                              backgroundColor: session.linkedAppleHealthWorkout ? tc.primary + '18' : tc.surfaceRaised,
+                              borderWidth: 1,
+                              borderColor: session.linkedAppleHealthWorkout ? tc.primary + '44' : tc.border,
+                              marginBottom: 8,
+                            }}>
+                            <Ionicons name={session.linkedAppleHealthWorkout ? 'checkmark-circle-outline' : 'link-outline'} size={14} color={session.linkedAppleHealthWorkout ? tc.primary : tc.textSecondary} />
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: session.linkedAppleHealthWorkout ? tc.primary : tc.textSecondary }}>
+                              {session.linkedAppleHealthWorkout ? 'Apple Health attached' : 'Attach Apple Health'}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
                         {session.exercises.filter(ex => ex.sets.length > 0).map((ex, ei) => {
                           const best = ex.sets.reduce((b, s) => s.weightLbs > b.weightLbs ? s : b, ex.sets[0]);
                           return (
@@ -4687,7 +12658,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </FadeInView>
                 );
               })}
-              {history.length > visibleWorkoutCount && (
+              {matchedHistory.length > visibleWorkoutCount && (
                 <TouchableOpacity
                   onPress={() => setVisibleWorkoutCount(c => c + 30)}
                   activeOpacity={0.85}
@@ -4701,12 +12672,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     marginTop: 4,
                   }}>
                   <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                    Load {Math.min(30, history.length - visibleWorkoutCount)} more workouts
+                    Load {Math.min(30, matchedHistory.length - visibleWorkoutCount)} more workouts
                   </Text>
                 </TouchableOpacity>
               )}
             </>
-          )}
+            );
+          })()}
         </ScrollView>
       ) : false ? (
         <ScrollView contentContainerStyle={styles.content}>
@@ -4805,6 +12777,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                 ) : (<>
                 {visible.map((s, i) => {
+                  const trainingScore = workoutTrainingScore(s);
+                  const trainingRating = workoutTrainingRating(s);
+                  const trainingScoreColor = trainingScore != null ? workoutTrainingScoreColor(trainingScore, tc) : tc.primary;
                   const deleteSummary = () => {
                     if (!s.id) return;
                     Alert.alert(
@@ -4878,6 +12853,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={styles.sessionStat}>{s.totalReps} reps</Text>
                 <Text style={styles.sessionStatDot}>·</Text>
                 <Text style={styles.sessionStat}>~{s.caloriesBurned} kcal</Text>
+                {trainingScore != null ? (
+                  <>
+                    <Text style={styles.sessionStatDot}>·</Text>
+                    <View style={[
+                      styles.workoutScorePill,
+                      {
+                        backgroundColor: trainingScoreColor + '18',
+                        borderColor: trainingScoreColor + '44',
+                      },
+                    ]}>
+                      <Ionicons name="trophy-outline" size={12} color={trainingScoreColor} />
+                      <Text style={[styles.workoutScorePillText, { color: trainingScoreColor }]}>
+                        Score {trainingScore}{trainingRating ? ` · ${trainingRating}` : ''}
+                      </Text>
+                    </View>
+                  </>
+                ) : null}
               </View>
               <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{s.motivationMessage}</Text>
               {s.achievements?.length > 0 && (
@@ -4931,16 +12923,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
                         {sx.name}
                       </Text>
-                      {sx.sets.length === 0 ? (
+                      {((sx.warmupSets?.length ?? 0) + sx.sets.length) === 0 ? (
                         <Text style={{ fontSize: 12, color: tc.textMuted }}>no sets logged</Text>
                       ) : (
-                        sx.sets.map((set, si) => {
+                        [...(sx.warmupSets ?? []).map(set => ({ ...set, setType: 'warmup' as const })), ...sx.sets].map((set, si) => {
                           const hasDuration = (set as any).durationSeconds != null;
                           const durMin = hasDuration ? Math.floor((set as any).durationSeconds / 60) : 0;
                           const durSec = hasDuration ? (set as any).durationSeconds % 60 : 0;
+                          const label = (set as any).setType === 'warmup' ? `W${set.setNumber}` : `Set ${set.setNumber}`;
                           const line = hasDuration
-                            ? `Set ${set.setNumber}: ${durMin}:${String(durSec).padStart(2, '0')}`
-                            : `Set ${set.setNumber}: ${set.weightLbs} lb × ${set.reps}${set.feedback ? ` · ${set.feedback}` : ''}`;
+                            ? `${label}: ${durMin}:${String(durSec).padStart(2, '0')}`
+                            : `${label}: ${set.weightLbs} lb × ${set.reps}${set.feedback ? ` · ${set.feedback}` : ''}`;
                           return (
                             <Text key={si} style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
                               {line}
@@ -5068,6 +13061,26 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          <View style={{ alignItems: 'flex-end', marginBottom: 8 }}>
+            <AnimatedPressable
+              testID="progress-edit-health"
+              accessibilityRole="button"
+              accessibilityLabel="Edit Health"
+              onPress={() => { import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); setEditHealthOpen(true); }}
+              scaleDown={0.97}
+              style={[styles.healthEditButton, { borderColor: tc.primary + '28', backgroundColor: tc.surface }]}>
+              <LinearGradient
+                pointerEvents="none"
+                colors={[tc.primary + '16', '#14B8A612', 'rgba(255,255,255,0)']}
+                locations={[0, 0.62, 1]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={StyleSheet.absoluteFill}
+              />
+              <Ionicons name="options-outline" size={15} color={tc.textSecondary} />
+              <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textSecondary }}>Edit Health</Text>
+            </AnimatedPressable>
+          </View>
           {!isProTier && (
             <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6} style={styles.vitalsCard}>
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
@@ -5080,350 +13093,218 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </FadeInView>
           )}
           {isProTier && !isHealthKitAvailable() && (
-            <View style={styles.vitalsCard}>
-              <View style={{ alignItems: 'center', paddingVertical: 12 }}>
-                <Ionicons name="heart-outline" size={34} color={tc.textMuted} />
-                <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>
-                  {HEALTH_PLATFORM_LABEL} unavailable
-                </Text>
-                <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6 }}>
-                  {HEALTH_PLATFORM_STATUS_COPY}
+            <HealthDataImageCard
+              tc={tc}
+              styles={styles}
+              title={`${HEALTH_PLATFORM_LABEL} unavailable`}
+              subtitle={HEALTH_PLATFORM_STATUS_COPY}
+              badge="Device"
+              iconName="heart-outline"
+              imageUri={HEALTH_DATA_EMPTY_IMAGE}>
+              <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+                <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 18 }}>
+                  Manual logs still work normally. Connect a supported health source when available to unlock sleep, HRV, heart, activity, and recovery signals.
                 </Text>
               </View>
+            </HealthDataImageCard>
+          )}
+
+          {healthShown('health-vitals-overview') && healthVitalsOverviewCard && (
+            <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6}>
+              {healthVitalsOverviewCard}
+            </FadeInView>
+          )}
+
+          {healthShown('health-labs') && isProTier && (
+            <View style={styles.healthLabsSection}>
+              <HealthLabsCard
+                authToken={authToken}
+                userProfile={userProfile}
+                themeName={themeName}
+                isActive={isActive && tab === 'health'}
+              />
             </View>
           )}
 
-          {/* Combined Health Score — backward-looking, requires 14 days */}
-          {isProTier && showWorkoutProgress && showMealProgress && (() => {
-            const completedWorkouts = history.filter(s => s.completed);
-            const allDates = new Set(completedWorkouts.map(s => s.date?.slice(0, 10)).filter(Boolean));
-            const daysOfData = allDates.size;
-            const DAYS_REQUIRED = 14;
-            const nutritionDays = nutritionScoreWeekly?.days_with_data ?? mealAverages?.days_with_data ?? 0;
-            const nutritionReady = !!nutritionScoreWeekly && nutritionScoreWeekly.days_with_data >= MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE;
-            const missingWorkoutDays = Math.max(0, DAYS_REQUIRED - daysOfData);
-            const missingNutritionDays = Math.max(0, MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE - nutritionDays);
+          {healthShown('metabolic-signals') && isProTier && (
+            <FadeInView delay={35} duration={TIMING_STANDARD.duration} slideDistance={6}>
+              <MetabolicSignalsCard
+                authToken={authToken}
+                themeName={themeName}
+                isActive={isActive && tab === 'health'}
+              />
+            </FadeInView>
+          )}
 
-            if (daysOfData < DAYS_REQUIRED || !nutritionReady) {
-              return (
-                <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 20, marginBottom: 14, borderWidth: 1, borderColor: tc.border, alignItems: 'center' }}>
-                  <TouchableOpacity
-                    accessibilityLabel="What is the Health Score?"
-                    onPress={() => setHealthScoreExplainOpen(true)}
-                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    style={{ position: 'absolute', top: 12, right: 12, padding: 4 }}>
-                    <Ionicons name="information-circle-outline" size={18} color={tc.textMuted} />
-                  </TouchableOpacity>
-                  <Ionicons name="heart-circle-outline" size={32} color={tc.textMuted} />
-                  <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Health Score</Text>
-                  <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginTop: 4, lineHeight: 18 }}>
-                    {missingWorkoutDays > 0 && missingNutritionDays > 0
-                      ? `${missingWorkoutDays} more training day${missingWorkoutDays === 1 ? '' : 's'} and ${missingNutritionDays} more meal day${missingNutritionDays === 1 ? '' : 's'} to unlock your score`
-                      : missingWorkoutDays > 0
-                        ? `${missingWorkoutDays} more training day${missingWorkoutDays === 1 ? '' : 's'} to unlock your score`
-                        : missingNutritionDays > 0
-                          ? `${missingNutritionDays} more meal day${missingNutritionDays === 1 ? '' : 's'} to unlock your score`
-                          : 'Waiting on the projected nutrition score before unlocking this card'}
-                  </Text>
-                  <View style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: tc.border, marginTop: 12 }}>
-                    <AnimatedProgressFill
-                      pct={Math.min(100, (daysOfData / DAYS_REQUIRED) * 100)}
-                      color={tc.primary}
-                      delay={120}
-                      style={{ height: 4, borderRadius: 2 }}
-                    />
-                  </View>
-                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
-                    Training {Math.min(daysOfData, DAYS_REQUIRED)} / {DAYS_REQUIRED} days · Nutrition {Math.min(nutritionDays, MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE)} / {MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE} days
-                  </Text>
-                </View>
+          {/* The MyFitnessPal-via-Apple-Health card moved to
+              Meals → Foods Settings (see MyFitnessPalCard) where it
+              belongs as a food-import surface. Leaving this null
+              branch so the Health tab's vertical rhythm is unchanged
+              between users who had it expanded and those who didn't. */}
+          {false && showMealProgress && isProTier && isHealthKitAvailable() && (() => {
+            const snap = appleNutritionSnapshot!;
+            const hasData = [snap.calories, snap.proteinG, snap.carbsG, snap.fatG]
+              .some(v => typeof v === 'number' && v > 0);
+            const handleConnectNutrition = () => {
+              Alert.alert(
+                'Use MyFitnessPal with Thallo',
+                'Log food in MyFitnessPal, let MyFitnessPal write nutrition summaries to Apple Health, then allow Thallo to read nutrition from Apple Health.',
+                [
+                  { text: 'Not now', style: 'cancel' },
+                  {
+                    text: 'Connect Apple Health',
+                    onPress: async () => {
+                      setHealthConnecting(true);
+                      try {
+                        const granted = await requestHealthPermissions();
+                        await persistAppleHealthEnabled(granted);
+                        setHealthEnabled(granted);
+                        if (granted) {
+                          await refreshAppleNutritionSnapshot();
+                        } else {
+                          const err = getLastHealthKitError();
+                          Alert.alert('Apple Health not connected', `${APPLE_HEALTH_PERMISSION_COPY.denied}\n\n${err ?? ''}`.trim());
+                        }
+                      } catch (e: any) {
+                        Alert.alert('Apple Health error', String(e?.message ?? e));
+                      } finally {
+                        setHealthConnecting(false);
+                      }
+                    },
+                  },
+                ],
               );
-            }
-
-            // Compute backward-looking scores
-            const targetPerWeek = userProfile.daysPerWeek || 4;
-            const expectedWorkouts = Math.round(targetPerWeek * (daysOfData / 7));
-            const workoutAdherence = expectedWorkouts > 0 ? Math.min(1, completedWorkouts.length / expectedWorkouts) : 0;
-            const activityScore = Math.round(workoutAdherence * 100);
-
-            const nutScore = nutritionScoreWeekly!.avg_score;
-            const nutDetail = `${nutritionScoreWeekly!.days_with_data}/${nutritionScoreWeekly!.window_days} meal days · projected nutrition score`;
-            const combined = Math.round(activityScore * 0.5 + nutScore * 0.5);
-            const scoreColor = combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444';
-            const rating = combined >= 80 ? 'Excellent' : combined >= 65 ? 'Good' : combined >= 45 ? 'Fair' : 'Needs work';
-
-            return (
-              <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  <Ionicons name="heart-circle-outline" size={22} color={tc.primary} />
-                  <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Health Score</Text>
-                  <TouchableOpacity
-                    accessibilityLabel="What is the Health Score?"
-                    onPress={() => setHealthScoreExplainOpen(true)}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    style={{ padding: 2, marginRight: 4 }}>
-                    <Ionicons name="information-circle-outline" size={18} color={tc.textMuted} />
-                  </TouchableOpacity>
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Text style={{ fontSize: 28, fontWeight: '900', color: scoreColor }}>{combined}</Text>
-                    <Text style={{ fontSize: 10, color: tc.textMuted }}>{rating} · {daysOfData}d data</Text>
-                  </View>
-                </View>
-                {[
-                  { label: 'Activity', value: activityScore, color: tc.primary, detail: `${completedWorkouts.length}/${expectedWorkouts} workouts` },
-                  { label: 'Nutrition', value: nutScore, color: '#22C55E', detail: nutDetail },
-                ].map(s => (
-                  <View key={s.label} style={{ marginBottom: 8 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                      <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{s.label}</Text>
-                      <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
-                        <AnimatedProgressFill
-                          pct={Math.min(100, s.value)}
-                          color={s.color}
-                          delay={s.label === 'Activity' ? 120 : 180}
-                          style={{ height: 6, borderRadius: 3 }}
-                        />
-                      </View>
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: s.color, width: 28, textAlign: 'right' }}>{s.value}</Text>
-                    </View>
-                    {s.detail ? <Text style={{ fontSize: 10, color: tc.textMuted, marginLeft: 78, marginTop: 2 }}>{s.detail}</Text> : null}
-                  </View>
-                ))}
-              </View>
-            );
-          })()}
-
-          {/* Sleep Score */}
-          {isProTier && healthEnabled && isHealthKitAvailable() && healthSummary && !healthSummary.sleepScore && (
-            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-              <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
-                <Ionicons name="moon-outline" size={16} color={tc.textMuted} />
-                <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
-                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6 }}>UNAVAILABLE</Text>
-              </View>
-              <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18 }}>
-                No sleep stages were recorded for last night. Use a sleep-capable {HEALTH_WEARABLE_LABEL} overnight, then open Thallo after {HEALTH_PLATFORM_LABEL} syncs.
-              </Text>
-            </View>
-          )}
-          {isProTier && healthSummary?.sleepScore && (() => {
-            const ss = healthSummary.sleepScore;
-            const scoreColor = ss.score >= 80 ? tc.success : ss.score >= 60 ? tc.warning : tc.error;
-            const formatHM = (hours: number) => {
-              const totalMin = Math.round(hours * 60);
-              const h = Math.floor(totalMin / 60);
-              const m = totalMin % 60;
-              if (h > 0 && m > 0) return `${h}h ${m}m`;
-              if (h > 0) return `${h}h`;
-              return `${m}m`;
             };
-            const isPersonalized = (ss as any).mode === 'personalized';
-            const pillars = (ss as any).pillars as {
-              duration: number; efficiency: number; hrv: number;
-              regularity?: number; stageComposite: number; healthFlags: number;
-            } | undefined;
-            const effRatio = (ss as any).efficiency as number | null | undefined;
-            const effPct = effRatio != null ? Math.min(100, Math.round(effRatio * 100)) : null;
-            const nightsLogged = sleepHistoryCount;
-
-            // Stage composition (single stacked bar). Awake is visually
-            // appended after the asleep stages for a "time in bed" read.
-            const totalAsleep = ss.stages.total;
-            const totalWithAwake = totalAsleep + ss.stages.awake;
-            const deepPct = totalAsleep > 0 ? (ss.stages.deep / totalAsleep) * 100 : 0;
-            const corePct = totalAsleep > 0 ? (ss.stages.core / totalAsleep) * 100 : 0;
-            const remPct  = totalAsleep > 0 ? (ss.stages.rem  / totalAsleep) * 100 : 0;
-            const awakePctOfTotal = totalWithAwake > 0 ? (ss.stages.awake / totalWithAwake) * 100 : 0;
-            const STAGE_COLOR = { deep: '#6366F1', core: '#818CF8', rem: '#A78BFA', awake: tc.error };
-
+            const openSettings = () => {
+              Linking.openURL('app-settings:').catch(() => {
+                Alert.alert('Unable to open Settings', 'Go to iPhone Settings -> Privacy & Security -> Health, then allow nutrition categories for MyFitnessPal and Thallo.');
+              });
+            };
             return (
-              <View testID="sleep-score-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
-                {/* Header: icon + title + history pill + score (score is the hero metric). */}
+              <View testID="apple-health-nutrition-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
-                  <Ionicons name="moon-outline" size={16} color="#818CF8" />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
-                  {sleepHistory.length > 0 && (
+                  <Ionicons name="restaurant-outline" size={16} color={tc.primary} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>MyFitnessPal via Apple Health</Text>
+                  {hasData ? (
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.success }}>TODAY</Text>
+                  ) : (
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted }}>OPTIONAL</Text>
+                  )}
+                </View>
+
+                {hasData ? (
+                  <>
+                    <View style={{ flexDirection: 'row', gap: 6, marginBottom: 9 }}>
+                      {[
+                        { label: 'Calories', value: snap?.calories != null ? `${snap.calories}` : 'n/a', color: tc.primary },
+                        { label: 'Protein', value: snap?.proteinG != null ? `${snap.proteinG}g` : 'n/a', color: '#22C55E' },
+                        { label: 'Carbs', value: snap?.carbsG != null ? `${snap.carbsG}g` : 'n/a', color: '#F59E0B' },
+                        { label: 'Fat', value: snap?.fatG != null ? `${snap.fatG}g` : 'n/a', color: '#A78BFA' },
+                      ].map(item => (
+                        <View key={item.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
+                          <Text style={{ fontSize: 15, fontWeight: '900', color: item.color }}>{item.value}</Text>
+                          <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, marginTop: 1 }}>{item.label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+                      These are Apple Health nutrition totals. If MyFitnessPal is connected to Apple Health, Thallo can use the summaries without asking you to relog individual foods here.
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+                      Keep logging food in MyFitnessPal. In MFP, enable HealthKit Sharing for food/nutrition; then allow Thallo to read dietary energy, protein, carbs, and fat from Apple Health.
+                    </Text>
+                    <View style={{ marginTop: 10, gap: 6 }}>
+                      {[
+                        'MyFitnessPal: More -> Settings -> Sharing & Privacy -> HealthKit Sharing',
+                        'iPhone Settings: Health -> Data Access & Devices -> MyFitnessPal',
+                        'iPhone Settings: Health -> Data Access & Devices -> Thallo',
+                      ].map(step => (
+                        <View key={step} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
+                          <Ionicons name="checkmark-circle-outline" size={14} color={tc.primary} style={{ marginTop: 1 }} />
+                          <Text style={{ flex: 1, fontSize: 11, color: tc.textMuted, lineHeight: 15 }}>{step}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </>
+                )}
+
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                  {!healthEnabled ? (
                     <TouchableOpacity
-                      accessibilityLabel="Show sleep history"
-                      onPress={() => {
-                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                        setSleepHistoryOpen(true);
-                      }}
-                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      style={{
-                        flexDirection: 'row', alignItems: 'center', gap: 4,
-                        paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999,
-                        backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
-                      }}>
-                      <Ionicons name="time-outline" size={11} color={tc.textSecondary} />
-                      <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.4, color: tc.textSecondary }}>HISTORY</Text>
+                      activeOpacity={0.85}
+                      disabled={healthConnecting}
+                      onPress={handleConnectNutrition}
+                      style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: radius.md, backgroundColor: tc.primary }}>
+                      {healthConnecting ? (
+                        <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+                      ) : (
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: getContrastingTextColor(tc.primary) }}>Connect Apple Health</Text>
+                      )}
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      disabled={appleNutritionReading}
+                      onPress={() => refreshAppleNutritionSnapshot()}
+                      style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: radius.md, backgroundColor: tc.primary }}>
+                      {appleNutritionReading ? (
+                        <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+                      ) : (
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: getContrastingTextColor(tc.primary) }}>Refresh Nutrition</Text>
+                      )}
                     </TouchableOpacity>
                   )}
-                  <Text style={{ fontSize: 28, fontWeight: '900', color: scoreColor, lineHeight: 32 }}>{ss.score}</Text>
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={openSettings}
+                    style={{ alignItems: 'center', justifyContent: 'center', minHeight: 38, paddingHorizontal: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
+                    <Ionicons name="settings-outline" size={17} color={tc.textSecondary} />
+                  </TouchableOpacity>
                 </View>
-
-                {/* Rating + total + baseline-mode pill on one compact line. */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textSecondary }}>{ss.rating}</Text>
-                  <Text style={{ fontSize: 11, color: tc.textMuted }}>· {formatHM(ss.duration)} total</Text>
-                  <View style={{ flex: 1 }} />
-                  <View style={{
-                    paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8,
-                    backgroundColor: isPersonalized ? tc.primary + '22' : tc.surfaceRaised,
-                  }}>
-                    <Text style={{
-                      fontSize: 9, fontWeight: '800', letterSpacing: 0.6,
-                      color: isPersonalized ? tc.primary : tc.textMuted,
-                    }}>
-                      {isPersonalized ? 'PERSONALIZED' : 'CALIBRATING'}
-                    </Text>
-                  </View>
-                </View>
-                <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 13, marginBottom: 10 }}>
-                  Biggest drivers: total sleep, deep and REM sleep, overnight wake-ups, and HRV when it's available.
-                </Text>
-
-                {/* Compact calibration progress (only while building baseline). */}
-                {!isPersonalized && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                  <View style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: tc.border }}>
-                      <AnimatedProgressFill
-                        pct={Math.min(100, (nightsLogged / 14) * 100)}
-                        color={tc.primary}
-                        delay={100}
-                        style={{ height: 4, borderRadius: 2 }}
-                      />
-                    </View>
-                    <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600' }}>
-                      {Math.min(14, nightsLogged)}/14 nights
-                    </Text>
-                  </View>
-                )}
-
-                {/* Single stacked stage-composition bar. Fades + slides in on mount. */}
-                <FadeInView delay={60} style={{
-                  flexDirection: 'row', height: 12, borderRadius: 6, overflow: 'hidden',
-                  backgroundColor: tc.border,
-                }}>
-                  {ss.stages.deep > 0 && (
-                    <AnimatedProgressFill pct={deepPct} color={STAGE_COLOR.deep} delay={80} style={{ height: '100%' }} />
-                  )}
-                  {ss.stages.core > 0 && (
-                    <AnimatedProgressFill pct={corePct} color={STAGE_COLOR.core} delay={130} style={{ height: '100%' }} />
-                  )}
-                  {ss.stages.rem > 0 && (
-                    <AnimatedProgressFill pct={remPct} color={STAGE_COLOR.rem} delay={180} style={{ height: '100%' }} />
-                  )}
-                </FadeInView>
-                {/* Stage legend — each row in one line. */}
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, gap: 4 }}>
-                  {[
-                    { label: 'Deep', hours: ss.stages.deep, color: STAGE_COLOR.deep, pct: deepPct },
-                    { label: 'Core', hours: ss.stages.core, color: STAGE_COLOR.core, pct: corePct },
-                    { label: 'REM',  hours: ss.stages.rem,  color: STAGE_COLOR.rem,  pct: remPct },
-                  ].map(s => (
-                    <View key={s.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingRight: 8 }}>
-                      <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: s.color }} />
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textPrimary }}>{s.label}</Text>
-                      <Text style={{ fontSize: 11, color: tc.textMuted }}>{formatHM(s.hours)} ({Math.round(s.pct)}%)</Text>
-                    </View>
-                  ))}
-                </View>
-
-                {/* Summary strip: Total · Efficiency · Awake. */}
-                <View style={{
-                  flexDirection: 'row', marginTop: 10, paddingTop: 10,
-                  borderTopWidth: 1, borderTopColor: tc.border + '55',
-                }}>
-                  <View style={{ flex: 1, alignItems: 'center' }}>
-                    <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{formatHM(ss.duration)}</Text>
-                    <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>TOTAL</Text>
-                  </View>
-                  {effPct != null && (
-                    <View style={{ flex: 1, alignItems: 'center' }}>
-                      <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{effPct}%</Text>
-                      <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>EFFICIENCY</Text>
-                    </View>
-                  )}
-                  <View style={{ flex: 1, alignItems: 'center' }}>
-                    <Text style={{ fontSize: 14, fontWeight: '800', color: ss.stages.awake > 0.5 ? tc.warning : tc.textPrimary }}>
-                      {formatHM(ss.stages.awake)}
-                      {awakePctOfTotal > 0 && <Text style={{ fontSize: 10, color: tc.textMuted }}> ({Math.round(awakePctOfTotal)}%)</Text>}
-                    </Text>
-                    <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>AWAKE</Text>
-                  </View>
-                  {isPersonalized && pillars?.regularity != null && (
-                    <View style={{ flex: 1, alignItems: 'center' }}>
-                      <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>{pillars.regularity}<Text style={{ fontSize: 10, color: tc.textMuted }}>/15</Text></Text>
-                      <Text style={{ fontSize: 9, color: tc.textMuted, letterSpacing: 0.5 }}>REGULARITY</Text>
-                    </View>
-                  )}
-                </View>
-
-                {(ss.hrvAvg != null || ss.restingHeartRate != null || ss.respiratoryRate != null || ss.oxygenSaturation != null) && (
-                  <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
-                    {ss.hrvAvg != null && (
-                      <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.hrvAvg}</Text>
-                        <Text style={{ fontSize: 9, color: tc.textMuted }}>HRV (ms)</Text>
-                      </View>
-                    )}
-                    {ss.restingHeartRate != null && (
-                      <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.restingHeartRate}</Text>
-                        <Text style={{ fontSize: 9, color: tc.textMuted }}>RHR</Text>
-                      </View>
-                    )}
-                    {ss.respiratoryRate != null && (
-                      <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.respiratoryRate}</Text>
-                        <Text style={{ fontSize: 9, color: tc.textMuted }}>Resp (brpm)</Text>
-                      </View>
-                    )}
-                    {ss.oxygenSaturation != null && (
-                      <View style={{ flex: 1, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.oxygenSaturation}%</Text>
-                        <Text style={{ fontSize: 9, color: tc.textMuted }}>SpO2</Text>
-                      </View>
-                    )}
-                  </View>
-                )}
-                {ss.insights.length > 0 && (
-                  <View style={{ marginTop: 8, gap: 4 }}>
-                    {ss.insights.map((insight, i) => (
-                      <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
-                        <Ionicons name="information-circle-outline" size={14} color={tc.textMuted} style={{ marginTop: 1 }} />
-                        <Text style={{ fontSize: 11, color: tc.textSecondary, flex: 1, lineHeight: 16 }}>{insight}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
               </View>
             );
           })()}
 
           {/* Nutrition & Gut Facts — 14-day logged-food window (facts only, no scores). */}
-          {showMealProgress && isProTier && (gutHealthWindow || mealAverages) && (
-            <View testID="nutrition-gut-facts-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
+          {healthShown('nutrition-gut') && showMealProgress && isProTier && (gutHealthWindow || mealAverages) && (
+            <View testID="nutrition-gut-facts-card" style={[styles.vitalsCard, styles.nutritionGutFactsCard, { marginTop: 0 }]}>
               <TouchableOpacity
                 testID="nutrition-gut-facts-toggle"
                 activeOpacity={0.7}
                 onPress={() => { configureExpandAnimation(300); setNutritionGutExpanded(prev => !prev); }}
               >
-                <View style={[styles.vitalsHeader, { marginBottom: nutritionGutExpanded ? 10 : 0 }]}>
-                  <Ionicons name="leaf-outline" size={16} color={tc.primary} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition & Gut Facts</Text>
-                  {gutHealthWindow && (
-                    <Text
-                      testID={`nutrition-gut-facts-days-${gutHealthWindow.days_with_data}`}
-                      style={{ fontSize: 10, color: tc.textMuted, marginRight: 6 }}>
-                      {gutHealthWindow.days_with_data}d data
-                    </Text>
-                  )}
-                  <Ionicons name={nutritionGutExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
-                </View>
+                <ImageBackground
+                  source={{ uri: NUTRITION_GUT_FACTS_IMAGE }}
+                  resizeMode="cover"
+                  imageStyle={styles.nutritionGutHeroImage}
+                  style={styles.nutritionGutHero}>
+                  <LinearGradient
+                    colors={['rgba(0,0,0,0.02)', 'rgba(0,0,0,0.58)']}
+                    style={StyleSheet.absoluteFill}
+                  />
+                  <View style={styles.nutritionGutHeroMeta}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.nutritionGutEyebrow}>Health facts</Text>
+                      <Text style={styles.nutritionGutHeroTitle} numberOfLines={1}>Nutrition & Gut Facts</Text>
+                    </View>
+                    {gutHealthWindow && (
+                      <View style={styles.nutritionGutDataPill}>
+                        <Text
+                          testID={`nutrition-gut-facts-days-${gutHealthWindow.days_with_data}`}
+                          style={styles.nutritionGutDataPillText}>
+                          {gutHealthWindow.days_with_data}d data
+                        </Text>
+                      </View>
+                    )}
+                    <Ionicons name={nutritionGutExpanded ? 'chevron-up' : 'chevron-down'} size={17} color="#FFFFFF" />
+                  </View>
+                </ImageBackground>
               </TouchableOpacity>
 
+              <View style={styles.nutritionGutFactsContent}>
               {/* Top-row averages render BEFORE expansion — gives a
                   glanceable snapshot (Fiber, Added sugar, Plants) so the
                   card has visible content even when collapsed. */}
@@ -5793,104 +13674,32 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {!gutHealthWindow && !gutInsights && (
                 <View style={{ alignItems: 'center', paddingVertical: 8 }}>
                   <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', lineHeight: 17 }}>
-                    Log meals to see weekly nutrition & gut health trends
+                    Log meals to see weekly nutrition and gut facts.
                   </Text>
                 </View>
               )}
               </>}
+              </View>
             </View>
           )}
 
-          {showMealProgress && (() => {
-            const trends = mealInsightPatterns?.adherence_trends;
-            const recent = trends?.recent;
-            if (!trends || !recent) return null;
-            const direction = String(trends.direction ?? 'steady');
-            const trendColor = direction === 'improving'
-              ? '#22C55E'
-              : direction === 'slipping'
-                ? '#F59E0B'
-                : tc.primary;
-            const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
-            const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
-            const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
-            // Sourced from the same helper as the Nutrition & Gut Facts
-            // card so the two surfaces can't drift. See progressData.ts /
-            // progressData.test.ts (the trendFactsCalorieDiff invariant).
-            // Direction + delta still come from the half-window comparison
-            // (that's what makes "improving" / "slipping" meaningful).
-            const calendarCalorieAvg = Number(mealAverages?.avg_calories ?? recent.avg_calories ?? 0);
-            const calorieAvg = mealMacroHeadline?.calories ?? headlineLoggedCalories(mealAverages as any, trends as any);
-            const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
-            return (
-              <View testID="nutrition-trend-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
-                <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
-                  <Ionicons name="trending-up-outline" size={16} color={trendColor} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition Trend</Text>
-                  <Text style={{ fontSize: 11, fontWeight: '800', color: trendColor }}>{directionLabel}</Text>
-                </View>
-                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
-                  {[
-                    { label: 'Tracked', value: `${recent.tracking_rate_pct ?? 0}%`, delta: `${trackingDelta >= 0 ? '+' : ''}${trackingDelta}%` },
-                    { label: 'Protein', value: recent.protein_hit_pct == null ? 'n/a' : `${recent.protein_hit_pct}%`, delta: proteinDelta == null ? null : `${proteinDelta >= 0 ? '+' : ''}${proteinDelta}%` },
-                    { label: 'Logged cal', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
-                  ].map(item => (
-                    <View key={item.label} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 8 }}>
-                      <Text
-                        testID={item.label === 'Logged cal' ? `nutrition-trend-logged-calories-${item.value}` : undefined}
-                        style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>
-                        {item.value}
-                      </Text>
-                      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', marginTop: 2 }}>
-                        {item.label}
-                      </Text>
-                      {item.delta != null && (
-                        <Text style={{ fontSize: 10, fontWeight: '800', color: trendColor, marginTop: 3 }}>
-                          {item.delta} vs prior
-                        </Text>
-                      )}
-                    </View>
-                  ))}
-                </View>
-                <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
-                  Logging streak {trends.current_logging_streak_days ?? 0} day{trends.current_logging_streak_days === 1 ? '' : 's'}
-                  {trends.current_protein_streak_days != null ? ` · Protein streak ${trends.current_protein_streak_days} day${trends.current_protein_streak_days === 1 ? '' : 's'}` : ''}
-                  {calendarCalorieAvg > 0 && Math.abs(calendarCalorieAvg - calorieAvg) >= 25
-                    ? ` · Calendar avg ${Math.round(calendarCalorieAvg)} cal`
-                    : ''}
-                </Text>
+          {healthShown('sun-exposure') && isProTier && (
+            <FadeInView delay={45} duration={TIMING_STANDARD.duration} slideDistance={6}>
+              <View style={styles.healthSunExposureSection}>
+                <SunExposureHealthCard
+                  authToken={authToken}
+                  themeName={themeName}
+                  isActive={isActive && tab === 'health'}
+                />
               </View>
-            );
-          })()}
-
-          {showWorkoutProgress && isProTier && isHealthKitAvailable() && (
-            <FadeInView delay={100} duration={TIMING_STANDARD.duration} slideDistance={6}>
-            <DetectedWorkoutsCard
-              themeName={userProfile.themePreference}
-              appleWorkouts={healthSummary?.workoutDetails ?? null}
-              authToken={authToken}
-              onAfterImport={() => {
-                // Reload local history so the just-imported session
-                // shows up in the streak / consistency widgets.
-                (async () => {
-                  try {
-                    const { loadWorkoutHistory } = await import('../utils/workoutHistory');
-                    const fresh = await loadWorkoutHistory();
-                    setHistory(fresh);
-                  } catch { /* non-fatal */ }
-                })();
-              }}
-            />
             </FadeInView>
           )}
-          {/* Apple Health vitals */}
-          {isProTier && isHealthKitAvailable() && (() => {
+
+          {/* Device health vitals */}
+          {healthShown('device-vitals') && isProTier && isHealthKitAvailable() && healthEnabled && !hasDisplayableHealthSummaryData(healthSummary) && !healthVitalsOverviewCard && (() => {
             const hs = healthSummary;
-            const hasAnyData = hs && (
-              hs.restingHeartRate != null || hs.avgSteps7d != null ||
-              hs.lastNightSleepHours != null ||
-              hs.activeEnergy7d != null || hs.hrvAvg != null
-            );
+            const hasAnyData = hasDisplayableHealthSummaryData(hs);
+            const availableSignals = getHealthSummarySignalAvailability(hs);
 
             const handleConnect = async () => {
               Alert.alert(
@@ -5916,15 +13725,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           import('../services/healthDataSummary')
                             .then(({ backfillSnapshotsToBackend, refreshHealthDataSummary }) => {
                               refreshHealthDataSummary({ age }).catch(() => null);
-                              backfillSnapshotsToBackend(30).catch(() => null);
+                              // 180-day backfill on first connection — UI
+                              // populates as recent chunks land; older
+                              // ones fill in over the next few seconds.
+                              backfillSnapshotsToBackend(180).catch(() => null);
                             })
                             .catch(() => null);
                         }
-                        const hasAny = fresh && (
-                          fresh.restingHeartRate != null || fresh.avgSteps7d != null ||
-                          fresh.lastNightSleepHours != null ||
-                          fresh.activeEnergy7d != null
-                        );
+                        const hasAny = hasDisplayableHealthSummaryData(fresh);
                         if (granted && !hasAny) {
                           Alert.alert('Connected — waiting for data', 'Apple Health is connected. If this card stays empty, open iPhone Settings -> Privacy & Security -> Health -> Thallo and turn on the categories you want to share.');
                         } else if (!granted) {
@@ -5950,12 +13758,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
             if (!healthEnabled) {
               return (
-                <View style={styles.vitalsCard}>
-                  <View style={{ alignItems: 'center', paddingVertical: 12 }}>
-                    <Ionicons name="heart-outline" size={36} color={tc.primary} />
-                    <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health is optional</Text>
-                    <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
-                      Optional sync for sleep, heart rate, HRV, steps, {showWorkoutProgress ? 'workouts, ' : ''}weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and cycle-aware signals.{showWorkoutProgress ? ' Thallo can also write completed workout details back to Apple Health.' : ''}
+                <HealthDataImageCard
+                  tc={tc}
+                  styles={styles}
+                  title={`${HEALTH_DATA_LABEL} is optional`}
+                  subtitle="Connect Apple Health or source apps when you want shared signals folded into Thallo."
+                  badge="Optional"
+                  iconName="heart-outline"
+                  imageUri={HEALTH_DATA_CONNECT_IMAGE}>
+                  <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+                    <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginBottom: 14 }}>
+                      Optional sync for health categories that actually have data from your iPhone, Apple Watch, or connected apps. Missing categories stay hidden until Apple Health returns samples.{showWorkoutProgress ? ' Thallo can also write completed workout details back to Apple Health.' : ''}
                     </Text>
                     <TouchableOpacity
                       style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 32 }}
@@ -5967,68 +13780,188 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 14 }}>Connect Apple Health</Text>}
                     </TouchableOpacity>
                   </View>
-                </View>
+                </HealthDataImageCard>
+              );
+            }
+
+            if (!hasAnyData && (healthReading || healthConnecting)) {
+              return (
+                <HealthDataImageCard
+                  tc={tc}
+                  styles={styles}
+                  title={`Reading ${HEALTH_DATA_LABEL}`}
+                  subtitle="Pulling shared health samples that are available on this device."
+                  badge="Syncing"
+                  iconName="sync-outline"
+                  imageUri={HEALTH_DATA_SYNC_IMAGE}>
+                  <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+                    <ActivityIndicator color={tc.primary} />
+                    <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4 }}>
+                      This can take a moment. Rows only appear for categories Apple Health returns.
+                    </Text>
+                  </View>
+                </HealthDataImageCard>
               );
             }
 
             if (!hasAnyData) {
               return (
-                <View style={styles.vitalsCard}>
-                  <View style={{ alignItems: 'center', paddingVertical: 12 }}>
-                    <Ionicons name="cloud-offline-outline" size={32} color={tc.textMuted} />
-                    <Text {...dynamicTextProps} style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>Connected, but no Health data yet</Text>
-                    <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4, marginBottom: 12 }}>
-                      Thallo still works normally. If this stays empty, open iOS Settings and make sure Sleep, Heart, Activity, Workouts, and Weight are enabled for Thallo.
+                <HealthDataImageCard
+                  tc={tc}
+                  styles={styles}
+                  title={`No ${HEALTH_DATA_LABEL.toLowerCase()} data yet`}
+                  subtitle="Connected, but Apple Health has not returned displayable samples."
+                  badge="Empty"
+                  iconName="cloud-offline-outline"
+                  imageUri={HEALTH_DATA_EMPTY_IMAGE}>
+                  <View style={{ alignItems: 'center', paddingVertical: 4 }}>
+                    <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginBottom: 12 }}>
+                      Thallo still works normally. Tap Refresh to retry, or open iOS Settings to share categories that your iPhone, Apple Watch, or connected apps are recording.
                     </Text>
-                    <TouchableOpacity
-                      style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 24 }}
-                      onPress={handleOpenSettings}
-                    >
-                      <Text style={{ color: tc.textPrimary, fontWeight: '600', fontSize: 13 }}>Open iOS Settings</Text>
-                    </TouchableOpacity>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <TouchableOpacity
+                        style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 22 }}
+                        disabled={healthConnecting}
+                        onPress={async () => {
+                          // Force a re-read. The live-load effect's
+                          // ref-guard would otherwise short-circuit
+                          // until the user navigated away and back.
+                          setHealthConnecting(true);
+                          healthLiveLoadedRef.current = false;
+                          try {
+                            const age = userProfile.physicalStats?.age ?? null;
+                            const fresh = await readFreshProgressHealthSummary(age, true);
+                            if (fresh) {
+                              healthLiveLoadedRef.current = true;
+                              setHealthSummary(fresh);
+                              saveHealthSummary(fresh).catch(() => null);
+                              loadProgressSleepHistory(authToken, fresh).then(setSleepHistory).catch(() => null);
+                            } else {
+                              Alert.alert(
+                                'No Apple Health data returned',
+                                'Apple Health did not return displayable samples this time. In iOS Settings -> Privacy & Security -> Health -> Thallo, share the categories your iPhone, Apple Watch, or connected apps are recording.',
+                              );
+                            }
+                          } finally {
+                            setHealthConnecting(false);
+                          }
+                        }}
+                      >
+                        {healthConnecting
+                          ? <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+                          : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 13 }}>Refresh</Text>}
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 22 }}
+                        onPress={handleOpenSettings}
+                      >
+                        <Text style={{ color: tc.textPrimary, fontWeight: '600', fontSize: 13 }}>iOS Settings</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
-                </View>
+                </HealthDataImageCard>
               );
             }
 
-            const vitalsRow = (icon: string, label: string, value: string | number | null, unit?: string) => (
+            // Personal RHR / HRV baselines from the persisted sleep
+            // history. Same `median` strategy the Thallo Score uses, so
+            // the chip + the recovery pillar agree on what "below
+            // baseline" means. Computed inline (not memoized) because
+            // the parent useMemo block already sees `sleepHistory` and
+            // this IIFE only runs once per render.
+            const medianOf = (xs: number[]): number | null => {
+              const valid = xs.filter(v => Number.isFinite(v) && v > 0).slice().sort((a, b) => a - b);
+              if (valid.length === 0) return null;
+              const mid = Math.floor(valid.length / 2);
+              return valid.length % 2 === 0 ? (valid[mid - 1] + valid[mid]) / 2 : valid[mid];
+            };
+            const recent30 = sleepHistory.slice(-30);
+            const rhrBaseline30 = medianOf(recent30.map(n => Number(n.restingHr ?? 0)));
+            const hrvBaseline30 = medianOf(recent30.map(n => Number(n.hrv ?? 0)));
+
+            // Trend chip — small dot + 1–3 word label after each value.
+            // `improving` is green (healthy direction), `monitor` is
+            // amber, `onTrack` is muted (not green so it doesn't
+            // gamify "everything must be green"), null hides entirely.
+            const trendChip = (result: VitalTrendResult) => {
+              if (!result.trend) return null;
+              const color =
+                result.trend === 'improving' ? '#22C55E'
+                : result.trend === 'monitor' ? '#F59E0B'
+                : tc.textMuted;
+              return (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
+                  <Text style={{ fontSize: 10, fontWeight: '600', color, letterSpacing: 0.2 }}>
+                    {result.label}
+                  </Text>
+                </View>
+              );
+            };
+
+            const vitalsRow = (
+              icon: string,
+              label: string,
+              value: string | number | null,
+              unit?: string,
+              trend?: VitalTrendResult,
+            ) => (
               <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border + '44' }}>
                 <Ionicons name={icon as any} size={18} color={tc.primary} style={{ width: 28 }} />
                 <Text style={{ fontSize: 13, color: tc.textSecondary, flex: 1 }}>{label}</Text>
-                <Text style={{ fontSize: 16, fontWeight: '700', color: value != null ? tc.textPrimary : tc.textMuted }}>
-                  {value != null ? (typeof value === 'number' ? value.toLocaleString() : value) : '—'}
-                  {value != null && unit ? <Text style={{ fontSize: 11, fontWeight: '500', color: tc.textMuted }}> {unit}</Text> : null}
-                </Text>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: value != null ? tc.textPrimary : tc.textMuted }}>
+                    {value != null ? (typeof value === 'number' ? value.toLocaleString() : value) : '—'}
+                    {value != null && unit ? <Text style={{ fontSize: 11, fontWeight: '500', color: tc.textMuted }}> {unit}</Text> : null}
+                  </Text>
+                  {trend ? trendChip(trend) : null}
+                </View>
               </View>
             );
+            const workoutCount = Array.isArray(hs?.workoutDetails) ? hs.workoutDetails.length : 0;
+            const workoutMinutes = Array.isArray(hs?.workoutDetails)
+              ? hs.workoutDetails.reduce((sum, workout) => sum + (Number(workout.duration ?? 0) || 0), 0)
+              : 0;
+            const workoutValue = workoutCount > 0
+              ? `${workoutCount} workout${workoutCount === 1 ? '' : 's'}`
+              : null;
+            const workoutUnit = workoutMinutes > 0 ? `${Math.round(workoutMinutes)} min` : undefined;
 
             return (
-              <View style={styles.vitalsCard}>
-                <View style={[styles.vitalsHeader, { marginBottom: 4 }]}>
-                  <Ionicons name="heart-outline" size={16} color={tc.primary} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
-                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Rolling 7-day snapshot</Text>
-                </View>
-                {vitalsRow('pulse-outline', 'Resting HR', hs!.restingHeartRate, 'bpm')}
-                {vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms')}
-                {vitalsRow('walk-outline', 'Steps (avg)', hs!.avgSteps7d)}
-                {vitalsRow('flame-outline', 'Active calories', hs!.activeEnergy7d, 'kcal')}
-                {vitalsRow('moon-outline', 'Sleep (avg)', hs!.avgSleepHours7d != null ? (() => {
+              <HealthDataImageCard
+                tc={tc}
+                styles={styles}
+                title={HEALTH_DATA_LABEL}
+                subtitle="Rolling 7-day snapshot from shared signals Apple Health returned."
+                badge="7D"
+                iconName="heart-outline"
+                imageUri={HEALTH_DATA_READY_IMAGE}>
+                {availableSignals.restingHeartRate && vitalsRow('pulse-outline', 'Resting HR', hs!.restingHeartRate, 'bpm',
+                  classifyRestingHeartRate(hs!.restingHeartRate, rhrBaseline30))}
+                {availableSignals.hrvAvg && vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms',
+                  classifyHrv(hs!.hrvAvg, hrvBaseline30))}
+                {availableSignals.avgSteps7d && vitalsRow('walk-outline', 'Steps (avg)', hs!.avgSteps7d, undefined,
+                  classifyAvgSteps(hs!.avgSteps7d))}
+                {availableSignals.activeEnergy7d && vitalsRow('flame-outline', 'Active calories', hs!.activeEnergy7d, 'kcal',
+                  classifyActiveEnergy(hs!.activeEnergy7d))}
+                {availableSignals.avgSleepHours7d && vitalsRow('moon-outline', 'Sleep (avg)', hs!.avgSleepHours7d != null ? (() => {
                   const total = Math.round(hs!.avgSleepHours7d! * 60);
                   const h = Math.floor(total / 60), m = total % 60;
                   return m > 0 ? `${h}h ${m}m` : `${h}h`;
-                })() : null)}
-                {hs!.vo2Max != null && vitalsRow('fitness-outline', 'VO2 Max', Math.round(hs!.vo2Max * 10) / 10, 'ml/kg/min')}
-                {hs!.respiratoryRate != null && vitalsRow('leaf-outline', 'Respiratory rate', hs!.respiratoryRate, 'brpm')}
-                {hs!.oxygenSaturation != null && vitalsRow('water-outline', 'Blood oxygen', hs!.oxygenSaturation, '%')}
-                {hs!.standingHours7d != null && vitalsRow('body-outline', 'Standing hours', hs!.standingHours7d, 'hrs')}
-                {hs!.mindfulMinutes7d != null && vitalsRow('flower-outline', 'Mindful minutes', hs!.mindfulMinutes7d, 'min')}
-                {hs!.basalEnergy7d != null && vitalsRow('flash-outline', 'Basal energy', hs!.basalEnergy7d, 'kcal')}
-              </View>
+                })() : null, undefined,
+                  classifyAvgSleepHours(hs!.avgSleepHours7d))}
+                {availableSignals.workouts && vitalsRow('fitness-outline', 'Workouts', workoutValue, workoutUnit)}
+                {availableSignals.vo2Max && vitalsRow('speedometer-outline', 'VO2 Max', Math.round(hs!.vo2Max! * 10) / 10, 'ml/kg/min')}
+                {availableSignals.respiratoryRate && vitalsRow('leaf-outline', 'Respiratory rate', hs!.respiratoryRate, 'brpm')}
+                {availableSignals.oxygenSaturation && vitalsRow('water-outline', 'Blood oxygen', hs!.oxygenSaturation, '%')}
+                {availableSignals.standingHours7d && vitalsRow('body-outline', 'Standing hours', hs!.standingHours7d, 'hrs')}
+                {availableSignals.mindfulMinutes7d && vitalsRow('flower-outline', 'Mindful minutes', hs!.mindfulMinutes7d, 'min')}
+                {availableSignals.basalEnergy7d && vitalsRow('flash-outline', 'Basal energy', hs!.basalEnergy7d, 'kcal')}
+              </HealthDataImageCard>
             );
           })()}
 
-          {/* Muscle Balance moved to Body tab */}
+          {/* Muscle Distribution moved to Body tab */}
         </ScrollView>
       ) : tab === 'body' ? (
         /* ── Body Tab ───────────────────────────────────────────────── */
@@ -6036,13 +13969,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
               all 12 muscle groups with the full expanded bars. */}
           {showWorkoutProgress && isProTier && muscleFatigue && (
-            <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
+            <RecoveryCard data={muscleFatigue as any} themeName={themeName} />
           )}
 
-          {/* Muscle Balance — volume distribution across muscle groups (14d) */}
+          {/* Muscle Distribution — volume share across muscle groups */}
           {showWorkoutProgress && isProTier && muscleBalance && muscleBalance.total_sets > 0 && (() => {
             const entries = Object.entries(muscleBalance.muscles);
+            const detailEntries = Object.entries(muscleBalance.detail_muscles ?? {});
             const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
+            const maxDetailSets = detailEntries.length ? Math.max(...detailEntries.map(([, v]) => v.sets)) : 1;
             const BALANCE_MUSCLES = new Set(['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes']);
             const balEntries = entries.filter(([m]) => BALANCE_MUSCLES.has(m));
             const avgPct = balEntries.length ? balEntries.reduce((s, [, v]) => s + v.pct, 0) / balEntries.length : 0;
@@ -6065,7 +14000,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 >
                   <View style={[styles.vitalsHeader, { marginBottom: muscleBalanceExpanded ? 12 : 0 }]}>
                     <Ionicons name="body-outline" size={16} color={tc.primary} />
-                    <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Muscle Balance</Text>
+                    <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Muscle Distribution</Text>
                     <Text style={{ fontSize: 20, fontWeight: '800', color: scoreColor }}>{score}</Text>
                     <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginLeft: 2 }}>/100</Text>
                     <Ionicons name={muscleBalanceExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} style={{ marginLeft: 6 }} />
@@ -6091,6 +14026,30 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <Text style={{ width: 36, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{Math.round(data.sets)}</Text>
                       </View>
                     ))}
+                    {detailEntries.length > 0 && (
+                      <View style={{ marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border, gap: 6 }}>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>
+                          Detailed muscles · {Math.round(muscleBalance.detail_total_sets ?? 0)} regional sets
+                        </Text>
+                        {detailEntries.map(([muscle, data], index) => (
+                          <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <Text style={{ width: 86, fontSize: 11, fontWeight: '600', color: tc.textSecondary }} numberOfLines={1}>
+                              {humanizeToken(muscle)}
+                            </Text>
+                            <View style={{ flex: 1, height: 7, borderRadius: 4, backgroundColor: tc.border }}>
+                              <AnimatedProgressFill
+                                pct={(data.sets / maxDetailSets) * 100}
+                                minPct={3}
+                                color={tc.primary}
+                                delay={staggerDelay(index, 24)}
+                                style={{ height: 7, borderRadius: 4 }}
+                              />
+                            </View>
+                            <Text style={{ width: 36, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{Math.round(data.sets)}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
                   </View>
                 )}
               </View>
@@ -6101,7 +14060,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           <FadeInView delay={60} duration={TIMING_STANDARD.duration} slideDistance={6}>
           <View
             testID="progress-weight-card"
-            style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
+            style={styles.bodyImageCard}>
+            <ImageBackground
+              source={{ uri: BODY_WEIGHT_IMAGE }}
+              style={styles.bodyImageHeader}
+              imageStyle={styles.bodyImageHeaderImage}
+            >
+              <LinearGradient
+                colors={['rgba(0,0,0,0.02)', 'rgba(0,0,0,0.36)']}
+                style={styles.bodyImageHeaderGradient}
+              />
+            </ImageBackground>
+            <View style={styles.bodyImageContent}>
             {(() => {
               const latestWeight = weightEntries[weightEntries.length - 1] ?? null;
               const displayWeight = Number(latestWeight?.weightLbs ?? currentWeight);
@@ -6230,6 +14200,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             );
                           })()}
 
+                          <WeightBodyFatTrendChart
+                            weightEntries={weightEntries}
+                            bodyScanHistory={bodyScanHistory}
+                            weightUnit={weightUnit}
+                            tc={tc}
+                            styles={styles}
+                          />
+
                           {weightEntries.slice(-10).reverse().map((e, i) => (
                             <View key={e.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
                               <Text style={{ flex: 1, fontSize: 13, color: tc.textSecondary }}>
@@ -6252,7 +14230,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                                         style: 'destructive',
                                         onPress: async () => {
                                           try {
-                                            if (authToken) await deleteWeightEntryAPI(authToken, e.date);
                                             const { deleteWeightEntry } = await import('../utils/weightHistory');
                                             const next = await deleteWeightEntry(e.date);
                                             setWeightEntries(next);
@@ -6274,16 +14251,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
                             <TouchableOpacity
                               onPress={async () => {
-                                const server = authToken ? await getWeightEntries(authToken).catch(() => null) : null;
-                                if (server != null) {
-                                  const remote = server
-                                    .map(normalizeRemoteWeightEntry)
-                                    .filter((entry): entry is import('../types').WeightEntry => entry != null)
-                                    .sort((a, b) => a.date.localeCompare(b.date));
-                                  setWeightEntries(remote);
-                                  await AsyncStorage.setItem('weightHistory', JSON.stringify(remote));
-                                  return;
-                                }
                                 const { loadWeightHistory } = await import('../utils/weightHistory');
                                 setWeightEntries(await loadWeightHistory());
                               }}
@@ -6302,7 +14269,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                                       style: 'destructive',
                                       onPress: async () => {
                                         try {
-                                          if (authToken) await clearWeightEntriesAPI(authToken);
                                           const { clearWeightHistory } = await import('../utils/weightHistory');
                                           await clearWeightHistory();
                                           setWeightEntries([]);
@@ -6365,65 +14331,89 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </>
               );
             })()}
+            </View>
           </View>
           </FadeInView>
 
           {/* Body Measurements */}
           <FadeInView delay={110} duration={TIMING_STANDARD.duration} slideDistance={6}>
-          <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Ionicons name="body-outline" size={22} color={tc.primary} />
-              <Text {...dynamicTextProps} style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Measurements</Text>
-              <TouchableOpacity
-                style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
-                onPress={() => setMeasurementsModalVisible(true)}>
-                <Ionicons name="add" size={16} color={getContrastingTextColor(tc.primary)} />
-                <Text style={{ fontSize: 13, fontWeight: '600', color: getContrastingTextColor(tc.primary) }}>Log</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={{ marginTop: 10, padding: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
-              <Text {...dynamicTextProps} style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                No measurement trend yet
-              </Text>
-              <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textMuted, marginTop: 3, lineHeight: 17 }}>
-                Log a baseline waist, chest, hips, arms, or body-fat estimate. Future logs will make body changes easier to see than scale weight alone.
-              </Text>
+          <View style={styles.bodyImageCard}>
+            <ImageBackground
+              source={bodyMeasurementsImageSource(userProfile.physicalStats?.gender)}
+              style={styles.bodyImageHeader}
+              imageStyle={styles.bodyImageHeaderImage}
+            >
+              <LinearGradient
+                colors={['rgba(0,0,0,0.02)', 'rgba(0,0,0,0.36)']}
+                style={styles.bodyImageHeaderGradient}
+              />
+            </ImageBackground>
+            <View style={styles.bodyImageContent}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="body-outline" size={22} color={tc.primary} />
+                <Text {...dynamicTextProps} style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Measurements</Text>
+                <TouchableOpacity
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
+                  onPress={() => setMeasurementsModalVisible(true)}>
+                  <Ionicons name="add" size={16} color={getContrastingTextColor(tc.primary)} />
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: getContrastingTextColor(tc.primary) }}>Log</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={{ marginTop: 10, padding: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
+                <Text {...dynamicTextProps} style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                  No measurement trend yet
+                </Text>
+                <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textMuted, marginTop: 3, lineHeight: 17 }}>
+                  Log a baseline waist, chest, hips, arms, or body-fat estimate. Future logs will make body changes easier to see than scale weight alone.
+                </Text>
+              </View>
             </View>
           </View>
           </FadeInView>
 
           {/* Scan buttons */}
           {isProTier && <FadeInView delay={160} duration={TIMING_STANDARD.duration} slideDistance={6} style={styles.bodyScanPrompt}>
-            <Ionicons name="body-outline" size={40} color={tc.primary} style={{ alignSelf: 'center' }} />
-            <Text style={styles.bodyScanPromptTitle}>Body Check</Text>
-            <Text style={styles.bodyScanPromptText}>
-              Take a front-facing photo to estimate body fat percentage, muscle mass, and get personalized feedback.
-            </Text>
-            <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
-              <AnimatedPressable
-                style={[styles.bodyScanBtn, { flex: 1 }, bodyScanLoading && { opacity: 0.55 }]}
-                onPress={() => setBodyScanPrepSource('camera')}
-                disabled={bodyScanLoading}
-                scaleDown={0.96}>
-                <View style={styles.bodyScanBtnContent}>
-                  <Ionicons name="camera-outline" size={16} color={primaryButtonTextColor} />
-                  <Text style={[styles.bodyScanBtnText, { color: primaryButtonTextColor }]}>Camera</Text>
-                </View>
-              </AnimatedPressable>
-              <AnimatedPressable
-                style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }, bodyScanLoading && { opacity: 0.55 }]}
-                onPress={() => setBodyScanPrepSource('library')}
-                disabled={bodyScanLoading}
-                scaleDown={0.96}>
-                <View style={styles.bodyScanBtnContent}>
-                  <Ionicons name="images-outline" size={16} color={tc.textPrimary} />
-                  <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}>Library</Text>
-                </View>
-              </AnimatedPressable>
+            <ImageBackground
+              source={{ uri: bodyCheckImageUri(userProfile.physicalStats?.gender) }}
+              style={styles.bodyScanPromptImage}
+              imageStyle={styles.bodyScanPromptImageStyle}
+            >
+              <LinearGradient
+                colors={['rgba(0,0,0,0.02)', 'rgba(0,0,0,0.42)']}
+                style={styles.bodyScanPromptImageGradient}
+              />
+            </ImageBackground>
+            <View style={styles.bodyScanPromptContent}>
+              <Text style={styles.bodyScanPromptTitle}>Body Check</Text>
+              <Text style={styles.bodyScanPromptText}>
+                Take a front-facing photo to estimate body fat percentage, muscle mass, and get personalized feedback.
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                <AnimatedPressable
+                  style={[styles.bodyScanBtn, { flex: 1 }, bodyScanLoading && { opacity: 0.55 }]}
+                  onPress={() => setBodyScanPrepSource('camera')}
+                  disabled={bodyScanLoading}
+                  scaleDown={0.96}>
+                  <View style={styles.bodyScanBtnContent}>
+                    <Ionicons name="camera-outline" size={16} color={primaryButtonTextColor} />
+                    <Text style={[styles.bodyScanBtnText, { color: primaryButtonTextColor }]}>Camera</Text>
+                  </View>
+                </AnimatedPressable>
+                <AnimatedPressable
+                  style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }, bodyScanLoading && { opacity: 0.55 }]}
+                  onPress={() => setBodyScanPrepSource('library')}
+                  disabled={bodyScanLoading}
+                  scaleDown={0.96}>
+                  <View style={styles.bodyScanBtnContent}>
+                    <Ionicons name="images-outline" size={16} color={tc.textPrimary} />
+                    <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}>Library</Text>
+                  </View>
+                </AnimatedPressable>
+              </View>
+              <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
+                For best results: front-facing, good lighting, form-fitting clothing. Do not submit nude photos. Accuracy varies with lighting and angle.
+              </Text>
             </View>
-            <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
-              For best results: front-facing, good lighting, form-fitting clothing. Do not submit nude photos. Accuracy varies with lighting and angle.
-            </Text>
           </FadeInView>}
 
           {/* Loading */}
@@ -6440,20 +14430,43 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <ViewShot ref={bodyScanShareRef} options={{ format: 'png', quality: 1 }}>
             <View style={styles.bodyScanResultCard}>
               <View style={styles.bodyScanResultHeader}>
-                <View>
-                  <Text style={styles.bodyScanResultCategory}>{bodyScanResult.category}</Text>
-                  <Text style={styles.bodyScanResultMuscle}>
+                <View style={{ flex: 1, marginRight: 12, minWidth: 0 }}>
+                  <Text style={styles.bodyScanResultCategory} numberOfLines={2}>{bodyScanResult.category}</Text>
+                  <Text style={styles.bodyScanResultMuscle} numberOfLines={2}>
                     Muscle mass: {bodyScanResult.muscleMass.replace('_', ' ')}
                   </Text>
                 </View>
+                {/* Show the integer percentage in the circle so a value
+                    like 18.5% doesn't wrap or get truncated inside the
+                    fixed 84pt diameter. The full-precision range still
+                    appears in the "Estimated range" line below. */}
                 <View style={styles.bodyScanBfCircle}>
-                  <Text style={styles.bodyScanBfValue}>{bodyScanResult.bodyFatPct}%</Text>
+                  <Text
+                    style={styles.bodyScanBfValue}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.7}>
+                    {Math.round(bodyScanResult.bodyFatPct)}%
+                  </Text>
                   <Text style={styles.bodyScanBfLabel}>Body Fat</Text>
                 </View>
               </View>
               <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 6 }}>
                 Estimated range: {bodyScanResult.bodyFatRange}
               </Text>
+              {(bodyScanResult.confidence || bodyScanResult.photoQuality) && (
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 6 }}>
+                  {[
+                    bodyScanResult.confidence ? `Confidence: ${String(bodyScanResult.confidence).toLowerCase()}` : null,
+                    bodyScanResult.photoQuality ? `Photo: ${String(bodyScanResult.photoQuality).toLowerCase()}` : null,
+                  ].filter(Boolean).join(' · ')}
+                </Text>
+              )}
+              {bodyScanResult.needsRetake && (
+                <Text style={{ fontSize: 11, color: tc.warning ?? tc.primary, marginBottom: 6, fontWeight: '700' }}>
+                  Retake recommended{bodyScanResult.qualityFlags?.length ? `: ${bodyScanResult.qualityFlags[0]}` : ''}
+                </Text>
+              )}
 
               <Text style={styles.bodyScanAssessment}>{bodyScanResult.assessment}</Text>
 
@@ -6491,119 +14504,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
 
-          {isProTier && bodyScanHistory.length > 0 && (() => {
-            const fmt = (d: Date) => `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
-            return (
-              <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Scan Timeline</Text>
-                  <Text style={{ fontSize: 11, color: tc.textMuted }}>{bodyScanHistory.length} saved</Text>
-                </View>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 4 }}>
-                  {bodyScanHistory.slice(0, 8).map((entry, idx) => {
-                    const d = new Date(entry.date);
-                    const prior = idx < bodyScanHistory.length - 1 ? bodyScanHistory[idx + 1] : null;
-                    const delta = prior ? (Number(entry.bodyFatPct) || 0) - (Number(prior.bodyFatPct) || 0) : null;
-                    const deltaColor = delta == null
-                      ? tc.textMuted
-                      : delta < 0 ? tc.primary : delta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
-                    return (
-                      <FadeInView
-                        key={entry.id}
-                        delay={staggerDelay(idx, 35)}
-                        duration={TIMING_STANDARD.duration}
-                        slideDistance={5}
-                        style={{
-                          width: 116,
-                          borderRadius: 12,
-                          borderWidth: 1,
-                          borderColor: idx === 0 ? tc.primary + '88' : tc.border,
-                          backgroundColor: idx === 0 ? tc.primary + '0F' : tc.surfaceRaised,
-                          padding: 8,
-                        }}>
-                        <View style={{
-                          height: 78,
-                          borderRadius: 9,
-                          overflow: 'hidden',
-                          backgroundColor: tc.surface,
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          marginBottom: 8,
-                        }}>
-                          {entry.photoUri ? (
-                            <Image source={{ uri: entry.photoUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                          ) : (
-                            <Ionicons name="body-outline" size={24} color={tc.textMuted} />
-                          )}
-                        </View>
-                        <Text style={{ fontSize: 10, fontWeight: '800', color: idx === 0 ? tc.primary : tc.textMuted, textTransform: 'uppercase' }}>
-                          {idx === 0 ? 'Latest' : fmt(d)}
-                        </Text>
-                        <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary, marginTop: 2 }}>{entry.bodyFatPct}%</Text>
-                        <Text style={{ fontSize: 10, color: deltaColor, fontWeight: '800', marginTop: 2 }}>
-                          {delta == null ? 'First scan' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)}% BF`}
-                        </Text>
-                      </FadeInView>
-                    );
-                  })}
-                </ScrollView>
+          {isProTier && bodyScanHistory.length === 1 && (
+            <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Body Scan History</Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted }}>1 saved</Text>
               </View>
-            );
-          })()}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingRight: 4 }}>
+                {bodyScanHistory.map((entry, idx) => renderBodyScanHistoryTile(entry, idx))}
+              </ScrollView>
+            </View>
+          )}
 
-          {isProTier && bodyScanHistory.length >= 2 && (() => {
-            const latest = bodyScanHistory[0];
-            const prior = bodyScanHistory[1];
-            if (!latest || !prior) return null;
-            const latestDate = new Date(latest.date);
-            const priorDate = new Date(prior.date);
-            const bfDelta = (Number(latest.bodyFatPct) || 0) - (Number(prior.bodyFatPct) || 0);
-            const deltaColor = bfDelta < 0 ? tc.primary : bfDelta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
-            const fmt = (d: Date) => `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
-            const compareTile = (entry: BodyScanEntry, label: string, date: Date) => (
-              <View style={{ flex: 1 }}>
-                <View style={{
-                  height: 150,
-                  borderRadius: 14,
-                  overflow: 'hidden',
-                  backgroundColor: tc.surfaceRaised,
-                  borderWidth: 1,
-                  borderColor: tc.border,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}>
-                  {entry.photoUri ? (
-                    <Image source={{ uri: entry.photoUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                  ) : (
-                    <View style={{ alignItems: 'center', padding: 12 }}>
-                      <Ionicons name="body-outline" size={28} color={tc.textMuted} />
-                      <Text style={{ fontSize: 11, color: tc.textMuted, textAlign: 'center', marginTop: 6 }}>Photo not stored</Text>
-                    </View>
-                  )}
-                </View>
-                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginTop: 6, textTransform: 'uppercase' }}>
-                  {label} · {fmt(date)}
-                </Text>
-                <Text style={{ fontSize: 16, fontWeight: '900', color: tc.textPrimary, marginTop: 2 }}>
-                  {entry.bodyFatPct}%
-                </Text>
-              </View>
-            );
-            return (
-              <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                  <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Before / After</Text>
-                  <Text style={{ fontSize: 11, fontWeight: '800', color: deltaColor }}>
-                    {bfDelta > 0 ? '+' : ''}{bfDelta.toFixed(1)}% BF
-                  </Text>
-                </View>
-                <View style={{ flexDirection: 'row', gap: 10 }}>
-                  {compareTile(prior, 'Before', priorDate)}
-                  {compareTile(latest, 'After', latestDate)}
-                </View>
-              </View>
-            );
-          })()}
+          {/* Standalone Scan Timeline + Before/After cards removed.
+              The scan strip is now folded into the Body Fat Trend card
+              below so the Body section reads as one consolidated card
+              instead of three competing for attention. */}
 
           {/* Timeline — body fat % chart over time. Renders only when 2+
               scans exist (a single point isn't a trend). Pure SVG, matches
@@ -6642,6 +14558,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               return { x, y, v, entry, i };
             });
             const polyPoints = points.map(p => `${p.x},${p.y}`).join(' ');
+            const areaPoints = [
+              `${points[0].x},${chartH - padB}`,
+              ...points.map(p => `${p.x},${p.y}`),
+              `${points[points.length - 1].x},${chartH - padB}`,
+            ].join(' ');
 
             const gridLines = 4;
             const gridVals = Array.from({ length: gridLines }, (_, i) =>
@@ -6684,6 +14605,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
                 <View style={{ alignItems: 'center', marginVertical: 4 }}>
                   <Svg width={chartW} height={chartH}>
+                    <Defs>
+                      <SvgLinearGradient id="bodyFatTrendAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                        <Stop offset="0%" stopColor={tc.primary} stopOpacity="0.22" />
+                        <Stop offset="62%" stopColor={tc.primary} stopOpacity="0.10" />
+                        <Stop offset="100%" stopColor={tc.primary} stopOpacity="0.02" />
+                      </SvgLinearGradient>
+                    </Defs>
                     {gridVals.map((gv, gi) => {
                       const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
                       return (
@@ -6700,6 +14628,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         </SvgText>
                       );
                     })}
+                    <Polygon points={areaPoints} fill="url(#bodyFatTrendAreaGradient)" />
                     <Polyline points={polyPoints}
                       fill="none" stroke={tc.primary} strokeWidth={2.5}
                       strokeLinejoin="round" strokeLinecap="round" />
@@ -6747,6 +14676,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                 </View>
 
+                {/* Concise scan strip — replaces the standalone Scan
+                    Timeline + Before/After cards. Photo + BF% per scan,
+                    horizontally scrollable, latest highlighted. The
+                    chart above already shows the trend; the strip just
+                    gives users a way to see the actual photos. */}
+                {bodyScanHistory.length > 0 && (
+                  <View style={{ marginTop: 14 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+                      SCANS · {bodyScanHistory.length} SAVED
+                    </Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingRight: 4 }}>
+                      {bodyScanHistory.map((entry, idx) => renderBodyScanHistoryTile(entry, idx))}
+                    </ScrollView>
+                  </View>
+                )}
+
                 {/* Muscle-mass timeline — categorical, so we render as a
                     horizontal strip of pill chips colored by tier. Lets the
                     user see "I went from average → above average" without
@@ -6784,9 +14729,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
         </ScrollView>
-      ) : null}
-      </FadeInView>
-      )}
+        ) : null}
+        </FadeInView>
+        )}
+      </TabDragWrapper>
       <Modal
         visible={quickDetailSheet != null}
         transparent
@@ -6799,21 +14745,26 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             onPress={() => setQuickDetailSheet(null)}
           />
           <View style={styles.quickDetailSheet}>
-            <View style={styles.quickDetailHandle} />
+            <BottomSheetDismissHandle
+              onClose={() => setQuickDetailSheet(null)}
+              color={tc.border}
+              containerStyle={styles.quickDetailHandleTap}
+              handleStyle={styles.quickDetailHandle}
+            />
             <View style={styles.quickDetailHeader}>
-              <View style={[styles.quickDetailIcon, { backgroundColor: (quickDetailSheet === 'forecast' ? goalForecastColor : todayTrack.color) + '20' }]}>
+              <View style={[styles.quickDetailIcon, { backgroundColor: (quickDetailSheet === 'forecast' ? todayHeroColor : todayTrack.color) + '20' }]}>
                 <Ionicons
                   name={quickDetailSheet === 'forecast' ? 'analytics-outline' : todayTrack.icon}
                   size={18}
-                  color={quickDetailSheet === 'forecast' ? goalForecastColor : todayTrack.color}
+                  color={quickDetailSheet === 'forecast' ? todayHeroColor : todayTrack.color}
                 />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.quickDetailEyebrow}>
-                  {quickDetailSheet === 'forecast' ? 'GOAL ESTIMATE' : `TODAY · ${todayTrack.goalLabel.toUpperCase()}`}
+                  {quickDetailSheet === 'forecast' ? "HOW YOU'RE DOING" : `TODAY · ${todayTrack.goalLabel.toUpperCase()}`}
                 </Text>
                 <Text style={styles.quickDetailTitle} numberOfLines={2}>
-                  {quickDetailSheet === 'forecast' && goalForecast ? goalForecast.headline : todayTrack.title}
+                  {quickDetailSheet === 'forecast' && goalScore ? 'Goal estimate' : quickDetailSheet === 'forecast' && hasGoalScoreDetail ? todayHeroTitle : todayTrack.title}
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setQuickDetailSheet(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -6822,9 +14773,56 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
 
             <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
-              {quickDetailSheet === 'forecast' && goalForecast ? (
+              {quickDetailSheet === 'forecast' && goalScore ? (
                 <>
-                  <Text style={styles.quickDetailBody}>{goalForecast.subheadline}</Text>
+                  <Text style={styles.quickDetailBody}>{goalScore.projectedOutcome.displayText}</Text>
+                  <View style={styles.quickDetailMetricRow}>
+                    <View style={styles.quickDetailMetric}>
+                      <Text style={styles.quickDetailMetricLabel}>Execution</Text>
+                      <Text style={[styles.quickDetailMetricValue, { color: goalScoreColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>{goalScore.executionScore}%</Text>
+                      <Text style={styles.quickDetailMetricDetail}>{goalScore.executionLabel}</Text>
+                    </View>
+                    <View style={styles.quickDetailMetric}>
+                      <Text style={styles.quickDetailMetricLabel}>Confidence</Text>
+                      <Text style={[styles.quickDetailMetricValue, { color: goalScoreColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>{goalScore.projectionConfidence}%</Text>
+                      <Text style={styles.quickDetailMetricDetail}>{goalScore.confidenceLabel}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.quickDetailSection}>
+                    <Text style={styles.quickDetailSectionTitle}>Projected outcome</Text>
+                    <Text style={styles.quickDetailBody}>
+                      Expected range: {goalScore.projectedOutcome.expectedLow} to {goalScore.projectedOutcome.expectedHigh} {goalScore.projectedOutcome.unit.replace(/_/g, ' ')}
+                    </Text>
+                    <Text style={styles.quickDetailMuted}>Midpoint: {goalScore.projectedOutcome.expectedMidpoint} {goalScore.projectedOutcome.unit.replace(/_/g, ' ')} · response factor {goalScore.responseFactor}</Text>
+                  </View>
+                  {goalScore.limitingFactors.length > 0 && (
+                    <View style={styles.quickDetailSection}>
+                      <Text style={styles.quickDetailSectionTitle}>Main limiter</Text>
+                      <Text style={styles.quickDetailBody}>{goalScore.limitingFactors[0].reason}</Text>
+                      <Text style={styles.quickDetailMuted}>{goalScore.limitingFactors[0].suggestedFix}</Text>
+                    </View>
+                  )}
+                  {goalScore.nextBestActions.length > 0 && (
+                    <View style={styles.quickDetailSection}>
+                      <Text style={styles.quickDetailSectionTitle}>Best next action</Text>
+                      <Text style={styles.quickDetailBody}>{goalScore.nextBestActions[0].title}</Text>
+                      <Text style={styles.quickDetailMuted}>{goalScore.nextBestActions[0].description}</Text>
+                    </View>
+                  )}
+                  <View style={styles.quickDetailSection}>
+                    <Text style={styles.quickDetailSectionTitle}>Detailed breakdown</Text>
+                    {goalScore.executionBreakdown.map(item => (
+                      <View key={item.driverId} style={styles.quickDetailRow}>
+                        <Text style={styles.quickDetailRowLabel}>{item.driverName}</Text>
+                        <Text style={styles.quickDetailRowValue}>{Math.round(item.score)} / 100</Text>
+                        <Text style={styles.quickDetailRowDetail}>{item.actualSummary || item.targetSummary}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </>
+              ) : quickDetailSheet === 'forecast' && goalForecast ? (
+                <>
+                  <Text style={styles.quickDetailBody}>{stripGoalStartedCopy(goalForecast.subheadline)}</Text>
                   <View style={styles.quickDetailMetricRow}>
                     <View style={styles.quickDetailMetric}>
                       <Text style={styles.quickDetailMetricLabel}>{goalForecast.metricLabel}</Text>
@@ -6837,11 +14835,69 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <Text style={styles.quickDetailMetricDetail}>{goalForecast.confidenceDetail}</Text>
                     </View>
                   </View>
+                  {goalProgressBar && userProfile.goalDetails.goalStartedAt && (
+                    <GoalTrajectoryChart
+                      bar={goalProgressBar}
+                      weightEntries={weightEntries}
+                      goalStartedAt={userProfile.goalDetails.goalStartedAt}
+                      weightUnit={weightUnit}
+                      width={trajectoryChartWidth}
+                      colors={{
+                        primary: tc.primary,
+                        success: tc.success ?? '#22C55E',
+                        warning: tc.warning ?? '#F59E0B',
+                        textPrimary: tc.textPrimary,
+                        textSecondary: tc.textSecondary,
+                        textMuted: tc.textMuted,
+                        surface: tc.surface,
+                        surfaceRaised: tc.surfaceRaised,
+                        border: tc.border,
+                      }}
+                    />
+                  )}
+                  {!goalProgressBar && recompTrajectory && (
+                    <RecompTrajectoryChart
+                      trajectory={recompTrajectory}
+                      width={trajectoryChartWidth}
+                      colors={{
+                        primary: tc.primary,
+                        success: tc.success ?? '#22C55E',
+                        warning: tc.warning ?? '#F59E0B',
+                        textPrimary: tc.textPrimary,
+                        textSecondary: tc.textSecondary,
+                        textMuted: tc.textMuted,
+                        surface: tc.surface,
+                        surfaceRaised: tc.surfaceRaised,
+                        border: tc.border,
+                      }}
+                    />
+                  )}
+                  {fatMassProgress && fatMassProgress.fatLostLbs != null && fatMassProgress.label && (
+                    <View style={styles.quickDetailBullet}>
+                      <Ionicons
+                        name={fatMassProgress.fatLostLbs >= 0 ? 'trending-down' : 'trending-up'}
+                        size={14}
+                        color={fatMassProgress.fatLostLbs >= 0 ? (tc.success ?? '#22C55E') : tc.textMuted}
+                      />
+                      <Text style={styles.quickDetailBulletText}>
+                        {fatMassProgress.label}
+                        {fatMassProgress.leanMassDeltaLbs != null && Math.abs(fatMassProgress.leanMassDeltaLbs) >= 0.5
+                          ? ` · lean ${fatMassProgress.leanMassDeltaLbs > 0 ? '+' : ''}${fatMassProgress.leanMassDeltaLbs.toFixed(1)} lb`
+                          : ''}
+                      </Text>
+                    </View>
+                  )}
                   <View style={styles.quickDetailSection}>
-                    <Text style={styles.quickDetailSectionTitle}>Why</Text>
+                    <Text style={styles.quickDetailSectionTitle}>Read</Text>
                     <Text style={styles.quickDetailBody}>{goalForecast.updateReason}</Text>
                     <Text style={styles.quickDetailMuted}>{goalForecast.assumption}</Text>
                   </View>
+                  {goalForecast.horizonProjection && (
+                    <View style={styles.quickDetailSection}>
+                      <Text style={styles.quickDetailSectionTitle}>Six-week projection</Text>
+                      <Text style={styles.quickDetailBody}>{goalForecast.horizonProjection.label}</Text>
+                    </View>
+                  )}
                   <View style={styles.quickDetailSection}>
                     <Text style={styles.quickDetailSectionTitle}>Signals</Text>
                     {goalForecast.stats.map(stat => (
@@ -6855,9 +14911,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {(goalForecast.drivers.length > 0 || goalForecast.limiters.length > 0) && (
                     <View style={styles.quickDetailSection}>
                       <Text style={styles.quickDetailSectionTitle}>Adjustments</Text>
-                      {[...goalForecast.drivers, ...goalForecast.limiters].slice(0, 4).map(item => (
-                        <View key={item} style={styles.quickDetailBullet}>
-                          <Ionicons name="ellipse" size={5} color={goalForecastColor} />
+                      {goalForecast.drivers.slice(0, 2).map(item => (
+                        <View key={`driver-${item}`} style={styles.quickDetailBullet}>
+                          <Ionicons name="arrow-up-circle" size={14} color={tc.success ?? '#22C55E'} />
+                          <Text style={styles.quickDetailBulletText}>{item}</Text>
+                        </View>
+                      ))}
+                      {goalForecast.limiters.slice(0, Math.max(0, 4 - Math.min(2, goalForecast.drivers.length))).map(item => (
+                        <View key={`limiter-${item}`} style={styles.quickDetailBullet}>
+                          <Ionicons name="alert-circle-outline" size={14} color={tc.warning ?? '#F59E0B'} />
                           <Text style={styles.quickDetailBulletText}>{item}</Text>
                         </View>
                       ))}
@@ -6899,102 +14961,382 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </View>
         </View>
       </Modal>
-      {/* Health Score explainer — bottom sheet patterned on
-          quickDetailSheet so the look stays consistent. Triggered by
-          the info icon in the Health Score card header. */}
+      {/* Sleep Score explainer — same quickDetailSheet pattern as the
+          Thallo Score modal above. Triggered from the info icon in
+          the card header. */}
       <Modal
-        visible={healthScoreExplainOpen}
+        visible={sleepScoreExplainOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => setHealthScoreExplainOpen(false)}>
+        onRequestClose={() => setSleepScoreExplainOpen(false)}>
         <View style={styles.quickDetailBackdrop}>
           <TouchableOpacity
             style={StyleSheet.absoluteFill}
             activeOpacity={1}
-            onPress={() => setHealthScoreExplainOpen(false)}
+            onPress={() => setSleepScoreExplainOpen(false)}
           />
           <View style={styles.quickDetailSheet}>
-            <View style={styles.quickDetailHandle} />
+            <BottomSheetDismissHandle
+              onClose={() => setSleepScoreExplainOpen(false)}
+              color={tc.border}
+              containerStyle={styles.quickDetailHandleTap}
+              handleStyle={styles.quickDetailHandle}
+            />
             <View style={styles.quickDetailHeader}>
-              <View style={[styles.quickDetailIcon, { backgroundColor: tc.primary + '20' }]}>
-                <Ionicons name="heart-circle-outline" size={18} color={tc.primary} />
+              <View style={[styles.quickDetailIcon, { backgroundColor: '#818CF822' }]}>
+                <Ionicons name="moon-outline" size={18} color="#818CF8" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.quickDetailEyebrow}>HEALTH SCORE</Text>
+                <Text style={styles.quickDetailEyebrow}>SLEEP SCORE</Text>
                 <Text style={styles.quickDetailTitle} numberOfLines={2}>How it's calculated</Text>
               </View>
-              <TouchableOpacity onPress={() => setHealthScoreExplainOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <TouchableOpacity onPress={() => setSleepScoreExplainOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Ionicons name="close" size={20} color={tc.textMuted} />
               </TouchableOpacity>
             </View>
             <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
               <Text style={styles.quickDetailBody}>
-                A 0–100 read on how your last two weeks of training and eating
-                line up with your goal. It's a backward-looking summary, not
-                a real-time signal — for "how ready am I right now?" use
-                Training Readiness on the Plan tab.
+                A 0-100 read of last night. Duration and efficiency carry
+                the most weight; deep / REM, wake time, HRV, RHR, SpO2,
+                and respiratory rate refine the read when your wearable
+                records them.
               </Text>
+
               <View style={styles.quickDetailSection}>
                 <Text style={styles.quickDetailSectionTitle}>What goes in</Text>
                 <View style={styles.quickDetailRow}>
-                  <Text style={styles.quickDetailRowLabel}>Activity (50%)</Text>
-                  <Text style={styles.quickDetailRowValue}>completed ÷ expected</Text>
+                  <Text style={styles.quickDetailRowLabel}>Duration</Text>
+                  <Text style={styles.quickDetailRowValue}>7-9h target window</Text>
                 </View>
-                <Text style={styles.quickDetailMuted}>
-                  Workouts you finished over the last 14 days vs. how many
-                  your plan called for at your weekly target. Skipped or
-                  partial sessions don't count.
-                </Text>
-                <View style={[styles.quickDetailRow, { marginTop: 10 }]}>
-                  <Text style={styles.quickDetailRowLabel}>Nutrition (50%)</Text>
-                  <Text style={styles.quickDetailRowValue}>weekly meal score</Text>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Efficiency</Text>
+                  <Text style={styles.quickDetailRowValue}>asleep ÷ time in bed</Text>
                 </View>
-                <Text style={styles.quickDetailMuted}>
-                  Server-computed average of your daily nutrition score over
-                  days you logged meals. Hits calorie + protein targets,
-                  fiber, food quality, and gut-health markers.
-                </Text>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Stages</Text>
+                  <Text style={styles.quickDetailRowValue}>deep and REM, lightly weighted</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Wake-ups</Text>
+                  <Text style={styles.quickDetailRowValue}>awake time after sleep onset</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Regularity</Text>
+                  <Text style={styles.quickDetailRowValue}>bedtime / wake-time consistency</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Vitals</Text>
+                  <Text style={styles.quickDetailRowValue}>HRV · RHR · SpO₂ · respiratory rate</Text>
+                </View>
               </View>
+
               <View style={styles.quickDetailSection}>
-                <Text style={styles.quickDetailSectionTitle}>Why 14 days?</Text>
-                <Text style={styles.quickDetailBody}>
-                  One bad week happens to everyone. Two weeks is the shortest
-                  window where the average actually reflects the habit, not
-                  a single missed gym day or a holiday weekend.
+                <Text style={styles.quickDetailSectionTitle}>Personalized vs calibrating</Text>
+                <Text style={[styles.quickDetailBody, { color: tc.textSecondary }]}>
+                  The first 14 nights use a generic baseline. After that,
+                  Thallo compares HRV, resting heart rate, and regularity
+                  against your own recent sleep pattern.
                 </Text>
               </View>
-              <View style={styles.quickDetailSection}>
-                <Text style={styles.quickDetailSectionTitle}>How to move it</Text>
-                <Text style={styles.quickDetailBody}>
-                  Hit your scheduled workouts and log your meals consistently.
-                  Both pillars weight equally — a 90 in one and a 50 in the
-                  other lands at 70 overall. Progress shows up after a few
-                  days; don't chase a 100, aim for steady ≥70.
-                </Text>
-              </View>
+
               <View style={styles.quickDetailSection}>
                 <Text style={styles.quickDetailSectionTitle}>Rating bands</Text>
                 <View style={styles.quickDetailRow}>
                   <Text style={styles.quickDetailRowLabel}>80+</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Excellent</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: tc.success }]}>Great recovery night</Text>
                 </View>
                 <View style={styles.quickDetailRow}>
-                  <Text style={styles.quickDetailRowLabel}>65–79</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Good</Text>
+                  <Text style={styles.quickDetailRowLabel}>60–79</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: tc.warning }]}>Decent — room to improve</Text>
                 </View>
                 <View style={styles.quickDetailRow}>
-                  <Text style={styles.quickDetailRowLabel}>45–64</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>Fair</Text>
+                  <Text style={styles.quickDetailRowLabel}>Below 60</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: tc.error }]}>Short / fragmented</Text>
                 </View>
-                <View style={styles.quickDetailRow}>
-                  <Text style={styles.quickDetailRowLabel}>Below 45</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#EF4444' }]}>Needs work</Text>
+              </View>
+
+              <Text style={[styles.quickDetailMuted, { marginTop: 4 }]}>
+                Sleep data comes from your wearable / phone via the
+                health platform. Missing nights show as "Unavailable"
+                and don't lower future scores.
+              </Text>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <EditTrendsSheet
+        visible={editTrendsOpen}
+        hidden={trendsHidden}
+        onSetVisible={setTrendsSectionVisible}
+        onShowAll={showAllTrends}
+        onHideAll={hideAllTrends}
+        onClose={() => setEditTrendsOpen(false)}
+        tc={tc}
+      />
+      <EditTrendsSheet
+        visible={editHighValueTrendsOpen}
+        hidden={hiddenHighValueTrendCards}
+        onSetVisible={setHighValueTrendCardVisible}
+        onShowAll={showAllHighValueTrendCards}
+        onClose={() => setEditHighValueTrendsOpen(false)}
+        tc={tc}
+        sections={highValueTrendEditSections}
+        title="Edit High-Value Trends"
+        testPrefix="edit-high-value-trends"
+        countLabel="cards"
+      />
+      <EditTrendsSheet
+        visible={editActivityHighlightsOpen}
+        hidden={hiddenActivityHighlightCards}
+        onSetVisible={setActivityHighlightCardVisible}
+        onShowAll={showAllActivityHighlightCards}
+        onClose={() => setEditActivityHighlightsOpen(false)}
+        tc={tc}
+        sections={activityHighlightEditSections}
+        title="Edit Activity Highlights"
+        testPrefix="edit-activity-highlights"
+        countLabel="cards"
+      />
+      <EditTrendsSheet
+        visible={editHealthOpen}
+        hidden={healthHidden}
+        onSetVisible={setHealthSectionVisible}
+        onShowAll={showAllHealth}
+        onClose={() => setEditHealthOpen(false)}
+        tc={tc}
+        sections={HEALTH_SECTIONS}
+        title="Edit Health"
+        testPrefix="edit-health"
+      />
+
+      {/* Relative Strength Profile detail - per-muscle strength against
+          bodyweight-relative target ranges. */}
+      <Modal
+        visible={strengthRadarDetailOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setStrengthRadarDetailOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setStrengthRadarDetailOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            <BottomSheetDismissHandle
+              onClose={() => setStrengthRadarDetailOpen(false)}
+              color={tc.border}
+              containerStyle={styles.quickDetailHandleTap}
+              handleStyle={styles.quickDetailHandle}
+            />
+            <View style={styles.quickDetailHeader}>
+              <View style={[styles.quickDetailIcon, { backgroundColor: strengthRadarColor + '20' }]}>
+                <Ionicons name="barbell-outline" size={18} color={strengthRadarColor} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.quickDetailEyebrow}>RELATIVE STRENGTH</Text>
+                <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                  {strengthRadarScore == null ? 'Building muscle profile' : `${radarScoreLabel(strengthRadarScore)} · ${strengthRadarScore}/100`}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setStrengthRadarDetailOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.quickDetailBody}>
+                This uses your best loaded strength estimate from the last 30 days for each muscle, divided by bodyweight, then compares it with a practical target for that muscle. Set-target volume still lives in Performance gauges.
+              </Text>
+              <View style={styles.quickDetailMetricRow}>
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>Score</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color: strengthRadarColor }]}>{strengthRadarScore == null ? '--' : strengthRadarScore}</Text>
+                  <Text style={styles.quickDetailMetricDetail}>average of filled axes</Text>
+                </View>
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>Bodyweight</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color: strengthRadarColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                    {strengthScoreWeightLbs ? formatWeight(strengthScoreWeightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }) : '--'}
+                  </Text>
+                  <Text style={styles.quickDetailMetricDetail}>comparison base</Text>
+                </View>
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Muscle axes</Text>
+                {strengthRadarMetrics.map(metric => {
+                  const score = clampRadarScore(metric.value);
+                  const color = score == null ? tc.textMuted : radarScoreColor(score, tc);
+                  return (
+                    <View key={metric.key} style={{ marginBottom: 12 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <Text style={{ flex: 1, fontSize: 13, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
+                          {metric.label}
+                        </Text>
+                        <Text style={{ fontSize: 13, fontWeight: '900', color, fontVariant: ['tabular-nums'] as any }}>
+                          {score == null ? '--' : score}
+                        </Text>
+                      </View>
+                      <View style={{ height: 6, borderRadius: 3, backgroundColor: tc.border, overflow: 'hidden' }}>
+                        <View style={{ width: `${score == null ? 0 : Math.max(4, score)}%` as any, height: 6, backgroundColor: color }} />
+                      </View>
+                      <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>
+                        {metric.rawValue ?? '--'} bodyweight · {metric.detail}{metric.targetLabel ? ` · ${metric.targetLabel}` : ''}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
+                        {metric.reason}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Cardio Fitness Profile detail - unpack the Trends card
+          into capability axes plus source/context signals. */}
+      <Modal
+        visible={cardioScoreDetailOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCardioScoreDetailOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setCardioScoreDetailOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            <BottomSheetDismissHandle
+              onClose={() => setCardioScoreDetailOpen(false)}
+              color={tc.border}
+              containerStyle={styles.quickDetailHandleTap}
+              handleStyle={styles.quickDetailHandle}
+            />
+            <View style={styles.quickDetailHeader}>
+              <View style={[styles.quickDetailIcon, { backgroundColor: cardioBalanceColor + '20' }]}>
+                <Ionicons name="pulse-outline" size={18} color={cardioBalanceColor} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.quickDetailEyebrow}>CARDIO FITNESS PROFILE</Text>
+                <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                  {cardioBalanceScore == null ? 'Building cardio data' : `${radarScoreLabel(cardioBalanceScore)} · ${cardioBalanceScore}/100`}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setCardioScoreDetailOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.quickDetailBody}>
+                This profile looks at aerobic base, endurance, speed,
+                intensity, efficiency, and consistency over the last 30 days.
+                Session-count-only data stays conservative until HR, pace,
+                duration, or VO2 fills in the picture.
+              </Text>
+              <View style={styles.quickDetailMetricRow}>
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>Score</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color: cardioBalanceColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                    {cardioBalanceScore == null ? '--' : cardioBalanceScore}
+                  </Text>
+                  <Text style={styles.quickDetailMetricDetail}>profile average</Text>
+                </View>
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>Sessions</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color: cardioBalanceColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                    {cardioTrendSummary.cardioSessions7d}
+                  </Text>
+                  <Text style={styles.quickDetailMetricDetail}>last 7 days</Text>
+                </View>
+              </View>
+              <View style={styles.quickDetailMetricRow}>
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>Strongest area</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color: cardioBalanceColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                    {cardioRadarInsight.enoughData && cardioRadarInsight.strongest ? cardioRadarInsight.strongest.label : 'More data'}
+                  </Text>
+                  <Text style={styles.quickDetailMetricDetail}>
+                    {cardioRadarInsight.enoughData && cardioRadarInsight.strongest ? cardioRadarInsight.strongest.reason : 'add HR, pace, or duration'}
+                  </Text>
+                </View>
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>Focus area</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color: cardioBalanceColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                    {cardioRadarInsight.enoughData && cardioRadarInsight.focus ? cardioRadarInsight.focus.label : 'Not enough data'}
+                  </Text>
+                  <Text style={styles.quickDetailMetricDetail}>
+                    {cardioRadarInsight.enoughData && cardioRadarInsight.focus ? cardioRadarInsight.focus.reason : 'session count alone is capped'}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Axes</Text>
+                {cardioRadarMetrics.map(metric => {
+                  const metricScore = clampRadarScore(metric.value);
+                  return (
+                    <View key={metric.key} style={styles.quickDetailRow}>
+                      <Text style={styles.quickDetailRowLabel}>{metric.label}</Text>
+                      <Text style={[styles.quickDetailRowValue, { color: cardioBalanceColor }]}>{metricScore == null ? '--' : metricScore}</Text>
+                      <Text style={styles.quickDetailRowDetail}>
+                        {metric.rawValue != null && metric.rawValue !== '--' ? `${metric.rawValue} · ` : ''}{metric.reason ?? metric.detail}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Data quality</Text>
+                <Text style={styles.quickDetailBody}>{cardioBalanceDetail}</Text>
+              </View>
+              {cardioActivityMix.length > 0 && (
+                <View style={styles.quickDetailSection}>
+                  <Text style={styles.quickDetailSectionTitle}>Activity mix</Text>
+                  {cardioActivityMix.map(item => (
+                    <View key={item.key} style={styles.quickDetailRow}>
+                      <Text style={styles.quickDetailRowLabel}>{item.label}</Text>
+                      <Text style={[styles.quickDetailRowValue, { color: cardioBalanceColor }]}>{item.count}</Text>
+                      <Text style={styles.quickDetailRowDetail}>session{item.count === 1 ? '' : 's'} in the last 30 days</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Detailed signals</Text>
+                {cardioScoreDrivers.length > 0 ? cardioScoreDrivers.map(item => (
+                  <View key={item.label} style={styles.quickDetailRow}>
+                    <Text style={styles.quickDetailRowLabel}>{item.label}</Text>
+                    <Text style={[styles.quickDetailRowValue, { color: cardioBalanceColor }]}>{item.value}</Text>
+                    <Text style={styles.quickDetailRowDetail}>{item.detail}</Text>
+                  </View>
+                )) : (
+                  <Text style={styles.quickDetailMuted}>
+                    Log cardio distance, pace, duration, or use a wearable during workouts to add drivers here.
+                  </Text>
+                )}
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>How to improve</Text>
+                <View style={styles.quickDetailBullet}>
+                  <Ionicons name="walk-outline" size={14} color={cardioBalanceColor} />
+                  <Text style={styles.quickDetailBulletText}>Add one easy Zone 2 session to strengthen aerobic base.</Text>
+                </View>
+                <View style={styles.quickDetailBullet}>
+                  <Ionicons name="calendar-outline" size={14} color={cardioBalanceColor} />
+                  <Text style={styles.quickDetailBulletText}>Spread cardio across 2-3 sessions so consistency is visible.</Text>
+                </View>
+                <View style={styles.quickDetailBullet}>
+                  <Ionicons name="speedometer-outline" size={14} color={cardioBalanceColor} />
+                  <Text style={styles.quickDetailBulletText}>Keep hard sessions balanced with easy work, then repeat comparable routes to reveal speed and efficiency.</Text>
                 </View>
               </View>
             </ScrollView>
           </View>
         </View>
       </Modal>
+
       {/* Strength Score detail — bottom sheet showing per-lift 1RM,
           bodyweight ratio, and target ratio so users can see exactly
           what feeds the score. Triggered from the tile on the Trends
@@ -7029,13 +15371,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               });
               const headerColor =
                 detail.band === 'elite' ? '#22C55E'
-                : detail.band === 'advanced' ? tc.primary
-                : detail.band === 'intermediate' ? '#F59E0B'
+                : detail.band === 'advanced' ? '#84CC16'
+                : detail.band === 'intermediate' ? tc.primary
+                : detail.band === 'developing' ? '#F59E0B'
                 : detail.band === 'novice' ? tc.textMuted
                 : tc.textMuted;
               return (
                 <>
-                  <View style={styles.quickDetailHandle} />
+                  <BottomSheetDismissHandle
+                    onClose={() => setStrengthScoreDetailOpen(false)}
+                    color={tc.border}
+                    containerStyle={styles.quickDetailHandleTap}
+                    handleStyle={styles.quickDetailHandle}
+                  />
                   <View style={styles.quickDetailHeader}>
                     <View style={[styles.quickDetailIcon, { backgroundColor: headerColor + '20' }]}>
                       <Ionicons name="barbell-outline" size={18} color={headerColor} />
@@ -7047,6 +15395,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           ? 'Not enough data yet'
                           : `${strengthBandLabel(detail.band)} · ${detail.score}/100`}
                       </Text>
+                      {detail.band !== 'unknown' && (
+                        <Text style={[styles.quickDetailEyebrow, { marginTop: 2, color: tc.textMuted }]} numberOfLines={1}>
+                          {detail.loggedLiftCount}/{detail.totalLiftCount} lifts · {strengthConfidenceLabel(detail.confidence).toLowerCase()} confidence
+                        </Text>
+                      )}
                     </View>
                     <TouchableOpacity onPress={() => setStrengthScoreDetailOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                       <Ionicons name="close" size={20} color={tc.textMuted} />
@@ -7058,7 +15411,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         ? (detailWeightLbs && detailWeightLbs > 0
                           ? 'Log a few key compound lifts (squat, bench, deadlift, OHP, row) and your score will appear here.'
                           : 'Set your bodyweight in Settings — strength is scored relative to it.')
-                        : `Each lift is scored as the ratio of your estimated 1RM to a typical "intermediate trainee" target for your bodyweight (${detailWeightLbs ? Math.round(detailWeightLbs) : 0} lb), capped at 130. The overall score is the average of every lift you've logged.`}
+                        : `Your score averages the best logged lift in each movement pattern: squat, hinge, horizontal push, vertical push, horizontal pull, and vertical pull. Each lift compares estimated 1RM to bodyweight. Missing patterns lower confidence, not the score.`}
                     </Text>
                     {detail.rows.length > 0 && (
                       <View style={styles.quickDetailSection}>
@@ -7066,8 +15419,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         {detail.rows.map(row => {
                           const rowColor =
                             row.band === 'elite' ? '#22C55E'
-                            : row.band === 'advanced' ? tc.primary
-                            : row.band === 'intermediate' ? '#F59E0B'
+                            : row.band === 'advanced' ? '#84CC16'
+                            : row.band === 'intermediate' ? tc.primary
+                            : row.band === 'developing' ? '#F59E0B'
                             : tc.textMuted;
                           return (
                             <View key={row.key} style={{ marginBottom: 14 }}>
@@ -7092,7 +15446,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <View style={styles.quickDetailSection}>
                         <Text style={styles.quickDetailSectionTitle}>Lifts not yet logged</Text>
                         <Text style={styles.quickDetailMuted}>
-                          Adding any of these to your training (with a logged top set) raises your score:
+                          Adding these improves coverage and may fill a missing movement pattern:
                         </Text>
                         {detail.missing.map(m => (
                           <View key={m.key} style={[styles.quickDetailRow, { paddingVertical: 4 }]}>
@@ -7106,19 +15460,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <Text style={styles.quickDetailSectionTitle}>Bands</Text>
                       <View style={styles.quickDetailRow}>
                         <Text style={styles.quickDetailRowLabel}>Elite</Text>
-                        <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>115+</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>95-100</Text>
                       </View>
                       <View style={styles.quickDetailRow}>
                         <Text style={styles.quickDetailRowLabel}>Advanced</Text>
-                        <Text style={[styles.quickDetailRowValue, { color: tc.primary }]}>90–114</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: '#84CC16' }]}>80-94</Text>
                       </View>
                       <View style={styles.quickDetailRow}>
                         <Text style={styles.quickDetailRowLabel}>Intermediate</Text>
-                        <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>60–89</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: tc.primary }]}>60-79</Text>
+                      </View>
+                      <View style={styles.quickDetailRow}>
+                        <Text style={styles.quickDetailRowLabel}>Developing</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>40-59</Text>
                       </View>
                       <View style={styles.quickDetailRow}>
                         <Text style={styles.quickDetailRowLabel}>Novice</Text>
-                        <Text style={[styles.quickDetailRowValue, { color: tc.textMuted }]}>Below 60</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: tc.textMuted }]}>Under 40</Text>
                       </View>
                     </View>
                   </ScrollView>
@@ -7128,10 +15486,657 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </View>
         </View>
       </Modal>
-      {/* Sleep history — last 30 nights as colored circles. Each
-          circle's color encodes total sleep hours; tapping a circle
-          shows its date + hours. Visualization-only; we don't have
-          per-night sleep scores in cache so duration is the proxy. */}
+      {/* Strength trend detail — per-exercise e1RM deltas over the last
+          8 weeks vs each lift's own prior logged session, so sparse
+          weekly programming still gets a fair read. Triggered from the
+          Strength row on the Trends tab. */}
+      <Modal
+        visible={strengthTrendDetailOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setStrengthTrendDetailOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setStrengthTrendDetailOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            {(() => {
+              const summary = buildStrengthTrendSummary(history, {
+                estimateSet: estimate1RM,
+                categorizeExercise,
+              });
+              const rows = summary?.rows ?? [];
+              const gains = rows.filter(r => r.deltaLbs != null && r.deltaLbs > 0.5);
+              const drops = rows.filter(r => r.deltaLbs != null && r.deltaLbs < -0.5);
+              const flat = rows.filter(r => r.deltaLbs != null && Math.abs(r.deltaLbs) <= 0.5);
+              const fresh = rows.filter(r => r.deltaLbs == null);
+              const reviewWeeks = Math.round((summary?.reviewDays ?? 56) / 7);
+              const muscleSet = new Set(
+                rows.map(r => r.primaryMuscle).filter((v): v is string => !!v),
+              );
+              const expectedMuscles = ['chest', 'back', 'shoulders', 'quads', 'hamstrings', 'glutes'];
+              const untouched = expectedMuscles.filter(m => !muscleSet.has(m));
+              const renderRow = (r: StrengthChangeRow) => {
+                const positive = (r.deltaLbs ?? 0) > 0;
+                const color = r.deltaLbs == null
+                  ? tc.textMuted
+                  : positive ? '#22C55E'
+                  : r.deltaLbs < -0.5 ? '#EF4444'
+                  : tc.textMuted;
+                const sign = (r.deltaLbs ?? 0) > 0 ? '+' : '';
+                return (
+                  <View key={r.name} style={{ marginBottom: 10 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary, flex: 1 }} numberOfLines={1}>{r.name}</Text>
+                      <Text style={{ fontSize: 14, fontWeight: '800', color, fontVariant: ['tabular-nums'] as any }}>
+                        {r.deltaLbs == null ? 'new' : `${sign}${formatWeight(Math.abs(r.deltaLbs), weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}`}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                      {r.primaryMuscle ? `${r.primaryMuscle} · ` : ''}
+                      {r.priorE1RM != null
+                        ? `${formatWeight(r.priorE1RM, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} → ${formatWeight(r.currentE1RM, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} est. 1RM${r.deltaPct != null ? ` (${r.deltaPct > 0 ? '+' : ''}${r.deltaPct}%)` : ''}`
+                        : `${formatWeight(r.currentE1RM, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} est. 1RM · no prior matched session`}
+                    </Text>
+                  </View>
+                );
+              };
+              return (
+                <>
+                  <BottomSheetDismissHandle
+                    onClose={() => setStrengthTrendDetailOpen(false)}
+                    color={tc.border}
+                    containerStyle={styles.quickDetailHandleTap}
+                    handleStyle={styles.quickDetailHandle}
+                  />
+                  <View style={styles.quickDetailHeader}>
+                    <View style={[styles.quickDetailIcon, { backgroundColor: tc.primary + '20' }]}>
+                      <Ionicons name="barbell-outline" size={18} color={tc.primary} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.quickDetailEyebrow}>STRENGTH TREND</Text>
+                      <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                        Last {reviewWeeks} weeks vs prior sessions
+                      </Text>
+                    </View>
+                    <TouchableOpacity onPress={() => setStrengthTrendDetailOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                      <Ionicons name="close" size={20} color={tc.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                  <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+                    <Text style={styles.quickDetailBody}>
+                      Estimated 1RM per compound lift, comparing your
+                      latest logged session in the last {reviewWeeks} weeks
+                      against that lift's previous logged session. The
+                      headline needs multiple matched lifts before it calls
+                      overall strength up or down.
+                    </Text>
+                    {rows.length === 0 ? (
+                      <View style={styles.quickDetailSection}>
+                        <Text style={styles.quickDetailMuted}>
+                          No loaded compound sets in the last {reviewWeeks} weeks
+                          yet. Log a working set and the breakdown will
+                          appear here.
+                        </Text>
+                      </View>
+                    ) : (
+                      <>
+                        {gains.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>Improved</Text>
+                            {gains.map(renderRow)}
+                          </View>
+                        )}
+                        {drops.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>Down vs prior session</Text>
+                            {drops.map(renderRow)}
+                          </View>
+                        )}
+                        {flat.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>Held steady</Text>
+                            {flat.map(renderRow)}
+                          </View>
+                        )}
+                        {fresh.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>New baselines</Text>
+                            <Text style={styles.quickDetailMuted}>
+                              No prior session for the same lift inside the
+                              lookback, so these set baselines without
+                              moving the overall trend.
+                            </Text>
+                            {fresh.map(renderRow)}
+                          </View>
+                        )}
+                        {untouched.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>No recent compound work</Text>
+                            <Text style={styles.quickDetailMuted}>
+                              {untouched.map(m => m[0].toUpperCase() + m.slice(1)).join(' · ')}
+                            </Text>
+                          </View>
+                        )}
+                      </>
+                    )}
+                  </ScrollView>
+                </>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+      {/* Strength volume details. Set targets answers "which muscles are
+          sets land?"; Workload answers "how much loaded lifting was done?" */}
+      <Modal
+        visible={volumeDetailMode != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setVolumeDetailMode(null)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setVolumeDetailMode(null)}
+          />
+          <View style={styles.quickDetailSheet}>
+            {(() => {
+              const vb = buildVolumeTrendBreakdown(history, progressWeekWindow.startDate);
+              const loadBalance = vb.loadBalance;
+              const tonnage = vb.tonnage;
+              const mode = volumeDetailMode ?? 'balance';
+              const isWorkload = mode === 'workload';
+              const balanceColor = strengthLoadBalanceColor(loadBalance.status, loadBalance.score);
+              const workloadColor = '#6366F1';
+              const headerColor = isWorkload ? workloadColor : balanceColor;
+              const overTargetMuscles = [...loadBalance.spikeMuscles, ...loadBalance.highMuscles];
+              const peakVolume = Math.max(1, ...tonnage.weeks.map(row => row.volumeLbs));
+              const priorVolume = tonnage.previous?.volumeLbs ?? 0;
+              const fixedWeekComparison = tonnage.bucketMode === 'fixed_week';
+              const currentWeekCopy = fixedWeekComparison
+                ? (tonnage.elapsedDays >= tonnage.windowDays ? 'this week' : `this week through day ${tonnage.elapsedDays}`)
+                : `the last ${tonnage.windowDays} days`;
+              const priorCopy = fixedWeekComparison ? 'last week at this time' : 'the prior window';
+              const vsPrior = tonnage.deltaPct != null
+                ? `${tonnage.deltaPct >= 0 ? '+' : ''}${tonnage.deltaPct}%`
+                : tonnage.deltaLbs != null
+                  ? formatSignedLoadVolume(tonnage.deltaLbs, weightUnit)
+                  : '--';
+              const workloadRead = (() => {
+                if (tonnage.current.loadedSets === 0) return 'No loaded strength sets in this window yet.';
+                if (!tonnage.previous || tonnage.previous.loadedSets === 0) return 'This is your current workload baseline.';
+                if (tonnage.deltaPct != null) {
+                  if (Math.abs(tonnage.deltaPct) <= 10) return `Workload is steady versus ${priorCopy}.`;
+                  return tonnage.deltaPct > 0
+                    ? `Workload is ahead of ${priorCopy}. Useful if recovery is good; hold steady if joints or soreness are climbing too.`
+                    : `Workload is behind ${priorCopy}. That may be recovery, missed sessions, or a lighter training block.`;
+                }
+                if (tonnage.comparison === 'insufficient_previous') return `${priorCopy[0].toUpperCase()}${priorCopy.slice(1)} was too sparse for a useful percent, so use the raw load and set count.`;
+                if (tonnage.comparison === 'absolute' && tonnage.deltaLbs != null) return 'The change was large enough that raw load is clearer than a percent.';
+                return 'No prior workload to compare yet.';
+              })();
+              const renderMetric = (label: string, value: string, detail: string, color = headerColor) => (
+                <View style={styles.quickDetailMetric}>
+                  <Text style={styles.quickDetailMetricLabel}>{label}</Text>
+                  <Text style={[styles.quickDetailMetricValue, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                    {value}
+                  </Text>
+                  <Text style={styles.quickDetailMetricDetail}>{detail}</Text>
+                </View>
+              );
+              const renderWorkloadWeekRow = (r: VolumeTrendRow, index: number) => {
+                const pct = r.volumeLbs > 0 ? Math.max(4, Math.min(100, (r.volumeLbs / peakVolume) * 100)) : 0;
+                const isCurrent = index === 0;
+                const currentLabel = r.endDate === shiftDateKey(r.startDate, tonnage.windowDays - 1)
+                  ? 'Current'
+                  : `Current through ${formatShortDateKey(r.endDate)}`;
+                return (
+                  <View key={`${r.startDate}-${r.endDate}`} style={{ marginBottom: 12 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 13, fontWeight: isCurrent ? '900' : '700', color: tc.textPrimary, flex: 1 }} numberOfLines={1}>
+                        {isCurrent ? currentLabel : `${formatShortDateKey(r.startDate)}-${formatShortDateKey(r.endDate)}`}
+                      </Text>
+                      <Text style={{ fontSize: 13, fontWeight: '900', color: isCurrent ? workloadColor : tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
+                        {formatLoadVolume(r.volumeLbs, weightUnit)}
+                      </Text>
+                    </View>
+                    <View style={{ height: 7, borderRadius: 4, backgroundColor: tc.border, overflow: 'hidden' }}>
+                      <View style={{ width: `${pct}%` as any, height: 7, backgroundColor: isCurrent ? workloadColor : tc.textMuted }} />
+                    </View>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>
+                      {formatLoadedSetCount(r.loadedSets)} · {r.sessionCount} strength session{r.sessionCount === 1 ? '' : 's'} · {formatAverageLoadPerSet(r, weightUnit)}
+                    </Text>
+                  </View>
+                );
+              };
+              const renderMuscleRow = (r: StrengthLoadMuscleSummary) => {
+                const rowColor = strengthLoadBalanceColor(r.status, r.score);
+                const max = Math.max(r.targetMax, r.currentSets, 1);
+                const pct = r.currentSets > 0
+                  ? Math.max(4, Math.min(100, (r.currentSets / max) * 100))
+                  : 0;
+                const baselineCopy = r.baselineSets > 0
+                  ? ` · ${formatSetCount(r.baselineSets)} baseline`
+                  : '';
+                return (
+                  <View key={r.muscle} style={{ marginBottom: 12 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <Text style={{ flex: 1, fontSize: 13, fontWeight: '800', color: tc.textPrimary, textTransform: 'capitalize' }} numberOfLines={1}>
+                        {r.muscle.replace(/_/g, ' ')}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: tc.textSecondary, fontVariant: ['tabular-nums'] as any }}>
+                        {formatSetCount(r.currentSets)} / {r.targetMin}-{r.targetMax}
+                      </Text>
+                      <View style={{ paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, backgroundColor: rowColor + '24', borderWidth: 1, borderColor: rowColor + '80' }}>
+                        <Text style={{ fontSize: 9, fontWeight: '900', color: rowColor, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                          {strengthLoadStatusLabel(r.status)}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={{ height: 6, borderRadius: 3, backgroundColor: tc.border, overflow: 'hidden' }}>
+                      <View style={{ width: `${pct}%` as any, height: 6, backgroundColor: rowColor }} />
+                    </View>
+                    <Text style={{ marginTop: 4, fontSize: 11, color: tc.textMuted }}>
+                      {formatSetCount(r.primarySets)} primary + {formatSetCount(r.secondarySets)} secondary credit{baselineCopy}
+                    </Text>
+                  </View>
+                );
+              };
+              return (
+                <>
+                  <BottomSheetDismissHandle
+                    onClose={() => setVolumeDetailMode(null)}
+                    color={tc.border}
+                    containerStyle={styles.quickDetailHandleTap}
+                    handleStyle={styles.quickDetailHandle}
+                  />
+                  <View style={styles.quickDetailHeader}>
+                    <View style={[styles.quickDetailIcon, { backgroundColor: headerColor + '20' }]}>
+                      <Ionicons name={isWorkload ? 'analytics-outline' : 'body-outline'} size={18} color={headerColor} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.quickDetailEyebrow}>{isWorkload ? 'WORKLOAD' : 'STRENGTH BALANCE'}</Text>
+                      <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                        {isWorkload
+                          ? `${formatLoadVolume(tonnage.current.volumeLbs, weightUnit)} ${currentWeekCopy}`
+                          : loadBalance.score == null ? 'Needs volume data' : `${loadBalance.score}/100 · weekly set targets`}
+                      </Text>
+                    </View>
+                    <TouchableOpacity onPress={() => setVolumeDetailMode(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                      <Ionicons name="close" size={20} color={tc.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                  <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+                    {tonnage.weeks.every(row => row.loadedSets === 0) ? (
+                      <View style={styles.quickDetailSection}>
+                        <Text style={styles.quickDetailMuted}>
+                          No loaded strength sets in the last {tonnage.weekCount} weeks. Finish a workout
+                          and the breakdown will appear here.
+                        </Text>
+                      </View>
+                    ) : isWorkload ? (
+                      <>
+                        <Text style={styles.quickDetailBody}>
+                          Workload is total reps times weight across loaded strength sets. The headline compares this week-to-date with last week at the same point; the chart uses fixed weekly buckets.
+                        </Text>
+                        <View style={styles.quickDetailMetricRow}>
+                          {renderMetric('Total load', formatLoadVolume(tonnage.current.volumeLbs, weightUnit), `${formatLoadedSetCount(tonnage.current.loadedSets)} this window`, workloadColor)}
+                          {renderMetric('Vs prior', vsPrior, priorVolume > 0 ? `${formatLoadVolume(priorVolume, weightUnit)} ${priorCopy}` : 'no useful prior baseline', tonnage.deltaPct == null || tonnage.deltaPct >= 0 ? workloadColor : '#EF4444')}
+                        </View>
+                        <View style={styles.quickDetailMetricRow}>
+                          {renderMetric('Sessions', `${tonnage.current.sessionCount}`, 'strength sessions counted', workloadColor)}
+                          {renderMetric('Avg / set', formatAverageLoadPerSet(tonnage.current, weightUnit), 'load divided by loaded sets', workloadColor)}
+                        </View>
+                        <View style={styles.quickDetailSection}>
+                          <Text style={styles.quickDetailSectionTitle}>Read</Text>
+                          <Text style={styles.quickDetailBody}>{workloadRead}</Text>
+                        </View>
+                        <View style={styles.quickDetailSection}>
+                          <Text style={styles.quickDetailSectionTitle}>Last {tonnage.weekCount} fixed weeks</Text>
+                          {tonnage.weeks.map(renderWorkloadWeekRow)}
+                        </View>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.quickDetailBody}>
+                          Strength Balance is weekly training-volume balance, not literal muscle strength. It compares completed hard sets against target ranges; primary muscles get full credit and secondary muscles get half credit.
+                        </Text>
+                        <View style={styles.quickDetailMetricRow}>
+                          {renderMetric('In range', `${loadBalance.inRangeMuscleCount}/${loadBalance.activeMuscleCount}`, 'active muscles in their weekly set range', balanceColor)}
+                          {renderMetric('Hard sets', `${loadBalance.current.loadedSets}`, 'working sets counted for balance', balanceColor)}
+                        </View>
+                        {loadBalance.lowMuscles.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>Needs volume</Text>
+                            <Text style={[styles.quickDetailMuted, { marginBottom: 10 }]}>
+                              Add hard sets for these muscles before the week closes.
+                            </Text>
+                            {loadBalance.lowMuscles.map(renderMuscleRow)}
+                          </View>
+                        )}
+                        {overTargetMuscles.length > 0 && (
+                          <View style={styles.quickDetailSection}>
+                            <Text style={styles.quickDetailSectionTitle}>Above target or spiking</Text>
+                            <Text style={[styles.quickDetailMuted, { marginBottom: 10 }]}>
+                              These areas are penalized for being above target or jumping sharply versus your recent baseline.
+                            </Text>
+                            {overTargetMuscles.map(renderMuscleRow)}
+                          </View>
+                        )}
+                        <View style={styles.quickDetailSection}>
+                          <Text style={styles.quickDetailSectionTitle}>
+                            All target ranges
+                          </Text>
+                          <Text style={[styles.quickDetailMuted, { marginBottom: 10 }]}>
+                            {loadBalance.detail}
+                          </Text>
+                          {loadBalance.muscles.length === 0 ? (
+                            <Text style={styles.quickDetailMuted}>
+                              Loaded sets were found, but they do not have enough muscle tags yet.
+                            </Text>
+                          ) : (
+                            loadBalance.muscles.map(renderMuscleRow)
+                          )}
+                        </View>
+                      </>
+                    )}
+                  </ScrollView>
+                </>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+      {/* Records detail — list of recent established PRs with the
+          prior best they beat. Triggered from the Records row on the
+          Trends tab. */}
+      <Modal
+        visible={recordsDetailOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRecordsDetailOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setRecordsDetailOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            {(() => {
+              const sinceMs = Date.now() - PR_MOMENTUM_WINDOW_DAYS * 86400000;
+              const records = buildRecordsBreakdown(history, prs, sinceMs);
+              return (
+                <>
+                  <BottomSheetDismissHandle
+                    onClose={() => setRecordsDetailOpen(false)}
+                    color={tc.border}
+                    containerStyle={styles.quickDetailHandleTap}
+                    handleStyle={styles.quickDetailHandle}
+                  />
+                  <View style={styles.quickDetailHeader}>
+                    <View style={[styles.quickDetailIcon, { backgroundColor: '#6366F1' + '20' }]}>
+                      <Ionicons name="trophy-outline" size={18} color="#6366F1" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.quickDetailEyebrow}>RECORDS</Text>
+                      <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                        {records.length} PR{records.length === 1 ? '' : 's'} in the last {PR_MOMENTUM_WINDOW_DAYS} days
+                      </Text>
+                    </View>
+                    <TouchableOpacity onPress={() => setRecordsDetailOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                      <Ionicons name="close" size={20} color={tc.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                  <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+                    <Text style={styles.quickDetailBody}>
+                      Records you've set after your first baseline
+                      session on each exercise. The prior best is the
+                      heaviest set you'd logged on that exercise before
+                      the PR's date.
+                    </Text>
+                    {records.length === 0 ? (
+                      <View style={styles.quickDetailSection}>
+                        <Text style={styles.quickDetailMuted}>
+                          No new records in this window yet.
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={styles.quickDetailSection}>
+                        {records.map(({ pr, priorBest }) => (
+                          <View key={`${pr.exerciseName}-${pr.date}`} style={{ marginBottom: 12 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                              <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary, flex: 1 }} numberOfLines={1}>{pr.exerciseName}</Text>
+                              <Text style={{ fontSize: 14, fontWeight: '800', color: '#6366F1', fontVariant: ['tabular-nums'] as any }}>
+                                {formatWeight(pr.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} × {pr.reps}
+                              </Text>
+                            </View>
+                            <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                              {formatDate(pr.date)}
+                              {priorBest
+                                ? ` · prior best ${formatWeight(priorBest.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} × ${priorBest.reps}`
+                                : ' · first established record'}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                  </ScrollView>
+                </>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={biometricHistoryOpen && selectedBiometricConfig != null && selectedBiometric != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setBiometricHistoryOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setBiometricHistoryOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            <BottomSheetDismissHandle
+              onClose={() => setBiometricHistoryOpen(false)}
+              color={tc.border}
+              containerStyle={styles.quickDetailHandleTap}
+              handleStyle={styles.quickDetailHandle}
+            />
+            {selectedBiometric && selectedBiometricConfig ? (
+              <>
+                <View style={styles.quickDetailHeader}>
+                  <View style={[styles.quickDetailIcon, { backgroundColor: selectedBiometricConfig.accent + '20' }]}>
+                    <Ionicons name={selectedBiometricConfig.icon} size={18} color={selectedBiometricConfig.accent} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.quickDetailEyebrow}>{selectedBiometricConfig.eyebrow.toUpperCase()}</Text>
+                    <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                      {selectedBiometricConfig.title} history
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setBiometricHistoryOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Ionicons name="close" size={20} color={tc.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.biometricWindowRow}>
+                  {biometricWindowOptions.map(days => {
+                    const active = biometricHistoryWindow === days;
+                    return (
+                      <TouchableOpacity
+                        key={days}
+                        activeOpacity={0.78}
+                        onPress={() => setBiometricHistoryWindow(days)}
+                        style={[
+                          styles.biometricWindowButton,
+                          {
+                            backgroundColor: active ? selectedBiometricConfig.accent + '18' : tc.surfaceRaised,
+                            borderColor: active ? selectedBiometricConfig.accent + '66' : tc.border,
+                          },
+                        ]}
+                      >
+                        <Text style={[styles.biometricWindowButtonText, { color: active ? selectedBiometricConfig.accent : tc.textSecondary }]}>
+                          {days}D
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {dailyHealthHistoryLoading && biometricHistoryPoints.length === 0 ? (
+                  <View style={styles.biometricLoadingRow}>
+                    <ActivityIndicator color={selectedBiometricConfig.accent} />
+                    <Text style={[styles.quickDetailBody, { flex: 1 }]}>Loading history...</Text>
+                  </View>
+                ) : biometricHistoryPoints.length > 0 ? (
+                  <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+                    <View style={styles.quickDetailMetricRow}>
+                      <View style={styles.quickDetailMetric}>
+                        <Text style={styles.quickDetailMetricLabel}>Latest</Text>
+                        <Text style={[styles.quickDetailMetricValue, { color: selectedBiometricConfig.accent }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                          {formatBiometricValue(selectedBiometric, biometricLatestPoint?.value)}
+                        </Text>
+                        <Text style={styles.quickDetailMetricDetail}>
+                          {biometricLatestPoint ? formatDate(`${biometricLatestPoint.date}T12:00:00`) : 'latest sample'}
+                        </Text>
+                      </View>
+                      <View style={styles.quickDetailMetric}>
+                        <Text style={styles.quickDetailMetricLabel}>Average</Text>
+                        <Text style={[styles.quickDetailMetricValue, { color: selectedBiometricConfig.accent }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                          {formatBiometricValue(selectedBiometric, biometricAverage)}
+                        </Text>
+                        <Text style={styles.quickDetailMetricDetail}>
+                          {biometricHistoryPoints.length} logged day{biometricHistoryPoints.length === 1 ? '' : 's'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.quickDetailMetricRow}>
+                      <View style={styles.quickDetailMetric}>
+                        <Text style={styles.quickDetailMetricLabel}>Change</Text>
+                        <Text style={[styles.quickDetailMetricValue, { color: biometricTrendColor }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                          {biometricDelta == null ? '--' : formatBiometricDelta(selectedBiometric, biometricDelta)}
+                        </Text>
+                        <Text style={styles.quickDetailMetricDetail}>
+                          {selectedBiometricConfig.better === 'lower'
+                            ? 'lower is generally better'
+                            : selectedBiometricConfig.better === 'higher'
+                              ? 'higher is generally better'
+                              : 'trend context'}
+                        </Text>
+                      </View>
+                      <View style={styles.quickDetailMetric}>
+                        <Text style={styles.quickDetailMetricLabel}>Range</Text>
+                        <Text style={[styles.quickDetailMetricValue, { color: selectedBiometricConfig.accent }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                          {formatBiometricValue(selectedBiometric, biometricChartMin, false)}-{formatBiometricValue(selectedBiometric, biometricChartMax)}
+                        </Text>
+                        <Text style={styles.quickDetailMetricDetail}>visible window</Text>
+                      </View>
+                    </View>
+                    <View style={[styles.biometricChartCard, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+                      <View style={styles.biometricChartScaleRow}>
+                        <Text style={[styles.biometricChartScaleText, { color: tc.textMuted }]}>
+                          {formatBiometricValue(selectedBiometric, biometricChartMax)}
+                        </Text>
+                        {dailyHealthHistoryLoading ? <ActivityIndicator color={selectedBiometricConfig.accent} size="small" /> : null}
+                        <Text style={[styles.biometricChartScaleText, { color: tc.textMuted }]}>
+                          {formatBiometricValue(selectedBiometric, biometricChartMin)}
+                        </Text>
+                      </View>
+                      {(() => {
+                        const accent = selectedBiometricConfig.accent;
+                        const pts = biometricHistoryPoints;
+                        const n = pts.length;
+                        const spacing = 46;
+                        const padL = 24;
+                        const padR = 24;
+                        const padT = 24;
+                        const padB = 26;
+                        const chartH = 168;
+                        const plotH = chartH - padT - padB;
+                        const chartW = Math.max(280, padL + padR + Math.max(1, n - 1) * spacing);
+                        const coords = pts.map((point, i) => {
+                          const pctY = (point.value - biometricChartMin) / biometricChartSpan;
+                          const x = n > 1 ? padL + i * spacing : chartW / 2;
+                          const y = padT + plotH - pctY * plotH;
+                          return { x, y, point };
+                        });
+                        const linePts = coords.map(co => `${co.x},${co.y}`).join(' ');
+                        const gridYs = [0, 0.5, 1].map(f => padT + plotH - f * plotH);
+                        return (
+                          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 4 }}>
+                            <Svg width={chartW} height={chartH}>
+                              {gridYs.map((gy, gi) => (
+                                <Line key={`grid-${gi}`} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
+                                  stroke={tc.border} strokeWidth={1} strokeDasharray="4,5" opacity={0.5} />
+                              ))}
+                              {coords.length >= 2 && (
+                                <Polyline points={linePts} fill="none" stroke={accent} strokeWidth={2.5}
+                                  strokeLinejoin="round" strokeLinecap="round" />
+                              )}
+                              {coords.map((co, i) => (
+                                <Circle key={`dot-${i}`} cx={co.x} cy={co.y}
+                                  r={i === coords.length - 1 ? 4.5 : 3}
+                                  fill={accent} stroke={tc.surfaceRaised} strokeWidth={1.5} />
+                              ))}
+                              {coords.map((co, i) => (
+                                <SvgText key={`val-${i}`} x={co.x} y={co.y - 9}
+                                  fontSize={9} fontWeight="800" fill={accent} textAnchor="middle">
+                                  {formatBiometricValue(selectedBiometric, co.point.value, false)}
+                                </SvgText>
+                              ))}
+                              {coords.map((co, i) => (
+                                <SvgText key={`date-${i}`} x={co.x} y={chartH - 8}
+                                  fontSize={8} fontWeight="700" fill={tc.textMuted} textAnchor="middle">
+                                  {co.point.date.slice(5).replace('-', '/')}
+                                </SvgText>
+                              ))}
+                            </Svg>
+                          </ScrollView>
+                        );
+                      })()}
+                    </View>
+                    <View style={[styles.biometricReadingList, { borderColor: tc.border, backgroundColor: tc.surfaceRaised }]}>
+                      <View style={[styles.biometricReadingHeader, { borderBottomColor: tc.border }]}>
+                        <Text style={[styles.biometricReadingHeaderText, { color: tc.textMuted }]}>READINGS</Text>
+                        <Text style={[styles.biometricReadingHeaderMeta, { color: tc.textMuted }]}>
+                          {biometricHistoryWindow}D
+                        </Text>
+                      </View>
+                      {biometricReadingRows.map((point, index) => (
+                        <View
+                          key={`${point.date}-${point.value}-${index}`}
+                          style={[
+                            styles.biometricReadingRow,
+                            {
+                              borderBottomColor: tc.border + '66',
+                              borderBottomWidth: index === biometricReadingRows.length - 1 ? 0 : StyleSheet.hairlineWidth,
+                            },
+                          ]}>
+                          <Text style={[styles.biometricReadingDate, { color: tc.textSecondary }]} numberOfLines={1}>
+                            {formatDate(`${point.date}T12:00:00`)}
+                          </Text>
+                          <Text style={[styles.biometricReadingValue, { color: selectedBiometricConfig.accent }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+                            {formatBiometricValue(selectedBiometric, point.value)}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </ScrollView>
+                ) : (
+                  <View style={styles.biometricEmptyState}>
+                    <Text style={[styles.quickDetailBody, { textAlign: 'center' }]}>{selectedBiometricConfig.empty}</Text>
+                  </View>
+                )}
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+      {/* Sleep history — last 30 nights as colored score circles. */}
       <Modal
         visible={sleepHistoryOpen}
         transparent
@@ -7144,7 +16149,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             onPress={() => setSleepHistoryOpen(false)}
           />
           <View style={styles.quickDetailSheet}>
-            <View style={styles.quickDetailHandle} />
+            <BottomSheetDismissHandle
+              onClose={() => setSleepHistoryOpen(false)}
+              color={tc.border}
+              containerStyle={styles.quickDetailHandleTap}
+              handleStyle={styles.quickDetailHandle}
+            />
             <View style={styles.quickDetailHeader}>
               <View style={[styles.quickDetailIcon, { backgroundColor: '#818CF8' + '20' }]}>
                 <Ionicons name="moon-outline" size={18} color="#818CF8" />
@@ -7171,46 +16181,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={styles.quickDetailSectionTitle}>Nights</Text>
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
                   {(() => {
-                    // Build rolling baselines from the loaded history so
-                    // each night's score uses the personalized HRV /
-                    // bedtime baseline when 14+ nights are available.
                     const ageForScore = userProfile?.physicalStats?.age ?? null;
-                    const hrvHistory = sleepHistory.map(n => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
-                    const rhrHistory = sleepHistory.map(n => n.restingHr).filter((v): v is number => typeof v === 'number' && v > 0);
-                    const respHistory = sleepHistory.map(n => n.respiratoryRate).filter((v): v is number => typeof v === 'number' && v > 0);
-                    const spo2History = sleepHistory.map(n => n.spo2Percent).filter((v): v is number => typeof v === 'number' && v > 0);
-                    const bedtimeHistory = sleepHistory.map(n => n.bedtimeMinutes).filter((v): v is number => typeof v === 'number' && v >= 0);
 
                     return sleepHistory.map((n, i) => {
-                      const score = (n.sleepHours != null && n.sleepHours >= 0.5) ? scoreSleep({
-                        totalSleepHours: n.sleepHours,
-                        // Stage / inBed detail isn't persisted per night.
-                        // scoreSleep applies neutral fallbacks for these,
-                        // and the score caps still penalize short or
-                        // recovery-flagged nights so the ribbon's color
-                        // tracks the today-card's logic as closely as
-                        // the persisted data allows.
-                        inBedMinutes: null,
-                        deepSleepHours: null,
-                        remSleepHours: null,
-                        hrvMs: n.hrv,
-                        restingHeartRate: n.restingHr,
-                        spo2Percent: n.spo2Percent,
-                        respiratoryRate: n.respiratoryRate,
-                        age: ageForScore,
-                        hrvHistory,
-                        rhrHistory,
-                        respiratoryRateHistory: respHistory,
-                        spo2History,
-                        bedtimeHistory,
-                      }) : null;
-                      // No score → grey "—" circle. Mirrors the user's
-                      // ask: "if there is no data or not enough data
-                      // leave grey circle n/a".
+                      const score = sleepHistoryDotScore(n, i, sleepHistory, ageForScore);
                       const fill = score == null
                         ? null
-                        : score.score >= 80 ? '#22C55E'
-                        : score.score >= 60 ? '#F59E0B'
+                        : score >= 80 ? '#22C55E'
+                        : score >= 60 ? '#F59E0B'
                         : '#EF4444';
                       return (
                         <View key={`${n.night}-${i}`} style={{ alignItems: 'center', gap: 3 }}>
@@ -7225,7 +16203,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                               fontSize: 9, fontWeight: '900',
                               color: fill ? '#FFFFFF' : tc.textMuted,
                             }} numberOfLines={1}>
-                              {score ? score.score : '—'}
+                              {score ?? '—'}
                             </Text>
                           </View>
                           <Text style={{ fontSize: 8, color: tc.textMuted, fontVariant: ['tabular-nums'] as any }} numberOfLines={1}>
@@ -7309,11 +16287,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   const { saveWeightEntry } = await import('../utils/weightHistory');
                   const updated = await saveWeightEntry(canonicalLbs, 'manual');
                   setWeightEntries(updated);
-                  const latest = updated[updated.length - 1];
-                  if (authToken && latest) {
-                    await saveWeightEntryAPI(authToken, latest.date, latest.weightLbs, 'manual', latest.loggedAt ?? new Date().toISOString())
-                      .catch((e) => console.warn('[Progress] weight sync failed:', e?.message ?? e));
-                  }
                   setWeightInputVisible(false);
                   if (onUpdateWeight) onUpdateWeight(canonicalLbs);
                   import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
@@ -7401,6 +16374,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         onClose={() => setShowLogActivity(false)}
         themeName={themeName}
         authToken={hasServerProTier ? authToken : null}
+        bodyweightLbs={userProfile.physicalStats?.weightLbs ?? null}
         onSave={async (session) => {
           await saveWorkoutSession(session);
           const sessionDate = dateKey(new Date(session.date));
@@ -7411,34 +16385,57 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           }
           if (authToken) {
             try {
-              const { logWorkoutDone } = await import('../services/api');
-              await logWorkoutDone(
-                authToken, sessionDate, session.focus, session.durationSeconds,
-                undefined,
-                session.manualActivity ? {
-                  category: session.manualActivity.category,
-                  subtype: session.manualActivity.subtype,
-                  intensity: session.manualActivity.intensity,
-                  source: session.manualActivity.source,
-                  cardioStyle: session.manualActivity.cardioStyle,
-                  distanceMiles: session.manualActivity.distanceMiles,
-                  caloriesBurned: session.manualActivity.caloriesBurned,
-                  avgHeartRate: session.manualActivity.avgHeartRate,
-                } : undefined,
-                undefined,
-                undefined,
-                undefined,
+              await completeWorkoutWithOfflineQueue(
+                authToken,
                 {
-                  startedAt: session.startedAt ?? session.date,
-                  endedAt: session.endedAt ?? null,
-                  externalSourceId: session.id,
+                  workout_date: sessionDate,
+                  focus_label: session.focus,
+                  duration_seconds: session.durationSeconds,
+                  activity: session.manualActivity ? {
+                    category: session.manualActivity.category,
+                    subtype: session.manualActivity.subtype,
+                    intensity: session.manualActivity.intensity,
+                    source: session.manualActivity.source,
+                    cardioStyle: session.manualActivity.cardioStyle,
+                    distanceMiles: session.manualActivity.distanceMiles,
+                    caloriesBurned: session.manualActivity.caloriesBurned,
+                    avgHeartRate: session.manualActivity.avgHeartRate,
+                    details: session.manualActivity.details,
+                    routeCoords: session.manualActivity.routeCoords,
+                  } : undefined,
+                  healthMetrics: appleHealthMetricsFromWorkoutSession(session),
+                  source: {
+                    sourceContext: session.manualActivity?.source === 'apple_health' ? 'apple_health' : undefined,
+                    startedAt: session.startedAt ?? session.date,
+                    endedAt: session.endedAt ?? null,
+                    externalSourceId: session.id,
+                  },
                 },
+                session,
               );
             } catch {}
           }
           const [h, s] = await Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()]);
           setHistory(h);
           setSummaries(s);
+          import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+        }}
+      />
+      <AppleHealthWorkoutAttachModal
+        visible={appleHealthAttachSession != null}
+        session={appleHealthAttachSession}
+        authToken={authToken}
+        themeName={themeName}
+        distanceUnit={distanceUnit}
+        age={userProfile.physicalStats?.age ?? null}
+        onClose={() => setAppleHealthAttachSession(null)}
+        onAssigned={async () => {
+          const [h, s] = await Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()]);
+          setHistory(h);
+          setSummaries(s);
+          if (authToken) {
+            getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
+          }
           import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
         }}
       />
@@ -7489,7 +16486,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   );
 }
 
-function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
+function createStyles(colors: ReturnType<typeof getTheme>['colors'], webMode = false) { return StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   inlineContainer: { backgroundColor: 'transparent' },
   header: {
@@ -7512,11 +16509,51 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   tabText:       { ...typography.label, color: colors.textSecondary, opacity: 0.6 },
   tabTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
 
+  // Labeled pill tabs — evenly spaced across the row, centered text.
+  // Replaces the segmented bar with a row of equal-width pills so each
+  // section has the same hit target.
+  tabPillRow: {
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: webMode ? 16 : 12,
+    marginTop: webMode ? 12 : 10,
+    marginBottom: webMode ? 10 : 8,
+    width: webMode ? '100%' : undefined,
+    maxWidth: webMode ? 980 : undefined,
+    alignSelf: webMode ? 'center' : undefined,
+  },
+  tabPillBtn: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 34,
+    paddingHorizontal: 2,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabPillText: {
+    fontSize: 11,
+    lineHeight: 14,
+    letterSpacing: 0,
+    fontWeight: '800',
+    textAlign: 'center',
+    maxWidth: '100%',
+  },
+
   center:  { flex: 1, justifyContent: 'center', alignItems: 'center' },
   // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px +
   // safe area). Otherwise the bottom of the content (sign-out,
   // delete-last-entry, etc.) sits under the tab bar.
-  content: { padding: 16, paddingBottom: 140, paddingTop: 12 },
+  content: {
+    padding: webMode ? 16 : 16,
+    paddingBottom: webMode ? 44 : 140,
+    paddingTop: webMode ? 12 : 12,
+    width: webMode ? '100%' : undefined,
+    maxWidth: webMode ? 980 : undefined,
+    alignSelf: webMode ? 'center' : undefined,
+  },
 
   sectionLabel: {
     ...typography.label,
@@ -7641,11 +16678,682 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginBottom: 12,
     ...elevations.subtle,
   },
+  todayHeroCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    overflow: 'hidden',
+    marginBottom: 12,
+    ...elevations.subtle,
+  },
+  todayHeroImageWrap: {
+    height: 132,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  todayHeroImage: {
+    borderTopLeftRadius: radius.lg,
+    borderTopRightRadius: radius.lg,
+  },
+  todayHeroImageMeta: {
+    padding: 13,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+  todayHeroImageEyebrow: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: '#FFFFFF',
+  },
+  todayHeroImageGoal: {
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    marginTop: 2,
+  },
+  todayHeroImagePillText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: '#FFFFFF',
+  },
+  todayHeroContent: {
+    padding: 14,
+  },
+  todayHeroTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  todayHeroIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todayHeroEyebrow: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  todayHeroGoal: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 1,
+  },
+  todayHeroPill: {
+    maxWidth: 112,
+    minHeight: 28,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todayHeroPillText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  todayHeroBody: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  todayHeroHeadline: {
+    fontSize: 20,
+    lineHeight: 25,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  todayHeroSubheadline: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.textSecondary,
+    marginTop: 5,
+  },
+  todayHeroScoreBubble: {
+    width: 88,
+    minHeight: 88,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  todayHeroScoreValue: {
+    fontSize: 24,
+    lineHeight: 29,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  todayHeroScoreLabel: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    marginTop: 2,
+  },
+  todayHeroTrack: {
+    height: 8,
+    borderRadius: radius.full,
+    overflow: 'visible',
+    position: 'relative',
+    backgroundColor: colors.border,
+    marginTop: 13,
+  },
+  todayHeroFill: {
+    height: '100%',
+    borderRadius: radius.full,
+  },
+  todayHeroPaceTick: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 2,
+    marginLeft: -1,
+    borderRadius: 1,
+    backgroundColor: colors.textPrimary,
+    opacity: 0.5,
+  },
+  goalExecutionGraph: {
+    marginTop: 13,
+  },
+  goalExecutionGraphHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  goalExecutionGraphTitle: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  goalExecutionGraphSubtitle: {
+    fontSize: 10.5,
+    lineHeight: 14,
+    fontWeight: '700',
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  goalExecutionGraphMeta: {
+    alignItems: 'flex-end',
+    maxWidth: 118,
+  },
+  goalExecutionGraphMetaText: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  goalExecutionGraphMetaSub: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '800',
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  goalExecutionLegend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 8,
+  },
+  goalExecutionLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  goalExecutionLegendLine: {
+    width: 18,
+    height: 3,
+    borderRadius: 2,
+  },
+  goalExecutionLegendText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    color: colors.textSecondary,
+  },
+  goalOverviewStatsRow: {
+    flexDirection: 'row',
+    gap: 9,
+    marginTop: 13,
+  },
+  goalOverviewStat: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 3,
+  },
+  goalOverviewStatLabel: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+  },
+  goalOverviewStatValue: {
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  goalOverviewStatDetail: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '800',
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  todayHeroStatsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 12,
+  },
+  todayHeroStat: {
+    flex: 1,
+    minHeight: 68,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 9,
+  },
+  todayHeroStatLabel: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+  },
+  todayHeroStatValue: {
+    fontSize: 17,
+    lineHeight: 21,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 3,
+  },
+  todayHeroStatDetail: {
+    fontSize: 10,
+    lineHeight: 13,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  todayHeroReadout: {
+    minHeight: 42,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+  },
+  todayHeroReadoutText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '800',
+    color: colors.textSecondary,
+  },
+  todayHeroReadoutMore: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  todayMetricGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  todayMetricGridItem: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 164,
+    minWidth: 0,
+  },
+  todayMetricCard: {
+    minHeight: 238,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    padding: 0,
+    justifyContent: 'flex-start',
+    ...elevations.subtle,
+  },
+  thalloScoreTodayCard: {
+    overflow: 'hidden',
+    marginBottom: 0,
+    minHeight: 210,
+  },
+  todayThalloScoreWrap: {
+    // Sits below the goal-estimate hero. No horizontal margin so it spans the
+    // same width as the hero / sleep cards (the ScrollView content already
+    // pads 16px) — an extra inset here made it look narrower than its siblings.
+    marginTop: 12,
+    marginBottom: 12,
+    zIndex: 2,
+  },
+  thalloScoreFloat: {
+    minHeight: 88,
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 11,
+    ...elevations.card,
+  },
+  thalloScoreFloatHalo: {
+    width: 66,
+    height: 66,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thalloScoreFloatCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  thalloScoreFloatTitle: {
+    fontSize: 17,
+    lineHeight: 21,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  thalloScoreFloatSubtitle: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  thalloScoreFloatRight: {
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    gap: 7,
+  },
+  thalloScoreTodayHero: {
+    minHeight: 104,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  thalloScoreTodayHeroMeta: {
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  thalloScoreTodayIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 15,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thalloScoreTodayEyebrow: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  thalloScoreTodayTitle: {
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  thalloScoreTodaySubtitle: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  thalloScoreTodayStatusPill: {
+    minHeight: 27,
+    maxWidth: 104,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thalloScoreTodayStatusText: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  thalloScoreTodayBody: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+  },
+  thalloScoreLegend: {
+    minHeight: 24,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  thalloScoreLegendChip: {
+    minHeight: 22,
+    maxWidth: 82,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  thalloScoreLegendDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  thalloScoreLegendText: {
+    flexShrink: 1,
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+  },
+  todayMetricHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginBottom: 9,
+  },
+  todayMetricIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todayMetricLabel: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '900',
+    letterSpacing: 0,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  todayMetricValue: {
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  todayMetricSubLabel: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '800',
+    color: colors.textSecondary,
+    marginTop: 1,
+  },
+  todayMetricTrack: {
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  todayMetricFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  todayMetricDetail: {
+    minWidth: 0,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.textSecondary,
+  },
+  thalloScoreModalHero: {
+    minHeight: 112,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+  },
+  thalloScoreMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  thalloScoreMetaPill: {
+    minHeight: 24,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thalloScoreMetaPillText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  thalloScoreAttributeButton: {
+    minHeight: 72,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  thalloScoreAttributeIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thalloScoreAttributeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  thalloScoreAttributeLabel: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  thalloScoreAttributeScore: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  thalloScoreAttributeMeta: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '800',
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  thalloScoreAttributeTrack: {
+    height: 6,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: colors.border,
+    marginTop: 7,
+  },
+  thalloScoreAttributeFill: {
+    height: '100%',
+    borderRadius: 999,
+  },
+  thalloScorePillarDetail: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 12,
+  },
+  thalloScorePillarDetailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  thalloScorePillarDetailScore: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '900',
+  },
+  thalloScorePillarDetailTitle: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  thalloScorePillarDetailBody: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.textSecondary,
+  },
+  thalloScoreChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  thalloScoreDataChip: {
+    minHeight: 24,
+    borderRadius: 999,
+    borderWidth: 1,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 8,
+    justifyContent: 'center',
+  },
+  thalloScoreDataChipText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '800',
+    color: colors.textSecondary,
+  },
+  thalloScoreActionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    marginTop: 6,
+  },
+  thalloScoreActionText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.textSecondary,
+  },
   goalForecastHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     marginBottom: 11,
+  },
+  goalForecastCompactHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
   goalForecastIcon: {
     width: 34,
@@ -7669,8 +17377,17 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   goalForecastPill: {
     borderWidth: 1,
     borderRadius: radius.full,
-    paddingHorizontal: 9,
+    paddingHorizontal: 10,
     paddingVertical: 4,
+    alignItems: 'center',
+    minWidth: 70,
+  },
+  goalForecastPillLabel: {
+    fontSize: 7,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    lineHeight: 9,
   },
   goalForecastPillText: {
     fontSize: 10,
@@ -7743,6 +17460,27 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     lineHeight: 14,
     marginTop: 2,
   },
+  goalEstimateCompactBody: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 12,
+  },
+  goalEstimateMetricBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  goalEstimateMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+  },
+  goalEstimateDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
   goalForecastReason: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -7766,72 +17504,23 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     lineHeight: 15,
     marginTop: 2,
   },
-  todaySignalGrid: {
+  scoreReadoutStrip: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 16,
-  },
-  todaySignalTile: {
-    minHeight: 146,
+    alignItems: 'flex-start',
+    gap: 7,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.surface,
-    padding: 11,
+    backgroundColor: colors.surfaceRaised,
+    padding: 10,
+    marginBottom: 10,
   },
-  todaySignalTileHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    marginBottom: 9,
-  },
-  todaySignalIcon: {
-    width: 28,
-    height: 28,
-    borderRadius: 9,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  todaySignalPill: {
-    borderRadius: radius.full,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-  },
-  todaySignalPillText: {
-    fontSize: 9,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-  },
-  todaySignalLabel: {
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-    color: colors.textMuted,
-  },
-  todaySignalValue: {
-    fontSize: 22,
-    fontWeight: '900',
-    marginTop: 2,
-  },
-  todaySignalTrack: {
-    height: 6,
-    borderRadius: radius.full,
-    overflow: 'hidden',
-    backgroundColor: colors.border,
-    marginTop: 7,
-  },
-  todaySignalFill: {
-    height: '100%',
-    borderRadius: radius.full,
-  },
-  todaySignalDetail: {
+  scoreReadoutText: {
+    flex: 1,
     fontSize: 11,
+    fontWeight: '700',
     color: colors.textSecondary,
-    lineHeight: 15,
-    marginTop: 7,
+    lineHeight: 16,
   },
   performanceGaugeCard: {
     backgroundColor: colors.surface,
@@ -7866,6 +17555,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderColor: colors.border,
     backgroundColor: colors.surfaceRaised,
     padding: 10,
+    overflow: 'hidden',
   },
   performanceGaugeIcon: {
     width: 27,
@@ -7903,6 +17593,294 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     color: colors.textSecondary,
     lineHeight: 15,
     marginTop: 7,
+  },
+  trendsRadarStack: {
+    gap: 12,
+    marginBottom: 16,
+  },
+  trendsRadarGridItem: {
+    width: '100%',
+    minWidth: 0,
+  },
+  trendsRadarCard: {
+    flex: 1,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    backgroundColor: colors.surfaceRaised,
+    padding: 12,
+    ...elevations.subtle,
+  },
+  trendsRadarCardCompact: {
+    minHeight: 204,
+    padding: 10,
+  },
+  trendsRadarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  trendsRadarHeaderCompact: {
+    alignItems: 'flex-start',
+    gap: 6,
+  },
+  trendsRadarIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trendsRadarIconCompact: {
+    width: 26,
+    height: 26,
+    borderRadius: 9,
+  },
+  trendsRadarEyebrow: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  trendsRadarTitle: {
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 1,
+  },
+  trendsRadarTitleCompact: {
+    fontSize: 13,
+    lineHeight: 16,
+  },
+  trendsRadarScorePill: {
+    minWidth: 44,
+    minHeight: 30,
+    borderRadius: 9,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  trendsRadarScorePillCompact: {
+    minWidth: 36,
+    minHeight: 26,
+    borderRadius: 8,
+    paddingHorizontal: 6,
+  },
+  trendsRadarScoreText: {
+    fontSize: 17,
+    lineHeight: 20,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  trendsRadarScoreTextCompact: {
+    fontSize: 14,
+    lineHeight: 17,
+  },
+  trendsRadarBody: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  trendsRadarChartWrap: {
+    width: '100%',
+    minHeight: 196,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trendsRadarChartWrapCompact: {
+    width: 112,
+    minHeight: 124,
+  },
+  trendsRadarInsightRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+  },
+  trendsRadarInsightChip: {
+    flex: 1,
+    minWidth: 0,
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  trendsRadarInsightLabel: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  trendsRadarInsightValue: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '900',
+    marginTop: 1,
+  },
+  trendsRadarMetricGrid: {
+    width: '100%',
+    minWidth: 0,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 2,
+  },
+  trendsRadarMetric: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: '31%',
+    minWidth: 92,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
+  },
+  trendsRadarMetricHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  trendsRadarMetricLabel: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  trendsRadarMetricValue: {
+    fontSize: 12,
+    lineHeight: 14,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  trendsRadarMetricDetail: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  trendsRadarDetail: {
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textSecondary,
+    marginTop: 9,
+  },
+  trendsScoreGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  trendsScoreGridItem: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: '47%',
+    minWidth: 0,
+  },
+  trendsScoreCard: {
+    minHeight: 188,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    backgroundColor: colors.surfaceRaised,
+    overflow: 'hidden',
+    ...elevations.subtle,
+  },
+  trendsScoreImage: {
+    height: 82,
+    overflow: 'hidden',
+  },
+  trendsScoreImageStyle: {
+    resizeMode: 'cover',
+  },
+  trendsScoreImageGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  trendsScoreContent: {
+    padding: 12,
+  },
+  trendsScoreHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginBottom: 8,
+  },
+  trendsScoreIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trendsScoreLabel: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  trendsScoreValue: {
+    fontSize: 34,
+    lineHeight: 38,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  trendsScoreTitle: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  trendsScoreDetail: {
+    minHeight: 34,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.textSecondary,
+    marginTop: 4,
+  },
+  trendsScoreMiniRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 9,
+  },
+  trendsScoreMiniStat: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
+  },
+  trendsScoreMiniValue: {
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  trendsScoreMiniLabel: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+    marginTop: 1,
   },
   weekOverviewHeader: {
     flexDirection: 'row',
@@ -8125,6 +18103,231 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginBottom: 12,
     ...elevations.card,
   },
+  cardioSectionCard: {
+    gap: 12,
+  },
+  cardioSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  cardioInsightGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  cardioInsightTile: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minHeight: 86,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 10,
+    overflow: 'hidden',
+  },
+  cardioInsightValue: {
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  cardioInsightLabel: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    letterSpacing: 0.35,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  cardioInsightDetail: {
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textSecondary,
+    marginTop: 4,
+  },
+  cardioChartPanel: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 12,
+  },
+  cardioChartEmpty: {
+    alignItems: 'center',
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 18,
+    paddingBottom: 6,
+  },
+  activityTrendCard: {
+    gap: 12,
+  },
+  trendCardsEditButton: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  trendCardsEditText: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '800',
+  },
+  trendCardsEmptyState: {
+    minHeight: 132,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+  },
+  trendCardsEmptyTitle: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  trendCardsEmptyBody: {
+    fontSize: 12,
+    lineHeight: 17,
+    textAlign: 'center',
+  },
+  activityTrendGrid: {
+    gap: 10,
+  },
+  activityTrendTile: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 11,
+    overflow: 'hidden',
+  },
+  activityTrendTileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    marginBottom: 10,
+  },
+  activityTrendIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activityTrendTitle: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  activityTrendSubtitle: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '800',
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  activityTrendMetricGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  activityTrendMetric: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minHeight: 72,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
+  activityTrendMetricValue: {
+    fontSize: 17,
+    lineHeight: 21,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  activityTrendMetricLabel: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  activityTrendMetricDetail: {
+    fontSize: 10,
+    lineHeight: 14,
+    color: colors.textSecondary,
+    marginTop: 3,
+  },
+  trendSuggestionCard: {
+    gap: 12,
+  },
+  trendSuggestionList: {
+    gap: 10,
+  },
+  trendSuggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 10,
+    overflow: 'hidden',
+  },
+  trendSuggestionIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  trendSuggestionTitle: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  trendSuggestionDetail: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  cardioGraphBars: {
+    minHeight: 132,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    paddingHorizontal: 2,
+  },
+  cardioGraphBarCol: {
+    width: 40,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+  },
+  cardioGraphBar: {
+    width: 22,
+    backgroundColor: colors.accent,
+    borderRadius: 7,
+  },
   graphHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 4 },
   graphTitle: { flex: 1, minWidth: 0, fontSize: 15, fontWeight: '700', color: colors.textPrimary, lineHeight: 19 },
   graphScore: { fontSize: 20, fontWeight: '800', color: colors.primary },
@@ -8146,12 +18349,48 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   sessionDate:   { fontSize: 12, color: colors.textMuted },
   sessionBadge:  { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.border },
   sessionBadgeText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
-  sessionStats:  { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+  sessionStats:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
   sessionStat:   { fontSize: 12, color: colors.textSecondary },
   sessionStatDot:{ fontSize: 12, color: colors.textMuted },
+  workoutScorePill: {
+    minHeight: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radius.full,
+    borderWidth: 1,
+  },
+  workoutScorePillText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
   exRow:    { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   exName:   { fontSize: 13, color: colors.textPrimary },
   exBest:   { fontSize: 13, color: colors.primary, fontWeight: '600' },
+  historyFilterGroup: {
+    gap: 6,
+    marginBottom: 8,
+  },
+  historyFilterScroller: {
+    gap: 6,
+    paddingRight: 14,
+  },
+  historyFilterChip: {
+    minHeight: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    borderWidth: 1,
+  },
+  historyFilterChipText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
 
   exerciseChipScroller: {
     gap: 8,
@@ -8168,6 +18407,12 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   exerciseChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '20' },
   exerciseChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600', flexShrink: 1 },
   exerciseChipTextActive: { color: colors.primary },
+  disabledChip: {
+    opacity: 0.44,
+  },
+  disabledChipText: {
+    color: colors.textMuted,
+  },
 
   chartModeGroup: {
     flexShrink: 0,
@@ -8300,7 +18545,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     color: colors.primary,
   },
 
-  // ── Apple Health vitals card (Body Check tab) ──
+  // ── Device health vitals card ──
   vitalsCard: {
     backgroundColor: colors.surface,
     borderRadius: 20,
@@ -8310,6 +18555,278 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderColor: colors.border,
     ...elevations.card,
   },
+  healthDataImageCard: {
+    padding: 0,
+    overflow: 'hidden',
+  },
+  healthLabsSection: {
+    marginTop: 14,
+  },
+  healthSunExposureSection: {
+    marginTop: 0,
+    marginBottom: 14,
+  },
+  healthEditButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  healthVitalsOverviewGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  healthVitalsOverviewRow: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: '47%',
+    minWidth: 124,
+    minHeight: 96,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 9,
+    gap: 5,
+    justifyContent: 'space-between',
+    position: 'relative',
+    overflow: 'hidden',
+    ...elevations.subtle,
+  },
+  healthVitalsOverviewSheen: {
+    top: -26,
+    bottom: -26,
+    width: 58,
+  },
+  healthVitalsOverviewTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    minWidth: 0,
+  },
+  healthVitalsOverviewIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  healthVitalsOverviewStatusRail: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    flexShrink: 1,
+  },
+  healthVitalsStatusPill: {
+    minHeight: 20,
+    maxWidth: 68,
+    flexShrink: 1,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  healthVitalsStatusText: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '900',
+  },
+  healthVitalsOverviewLabel: {
+    fontSize: 8,
+    lineHeight: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  healthVitalsOverviewValue: {
+    fontSize: 15,
+    lineHeight: 18,
+    fontWeight: '900',
+    marginTop: 1,
+  },
+  healthVitalsOverviewUnit: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '700',
+    marginTop: 1,
+  },
+  healthVitalsTrendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 3,
+  },
+  healthVitalsTrendDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  healthVitalsTrendText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '700',
+  },
+  healthVitalsSignalLine: {
+    height: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+  healthVitalsSignalFill: {
+    width: '62%',
+    height: '100%',
+    borderRadius: 999,
+  },
+  healthVitalsOverviewMoreButton: {
+    minHeight: 38,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    marginTop: 10,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  healthVitalsOverviewMoreText: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '800',
+  },
+  healthDataHero: {
+    height: 136,
+    justifyContent: 'flex-end',
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  healthDataHeroSheen: {
+    top: -54,
+    bottom: -54,
+    width: 112,
+  },
+  healthDataHeroImage: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  healthDataHeroMeta: {
+    padding: 13,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 9,
+  },
+  healthDataHeroIcon: {
+    width: 31,
+    height: 31,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.26)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  healthDataHeroEyebrow: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: '#FFFFFF',
+  },
+  healthDataHeroTitle: {
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    marginTop: 2,
+  },
+  healthDataHeroSubtitle: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    opacity: 0.9,
+    marginTop: 2,
+  },
+  healthDataHeroBadge: {
+    minHeight: 27,
+    maxWidth: 86,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: '#FFFFFF66',
+    backgroundColor: '#FFFFFF24',
+    paddingHorizontal: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  healthDataHeroBadgeText: {
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+  },
+  healthDataContent: {
+    padding: 16,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  nutritionGutFactsCard: {
+    padding: 0,
+    overflow: 'hidden',
+  },
+  nutritionGutHero: {
+    height: 132,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  nutritionGutHeroImage: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  nutritionGutHeroMeta: {
+    padding: 13,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 9,
+  },
+  nutritionGutEyebrow: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    color: '#FFFFFF',
+  },
+  nutritionGutHeroTitle: {
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    marginTop: 2,
+  },
+  nutritionGutDataPill: {
+    minHeight: 27,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: '#FFFFFF66',
+    backgroundColor: '#FFFFFF24',
+    paddingHorizontal: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  nutritionGutDataPillText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+  },
+  nutritionGutFactsContent: {
+    padding: 16,
+  },
   vitalsHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
   vitalsTitle: { ...typography.cardTitle },
   vitalsSubtitle: { ...typography.micro, marginLeft: 'auto' },
@@ -8318,7 +18835,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   vitalsValue: { fontSize: 18, fontWeight: '700' },
   vitalsLabel: { fontSize: 10, fontWeight: '600', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.5 },
 
-  // ── Recovery / Apple Health ──
+  // ── Recovery / device health ──
   recoverySection: {
     marginTop: 16,
     paddingTop: 14,
@@ -8394,16 +18911,51 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginTop: 2,
   },
 
+  bodyImageCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+    marginBottom: 14,
+  },
+  bodyImageHeader: {
+    height: 124,
+    overflow: 'hidden',
+  },
+  bodyImageHeaderImage: {
+    resizeMode: 'cover',
+  },
+  bodyImageHeaderGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bodyImageContent: {
+    padding: 16,
+  },
+
   // ── Body Scan ──
   bodyScanPrompt: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 20,
+    overflow: 'hidden',
+    marginBottom: 16,
+  },
+  bodyScanPromptImage: {
+    height: 136,
+    overflow: 'hidden',
+  },
+  bodyScanPromptImageStyle: {
+    resizeMode: 'cover',
+  },
+  bodyScanPromptImageGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bodyScanPromptContent: {
+    padding: 18,
     alignItems: 'center',
     gap: 6,
-    marginBottom: 16,
   },
   bodyScanPromptTitle: {
     fontSize: 18,
@@ -8449,13 +19001,15 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     paddingTop: 10,
     paddingBottom: 20,
   },
+  quickDetailHandleTap: {
+    minHeight: 18,
+    paddingBottom: 14,
+    justifyContent: 'flex-start',
+  },
   quickDetailHandle: {
     width: 42,
     height: 4,
     borderRadius: 999,
-    backgroundColor: colors.border,
-    alignSelf: 'center',
-    marginBottom: 14,
   },
   quickDetailHeader: {
     flexDirection: 'row',
@@ -8528,6 +19082,141 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     color: colors.textSecondary,
     lineHeight: 14,
     marginTop: 4,
+  },
+  biometricWindowRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  biometricWindowButton: {
+    minHeight: 34,
+    minWidth: 72,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  biometricWindowButtonText: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  biometricLoadingRow: {
+    minHeight: 74,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    paddingVertical: 12,
+  },
+  biometricEmptyState: {
+    minHeight: 110,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  biometricChartCard: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    marginTop: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    overflow: 'hidden',
+  },
+  biometricChartScaleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  biometricChartScaleText: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '800',
+  },
+  biometricBarScroll: {
+    alignItems: 'flex-end',
+    gap: 7,
+    paddingRight: 2,
+  },
+  biometricBarColumn: {
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+  },
+  biometricBarTrack: {
+    width: 12,
+    borderRadius: 999,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  biometricBarFill: {
+    width: 12,
+    borderRadius: 999,
+  },
+  biometricBarValue: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '800',
+    width: 34,
+    textAlign: 'center',
+  },
+  biometricBarLabel: {
+    fontSize: 8,
+    lineHeight: 10,
+    fontWeight: '800',
+    width: 34,
+    textAlign: 'center',
+  },
+  biometricReadingList: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    marginTop: 12,
+    overflow: 'hidden',
+  },
+  biometricReadingHeader: {
+    minHeight: 34,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  biometricReadingHeaderText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  biometricReadingHeaderMeta: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+  },
+  biometricReadingRow: {
+    minHeight: 38,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  biometricReadingDate: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '800',
+  },
+  biometricReadingValue: {
+    maxWidth: 132,
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '900',
+    textAlign: 'right',
   },
   quickDetailSection: {
     marginTop: 14,
@@ -8691,26 +19380,31 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     textTransform: 'capitalize',
   },
   bodyScanBfCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 84,
+    height: 84,
+    borderRadius: 42,
     backgroundColor: colors.primary + '15',
     borderWidth: 3,
     borderColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 6,
+    flexShrink: 0,
   },
   bodyScanBfValue: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '900',
     color: colors.primary,
+    textAlign: 'center',
+    includeFontPadding: false as any,
   },
   bodyScanBfLabel: {
     fontSize: 9,
     color: colors.textMuted,
     textTransform: 'uppercase',
-    fontWeight: '600',
-    marginTop: -2,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    marginTop: 1,
   },
   bodyScanAssessment: {
     fontSize: 14,
@@ -8742,3 +19436,5 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginBottom: 8,
   },
 }); }
+
+export default memo(ProgressScreen);

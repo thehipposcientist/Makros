@@ -50,11 +50,11 @@ def test_male_fat_loss_moderate() -> None:
                ≈ 816 + 1111 - 150 + 5
                ≈ 1782
         TDEE   = 1782 * 1.55 ≈ 2762
-        cut    = 2762 - 500 ≈ 2262
+        cut    = 2762 * -15% ≈ -414 → 2348
 
-        Protein = 180 * 0.9 = 162g
-        Fat     = max(0.3*180=54, 0.28*2262/9=70) = 70g
-        Carbs   ≈ (2262 - 162*4 - 70*9) / 4 = (2262 - 648 - 630) / 4 = 984/4 ≈ 246g
+        Protein = 180 * 1.0 = 180g
+        Fat     = max(0.3*180=54, 0.28*2349/9=73) = 73g
+        Carbs   ≈ (2349 - 180*4 - 73*9) / 4 = 243g
     """
     print("\n[test] 30yo M, 180lb, 5'10\", 4d/wk, fat_loss, moderate")
     targets = compute_targets(CalorieInputs(
@@ -65,11 +65,12 @@ def test_male_fat_loss_moderate() -> None:
     ))
     _assert_near(targets.bmr,      1782, 10,  "BMR")
     _assert_near(targets.tdee,     2762, 15,  "TDEE")
-    _assert_near(targets.calories, 2262, 15,  "calories")
-    _assert_near(targets.protein_g, 162, 2,   "protein_g")
-    _assert_near(targets.fat_g,      70, 5,   "fat_g")
-    _assert_near(targets.carbs_g,   246, 10,  "carbs_g")
+    _assert_near(targets.calories, 2349, 15,  "calories")
+    _assert_near(targets.protein_g, 180, 2,   "protein_g")
+    _assert_near(targets.fat_g,      73, 5,   "fat_g")
+    _assert_near(targets.carbs_g,   243, 10,  "carbs_g")
     assert targets.bucket_name == "fat_loss"
+    assert targets.goal_adjustment_pct == -0.15
 
 
 def test_body_recomp_moderate() -> None:
@@ -112,13 +113,13 @@ def test_body_recomp_moderate() -> None:
 def test_female_muscle_gain_aggressive() -> None:
     """25yo female, 140 lb, 5'5", training 5 days/wk, muscle gain aggressive.
 
-    Expected chain (post-2026-04-13 bucket tune — aggressive surplus
-    dropped from 500 → 375 to keep lean-gain rate in check):
+    Expected chain: aggressive lean bulk now uses +11% of maintenance,
+    clamped to the safe surplus band instead of a fixed +375 kcal.
         BMR    = 10*(140/2.205) + 6.25*65*2.54 - 5*25 - 161
                ≈ 635 + 1032 - 125 - 161
                ≈ 1381
         TDEE   = 1381 * 1.55 ≈ 2140
-        bulk   = 2140 + 375 ≈ 2515
+        bulk   = 2140 + 236 ≈ 2376
 
         Protein = 140 * 1.0 = 140g
         Fat     = max(0.3*140=42, 0.25*2515/9=70) = 70g
@@ -133,11 +134,12 @@ def test_female_muscle_gain_aggressive() -> None:
     ))
     _assert_near(targets.bmr,      1381, 10,  "BMR")
     _assert_near(targets.tdee,     2140, 15,  "TDEE")
-    _assert_near(targets.calories, 2515, 15,  "calories")
+    _assert_near(targets.calories, 2377, 15,  "calories")
     _assert_near(targets.protein_g, 140, 2,   "protein_g")
-    _assert_near(targets.fat_g,      70, 5,   "fat_g")
-    _assert_near(targets.carbs_g,   331, 15,  "carbs_g")
+    _assert_near(targets.fat_g,      66, 5,   "fat_g")
+    _assert_near(targets.carbs_g,   306, 15,  "carbs_g")
     assert targets.bucket_name == "muscle_gain"
+    assert targets.goal_adjustment_pct == 0.11
 
 
 def test_minimum_calorie_floor() -> None:
@@ -204,8 +206,8 @@ def test_reference_ranges_match_visible_example() -> None:
     assert card.bmr == 2005, f"expected BMR 2005, got {card.bmr}"
     assert card.activity_multiplier == 1.55
     assert card.maintenance_calories == 3108
-    assert card.cut_calories == 2608
-    assert card.bulk_calories == 3408
+    assert card.cut_calories == 2642
+    assert card.bulk_calories == 3357
     assert card.session_duration_label == "60-75 min"
     assert card.formula == "Mifflin-St Jeor"
     print(f"  ✓ cut={card.cut_calories} / maintain={card.maintenance_calories} / bulk={card.bulk_calories}")
@@ -359,6 +361,77 @@ def test_calculated_target_is_internally_consistent() -> None:
     print(f"  ✓ all 7 buckets consistent within 10 kcal")
 
 
+def test_moderate_recomp_180_lb_example() -> None:
+    """Regression for the user-visible case: 180 lb, 32yo male, 6'0",
+    4 day/week balanced recomp should be near 2800 kcal and label the pace
+    as balanced rather than "aggressive/conservative" semantics."""
+    print("\n[test] 32yo M, 180lb, 6'0\", 4d/wk, body_recomp, moderate")
+    targets = compute_targets(CalorieInputs(
+        weight_lbs=180, height_feet=6, height_inches=0,
+        age=32, gender="male",
+        training_days_per_week=4,
+        goal_id="body_recomp", pace="moderate",
+    ))
+    _assert_near(targets.bmr, 1804, 10, "BMR")
+    _assert_near(targets.tdee, 2796, 20, "TDEE")
+    _assert_near(targets.calories, 2796, 20, "calories")
+    _assert_near(targets.protein_g, 180, 2, "protein_g")
+    assert targets.goal_adjustment_kcal == 0
+    assert targets.goal_pace_label == "balanced"
+    assert 0.25 <= (targets.fat_percent or 0) <= 0.30
+    assert targets.carbs_g > 0
+    print(f"  ✓ recomp kcal={targets.calories}, P/C/F={targets.protein_g}/{targets.carbs_g}/{targets.fat_g}")
+
+
+def test_fat_loss_adjustment_scales_by_tdee() -> None:
+    print("\n[test] fat-loss adjustment scales by TDEE")
+    small = compute_targets(CalorieInputs(
+        weight_lbs=130, height_feet=5, height_inches=4,
+        age=35, gender="female", training_days_per_week=2,
+        goal_id="fat_loss", pace="moderate",
+    ))
+    large = compute_targets(CalorieInputs(
+        weight_lbs=240, height_feet=6, height_inches=2,
+        age=35, gender="male", training_days_per_week=5,
+        goal_id="fat_loss", pace="moderate",
+    ))
+    assert small.goal_adjustment_kcal != large.goal_adjustment_kcal
+    assert small.goal_adjustment_kcal <= -250
+    assert large.goal_adjustment_kcal < small.goal_adjustment_kcal
+    print(f"  ✓ small delta={small.goal_adjustment_kcal}, large delta={large.goal_adjustment_kcal}")
+
+
+def test_lean_bulk_adjustment_scales_by_tdee() -> None:
+    print("\n[test] lean-bulk adjustment scales by TDEE")
+    small = compute_targets(CalorieInputs(
+        weight_lbs=130, height_feet=5, height_inches=4,
+        age=35, gender="female", training_days_per_week=2,
+        goal_id="muscle_gain", pace="moderate",
+    ))
+    large = compute_targets(CalorieInputs(
+        weight_lbs=240, height_feet=6, height_inches=2,
+        age=35, gender="male", training_days_per_week=5,
+        goal_id="muscle_gain", pace="moderate",
+    ))
+    assert small.goal_adjustment_kcal != large.goal_adjustment_kcal
+    assert 150 <= small.goal_adjustment_kcal <= 500
+    assert large.goal_adjustment_kcal > small.goal_adjustment_kcal
+    print(f"  ✓ small delta={small.goal_adjustment_kcal}, large delta={large.goal_adjustment_kcal}")
+
+
+def test_overweight_fat_loss_uses_adjusted_protein_basis() -> None:
+    print("\n[test] overweight fat-loss protein basis is adjusted")
+    targets = compute_targets(CalorieInputs(
+        weight_lbs=300, height_feet=5, height_inches=10,
+        age=40, gender="male", training_days_per_week=3,
+        goal_id="fat_loss", pace="moderate",
+    ))
+    assert targets.protein_basis_kind == "adjusted_weight"
+    assert targets.protein_basis_lbs is not None and targets.protein_basis_lbs < 300
+    assert targets.protein_g < 300
+    print(f"  ✓ basis={targets.protein_basis_lbs} lb, protein={targets.protein_g}g")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -381,6 +454,10 @@ if __name__ == "__main__":
         test_override_all_four_uses_verbatim,
         test_override_fat_below_floor_flag,
         test_calculated_target_is_internally_consistent,
+        test_moderate_recomp_180_lb_example,
+        test_fat_loss_adjustment_scales_by_tdee,
+        test_lean_bulk_adjustment_scales_by_tdee,
+        test_overweight_fat_loss_uses_adjusted_protein_basis,
     ]
 
     failures = 0

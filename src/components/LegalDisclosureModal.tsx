@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { LEGAL_SECTIONS, LEGAL_VERSION } from '../constants/legal';
+import { useEffect, useState } from 'react';
+import { AccessibilityInfo, ActivityIndicator, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { LEGAL_SECTIONS, LEGAL_VERSION, SUPPORT_EMAIL } from '../constants/legal';
 import { colors, radius } from '../constants/theme';
 
 type ThemeColors = typeof colors;
@@ -29,6 +29,19 @@ export default function LegalDisclosureModal({ visible, onClose, themeColors, on
   const c = { ...colors, ...(themeColors ?? {}) };
   const [submitting, setSubmitting] = useState(false);
   const mustAccept = !!onAccept;
+  const actionLabel = mustAccept
+    ? 'I agree to the updated legal terms'
+    : 'Close legal and safety information';
+
+  useEffect(() => {
+    if (!visible) return;
+    AccessibilityInfo.announceForAccessibility(
+      mustAccept
+        ? 'Updated legal and safety terms opened. Review and tap I agree to continue.'
+        : 'Legal and safety information opened.',
+    );
+  }, [mustAccept, visible]);
+
   return (
     <Modal
       visible={visible}
@@ -42,14 +55,20 @@ export default function LegalDisclosureModal({ visible, onClose, themeColors, on
       <View style={styles.backdrop}>
         <View
           testID="legal-disclosure-modal"
+          accessibilityViewIsModal
+          importantForAccessibility="yes"
           style={[styles.sheet, { backgroundColor: c.surface, borderColor: c.border }]}>
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.title, { color: c.textPrimary }]}>Legal And Safety</Text>
+              <Text accessibilityRole="header" style={[styles.title, { color: c.textPrimary }]}>Legal And Safety</Text>
               <Text style={[styles.version, { color: c.textMuted }]}>Version {LEGAL_VERSION}</Text>
             </View>
             {!mustAccept && (
-              <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <TouchableOpacity
+                onPress={onClose}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                accessibilityRole="button"
+                accessibilityLabel="Close legal and safety information">
                 <Text style={[styles.closeIcon, { color: c.textMuted }]}>x</Text>
               </TouchableOpacity>
             )}
@@ -74,13 +93,15 @@ export default function LegalDisclosureModal({ visible, onClose, themeColors, on
               </View>
             ))}
             <Text style={[styles.note, { color: c.textMuted }]}>
-              These in-app terms are launch-ready product copy, not a substitute for attorney-reviewed legal documents.
+              Questions about privacy or account data? Contact {SUPPORT_EMAIL}.
             </Text>
           </ScrollView>
 
           <TouchableOpacity
             testID="legal-done"
-            accessibilityLabel="legal-done"
+            accessibilityRole="button"
+            accessibilityLabel={actionLabel}
+            accessibilityState={{ disabled: submitting, busy: submitting }}
             style={[styles.doneBtn, { backgroundColor: c.primary, opacity: submitting ? 0.6 : 1 }]}
             disabled={submitting}
             onPress={async () => {

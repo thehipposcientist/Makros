@@ -1,8 +1,8 @@
 # Social System — Architecture
 
-Last updated: 2026-05-05
+Last updated: 2026-05-31
 
-Friend list + once-a-week digest + a bounded friends-only activity feed. There is still no public discovery feed and no comments.
+Friend list + once-a-week digest + a bounded friends-only activity feed with lightweight comments. There is still no public discovery feed.
 
 ## Tables
 
@@ -11,7 +11,9 @@ Friend list + once-a-week digest + a bounded friends-only activity feed. There i
 - `weekly_digest_cache` — per-user-per-week JSON. TTL = 1 hour + eager invalidation on accept/remove/block.
 - `activity_feed` — friends-only workout activity rows. Feed payloads are sanitized to workout structure only.
 - `feed_likes` — one like per user/feed item.
-- `social_notifications` — in-app notification inbox for friend requests, accepted requests, and feed likes. Unique per actor + subject so unlike/re-like loops do not spam duplicates.
+- `feed_comments` — text-only comments on visible workout feed cards.
+- `social_notifications` — in-app notification inbox for friend requests, accepted requests, feed likes, and feed comments. Unique per actor + subject so unlike/re-like/comment loops do not spam duplicates.
+- `user_reports` — user-submitted abuse/spam/safety reports for moderation review.
 
 ## Privacy Model
 
@@ -53,6 +55,10 @@ Digest `summary`: `friend_count`, `friends_trained_this_week`, `total_friend_ses
 | `POST /social/posts` | Optional workout share with caption/photo + sanitized workout summary. |
 | `DELETE /social/posts/{id}` | Delete own post. |
 | `POST /social/feed/{id}/like` | Toggle a persisted like on a visible feed item; returns `{liked, like_count}`. |
+| `GET /social/feed/{id}/comments` | List visible comments for a feed item with full count. |
+| `POST /social/feed/{id}/comments` | Add a text-only comment to a visible workout feed item. |
+| `DELETE /social/feed/{id}/comments/{comment_id}` | Delete your own comment. |
+| `POST /social/report-user` | Store an abuse/spam/safety report for moderation review. |
 
 ## Client (`src/components/FriendsModal.tsx`, `src/components/SocialFeedView.tsx`)
 
@@ -66,6 +72,8 @@ All tabs share the Social toolbar. The bell opens the in-app notification tray; 
 ## Key Design Decisions
 
 - Activity is bounded and friends-only — it is a recent activity surface, not an infinite public feed.
+- Comments are text-only, friends-only, and tied to feed visibility. Only the comment author can delete their comment.
+- Blocking and reporting exist for platform-safety/App Review coverage; reports are stored for human review rather than auto-actioned.
 - Reuse `User.username` (globally unique) as friend handle — no separate social handle.
 - Canonical pair `(user_a_id < user_b_id)` — exactly one row per pair.
 - Eager cache invalidation — newly-accepted friend appears in digest within seconds.

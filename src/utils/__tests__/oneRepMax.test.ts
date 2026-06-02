@@ -10,6 +10,8 @@ import {
   setE1RM,
   ONE_RM_REP_LIMIT,
   REP_LIMIT_BY_CATEGORY,
+  MAX_EFFECTIVE_REPS_BY_CATEGORY,
+  getMaxEffectiveReps,
   categorizeExercise,
 } from '../oneRepMax.ts';
 
@@ -49,6 +51,38 @@ describe('setE1RM — pure Epley', () => {
 
   it('clamps negative RIR to 0 (negative reps in reserve isn\'t a thing)', () => {
     expect(setE1RM(200, 5, -3)).toBe(setE1RM(200, 5, 0));
+  });
+});
+
+describe('setE1RM — effective rep cap', () => {
+  it('main_compound caps effective reps at 10 — 225 × 10 @ 4 RIR → 300, not 330', () => {
+    // Raw effective = 14, capped to 10 → 225 × (1 + 10/30) = 300.
+    expect(setE1RM(225, 10, 4, 'main_compound')).toBe(300);
+    // Default category (omitted) also resolves to main_compound.
+    expect(setE1RM(225, 10, 4)).toBe(300);
+  });
+
+  it('machine_compound caps effective reps at 12 — 100 × 12 @ 4 RIR → 140, not ~153', () => {
+    // Raw effective = 16, capped to 12 → 100 × (1 + 12/30) = 140.
+    expect(setE1RM(100, 12, 4, 'machine_compound')).toBe(140);
+  });
+
+  it('cap is a no-op when reps + RIR are below the cap', () => {
+    // 200 × 5 @ 2 RIR → effective = 7, well under cap 10.
+    // Result identical to the pre-cap test up above: 246.67.
+    expect(setE1RM(200, 5, 2, 'main_compound')).toBe(246.67);
+  });
+
+  it('isolation returns null', () => {
+    expect(setE1RM(30, 12, 1, 'isolation')).toBe(null);
+  });
+
+  it('exposes the cap table for callers to inspect', () => {
+    expect(MAX_EFFECTIVE_REPS_BY_CATEGORY.main_compound).toBe(10);
+    expect(MAX_EFFECTIVE_REPS_BY_CATEGORY.machine_compound).toBe(12);
+    expect(MAX_EFFECTIVE_REPS_BY_CATEGORY.isolation).toBe(null);
+    expect(getMaxEffectiveReps('main_compound')).toBe(10);
+    expect(getMaxEffectiveReps('isolation')).toBe(null);
   });
 });
 

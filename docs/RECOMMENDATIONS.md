@@ -1,13 +1,15 @@
 # Thallo Recommendations
 
-Last updated: 2026-04-29 (deep audit refresh)
+Last updated: 2026-05-18 (current app-state, privacy, hydration/weather recommendation refresh)
 Audience: product, engineering, launch planning
 
 This is the running launch-readiness list for Thallo. The doc was originally written after a high-level review. The 2026-04-29 refresh adds findings from a deep audit covering legal/auth/privacy, performance/code quality, and feature/UX gaps, plus marks items completed in the current session.
+The 2026-05-12 refresh updates current screen-size/timer facts and adds a prioritized recommendation stack for performance, UI polish, and feature work.
+The 2026-05-18 refresh reconciles the docs with the current app state: Settings now exists as its own screen, location is already used for outdoor cardio route/distance/pace, hydration targets are server-authoritative and adaptive, subscription defaults moved to a 7-day server trial plus RevenueCat entitlement sync, and the remaining location opportunity is optional coarse weather context for hydration/recovery.
 
 The short version remains the same: Thallo has a real product foundation. The next work should not be a broad feature push. It should be a launch-readiness pass — legal/account basics, signed-build native reliability, production entitlements, observability, and performance cleanup around the biggest screens.
 
-Beta decision as of 2026-05-01: external beta is free. `app.json` sets `expo.extra.freeBetaFullAccess=true` for client UI gates, and the backend defaults `BETA_FULL_ACCESS_ENABLED=1` so beta users receive server-side Pro access without StoreKit/RevenueCat.
+Billing decision as of 2026-05-18: production defaults are `expo.extra.freeBetaFullAccess=false`, `BETA_FULL_ACCESS_ENABLED=0`, and `SIGNUP_TRIAL_DAYS=7`. RevenueCat is the planned store/payment layer; beta full access is now an explicit override only.
 
 ## Highest Priority Summary
 
@@ -24,9 +26,79 @@ Section A (Critical / Launch-Blocking) and section B (Legal, Privacy, Auth & Acc
 7. ~~Tighten Info.plist usage descriptions for Face ID, microphone, and photo library~~ ✓ Done (B1 — both app.json and raw plist).
 8. Keep the beta free/full-access only through explicit client + backend beta flags; replace the beta access override with real StoreKit 2 or RevenueCat entitlements before charging.
 9. Add crash reporting, analytics, native bridge logging, Watch sync metrics, and AI cost/error tracking.
-10. Split and lazy-load the largest screens, especially `HomeScreen` and `ActiveWorkoutScreen`.
-11. Audit ActiveWorkoutScreen setInterval cleanup — 17 timer instances with overlapping responsibilities risk leaks and double-fires on resume.
+10. Split and lazy-load the largest screens, especially `HomeScreen`, `ActiveWorkoutScreen`, and `ProgressScreen`.
+11. Consolidate ActiveWorkoutScreen timer ownership — current code has 4 `setInterval` references and 27 `setTimeout` references across workout sync, rest timing, autosave, modal handoffs, and deferred queues.
 12. Run `npm install` to pull in the new test dev deps (jest, jest-expo, @testing-library/react-native), then run `npm test` to verify the smoke suite passes (A5 scaffolded).
+
+## Current State Snapshot (2026-05-18)
+
+- **Outdoor cardio location is shipped.** The phone-side `cardioGpsTracker` and Watch `HeartRateStore` use location only for outdoor cardio sessions (run/walk/ride/hike) to capture distance, pace, route coordinates, and altitude/elevation when available. Indoor cardio avoids GPS and uses manual or device distance.
+- **Hydration is adaptive but not weather-fed yet.** `/meals/hydration` and `/meals/adjusted-daily-target` use body size/sex/age, planned or completed workout demand, active energy, protein, alcohol, sodium, and supplement context. The hydration pure function already has a heat add-on, but current callers do not pass ambient temperature, humidity, or altitude.
+- **Location privacy docs needed correction.** App Store/privacy docs previously said location was not found; that is stale. Current location collection is workout-scoped and should be labeled as Fitness/Location data, not tracking.
+- **Largest screen facts changed.** `HomeScreen.tsx` is ~20.8k lines with 164 `useState` occurrences, `ActiveWorkoutScreen.tsx` is ~13.3k lines, and `ProgressScreen.tsx` is ~13.1k lines.
+
+## Recommendation Stack (2026-05-18)
+
+These are the best next bets after the latest code/doc pass. Ordered by user impact divided by implementation risk.
+
+### Performance
+
+1. **Split `HomeScreen.tsx` by top-level route surface before adding more features.** It is now ~20.8k lines with 164 `useState` occurrences. Extract Friends, Meals, Workout Plan, You/Settings, trainer chat, saved meals, imports, GPS/custom tracker handoff, and library/detail modal domains into focused containers with their own hooks. Keep `HomeScreen` as route orchestration only. This is the highest-leverage client performance and maintainability move.
+2. **Turn Progress history views into virtualized lists.** `ProgressScreen.tsx` is ~13.1k lines and still relies heavily on mapped rows inside `ScrollView`. Convert chronological workout history, PR lists, imported activity history, body-scan history, health-insight lists, and plateau lists to `FlatList` / `SectionList` so large imported histories do not render hundreds of nodes at once.
+3. **Create one owned timer layer for Active Workout.** Keep the timestamp-based rest timer, but move polling, autosave flush, watch sync debounce, sidecar queue drains, GPS lifecycle cleanup, and modal-handoff timers into a small `useWorkoutTimers` / `useWorkoutSideEffects` module with explicit cleanup. Add a regression test or dev assertion that no timer remains after unmount.
+4. **Defer cold-start network fanout on Home.** Paint the active PlanWeek, today meals, and resume-workout state first; lazy-load social counts, supplement library, imports history, trainer context, and deep progress analytics after first interaction or idle time.
+5. **Add route-level performance marks before refactors.** Log client-side first paint / plan paint / workout-start-ready timing and backend `time.perf_counter()` for `/plans/week/active`, `/meals/score`, `/workouts/weekly-review`, `/imports/*/status`, and `/ai/*`. This makes the split work measurable instead of vibes-based.
+
+### UI / UX
+
+1. **Finish making Settings the real hub.** `SettingsScreen` now exists and covers notifications, units, HealthKit, app settings, and account actions. The remaining polish is navigation consistency: route Import, Data & Privacy, Watch/Health status, Gear, Theme, Legal, and Account from the same stable Settings surface instead of leaving duplicate controls in You/Home modals.
+2. **Surface pending imports as an activation banner.** `pending_imports` exists and ImportScreen is shipped. Add a Home/You banner plus 3-day and 7-day reminders for users who said they are coming from MFP, Strong, or Strava but have not uploaded/connected yet.
+3. **Use captured effort signals in the live workout UI.** Show an estimated 1RM chip and a deterministic next-set note after logged sets: RIR 0-1 means hold load; RIR 3+ suggests a small increase when readiness and target reps allow. No AI needed.
+4. **Make readiness and plateau cards actionable.** Plateau detection and weekly recommendations exist; avoid "Got it" dead ends. Route deload/swap/volume suggestions into the existing check-in apply flow with confirmation and undo.
+5. **Add explicit offline/cache states.** Home falls back to cached plan/meal state when backend is unreachable. Show a small, non-blocking offline/cache pill so users know they are viewing cached data and can trust what happened.
+6. **Do an accessibility sweep before beta expansion.** Add labels to icon-only buttons, pair color-coded score chips with text labels, and test Dynamic Type for workout logging, meal logging, and Settings. This is also App Review insurance.
+
+### Features
+
+1. **Finish import activation rather than building another import parser.** Manual review for unmatched MFP foods, Home pending-import banner, and import-success recap will convert more switchers than Hevy/Cronometer v1 right now.
+2. **Saved meals and routine meal one-tap logging.** Meal logging speed is the most obvious daily retention lever. Promote "save as favorite" after repeated meals, put recent/favorite meals above food search, and preserve server-authoritative `/meals/score`.
+3. **Add optional coarse weather context for hydration and recovery.** Do not request continuous GPS for hydration. Add a user-controlled setting like "Use local weather to adjust hydration and recovery targets"; accept city/ZIP or OS approximate location; fetch/store weather facts (`temp_f`, `humidity_pct`, `heat_index_f`, `altitude_m`, `observed_at`, source), not raw coordinates. Use it to activate the existing heat add-on, flag hot/humid outdoor cardio, and tune electrolyte copy. Keep manual fallback choices: hot/humid climate, dry climate, high altitude, mostly indoors. Never expose location/weather context socially, and do not send precise coordinates to AI prompts.
+4. **Finish preference propagation.** Settings now has workout/meal/hydration reminders, quiet hours, weight unit, and distance unit. Finish applying those units across every history/chart/share surface, then add the weather/hydration preference described above. This is small product work with high trust value, especially outside the US.
+5. **Coach transcript, undo, and action history.** Persist recent coach messages and give applied changes a short undo window. This makes AI-assisted coaching feel accountable while preserving the rule that AI mutates only user-editable state.
+6. **Cardio and HR-zone progression.** Strava imports, Apple Health, GPS route capture, and workout `hr_summary` make this cheap now. Add pace/power/Zone 2 trend cards for runners, cyclists, and hybrid users.
+7. **Body-scan comparison + soreness overlay.** Body scans and soreness/fatigue already exist. A before/after comparison and a separate "reported sore" layer on the body map would make Progress feel much more alive without changing planner logic.
+
+## New Recommendations (2026-05-10)
+
+Surfaced during the form-demo audit + the wearables/import planning passes. Ordered by leverage-per-effort.
+
+### Form demos / exercise media
+
+1. **Fix the 8 stale `_OVERRIDES` in `demo_resolver.py`.** Eight overrides point at upstream ids that 404 (`Glute_Bridge`, `Pendlay_Row`, `Dumbbell_Bench_Step`, `Dumbbell_Bent_Over_Row`, `Romanian_Deadlift_with_Dumbbells`, `Step_ups_With_Bands`, `Sumo_Squat_With_Dumbbell`, `Thoracic_Rotation`). The sync script silently prunes them so the client gracefully shows no card, but those exercises currently have no demo at all. Fix the override values against the actual manifest, run `./scripts/sync-exercise-demos.sh`, and coverage climbs above the current 53% (174 of 451 seeded exercises). Effort: <2 hours.
+2. **Add a coverage-report endpoint or test.** `demo_resolver.py::coverage_report` already exists. Wire it as a backend test or `/admin/coverage` debug endpoint so the next "did we cover the new seed entries" question takes ten seconds instead of a manual script. Effort: <1 hour.
+3. **Ship a 6-month seed expansion to push coverage to 70%+.** The remaining 212 unmatched seed exercises are mostly variant grips, kettlebell flows, and bodyweight progressions — many have close-but-not-exact matches in free-exercise-db that token-set fuzzy matching misses. Spending half a day hand-curating overrides for the top 50 missed exercises (by plan frequency) is high-leverage. Effort: 4-6 hours.
+4. **Don't migrate to a CDN unless usage justifies it.** Bundling is working. If ipa size becomes a problem (it shouldn't until ~50 MB+ of demos), revisit S3+CloudFront — but only after demos are commodity enough that storage cost is below the user pain of "first-launch download." Status: no action.
+
+### Wearables / Health integrations
+
+5. **Ship the Health Connect (Android) reader before any direct OAuth integration.** It covers Wear OS, Fitbit, Galaxy, Garmin Android, Pixel Watch — all in one native module. Direct Oura/WHOOP/Garmin APIs should wait until Health Connect parity is done. See `docs/architecture/wearable-integrations.md` for the full sequencing.
+6. ~~**Backfill 6 months of Apple Health on first onboarding.**~~ ✅ **Shipped 2026-05-10.** `backfillSnapshotsToBackend(180)` now runs after both onboarding Connect-Health success and Progress-tab connect. Chunked into two 90-day batches so the recent window populates the UI before the older window finishes. See roadmap "Recently Shipped" and `docs/architecture/healthkit.md`.
+7. **HRV reader.** Already documented as a missing piece in `HEALTH_INTEGRATIONS.md`. Strong recovery signal for WHOOP/Watch users. Effort: 1-2 hours.
+
+### Data imports
+
+8. ~~**MyFitnessPal CSV import is the single highest-leverage retention feature unbuilt.**~~ ✅ **Shipped 2026-05-10.** Backend parser/matcher/pipeline plus Settings → Import UI are live. Remaining work: manual review for unmatched foods, success recap, and pending-import reminders.
+9. **Awareness layer — `pending_imports` on `UserPreferences`.** ✅ Schema shipped 2026-05-10 (idempotent `ADD COLUMN IF NOT EXISTS pending_imports JSONB`, PreferencesUpsert pydantic shape, profile upsert handler with preserve-on-empty semantics matching `injuries_structured`). Next: Home/You banner + local notification reminders. Effort remaining: ~1-2 days.
+10. ~~**Strong + Strava imports.**~~ ✅ **Shipped 2026-05-10.** Strong CSV upload and Strava OAuth/backfill now have backend pipelines and frontend entry points. Remaining work: unmatched-exercise review, per-source telemetry, and production Strava env validation.
+11. **Hevy + Generic CSV** follow only after import activation is working. Effort: 3 days + 1-2 days.
+
+### Cleanup carried from earlier passes
+
+12. **Backend log structuring** — `KeyError("Attempt to overwrite 'created'")` in `gut_backfill`. Still polluting Sentry per the roadmap doc.
+13. **Per-route latency budgets** — log `time.perf_counter()` on `/workouts/weekly-review` and `/meals/score` (both hot paths). Cheap, high observability win.
+14. **HomeScreen / ActiveWorkoutScreen split-and-lazy-load** — both screens are still the largest performance risk in the app. No new diagnosis needed; just the implementation.
+15. **`actual_rir` → next-set load suggestion** — RIR data has been captured for weeks; nothing reads it during the live session. Wiring the deterministic suggestion (RIR 0-1 → same weight; RIR ≥3 → +2.5-5 lbs) is small.
+16. **In-workout 1RM display** — `rolling_e1rm.py` is production-ready; UI chip is a few hours.
 
 ## Implementation Status
 
@@ -49,15 +121,15 @@ Implemented in the 2026-04-29 launch-readiness pass (current session) — comple
 - **A3 — Authenticated password change.** New `POST /auth/change-password` requires the current password, validates the new one, refuses no-op (same as current), bumps `token_version`, and returns a fresh JWT. Frontend helper `changePassword()` added to `services/api.ts`.
 - **A4 — JWT versioning + revocation.** `User.token_version` column added (with idempotent migration). `create_access_token` encodes `tv`; `get_current_user` rejects tokens whose `tv` is below the user's current version. Bumped on logout, password change, and password reset (both flows). `POST /auth/logout` added; frontend `handleSignOut` now calls it best-effort. Old tokens issued before this rollout (no `tv` claim) keep validating against the default 0 until the user's next logout/password event.
 - **A5 — Frontend test scaffold.** Added Jest config + `jest-expo` preset to `package.json`, wired up `npm test` and `npm run typecheck` scripts, and seeded two pure-function smoke test files (`src/utils/__tests__/subscription.test.ts`, `src/constants/__tests__/legal.test.ts`). Run `npm install` once to pull in the dev deps; `npm test` after.
-- **A6 — Backend startup gating + timing.** Heavy backfills and seed inserts in `create_db_and_tables` are now wrapped behind two env flags: `STARTUP_BACKFILLS_ENABLED` and `STARTUP_SEEDS_ENABLED` (both default to `1`). Each entry logs a `[migration] X took Yms` line when it exceeds 250ms, so slow migrations are visible in container logs without extra tooling.
+- **A6 — Backend startup gating + timing.** Startup is schema-readiness only by default. Data maintenance now requires `STARTUP_DATA_MAINTENANCE_ENABLED=1`, startup backfills require `STARTUP_BACKFILLS_ENABLED=1`, and OpenAI enrichment / historical AI backfill hooks have been removed from deploy startup.
 - **B1 — Tighter Info.plist usage descriptions.** `NSCameraUsageDescription`, `NSFaceIDUsageDescription`, `NSMicrophoneUsageDescription`, and `NSPhotoLibraryUsageDescription` rewritten in both `app.json` (so Expo regenerates correctly on next prebuild) and `ios/Thallo/Info.plist` (raw). Each now explains the specific use case, which App Review expects.
-- **B2 — Legal version re-acceptance.** `LEGAL_VERSION` bumped to `2026-04-29.2` to trigger a re-accept on existing accounts. `needsLegalReAcceptance()` helper added to `src/constants/legal.ts`. `POST /auth/accept-legal` endpoint stamps fresh acceptance timestamps + versions on all four sections. Frontend `acceptLegal()` helper added to `services/api.ts`. Legal sections also now include a Third-Party Services entry and an Account Deletion And Retention entry — bumping the version forces existing users to re-accept.
+- **B2 — Legal version re-acceptance.** `LEGAL_VERSION` bumped to trigger a re-accept on existing accounts. `needsLegalReAcceptance()` helper added to `src/constants/legal.ts`. `POST /auth/accept-legal` endpoint stamps fresh acceptance timestamps + versions on all four sections and writes a versioned `legal_acceptance_events` audit row. Frontend `acceptLegal()` helper added to `services/api.ts`. Legal sections also now include a Third-Party Services entry and an Account Deletion And Retention entry — bumping the version forces existing users to re-accept.
 - **B3 — Third-party data sharing disclosure.** New "Third-Party Services" section in `LEGAL_SECTIONS` names OpenAI (meal/coach/scan AI), USDA (food data), and Apple Health (on-device only), and explicitly states that calorie/macro/weight data is not shared.
 - **B5 — Hard-delete schedule.** `_purge_expired_soft_deletes` startup task added to `backend/app/main.py`. Runs as a daemon thread; hard-deletes any user with `is_active=False` and `account_deleted_at < now − 30 days`. Window configurable via `ACCOUNT_HARD_DELETE_DAYS`, gate via `ACCOUNT_HARD_DELETE_ENABLED=0`. Retention timeline now documented in the new "Account Deletion And Retention" legal section so users see it on next acceptance.
 - **B6 — Tighter rate limits.** `/auth/email-verification/request` lowered from `5/hour` to `3/hour`. `/auth/recovery-question` lowered from `20/hour` to `10/hour`. Reduces account-enumeration and email-bombing surface.
 - **B8 — DEV_EMAIL_TOKENS isolation test.** New `backend/tests/test_auth_dev_token_isolation.py` (4 cases) pins the gating logic so dev tokens never leak when the env var is unset, set to `0`, or set to a truthy-but-not-`1` value. Registered in `run_all.py`.
 - **B9 — Gear photo EXIF strip.** `pickGearPhoto` in `GearScreen.tsx` now passes `exif: false` to both `launchCameraAsync` and `launchImageLibraryAsync`. Matches the existing `MealEditModal` photo path. Uploaded gear photos no longer carry GPS coordinates or device metadata.
-- **C4 — Startup background data jobs gated.** Schema migrations still run on boot, but food micronutrient enrichment, exercise image refresh, muscle-fatigue backfill, and gut-health backfill now stay off unless explicitly enabled through startup env flags. The pure startup config helper is covered by `test_startup_maintenance`.
+- **C4 — Startup background data jobs removed.** Schema migrations and account-retention cleanup still run on boot, but food micronutrient enrichment, exercise image refresh, muscle-fatigue backfill, gut-health backfill, and food-classification backfill are no longer wired into startup env flags. The pure startup config helper is covered by `test_startup_maintenance`.
 - **D17 — Watch-selected custom activity handoff.** Watch quick-start payloads now pass their selected category/subtype into `LiveActivityTracker`, which auto-starts the matching phone tracker activity instead of making the user pick again.
 - **D20 — Per-session gear picker.** Active workout completion now prompts when multiple active gear items match a session and passes selected `gear_ids` through `/workouts/complete`, so the backend credits only chosen gear instead of double-counting keyword matches.
 
@@ -83,6 +155,15 @@ Implemented earlier in this session (gear, watch, goal-change pass):
 - **Day card focus chips** filter against `CHIP_ALLOWED_MUSCLES` so a Pull day no longer shows Chest, etc. `lats` and `rear_delt` added to Pull allowlist.
 - **Upper/Push/Pull adjacency warning** added in `change_day_type.detect_conflicts` — flags Upper next to Push/Pull (overlap warning) but deliberately excludes Push↔Pull (standard PPL design).
 
+Implemented in the 2026-05-10 session (form demos, imports, wearables planning):
+
+- **Bundled local form demos.** Replaced GitHub raw hot-linking with `assets/exercise-demos/<id>/{0,1}.jpg` baked into the ipa (~21 MB, 174 ids × 2 frames). Hot-links worked in Expo Go but silently failed in TestFlight/App Runner prod builds. `src/utils/exerciseDemoAssets.ts` is the auto-generated `require()` map (Metro requires static literal paths). `scripts/sync-exercise-demos.sh` regenerates it after seed/resolver edits.
+- **Fixed dead `demoExerciseDbId` prop on `FormVideoModal`.** It was declared on the props interface but never rendered; modal now actually shows the 2-frame `ExerciseDemoCard` at the top of the video grid as the original JSDoc promised.
+- **Fixed aspect-ratio mismatches across demo surfaces.** Source frames are 3:2 (850×567); detail surfaces used 4:3 containers and small tiles used `contain`. Caused letterboxing on detail views and "tiny figure in a square white box" on small tiles. Corrected to 3:2 containers (no letterbox) for large surfaces and `cover` on small tiles (figure-centred crop). Also fixed `ExerciseDemoCard` `<Image>` styling — under New Architecture, `position: 'absolute' + top/left/right/bottom: 0` without explicit width/height fell back to intrinsic 850×567 and looked "super zoomed in" inside smaller parents.
+- **MFP / Strong / Strava import paths.** Backend parsers, matchers, idempotent pipelines, rollback-aware import batches, and Settings → Import UI are shipped for MyFitnessPal CSV/GDPR ZIP, Strong CSV, and Strava OAuth/backfill. Remaining import work is activation, review, telemetry, and production Strava env validation.
+- **New planning docs.** `docs/architecture/wearable-integrations.md` (coverage matrix + difficulty + recommendation tiering for Apple Health / Health Connect / Oura / WHOOP / Garmin / Fitbit / Polar / Galaxy / Coros / Strava / etc.). `docs/architecture/data-import.md` (import paths from MyFitnessPal, Cronometer, Hevy, Strong, Strava, plus generic CSV — phased sequence, idempotency, source boundary rules).
+- **CLAUDE.md updated.** Added invariant #12 ("Form demos are bundled, not hot-linked") and indexed the two new docs.
+
 Deferred by owner decision:
 
 - StoreKit, RevenueCat, restore purchases, billing management, entitlement verification, and production subscription gating.
@@ -92,9 +173,10 @@ Deferred by owner decision:
 - Backend `User` already has `first_name` and `last_name`. Signup flow now uses them.
 - Workout planner is fully deterministic per `CLAUDE.md`. AI plan review is permanently disabled (`PLAN_REVIEW_ENABLED=0` is a no-op).
 - The subscription helper now defaults missing tiers to Free, but Pro is still a client/dev-tier simulation until StoreKit or RevenueCat and server-side entitlements are wired.
-- `HomeScreen.tsx` is ~12k lines with 121 `useState` calls. `ActiveWorkoutScreen.tsx` is ~6k lines with 17 active `setInterval` instances.
+- `HomeScreen.tsx` is ~20.8k lines with 164 `useState` occurrences. `ActiveWorkoutScreen.tsx` is ~13.3k lines with 4 `setInterval` references and 27 `setTimeout` references. `ProgressScreen.tsx` is ~13.1k lines and remains map-heavy inside `ScrollView` surfaces.
+- Location is already used for workout-scoped outdoor cardio route/distance/pace capture on phone and Watch. Hydration has a heat add-on in the pure function, but no ambient weather/location feed is wired into the endpoint yet.
 - Watch and Live Activity code exists. Recent diagnostic improvements should make next-build sync issues visible without Console.app.
-- `docs/DEPLOYMENT.md` already notes that a public App Store release needs a privacy policy URL.
+- `docs/DEPLOYMENT.md` already notes that a public App Store release needs hosted Privacy Policy and Terms URLs; source drafts live in `docs/legal/`.
 
 ## Non-Negotiable Guardrails
 
@@ -124,17 +206,17 @@ The sections below are concrete punch-list items found by sweeping the codebase.
 | A3 | No authenticated password-change endpoint | `backend/app/routers/auth.py` | Add `POST /auth/change-password` that requires current password, rotates password without invalidating session. |
 | A4 | JWT 7-day lifetime, no revocation | `backend/app/auth.py` (`ACCESS_TOKEN_EXPIRE_MINUTES = 10080`) | Add token versioning column on `User` (`token_version`). Bump on logout/password-change. Verify in `get_current_user`. |
 | A5 | Frontend has zero test files | `find src -name '*.test.*'` returns nothing | At minimum, add Jest + React Native Testing Library scaffolding and one smoke test for `HomeScreen` mounting. |
-| A6 | Backend startup runs 41 migrations + 4 backfills + OpenAI calls sequentially | `backend/app/database.py:create_db_and_tables` and `app/main.py:_startup_enrich_food_micros` | Gate non-essential backfills behind a `--migrate` flag or daily cron. Hot restarts are slow today. |
+| A6 | Backend startup used to run migrations + data backfills + possible OpenAI calls | `backend/app/database.py:create_db_and_tables` and legacy `app/main.py` startup jobs | ✓ Done — startup no longer exposes AI backfill/enrichment hooks; data maintenance is explicit. |
 
 ## B. Legal, Privacy, Auth & Account
 
 | # | Issue | Location | Fix |
 |---|---|---|---|
-| B1 | Weak Info.plist usage descriptions | `ios/Thallo/Info.plist` — `NSFaceIDUsageDescription`, `NSMicrophoneUsageDescription`, `NSPhotoLibraryUsageDescription` are generic ("Allow $(PRODUCT_NAME) to use Face ID") | Rewrite each to explain specific use (Face ID for fast app sign-in, microphone for speech-to-meal entry, photo library for gear photos and meal scans). App Review flags generic copy. |
-| B2 | Legal versions hardcoded, not enforced post-signup | `src/constants/legal.ts:1`, `backend/app/routers/auth.py:18` both `2026-04-29` | When a version bumps, add a "re-accept terms" flow on next launch. Keep an audit trail of every accepted version per user. |
-| B3 | No third-party data sharing disclosure in legal copy | `src/constants/legal.ts` | Mention OpenAI (meals/coach/scans), USDA (food data), Apple Health (on-device only). |
-| B4 | Legal copy is "launch-ready product copy, not attorney-reviewed" | `src/components/LegalDisclosureModal.tsx:36` | Have counsel review before paid launch. Link to attorney-reviewed copy on website. |
-| B5 | Soft-delete has no hard-delete schedule | `backend/app/routers/profile.py` deletion | Add a scheduled job or daily cron that hard-deletes accounts soft-deleted >30 days. Document retention to users. |
+| B1 | Weak Info.plist usage descriptions | `ios/Thallo/Info.plist`, `app.json`, Watch `Info.plist` | ✓ Done — camera, photo library, microphone, Face ID, HealthKit, route/location, motion, and Watch Health writes now explain specific app use. Keep App Store labels synced. |
+| B2 | Legal versions hardcoded, not enforced post-signup | `src/constants/legal.ts`, `backend/app/routers/auth.py` | ✓ Done — re-accept terms flow plus `legal_acceptance_events` audit trail. |
+| B3 | No third-party data sharing disclosure in legal copy | `src/constants/legal.ts`, `docs/legal/` | ✓ Done — in-app copy and public drafts disclose OpenAI, USDA/Open Food Facts/wger, Apple/Google sign-in, RevenueCat/app stores, HealthKit/Health Connect boundaries, and no sale/tracking. |
+| B4 | Legal copy is "launch-ready product copy, not attorney-reviewed" | `src/constants/legal.ts`, `docs/legal/` | Public Privacy Policy and Terms source drafts added; founder/legal review and hosted URLs still required before paid launch. |
+| B5 | Soft-delete has no hard-delete schedule | `backend/app/routers/profile.py`, `backend/app/main.py` | ✓ Done — hard-delete window exists; deletion/retention copy now also calls out anonymized shells, backups, logs, vendor records, billing/security/fraud/moderation exceptions. |
 | B6 | Email-verification rate limit too loose | `backend/app/limiter.py` (`5/hour` for verification request) | Tighten to `3/hour` per user/IP. Same for `/auth/recovery-question` lookup. |
 | B7 | COPPA/GDPR-K age gate is self-reported only | `src/utils/age.ts:46` | Acceptable for soft launch. For EU/UK distribution add explicit parental-consent flow for 13–16. |
 | B8 | DEV_EMAIL_TOKENS path leaks tokens in JSON | `backend/app/routers/auth.py:252,416` | Confirm env check is airtight; add tests that ensure tokens are NOT in response when `DEV_EMAIL_TOKENS` unset. |
@@ -145,14 +227,14 @@ The sections below are concrete punch-list items found by sweeping the codebase.
 
 | # | Issue | Location | Fix |
 |---|---|---|---|
-| C1 | ActiveWorkoutScreen has 17 setInterval instances | `src/screens/ActiveWorkoutScreen.tsx:758-1471` (HK polling + rest timer + sync debounce) | Consolidate timers behind a single `useTimer` hook. Track owner refs explicitly. Comment at line 1207–1223 admits the intervals "pause when JS suspends" with timestamp fallback parallel logic. |
-| C2 | HomeScreen has 121 useState calls and is not memoized | `src/screens/HomeScreen.tsx` | Group state by domain (workout / meals / settings / social) into reducers or context providers. Wrap heavy children in `React.memo`. |
+| C1 | ActiveWorkoutScreen timer ownership is still spread out | `src/screens/ActiveWorkoutScreen.tsx` — 4 `setInterval` references, 27 `setTimeout` references | Consolidate polling, autosave, sync debounce, sidecar drains, GPS lifecycle, rest timing, and modal handoffs behind one owned timer/side-effect layer. Track cleanup explicitly on unmount and resume. |
+| C2 | HomeScreen is now a ~20.8k-line route container | `src/screens/HomeScreen.tsx` — 164 `useState` occurrences; some rows are memoized, but orchestration remains monolithic | Split by domain (workout / meals / settings / social / trainer / imports / custom activity tracker) into route-level containers and hooks. Keep HomeScreen as shell/orchestrator. |
 | C3 | Backend startup re-seeds equipment/exercises/foods on every hot restart | `backend/app/database.py:1164-1169` | Idempotent already, but adds 5–15s to every container restart. Skip if marker row exists. |
-| C4 | OpenAI call in startup background thread | `backend/app/main.py:_startup_enrich_food_micros` | ✓ Done — default-off behind `STARTUP_ENRICH_FOODS_ENABLED=1`; startup background job config is tested. Run deliberately as maintenance/cron, not on every boot. |
+| C4 | OpenAI call in startup background thread | legacy `backend/app/main.py:_startup_enrich_food_micros` | ✓ Done — startup AI backfill/enrichment hooks and the food-micro maintenance script were removed. |
 | C5 | N+1 queries on workout-detail fetch | `backend/app/routers/workouts.py:2406` (loop + `db.exec(select(ExerciseSet)…)` per exercise) | Single `IN` query then group by exercise id. ✓ Done — `_build_session_responses_batch` collapses list/detail to 3 queries; `progression_insights` collapses nested loop to 2; `delete_workout` uses bulk DELETE WHERE id IN(...). |
 | C6 | N+1 in social digest builder | `backend/app/services/social/digest.py:92-104` | ✓ Already batched (verified — uses `.in_(friend_ids)` for profiles, users, goals, completions). Doc was stale. |
 | C7 | N+1 in meal item fetch | `backend/app/routers/meals.py:743` (per-meal MealItem query) | ✓ Mostly batched (`day_summary` uses `.in_(meal_ids)`); only remaining per-row pattern is `delete_meal` cascade which is single-meal so not a true N+1. |
-| C8 | Long lists rendered via `.map()` inside ScrollView | `HomeScreen.tsx:5873` workout schedule, `HomeScreen.tsx:6278-6314` muscle library (~240 nodes) | Convert to `FlatList`/`SectionList`. Especially the muscle library. |
+| C8 | Long lists rendered via `.map()` inside ScrollView | `HomeScreen.tsx`, `ProgressScreen.tsx` | Convert workout history, meal/import history, PR lists, body-scan history, plateau lists, and library rows to `FlatList`/`SectionList`. Imports make this more urgent because users can arrive with years of history. |
 | C9 | 6 screens import `expo-image-picker` eagerly | ActiveWorkoutScreen, HomeScreen, ProgressScreen, OnboardingScreen, GearScreen, EditProfileScreen | ✓ Done — replaced eager `import * as ImagePicker` in the 5 remaining screens with a Proxy-backed lazy reference; the underlying `require()` only runs on first property access (consumers are all async). GearScreen already used `await import()`. |
 | C10 | base64-encoded photo strings persisted in component state and AsyncStorage | `src/screens/GearScreen.tsx`, `OnboardingScreen.tsx:638` | Validate < 2 MB before encoding. Consider writing to FS and storing path. |
 | C11 | bodyScanHistory loaded fully into memory | `src/screens/ProgressScreen.tsx:328` | ✓ Done — initial AsyncStorage + remote merge both `.slice(0, 20)` before `setBodyScanHistory`. Older entries stay persisted; only the recent slice lives in JS heap (each entry carries a base64 image). |
@@ -167,13 +249,13 @@ The sections below are concrete punch-list items found by sweeping the codebase.
 
 | # | Issue | Location | Fix |
 |---|---|---|---|
-| D1 | No notification preference UI | `workoutReminders.ts` and `mealReminders.ts` exist but no settings surface | Add Settings → Notifications with workout/meal reminder toggles, time pickers, quiet hours. |
-| D2 | No unit preferences | OnboardingScreen hardcodes lbs/feet-inches; distance is hardcoded miles app-wide | Add `weightUnit` and `distanceUnit` to `UserProfile`. Drive display formatters off them. EU users will need this. |
-| D3 | No dietary restriction collection in onboarding | `OnboardingScreen.tsx` skips this entirely; `UserProfile.allergies` exists but is never populated | Add an allergy/restriction step. Wire into nutrition planner so meal suggestions filter. |
-| D4 | Onboarding can't resume after abandonment | `OnboardingScreen.tsx` keeps state in memory only | Persist partial progress to AsyncStorage. Show progress indicator. Offer "continue where you left off" on re-open. |
-| D5 | Live Activity silently fails when notification perms denied | `src/services/liveActivity.ts:72-74` checks but doesn't surface | Show an inline tip during workout start: "Enable notifications to see rest timer on Lock Screen." |
-| D6 | No mid-workout exercise swap | Swap-scoring logic exists (`swapScoring.ts`); only pre-workout swap is wired | Expose swap from active workout (long-press on exercise card → swap with same-muscle alternative). |
-| D7 | No plan pause/resume for travel | Skip-day exists; pause-week doesn't | Add a "pause plan" flag on PlanWeek that suspends auto-renew and stops generating reminders. |
+| D1 | Notification preference UI missing | `SettingsScreen.tsx` | ✓ Mostly done — Settings has workout, meal, hydration, and quiet-hours controls. Remaining work is route-level polish and ensuring reminder scheduling respects these settings everywhere. |
+| D2 | Unit preferences missing | `SettingsScreen.tsx`, `UserProfile.weightUnit`, `UserProfile.distanceUnit` | ✓ Mostly done — Settings can update weight and distance units. Remaining work is applying display formatters across every history/chart/share/export surface. |
+| D3 | Dietary restriction collection in onboarding | `OnboardingScreen.tsx`, `UserProfile.allergies` | ✓ Done — onboarding collects allergies/restrictions and backend meal planning/filtering reads them. |
+| D4 | Onboarding resume after abandonment | `OnboardingScreen.tsx` | ✓ Done — versioned `onboardingDraft_v1` persists setup state, prompts to continue, expires stale drafts, and clears on completion. |
+| D5 | Live Activity permission education | `ActiveWorkoutScreen.tsx` | ✓ Done — one-time permission education alert explains Lock Screen/Dynamic Island rest-timer impact and links to Settings. |
+| D6 | Mid-workout exercise swap | `ActiveWorkoutScreen.tsx` | ✓ Done — active workout swap flow preserves logged sets and ranks same-session alternatives locally. |
+| D7 | Plan pause/resume for travel or illness | `PlanWeek.paused_until`, `SettingsScreen.tsx`, `plan_weeks.py` | ✓ Done — Settings can pause/resume the active week; backend suspends auto-renew, auto-skip, and reminders while paused. |
 | D8 | Coach chat has no transcript history | `CoachCheckinModal.tsx` doesn't persist a log | Add a `CoachMessage` table; show recent messages. |
 | D9 | Apply-action has no undo | Coach actions mutate `UserPreferences` / `UserCoachingState` directly | Add a 30-second undo banner after each apply-action. |
 | D10 | No body-scan comparison view | `ProgressScreen` shows scans but no side-by-side or trend graph | Add scan timeline + before/after comparison. |
@@ -181,18 +263,19 @@ The sections below are concrete punch-list items found by sweeping the codebase.
 | D12 | Barcode scan "Product not found" has no fallback | `MealEditModal.tsx:714` | Offer "Search by name" fallback or "Add to USDA submission queue." |
 | D13 | Saved meals not exposed as one-tap repeat from recents | `SavedMealsSection.tsx` | After logging a meal, prompt "Save as favorite?" Then expose saved meals as a horizontal scroll above the meal entry. |
 | D14 | No friend invite link / friend-code generation | `FriendsModal.tsx` only supports username search | Add deep-link invites with reusable per-user codes. |
-| D15 | No block/report UX | FriendsModal has remove-via-pending only | Add explicit Block + Report flows. App Review will ask. |
-| D16 | Watch complications and Siri Shortcuts disabled | `targets/thallo-watch-complication/` and `expo-target.config.js.disabled` | Defer until post-launch. Document the Xcode wiring needed. |
+| D15 | Block/report UX | FriendsModal social surface | ✓ Done — long-press friend row exposes Remove / Block / Report; `POST /social/report-user` stores open moderation reports. |
+| D16 | Watch complications / Siri shortcuts | Watch complication target / Siri intent target | Partial — Watch complication + Smart Stack widget shipped. Siri shortcuts / intents build pass remains deferred. |
 | D17 | TODO: pass watch-selected activity through to LiveActivityTracker | `HomeScreen.tsx` / `LiveActivityTracker.tsx` | ✓ Done — watch quick-start category/subtype resolves to the matching tracker option and starts it directly. |
 | D18 | TODO: persist protein preference once UserCoachingState supports it | `backend/app/services/nutrition/weekly_review.py:402` | Add `preferred_protein_g` to `UserCoachingState`. |
 | D19 | TODO: wire DayState.session_rpe_avg | `ProgressScreen.tsx:547` | Plumb the field through; surface RPE trend. |
 | D20 | Per-session gear picker | Gear auto-tracks via keyword matching, but two pairs of running shoes both match "run" → double-counting | ✓ Done — matching gear prompts on completion; selected IDs bypass keyword auto-match and explicit "none today" credits nothing. |
+| D21 | Hydration heat/weather context not wired | `backend/app/services/nutrition/hydration.py` supports `ambient_temp_f`, but `/meals/hydration` does not provide weather | Add optional coarse weather setting. Store weather observations, not precise background location. Use for heat/humidity/altitude hydration and outdoor-cardio recovery copy. |
 
 ## E. UX Rough Edges
 
 | # | Issue | Location | Fix |
 |---|---|---|---|
-| E1 | No dedicated Settings screen | Settings/preferences are spread across edit-profile + account modal | Create a single Settings hub. |
+| E1 | Dedicated Settings screen cleanup | `SettingsScreen.tsx` plus duplicate Home/You controls | ✓ Mostly done — `SettingsScreen` exists. Remaining work is retiring duplicate Home/You modal controls and making Import/Data & Privacy/Watch/Gear/Legal consistently route through Settings. |
 | E2 | Empty states are bare | First-run, no workouts, no meals, no friends, no measurements | Add contextual hints ("Save a meal as favorite for one-tap repeat next time"). |
 | E3 | Error states are silent | HomeScreen falls back to cache on network failure with no banner | Show a small "offline" pill when cached data is in use. |
 | E4 | Active-workout force-quit recovery is implicit | `ActiveWorkoutScreen` saves on background; resume banner exists in HomeScreen but is not always offered | Make the resume banner more visible after force quit. |
@@ -337,9 +420,9 @@ Originally listed (most still valid):
 |---|---|
 | Add device sync status screen | Partial (Account row); make prominent (G2) |
 | Add workout recovery/resume banner | Partial (E4) |
-| Improve onboarding save/resume | Pending — see D4 |
+| Improve onboarding save/resume | ✓ Done — see D4 |
 | Add pre-permission HealthKit education | Pending — see E8 |
-| Add notification preferences | Pending — see D1 |
+| Add notification preferences | Mostly done — see D1 |
 | Add legal/settings section | ✓ Done |
 | Add saved meal shortcuts | Pending — see D13 |
 | Improve grocery list check-off | Pending |
@@ -408,9 +491,9 @@ Do not prioritize these before the P0/P1 work above:
 4. Add password-change endpoint (A3) and JWT versioning for revocation (A4).
 5. Wire an email provider so verification + password reset actually deliver.
 6. Add Sentry (H1). One PR.
-7. Add a Settings hub with notification preferences and unit preferences (D1, D2, E1).
-8. Add onboarding resume + dietary restrictions step (D3, D4).
-9. Keep beta access free/full-feature via `freeBetaFullAccess`; choose StoreKit 2 or RevenueCat only when moving toward paid testing.
+7. Finish Settings hub cleanup and preference propagation (D1, D2, E1), including the new weather/hydration opt-in if prioritized.
+8. Add HealthKit pre-permission education in onboarding and keep the shipped onboarding draft/restriction flows covered in QA (D3, D4, E8).
+9. Keep `freeBetaFullAccess` off by default; validate the 7-day signup trial and RevenueCat entitlement sync in paid TestFlight/internal testing.
 10. Run a 10–20 person TestFlight with a written QA checklist that includes the Watch native checklist above.
 
 ## Practical 60-Day Plan

@@ -5,30 +5,32 @@
 // without leaving the app.
 //
 // Preview source:
-//   - Curated or auto-scraped YouTube video (`videoId`) → that video's
-//     thumbnail.
-//   - No video_id → a branded placeholder tile. Stick-figure / wger
-//     static images are intentionally NOT used (inconsistent with the
-//     YouTube-thumbnail treatment everywhere else).
+//   - Bundled Move Kit demo video when this exercise has a match.
+//   - Older bundled free-exercise-db frame when there is no Move Kit match.
+//   - Curated or auto-scraped YouTube video (`videoId`) thumbnail.
+//   - No media → a branded placeholder tile.
 //
 // Legal framing:
-//   - Copy explicitly says "YouTube form demo" / "Watch on YouTube" so
-//     the user never thinks the app owns the video.
 //   - Thumbnails are served by `img.youtube.com` (hotlinking allowed,
 //     same as Twitter/Discord/Reddit previews).
-//   - Play still routes through the YouTube embed iframe — no download,
+//   - YouTube playback still routes through the embed iframe — no download,
 //     no rehost.
 //
 // onPress always invokes openExerciseVideo (FormVideoModal).
 
-import { View, Text, TouchableOpacity, Image } from 'react-native';
+import { View, Text, TouchableOpacity, ImageSourcePropType } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+import { demoLockoutSource, moveKitDemoVideo } from '../utils/exerciseDemo';
+import ExerciseThumbMedia from './ExerciseThumbMedia';
 
 interface Props {
   exerciseName: string;
   videoId?: string | null;
+  /** free-exercise-db id — when present, the lockout photo frame is
+   *  used as the thumbnail instead of the YouTube thumbnail. */
+  demoExerciseDbId?: string | null;
   themeName?: AppThemeName;
   /** Invoked on tap. Typically wired to the parent's openExerciseVideo
    *  callback which opens FormVideoModal. */
@@ -41,11 +43,19 @@ function ytThumb(id: string): string {
   return `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
 }
 
-export default function ExerciseVideoCard({ exerciseName, videoId, themeName, onPress }: Props) {
+export default function ExerciseVideoCard({ exerciseName, videoId, demoExerciseDbId, themeName, onPress }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const onPrimary = getContrastingTextColor(tc.primary);
 
-  const thumbUri = videoId ? ytThumb(videoId) : null;
+  // Prefer the bundled Move Kit demo video, then the older bundled
+  // free-exercise-db lockout frame, then the YouTube thumbnail.
+  const demoSrc = demoLockoutSource(demoExerciseDbId);
+  const moveKitVideo = moveKitDemoVideo(demoExerciseDbId, exerciseName);
+  const ytSrc: ImageSourcePropType | null = videoId ? { uri: ytThumb(videoId) } : null;
+  const thumbSrc = demoSrc ?? ytSrc;
+  const isDemoFrame = !!demoSrc;
+  const isMoveKitFrame = !!moveKitVideo;
 
   return (
     <TouchableOpacity
@@ -57,12 +67,21 @@ export default function ExerciseVideoCard({ exerciseName, videoId, themeName, on
         marginBottom: 12,
       }}
     >
-      <View style={{ position: 'relative', width: '100%', aspectRatio: 16 / 9 }}>
-        {thumbUri ? (
-          <Image
-            source={{ uri: thumbUri }}
+      <View style={{
+        position: 'relative', width: '100%',
+        // Bundled demo frames are 3:2 (850x567); YouTube thumbs are 16:9.
+        aspectRatio: isDemoFrame && !isMoveKitFrame ? 3 / 2 : 16 / 9,
+        // Demo photos sit on a neutral light background; the YouTube
+        // thumbnail covers fully so no surface color shows through.
+        backgroundColor: isMoveKitFrame ? '#000000' : (isDemoFrame ? '#F5F5F5' : tc.surface),
+      }}>
+        {thumbSrc || isMoveKitFrame ? (
+          <ExerciseThumbMedia
+            exerciseName={exerciseName}
+            demoExerciseDbId={demoExerciseDbId}
+            fallbackSource={ytSrc}
             style={{ width: '100%', height: '100%' }}
-            resizeMode="cover"
+            imageResizeMode={isDemoFrame && !isMoveKitFrame ? 'contain' : 'cover'}
           />
         ) : (
           <View style={{
@@ -90,7 +109,7 @@ export default function ExerciseVideoCard({ exerciseName, videoId, themeName, on
         {/* Light bottom-only gradient — ensures the "YouTube" badge stays
             readable without darkening the whole thumbnail. Top 60% of
             the image is fully unaltered so the form preview stays clear. */}
-        {thumbUri && (
+        {(thumbSrc || isMoveKitFrame) && (
           <View pointerEvents="none" style={{
             position: 'absolute', left: 0, right: 0, bottom: 0, height: '45%',
             backgroundColor: 'rgba(0,0,0,0.25)',
@@ -111,7 +130,7 @@ export default function ExerciseVideoCard({ exerciseName, videoId, themeName, on
             <Ionicons name="play" size={22} color="#fff" style={{ marginLeft: 3 }} />
           </View>
         </View>
-        {thumbUri && (
+        {thumbSrc && !isDemoFrame && !isMoveKitFrame && (
           <View style={{
             position: 'absolute', bottom: 8, right: 10,
             backgroundColor: 'rgba(0,0,0,0.72)',
@@ -124,15 +143,26 @@ export default function ExerciseVideoCard({ exerciseName, videoId, themeName, on
             </Text>
           </View>
         )}
+        {(isDemoFrame || isMoveKitFrame) && (
+          <View style={{
+            position: 'absolute', bottom: 8, right: 10,
+            backgroundColor: tc.primary,
+            paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4,
+          }}>
+            <Text style={{ fontSize: 10, fontWeight: '800', color: onPrimary, letterSpacing: 0.5 }}>
+              FORM PREVIEW
+            </Text>
+          </View>
+        )}
       </View>
       <View style={{ padding: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <Ionicons name="play-circle" size={16} color={tc.primary} />
         <View style={{ flex: 1 }}>
           <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
-            Watch form video
+            {isDemoFrame || isMoveKitFrame ? 'Tap for form demo + videos' : 'Watch form video'}
           </Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 1 }} numberOfLines={1}>
-            YouTube form demo — not created by Thallo
+            {isMoveKitFrame ? 'Move Kit demo above · video on tap' : (isDemoFrame ? 'Static frame above · video on tap' : 'YouTube form demo — not created by Thallo')}
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />

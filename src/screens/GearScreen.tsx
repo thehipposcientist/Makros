@@ -10,12 +10,15 @@ import {
   ActivityIndicator,
   StyleSheet,
   Image,
+  ImageBackground,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { DEFAULT_THEME_NAME, getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { formatDistance, unitToMi, type DistanceUnit } from '../utils/units';
+import { STOCK_IMAGES, gearStockImageUri } from '../constants/stockImages';
 import {
   listGear,
   addGear,
@@ -168,6 +171,25 @@ function MileageBar({ pct, color }: { pct: number | null; color: string }) {
   );
 }
 
+function GearHero() {
+  return (
+    <ImageBackground
+      source={{ uri: STOCK_IMAGES.gear.hero }}
+      style={styles.gearHero}
+      imageStyle={styles.gearHeroImage}
+    >
+      <LinearGradient
+        colors={['rgba(0,0,0,0.06)', 'rgba(0,0,0,0.58)']}
+        style={styles.gearHeroGradient}
+      />
+      <View style={styles.gearHeroCopy}>
+        <Text style={styles.gearHeroTitle}>Gear status</Text>
+        <Text style={styles.gearHeroMeta}>Wear signals · rotations · maintenance</Text>
+      </View>
+    </ImageBackground>
+  );
+}
+
 function GearInsightPanel({
   gear,
   tc,
@@ -268,9 +290,23 @@ function GearCard({
   const info = gearTypeInfo(item.gear_type);
   const color = getMileageColor(item.pct_used);
   const pctLabel = item.pct_used !== null ? `${Math.round(item.pct_used * 100)}%` : null;
+  const hasPhotos = !!item.photos?.length;
 
   return (
     <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+      {!hasPhotos && (
+        <ImageBackground
+          source={{ uri: gearStockImageUri(item.gear_type) }}
+          style={styles.gearStockImage}
+          imageStyle={styles.gearStockImagePhoto}
+        >
+          <LinearGradient
+            colors={['rgba(0,0,0,0.01)', 'rgba(0,0,0,0.26)']}
+            style={styles.gearStockGradient}
+          />
+        </ImageBackground>
+      )}
+
       <View style={styles.cardHeader}>
         <View style={[styles.gearIcon, { backgroundColor: color + '22' }]}>
           <Ionicons name={info.icon as any} size={22} color={color} />
@@ -293,7 +329,7 @@ function GearCard({
       </View>
 
       {/* Photo strip — shown when the item has reference photos */}
-      {item.photos && item.photos.length > 0 && (
+      {hasPhotos && (
         <View style={{ flexDirection: 'row', gap: 6, marginTop: 10 }}>
           {item.photos.slice(0, 4).map((uri, idx) => (
             <Image
@@ -734,6 +770,7 @@ function LogMilesModal({
   onLog: (miles: number, sessions: number) => void;
   onCancel: () => void;
 }) {
+  const onPrimary = getContrastingTextColor(tc.primary);
   const sessionOnly = gear ? !isMileTracked(gear.gear_type) : false;
   const [miles, setMiles] = useState('');
   const [sessions, setSessions] = useState('1');
@@ -794,7 +831,7 @@ function LogMilesModal({
               }}
               style={[styles.logBtn, { backgroundColor: tc.primary, borderColor: tc.primary }]}
             >
-              <Text style={{ color: '#fff', fontWeight: '700' }}>Add</Text>
+              <Text style={{ color: onPrimary, fontWeight: '700' }}>Add</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -812,9 +849,10 @@ interface Props {
   onBack?: () => void;
 }
 
-export default function GearScreen({ authToken, themeName = 'slate', distanceUnit = 'mi', onBack }: Props) {
+export default function GearScreen({ authToken, themeName = DEFAULT_THEME_NAME, distanceUnit = 'mi', onBack }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const onPrimary = getContrastingTextColor(tc.primary);
   const insets = useSafeAreaInsets();
 
   const [gear, setGear] = useState<GearItem[]>([]);
@@ -891,7 +929,7 @@ export default function GearScreen({ authToken, themeName = 'slate', distanceUni
           onPress={() => { setEditTarget(null); setShowForm(true); }}
           style={[styles.addBtn, { backgroundColor: tc.primary }]}
         >
-          <Ionicons name="add" size={20} color="#fff" />
+          <Ionicons name="add" size={20} color={onPrimary} />
         </TouchableOpacity>
       </View>
 
@@ -912,6 +950,8 @@ export default function GearScreen({ authToken, themeName = 'slate', distanceUni
             </View>
           )}
 
+          {gear.length > 0 && <GearHero />}
+
           <View style={[styles.infoBanner, { backgroundColor: tc.surface, borderColor: tc.border }]}>
             <Ionicons name="information-circle-outline" size={16} color={tc.textSecondary} />
             <Text style={[styles.infoText, { color: tc.textSecondary }]}>
@@ -923,7 +963,16 @@ export default function GearScreen({ authToken, themeName = 'slate', distanceUni
 
           {gear.length === 0 ? (
             <View style={styles.empty}>
-              <Ionicons name="walk-outline" size={48} color={tc.textMuted} />
+              <ImageBackground
+                source={{ uri: STOCK_IMAGES.gear.hero }}
+                style={styles.emptyImage}
+                imageStyle={styles.emptyImagePhoto}
+              >
+                <LinearGradient
+                  colors={['rgba(0,0,0,0.02)', 'rgba(0,0,0,0.34)']}
+                  style={styles.emptyImageGradient}
+                />
+              </ImageBackground>
               <Text style={[styles.emptyTitle, { color: tc.textPrimary }]}>No gear yet</Text>
               <Text style={[styles.emptySubtitle, { color: tc.textSecondary }]}>
                 Add your running shoes, bike, lifting belt, wraps, or other wear gear to track usage and get retirement alerts.
@@ -932,7 +981,7 @@ export default function GearScreen({ authToken, themeName = 'slate', distanceUni
                 onPress={() => { setEditTarget(null); setShowForm(true); }}
                 style={[styles.emptyBtn, { backgroundColor: tc.primary }]}
               >
-                <Text style={{ color: '#fff', fontWeight: '700' }}>Add Gear</Text>
+                <Text style={{ color: onPrimary, fontWeight: '700' }}>Add Gear</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -988,6 +1037,18 @@ const styles = StyleSheet.create({
   headerTitle: { flex: 1, fontSize: 20, fontWeight: '700' },
   addBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  gearHero: {
+    height: 136,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    marginBottom: 12,
+    justifyContent: 'flex-end',
+  },
+  gearHeroImage: { borderRadius: radius.md },
+  gearHeroGradient: { ...StyleSheet.absoluteFillObject },
+  gearHeroCopy: { padding: 14 },
+  gearHeroTitle: { color: '#fff', fontSize: 20, fontWeight: '900' },
+  gearHeroMeta: { color: '#fff', fontSize: 12, fontWeight: '800', marginTop: 3, opacity: 0.88 },
   alertBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1027,6 +1088,15 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 12,
   },
+  gearStockImage: {
+    height: 82,
+    borderRadius: radius.sm,
+    overflow: 'hidden',
+    marginBottom: 12,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  gearStockImagePhoto: { borderRadius: radius.sm },
+  gearStockGradient: { ...StyleSheet.absoluteFillObject },
   cardHeader: { flexDirection: 'row', alignItems: 'center' },
   gearIcon: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   gearName: { fontSize: 16, fontWeight: '700' },
@@ -1101,8 +1171,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
   },
-  empty: { alignItems: 'center', paddingTop: 60, paddingHorizontal: 32 },
-  emptyTitle: { fontSize: 20, fontWeight: '800', marginTop: 16, marginBottom: 8 },
+  empty: { alignItems: 'center', paddingTop: 28, paddingHorizontal: 20 },
+  emptyImage: {
+    width: '100%',
+    height: 150,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    marginBottom: 18,
+    justifyContent: 'flex-end',
+  },
+  emptyImagePhoto: { borderRadius: radius.md },
+  emptyImageGradient: { ...StyleSheet.absoluteFillObject },
+  emptyTitle: { fontSize: 20, fontWeight: '800', marginBottom: 8 },
   emptySubtitle: { fontSize: 14, textAlign: 'center', lineHeight: 20 },
   emptyBtn: { marginTop: 24, paddingHorizontal: 28, paddingVertical: 14, borderRadius: radius.md },
 });

@@ -2,6 +2,8 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 sqlmodel==0.0.37
 python-jose[cryptography]==3.3.0
+google-auth>=2.30.0,<3.0.0
+requests>=2.31.0
 cryptography>=42.0.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.1
@@ -10,3 +12,10 @@ openai>=1.0.0
 bcrypt>=4.0.0
 psycopg2-binary>=2.9.0
 slowapi>=0.1.9
+# Pillow + pillow-heif: required by ai/scanning.py to transcode HEIC
+# uploads (iOS Photos default) to JPEG before sending to OpenAI vision.
+# Without these, library uploads of HEIC photos returned 400 from
+# OpenAI under a JPEG mime label.
+Pillow>=10.0.0
+pillow-heif>=0.16.0
+pypdf>=4.3.0

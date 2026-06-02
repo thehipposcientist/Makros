@@ -1,21 +1,333 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, Platform, UIManager, Animated, ActivityIndicator } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { memo, useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView, Platform, UIManager, Animated, ActivityIndicator, ImageBackground, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { getFoodIconSpec } from '../utils/foodIcon';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 import { configureExpandAnimation } from '../utils/layoutAnim';
-import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
+import { DailyNutritionPlan, MealSuggestion, AppThemeName, UserProfile, type MealItem } from '../types';
 import { elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
-import { ensureItems, formatItemAmount } from '../utils/mealItems';
+import { ensureItems, formatItemAmount, macroTotalsFromMeal, type MealMacroTotals } from '../utils/mealItems';
+import { computeProteinBreakdown } from '../utils/proteinBreakdown';
 import { computeDayInsights } from '../utils/nutritionLayers';
-import { classifyFood, computeNutritionScore, computePlanGutHealth } from '../utils/nutritionScore';
+import { computeNutritionScore, computePlanGutHealth } from '../utils/nutritionScore';
+import { formatNutritionPrimaryTarget } from '../utils/nutritionTargetRanges';
+import { creditedMicrosFromContent } from '../utils/supplementFacts';
+import { resolveSupplementSlug } from '../utils/supplementNameMatch';
+import { mealCheckKey, mealLegacyKey } from '../utils/mealPlanState';
 import NutritionInsightCard from './NutritionInsightCard';
 import SwipeableRow, { SwipeAction } from './SwipeableRow';
-import AnimatedNumber from './AnimatedNumber';
 import FadeInView from './FadeInView';
+import MealThumbnail from './MealThumbnail';
+import PressableScale from './PressableScale';
+import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from './ScoreInfoModal';
 import { dynamicCompactTextProps } from '../utils/dynamicType';
+import { useBottomSheetSwipeDismiss } from './BottomSheetDismissHandle';
+import { resolveMealImage } from '../utils/foodImage';
+
+// Suffixed micro keys (from a scanned Supplement Facts panel) → the
+// camelCase keys used by `dailyMicros` / the micro modal below. Converters
+// normalize to the UI's display unit; omega_3_g is stored in grams server-side
+// but shown against a 1600 mg target in the app.
+const PANEL_MICRO_TO_CARD: Record<string, { key: string; converter: number }> = {
+  calcium_mg: { key: 'calcium', converter: 1 },
+  iron_mg: { key: 'iron', converter: 1 },
+  potassium_mg: { key: 'potassium', converter: 1 },
+  magnesium_mg: { key: 'magnesium', converter: 1 },
+  zinc_mg: { key: 'zinc', converter: 1 },
+  copper_mg: { key: 'copper', converter: 1 },
+  manganese_mg: { key: 'manganese', converter: 1 },
+  boron_mg: { key: 'boron', converter: 1 },
+  selenium_mcg: { key: 'selenium', converter: 1 },
+  vitamin_d_mcg: { key: 'vitaminD', converter: 1 },
+  vitamin_b12_mcg: { key: 'vitaminB12', converter: 1 },
+  vitamin_c_mg: { key: 'vitaminC', converter: 1 },
+  vitamin_a_mcg: { key: 'vitaminA', converter: 1 },
+  folate_mcg: { key: 'folate', converter: 1 },
+  omega_3_g: { key: 'omega3', converter: 1000 },
+};
+
+// Aggregation registry. Each entry maps an output chip-key (camelCase) to
+// the snake_case / camelCase keys it can find on an incoming `micronutrients`
+// payload. Adding a row here is enough for the chip to start receiving data
+// from every meal-item path; rendering still requires a chip line in the
+// Nutrition Overview modal below. Keep ordering aligned with the chip
+// ordering in the modal so the spec reads top-to-bottom like the UI.
+const MICRO_FIELD_SPEC: Array<{ out: string; keys: string[]; converters?: Record<string, number> }> = [
+  // ── Default chips ─────────────────────────────────────────────────────
+  { out: 'fiber',              keys: ['fiber'] },
+  { out: 'sugar',              keys: ['sugar'] },
+  { out: 'addedSugar',         keys: ['added_sugar_g', 'added_sugar', 'addedSugar'] },
+  { out: 'sodium',             keys: ['sodium_mg', 'sodium'] },
+  { out: 'potassium',          keys: ['potassium_mg', 'potassium'] },
+  { out: 'calcium',            keys: ['calcium_mg', 'calcium'] },
+  { out: 'magnesium',          keys: ['magnesium_mg', 'magnesium'] },
+  { out: 'iron',               keys: ['iron_mg', 'iron'] },
+  { out: 'zinc',               keys: ['zinc_mg', 'zinc'] },
+  { out: 'saturatedFat',       keys: ['saturated_fat_g', 'saturated_fat', 'saturatedFat'] },
+  // Trans fat: "keep close to zero" target — sits next to sat fat / cholesterol.
+  { out: 'transFat',           keys: ['trans_fat_g', 'trans_fat', 'transFat'] },
+  { out: 'cholesterol',        keys: ['cholesterol', 'cholesterol_mg'] },
+  { out: 'monounsaturatedFat', keys: ['monounsaturated_fat', 'monounsaturatedFat'] },
+  { out: 'polyunsaturatedFat', keys: ['polyunsaturated_fat', 'polyunsaturatedFat'] },
+  { out: 'omega3',             keys: ['omega_3_g', 'omega_3', 'omega3'], converters: { omega_3_g: 1000, omega_3: 1000 } },
+  { out: 'vitaminD',           keys: ['vitamin_d_mcg', 'vitamin_d', 'vitaminD'] },
+  { out: 'vitaminC',           keys: ['vitamin_c_mg', 'vitamin_c', 'vitaminC'] },
+  { out: 'vitaminB12',         keys: ['vitamin_b12_mcg', 'vitamin_b12', 'vitaminB12'] },
+  { out: 'folate',             keys: ['folate_mcg', 'folate', 'folate_b9'] },
+  { out: 'vitaminA',           keys: ['vitamin_a_mcg', 'vitamin_a', 'vitaminA'] },
+  // ── Advanced / conditional chips ──────────────────────────────────────
+  // Render only when the day's value > 0 OR the user expands "Show advanced".
+  // Aggregation runs unconditionally so the insight layer always has data.
+  { out: 'choline',            keys: ['choline_mg', 'choline'] },
+  { out: 'iodine',             keys: ['iodine_mcg', 'iodine'] },
+  { out: 'vitaminK',           keys: ['vitamin_k_mcg', 'vitamin_k', 'vitaminK'] },
+  { out: 'vitaminE',           keys: ['vitamin_e_mg', 'vitamin_e', 'vitaminE'] },
+  { out: 'phosphorus',         keys: ['phosphorus_mg', 'phosphorus'] },
+  { out: 'selenium',           keys: ['selenium_mcg', 'selenium'] },
+  { out: 'copper',             keys: ['copper_mg', 'copper'] },
+  { out: 'manganese',          keys: ['manganese_mg', 'manganese'] },
+  { out: 'boron',              keys: ['boron_mg', 'boron'] },
+  // Omega-6: prefer the explicit `_mg` field; `omega_6` (no unit) is a
+  // legacy alias and was already treated as mg in the UI.
+  { out: 'omega6',             keys: ['omega_6_mg', 'omega_6', 'omega6'] },
+  { out: 'caffeine',           keys: ['caffeine_mg', 'caffeine'] },
+  { out: 'alcohol',            keys: ['alcohol_g', 'alcohol'] },
+  // Omega-3 subtypes (mg). Kept after the user-facing chip list because
+  // they're consumed for derivation, not chip rendering directly. The
+  // omega3 total chip stays the primary surface; EPA/DHA totals are
+  // computed in `dailyMicros` below for downstream insight use.
+  { out: 'omega3Ala',          keys: ['omega_3_ala_mg', 'omega_3_ala'] },
+  { out: 'omega3Epa',          keys: ['omega_3_epa_mg', 'omega_3_epa'] },
+  { out: 'omega3Dha',          keys: ['omega_3_dha_mg', 'omega_3_dha'] },
+];
+
+// Chip keys split into default (always visible) vs advanced (collapsed by
+// default, shown when value > 0 OR user taps "Show advanced"). Keep these
+// in sync with MICRO_FIELD_SPEC — the order here drives the modal layout
+// and matches the product spec from 2026-05.
+const DEFAULT_MICRO_CHIPS: ReadonlyArray<string> = [
+  'fiber', 'sugar', 'addedSugar', 'sodium',
+  'potassium', 'calcium', 'magnesium', 'iron', 'zinc',
+  'saturatedFat', 'transFat', 'cholesterol',
+  'monounsaturatedFat', 'polyunsaturatedFat', 'omega3',
+  'vitaminD', 'vitaminC', 'vitaminB12', 'folate', 'vitaminA',
+];
+const ADVANCED_MICRO_CHIPS: ReadonlyArray<string> = [
+  'choline', 'iodine', 'vitaminK', 'vitaminE', 'phosphorus',
+  'selenium', 'copper', 'manganese', 'boron',
+  'omega6', 'caffeine', 'alcohol',
+];
+
+const SUPPLEMENT_MICRO_MAP: Record<string, { key: string; converter: number }> = {
+  vitamin_d3:  { key: 'vitaminD',   converter: 1 / 40 },
+  vitamin_d:   { key: 'vitaminD',   converter: 1 / 40 },
+  vitamin_b12: { key: 'vitaminB12', converter: 1 },
+  magnesium:   { key: 'magnesium',  converter: 1 },
+  iron:        { key: 'iron',       converter: 1 },
+  omega_3:     { key: 'omega3',     converter: 1 },
+  vitamin_c:   { key: 'vitaminC',   converter: 1 },
+  calcium:     { key: 'calcium',    converter: 1 },
+  zinc:        { key: 'zinc',       converter: 1 },
+  selenium:    { key: 'selenium',   converter: 1 },
+  potassium:   { key: 'potassium',  converter: 1 },
+  folate:      { key: 'folate',     converter: 1 },
+};
+
+const EMPTY_TARGETS = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+
+type ProcessingBucket = NonNullable<MealItem['processing_bucket']>;
+
+const PROCESSING_TIER_INFO: Record<ProcessingBucket, { label: string; rowLabel: string; color: string }> = {
+  minimally_processed: { label: 'Whole food', rowLabel: 'Whole', color: '#22C55E' },
+  processed: { label: 'Processed', rowLabel: 'Processed', color: '#F59E0B' },
+  ultra_processed: { label: 'Ultra-processed', rowLabel: 'Ultra-processed', color: '#EF4444' },
+  unknown: { label: 'Unknown', rowLabel: 'Unknown', color: '#94A3B8' },
+};
+
+const NUTRITION_OVERVIEW_HEADER_IMAGE = require('../../assets/images/card-backgrounds/meal-card-plant-based-meal-prep-day.jpg');
+
+type TodaySupplement = {
+  ingredient_slug?: string | null;
+  ingredient_name?: string | null;
+  custom_name?: string | null;
+  category?: string | null;
+  description?: string | null;
+  source_terms?: string[] | null;
+  food_sources?: string[] | null;
+  log_names?: string[] | null;
+  dose_amount: number;
+  dose_unit: string;
+  taken_count: number;
+  nutrient_content?: {
+    serving_size?: { count?: number | null; unit?: string | null } | null;
+    nutrients?: Array<{ key?: string; nutrient?: string; amount?: number; unit?: string }> | null;
+  } | null;
+};
+
+type MicroSourceContribution = { food: string; meal: string; amount: number };
+
+type MicroSourceDetail = {
+  label: string;
+  unit: string;
+  total: number;
+  contributions: MicroSourceContribution[];
+};
+
+function microDisplayLabel(value: string): string {
+  // Special-case the few chips whose pretty label diverges from the
+  // auto-spaced camelCase form (e.g. "Vitamin B12" not "Vitamin B 1 2").
+  switch (value) {
+    case 'vitaminA': return 'Vitamin A';
+    case 'vitaminC': return 'Vitamin C';
+    case 'vitaminD': return 'Vitamin D';
+    case 'vitaminE': return 'Vitamin E';
+    case 'vitaminK': return 'Vitamin K';
+    case 'vitaminB12': return 'Vitamin B12';
+    case 'addedSugar': return 'Added Sugar';
+    case 'transFat': return 'Trans Fat';
+    case 'saturatedFat': return 'Saturated Fat';
+    case 'monounsaturatedFat': return 'Mono Fat';
+    case 'polyunsaturatedFat': return 'Poly Fat';
+    case 'omega3': return 'Omega-3';
+    case 'omega6': return 'Omega-6';
+    case 'omega3Ala': return 'Omega-3 ALA';
+    case 'omega3Epa': return 'Omega-3 EPA';
+    case 'omega3Dha': return 'Omega-3 DHA';
+    default:
+      return value.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+  }
+}
+
+function microDisplayUnit(value: string): string {
+  // Grams: macros-adjacent fats + carbs subcategories, plus alcohol.
+  if (['fiber', 'sugar', 'addedSugar', 'saturatedFat', 'transFat', 'monounsaturatedFat', 'polyunsaturatedFat', 'alcohol'].includes(value)) return 'g';
+  // Micrograms: anything where typical daily targets are <1 mg.
+  if (['vitaminD', 'vitaminB12', 'selenium', 'folate', 'vitaminK', 'iodine'].includes(value)) return 'mcg';
+  return 'mg';
+}
+
+function microValueFrom(source: Record<string, any> | null | undefined, spec: { keys: string[]; converters?: Record<string, number> }): number {
+  if (!source) return 0;
+  for (const key of spec.keys) {
+    if (source[key] == null) continue;
+    const value = Number(source[key]);
+    if (Number.isFinite(value)) return value * (spec.converters?.[key] ?? 1);
+  }
+  return 0;
+}
+
+function panelMicroContribution(panelKey: string, amount: number): { key: string; amount: number } | null {
+  const mapped = PANEL_MICRO_TO_CARD[panelKey];
+  if (!mapped || amount <= 0) return null;
+  return { key: mapped.key, amount: amount * mapped.converter };
+}
+
+function supplementFallbackAmount(
+  sup: TodaySupplement,
+  slug: string,
+  mapping: { key: string; converter: number },
+): number {
+  const unitNorm = (sup.dose_unit || '').trim().toLowerCase();
+  let converter = mapping.converter;
+  if ((slug === 'vitamin_d3' || slug === 'vitamin_d') && (unitNorm === 'mcg' || unitNorm === 'ug' || unitNorm === 'µg')) {
+    converter = 1;
+  }
+  if (slug === 'omega_3') {
+    if (unitNorm === 'g' || unitNorm === 'gram' || unitNorm === 'grams') converter = 1000;
+    else if (unitNorm === 'mg' || unitNorm === 'milligram' || unitNorm === 'milligrams') converter = 1;
+    else if (unitNorm === 'mcg' || unitNorm === 'ug' || unitNorm === 'µg') converter = 1 / 1000;
+  }
+  return sup.dose_amount * sup.taken_count * converter;
+}
+
+function buildMicroSourceDetail(
+  nutrient: string | null,
+  meals: MealSuggestion[],
+  todaySupplements?: TodaySupplement[] | null,
+): MicroSourceDetail | null {
+  const spec = MICRO_FIELD_SPEC.find(s => s.out === nutrient);
+  if (!spec) return null;
+
+  const contributions: MicroSourceContribution[] = [];
+  for (const meal of meals) {
+    let mealItemContributed = false;
+    for (const it of (meal.items ?? [])) {
+      const val = microValueFrom((it as any).micronutrients, spec);
+      if (val > 0) {
+        contributions.push({ food: it.name, meal: meal.meal, amount: val });
+        mealItemContributed = true;
+      }
+    }
+    if (!mealItemContributed) {
+      const val = microValueFrom(meal.micronutrients as any, spec);
+      if (val > 0) contributions.push({ food: meal.meal, meal: '', amount: val });
+    }
+  }
+
+  if (todaySupplements) {
+    for (const sup of todaySupplements) {
+      if (sup.taken_count <= 0) continue;
+      if (sup.nutrient_content) {
+        const credited = creditedMicrosFromContent(sup.nutrient_content, sup.dose_amount, sup.dose_unit);
+        let creditedAny = false;
+        for (const [panelKey, amt] of Object.entries(credited)) {
+          const contribution = panelMicroContribution(panelKey, amt);
+          if (contribution?.key === spec.out && contribution.amount > 0) {
+            contributions.push({
+              food: `${sup.custom_name ?? sup.ingredient_name ?? 'Supplement'} (supplement)`,
+              meal: '',
+              amount: contribution.amount * sup.taken_count,
+            });
+            creditedAny = true;
+          }
+        }
+        if (creditedAny) continue;
+      }
+      const slug = resolveSupplementSlug(sup);
+      if (!slug) continue;
+      const mapping = SUPPLEMENT_MICRO_MAP[slug];
+      if (!mapping || mapping.key !== spec.out) continue;
+      const amount = supplementFallbackAmount(sup, slug, mapping);
+      if (amount > 0) {
+        contributions.push({
+          food: `${sup.custom_name ?? sup.ingredient_name ?? slug} (supplement)`,
+          meal: '',
+          amount,
+        });
+      }
+    }
+  }
+
+  contributions.sort((a, b) => b.amount - a.amount);
+  return {
+    label: microDisplayLabel(spec.out),
+    unit: microDisplayUnit(spec.out),
+    total: contributions.reduce((sum, c) => sum + c.amount, 0),
+    contributions,
+  };
+}
+
+function formatMicroSourceAmount(value: number): string {
+  return String(value < 10 ? Math.round(value * 10) / 10 : Math.round(value));
+}
+
+function processingBucketForItem(item: MealItem): ProcessingBucket {
+  if (
+    item.processing_bucket === 'minimally_processed'
+    || item.processing_bucket === 'processed'
+    || item.processing_bucket === 'ultra_processed'
+    || item.processing_bucket === 'unknown'
+  ) {
+    return item.processing_bucket;
+  }
+  if (item.food_quality === 'whole') return 'minimally_processed';
+  if (item.food_quality === 'processed') return 'processed';
+  return 'unknown';
+}
 
 function e2eId(value: string | number | null | undefined): string {
   return String(value ?? '')
@@ -23,6 +335,21 @@ function e2eId(value: string | number | null | undefined): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function mealRowIdentityKey(meal: MealSuggestion, fallbackKey: string, macros: MealMacroTotals): string {
+  const loggedId = Number((meal as any)._loggedMealId ?? 0) || 0;
+  if (loggedId) return `logged_${loggedId}`;
+  const localId = String((meal as any)._localId ?? '').trim();
+  if (localId) return `local_${localId}`;
+  const routineId = String((meal as any)._routineId ?? '').trim();
+  if (routineId) return `routine_${routineId}`;
+  return [
+    fallbackKey,
+    (meal.meal || meal.name || 'meal').trim().toLowerCase(),
+    Math.round(macros.calories),
+    (meal.items ?? meal.foods ?? []).length,
+  ].join('_');
 }
 
 interface NutritionCardProps {
@@ -38,17 +365,10 @@ interface NutritionCardProps {
   onHardDeleteMeal?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
-  /** Rename a meal inline from the card. Long-press the name to enter
-   *  edit mode; the input commits on blur or submit. */
-  onRenameMeal?: (mealType: string, newName: string) => void;
   /** Reorder the day's meals[]. `direction` is -1 (move up) or +1 (move down). */
   onMoveMeal?: (mealType: string, direction: -1 | 1) => void;
-  /** Regenerate a single meal with a fresh seed, preserving calorie/macro targets.
-   *  Shuffles ingredients within the same nutrient envelope. */
-  onShuffleMeal?: (mealType: string, meal: MealSuggestion) => void;
-  /** When set to a meal key, that meal row shows a loading spinner while
-   *  the shuffle async operation is in flight. */
-  shufflingMealKey?: string | null;
+  onDuplicateMeal?: (mealType: string, meal: MealSuggestion) => void;
+  onSplitMeal?: (mealType: string, meal: MealSuggestion) => void;
   goal?: string;
   /** Lowercase names of the user's Favorites. Used to show a
    *  "Saved" state on meal rows whose name already lives in the
@@ -64,6 +384,7 @@ interface NutritionCardProps {
    *  collagen, billions of CFU, etc). */
   dailyCollagenG?: number | null;
   dailyProbioticCfuBillions?: number | null;
+  dailyPrebioticG?: number | null;
   /** Per-food plant vs animal protein breakdown for today. Drives the
    *  "Plant vs Meat" tile + drill-down modal beneath the macro grid.
    *  Null = not yet loaded; { plant_total_g: 0, animal_total_g: 0 }
@@ -80,14 +401,7 @@ interface NutritionCardProps {
   /** Today's taken (non-skipped) supplements — used to inject
    *  supplement contributions into the nutrient drill-down so users
    *  see "Vitamin D3 (supplement)" alongside food sources. */
-  todaySupplements?: Array<{
-    ingredient_slug?: string | null;
-    ingredient_name?: string | null;
-    custom_name?: string | null;
-    dose_amount: number;
-    dose_unit: string;
-    taken_count: number;
-  }> | null;
+  todaySupplements?: TodaySupplement[] | null;
   /** Server-authoritative projected-day score. When present, this
    *  overrides the local preview so Home, History, and Progress all
    *  show the same number for the planned day. */
@@ -97,14 +411,25 @@ interface NutritionCardProps {
     quality?: number | null;
     micro?: number | null;
   } | null;
+  /** True while a recent meal write is still inside the server's
+   *  recompute debounce window, so the displayed score may briefly
+   *  reflect pre-write totals. Renders a small "Updating" pill. */
+  scoreUpdating?: boolean;
   hidePlanScore?: boolean;
+  hideScoreRow?: boolean;
+  /** When set, renders a "Supplements" pill below the score row so the
+   *  user can open the supplements overlay without leaving the meal
+   *  card. Replaces the old Supps sub-tab. */
+  onOpenSupplements?: () => void;
+  glp1Support?: UserProfile['glp1Support'];
   /** Removes the outer card shell so parent day cards can reveal the
    *  macro panel + individual meal cards as a clean expanding stack. */
   embedded?: boolean;
   testID?: string;
+  onMealRowExpand?: (node: View | null) => void;
 }
 
-export default function NutritionCard({
+function NutritionCardInner({
   title,
   themeName,
   nutritionPlan,
@@ -117,28 +442,79 @@ export default function NutritionCard({
   onHardDeleteMeal,
   onToggleRoutine,
   onShowRecipe,
-  onRenameMeal,
   onMoveMeal,
-  onShuffleMeal,
-  shufflingMealKey,
+  onDuplicateMeal,
+  onSplitMeal,
   onToggleSave,
   goal,
   savedMealNames,
   onAddFromSaved,
   dailyCollagenG,
   dailyProbioticCfuBillions,
+  dailyPrebioticG,
   proteinBreakdown,
   todaySupplements,
   authoritativeScore,
+  scoreUpdating = false,
+  onOpenSupplements,
   hidePlanScore = false,
+  hideScoreRow = false,
+  glp1Support,
   embedded = false,
   testID,
+  onMealRowExpand,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [scoreInfoOpen, setScoreInfoOpen] = useState(false);
   const [showProteinModal, setShowProteinModal] = useState(false);
+  const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
+  // Advanced micronutrient section starts collapsed: each chip in
+  // ADVANCED_MICRO_CHIPS renders only when its value > 0. Expanding shows
+  // all of them (including empty / "—" chips) for discoverability.
+  const [showAllAdvanced, setShowAllAdvanced] = useState(false);
+  const detailScrollOffsetYRef = useRef(0);
+  const proteinScrollOffsetYRef = useRef(0);
+  const closeDetailModal = useCallback(() => {
+    setShowDetailModal(false);
+    setDrillNutrient(null);
+  }, []);
+  const closeProteinModal = useCallback(() => {
+    setShowProteinModal(false);
+  }, []);
+  const canSwipeDismissDetailModal = useCallback(
+    () => showDetailModal && !drillNutrient && detailScrollOffsetYRef.current <= 2,
+    [drillNutrient, showDetailModal],
+  );
+  const canSwipeDismissProteinModal = useCallback(
+    () => showProteinModal && proteinScrollOffsetYRef.current <= 2,
+    [showProteinModal],
+  );
+  const detailModalSwipeHandlers = useBottomSheetSwipeDismiss(closeDetailModal, {
+    enabled: showDetailModal,
+    canStart: canSwipeDismissDetailModal,
+    capture: true,
+    distance: 64,
+    velocity: 0.75,
+  });
+  const proteinModalSwipeHandlers = useBottomSheetSwipeDismiss(closeProteinModal, {
+    enabled: showProteinModal,
+    canStart: canSwipeDismissProteinModal,
+    capture: true,
+    distance: 56,
+    velocity: 0.75,
+  });
+  const handleDetailModalScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    detailScrollOffsetYRef.current = event.nativeEvent.contentOffset.y;
+  }, []);
+  const handleProteinModalScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    proteinScrollOffsetYRef.current = event.nativeEvent.contentOffset.y;
+  }, []);
   const planPreviewScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
   const dayScore = useMemo(() => {
-    if (!authoritativeScore || authoritativeScore.score <= 0) return planPreviewScore;
+    if (authoritativeScore && authoritativeScore.score <= 0) {
+      return { ...planPreviewScore, score: 0 };
+    }
+    if (!authoritativeScore) return planPreviewScore;
     return {
       ...planPreviewScore,
       score: authoritativeScore.score,
@@ -150,10 +526,11 @@ export default function NutritionCard({
   const visibleDayScore = hidePlanScore && (!authoritativeScore || authoritativeScore.score <= 0)
     ? { ...dayScore, score: 0 }
     : dayScore;
-  const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
   const sectionFadeAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
+    detailScrollOffsetYRef.current = 0;
+    proteinScrollOffsetYRef.current = 0;
     if (showDetailModal) {
       sectionFadeAnim.setValue(0);
       Animated.timing(sectionFadeAnim, { toValue: 1, duration: 400, delay: 120, useNativeDriver: true }).start();
@@ -161,73 +538,128 @@ export default function NutritionCard({
       sectionFadeAnim.setValue(0);
     }
   }, [showDetailModal]);
-  const theme = getTheme(themeName);
+  const theme = useMemo(() => getTheme(themeName), [themeName]);
   const colors = theme.colors;
   const section = theme.sections.meals;
-  const styles = createStyles(colors, section);
-  const targets = nutritionPlan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const removed = new Set(nutritionPlan.removedMealIds ?? []);
+  const addMealOnColor = getContrastingTextColor(section.strong);
+  const styles = useMemo(() => createStyles(colors, section), [colors, section]);
+  const targets = nutritionPlan.targets ?? EMPTY_TARGETS;
+  const removed = useMemo(() => new Set(nutritionPlan.removedMealIds ?? []), [nutritionPlan.removedMealIds]);
 
-  // Generic meals[] — no slot identity. Every meal is rendered uniformly
-  // and keyed by its index in the array. Routine meals carry _routineId
-  // and are surfaced under a "Routine" header; everything else lives
-  // under "Today's Plan".
-  const mealsArr = Array.isArray(nutritionPlan.meals) ? nutritionPlan.meals : [];
+  // Generic meals[] — rendered in user order, with stable meal keys so
+  // checked/logged state can survive reordering.
+  const mealsArr = useMemo(
+    () => Array.isArray(nutritionPlan.meals) ? nutritionPlan.meals : [],
+    [nutritionPlan.meals],
+  );
   // No emoji prefix on meal rows — the meal name + routine pin pill below
   // already carries the visual identity. Empty string keeps the prop API
   // stable so MealRow callers don't all have to change.
-  const allMeals = mealsArr.map((meal, idx) => ({
-    key: `meal_${idx}`,
+  const allMeals = useMemo(() => mealsArr.map((meal, idx) => ({
+    key: mealCheckKey(nutritionPlan, meal, idx),
+    legacyKey: mealLegacyKey(idx),
+    reactKey: mealRowIdentityKey(meal, mealCheckKey(nutritionPlan, meal, idx), macroTotalsFromMeal(meal)),
     emoji: '',
     meal,
-  }));
-  const visibleMeals = allMeals.filter(m => !removed.has(m.key));
-  const hiddenMeals  = allMeals.filter(m =>  removed.has(m.key));
+    macros: macroTotalsFromMeal(meal),
+  })), [mealsArr]);
+  const visibleMeals = useMemo(() => allMeals.filter(m => !removed.has(m.key) && !removed.has(m.legacyKey)), [allMeals, removed]);
+  const hiddenMeals  = useMemo(() => allMeals.filter(m =>  removed.has(m.key) ||  removed.has(m.legacyKey)), [allMeals, removed]);
   const allVisible = visibleMeals;
-  const hasSwipeActions = !!(onShowRecipe || onShuffleMeal || onMoveMeal || onRemoveMeal);
-  const actual = {
-    calories: Math.round(allVisible.reduce((sum, m) => sum + m.meal.calories, 0)),
-    protein:  Math.round(allVisible.reduce((sum, m) => sum + m.meal.protein, 0)),
-    carbs:    Math.round(allVisible.reduce((sum, m) => sum + (m.meal.carbs ?? 0), 0)),
-    fat:      Math.round(allVisible.reduce((sum, m) => sum + (m.meal.fat ?? 0), 0)),
-  };
+  const hasSwipeActions = !!(onShowRecipe || onMoveMeal || onDuplicateMeal || onSplitMeal || onRemoveMeal);
+  const actual = useMemo(() => ({
+    calories: Math.round(allVisible.reduce((sum, m) => sum + m.macros.calories, 0)),
+    protein:  Math.round(allVisible.reduce((sum, m) => sum + m.macros.protein, 0)),
+    carbs:    Math.round(allVisible.reduce((sum, m) => sum + m.macros.carbs, 0)),
+    fat:      Math.round(allVisible.reduce((sum, m) => sum + m.macros.fat, 0)),
+  }), [allVisible]);
+  const glp1Enabled = glp1Support?.enabled === true;
+  const glp1AppetiteLabel =
+    glp1Support?.appetite === 'very_low' ? 'Very low appetite' :
+    glp1Support?.appetite === 'reduced' ? 'Reduced appetite' :
+    'Appetite support';
+  const glp1ProteinGap = Math.max(0, Math.round((targets.protein || 0) - actual.protein));
+  const glp1HasGiSignal = (glp1Support?.sideEffects ?? []).some(s =>
+    s === 'nausea' || s === 'constipation' || s === 'reflux'
+  );
+  const glp1SupportChips = [
+    glp1ProteinGap > 15 ? `${glp1ProteinGap}g protein gap` : `${Math.round(targets.protein || actual.protein || 0)}g protein target`,
+    glp1AppetiteLabel,
+    glp1HasGiSignal ? 'GI-friendly' : 'Hydration',
+  ].filter(label => !!label && !label.startsWith('0g'));
 
   // Aggregate micronutrients across all visible meals. Each display
   // field accepts multiple backend key spellings because the backend
   // emits snake_case (`vitamin_a`) but the legacy type + old cached
   // plans used camelCase (`vitaminA`). We sum whichever is present.
-  const microFieldSpec: Array<{ out: string; keys: string[] }> = [
-    { out: 'fiber',              keys: ['fiber'] },
-    { out: 'sugar',              keys: ['sugar'] },
-    { out: 'addedSugar',         keys: ['added_sugar_g', 'added_sugar', 'addedSugar'] },
-    { out: 'sodium',             keys: ['sodium'] },
-    { out: 'cholesterol',        keys: ['cholesterol', 'cholesterol_mg'] },
-    { out: 'saturatedFat',       keys: ['saturated_fat', 'saturatedFat'] },
-    { out: 'monounsaturatedFat', keys: ['monounsaturated_fat', 'monounsaturatedFat'] },
-    { out: 'polyunsaturatedFat', keys: ['polyunsaturated_fat', 'polyunsaturatedFat'] },
-    { out: 'omega3',             keys: ['omega_3', 'omega3'] },
-    { out: 'omega6',             keys: ['omega_6', 'omega6'] },
-    { out: 'potassium',          keys: ['potassium'] },
-    { out: 'calcium',            keys: ['calcium'] },
-    { out: 'iron',               keys: ['iron'] },
-    { out: 'magnesium',          keys: ['magnesium'] },
-    { out: 'vitaminD',           keys: ['vitamin_d', 'vitaminD'] },
-    { out: 'vitaminC',           keys: ['vitamin_c', 'vitaminC'] },
-    { out: 'vitaminB12',         keys: ['vitamin_b12', 'vitaminB12'] },
-    { out: 'vitaminA',           keys: ['vitamin_a', 'vitaminA'] },
-  ];
-  const dailyMicros: Record<string, number> = {};
-  for (const spec of microFieldSpec) {
-    dailyMicros[spec.out] = Math.round(allVisible.reduce((sum, m) => {
-      const micro: any = m.meal.micronutrients;
-      if (!micro) return sum + (spec.out === 'fiber' ? (m.meal.fiber ?? 0) : 0);
-      for (const k of spec.keys) {
-        if (micro[k] != null) return sum + micro[k];
+  const dailyMicros = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const spec of MICRO_FIELD_SPEC) {
+      totals[spec.out] = allVisible.reduce((sum, m) => {
+        const itemTotal = (m.meal.items ?? []).reduce(
+          (itemSum, item) => itemSum + microValueFrom((item as any).micronutrients, spec),
+          0,
+        );
+        if (itemTotal > 0) return sum + itemTotal;
+        const mealTotal = microValueFrom(m.meal.micronutrients as any, spec);
+        return sum + mealTotal + (spec.out === 'fiber' ? (m.meal.fiber ?? 0) : 0);
+      }, 0);
+    }
+
+    // Add supplement contributions to today's micro totals so Key Gaps
+    // / drill-downs / score components reflect them. Custom-named
+    // supplements resolve via name inference. Mirrors the backend's
+    // _add_supplement_micros pipeline.
+    if (todaySupplements && todaySupplements.length > 0) {
+      for (const sup of todaySupplements) {
+        if (sup.taken_count <= 0) continue;
+        // Preferred: a scanned Supplement Facts panel credits every nutrient
+        // on the label (multivitamins, ZMA, electrolyte + bone blends),
+        // including trace minerals like boron. Mirrors the backend.
+        if (sup.nutrient_content) {
+          const credited = creditedMicrosFromContent(sup.nutrient_content, sup.dose_amount, sup.dose_unit);
+          let creditedAny = false;
+          for (const [panelKey, amt] of Object.entries(credited)) {
+            const contribution = panelMicroContribution(panelKey, amt);
+            if (contribution) {
+              totals[contribution.key] = (totals[contribution.key] || 0) + contribution.amount * sup.taken_count;
+              creditedAny = true;
+            }
+          }
+          if (creditedAny) continue;
+        }
+        const slug = resolveSupplementSlug(sup);
+        if (!slug) continue;
+        const mapping = SUPPLEMENT_MICRO_MAP[slug];
+        if (!mapping) continue;
+        const amount = supplementFallbackAmount(sup, slug, mapping);
+        if (amount > 0) {
+          totals[mapping.key] = (totals[mapping.key] || 0) + amount;
+        }
       }
-      return sum + (spec.out === 'fiber' ? (m.meal.fiber ?? 0) : 0);
-    }, 0));
-  }
-  const hasMicros = microFieldSpec.some(s => dailyMicros[s.out] > 0);
+    }
+    // Derived omega-3 EPA+DHA total (mg). Useful for seafood / algae-DHA
+    // insights without forcing the AI to also return a sum. Best-effort: if
+    // only one of EPA/DHA was reported, we still surface the partial sum
+    // so the insight layer can detect "seafood was in this day."
+    const epa = totals['omega3Epa'] || 0;
+    const dha = totals['omega3Dha'] || 0;
+    if (epa > 0 || dha > 0) {
+      totals['omega3EpaDha'] = epa + dha;
+    }
+    // Round at the end so partial values from supplements aren't lost.
+    // 2 decimals — sub-mg trace minerals (copper ~0.9mg, boron ~3mg) would
+    // be destroyed by integer rounding.
+    for (const key of Object.keys(totals)) {
+      totals[key] = Math.round(totals[key] * 100) / 100;
+    }
+    return totals;
+  }, [allVisible, todaySupplements]);
+  const hasMicros = useMemo(() => MICRO_FIELD_SPEC.some(s => dailyMicros[s.out] > 0), [dailyMicros]);
+  const selectedNutrientDetail = useMemo(
+    () => buildMicroSourceDetail(drillNutrient, allVisible.map(v => v.meal), todaySupplements),
+    [drillNutrient, allVisible, todaySupplements],
+  );
 
   // Plan-preview gut facts. Surfaced on the Nutrition Overview modal as a
   // descriptive "Gut signals" tile strip. Gut & Plants card handles the
@@ -237,34 +669,41 @@ export default function NutritionCard({
     [allVisible, dailyMicros, actual.calories],
   );
 
-  const effectiveProteinBreakdown = useMemo(() => {
-    if (proteinBreakdown) return proteinBreakdown;
-    let plantG = 0, animalG = 0;
-    const plantItems: Array<{ name: string; protein_g: number }> = [];
-    const animalItems: Array<{ name: string; protein_g: number }> = [];
-    const uncItems: Array<{ name: string; protein_g: number }> = [];
-    for (const { meal: m } of allVisible) {
-      const items = m.items ?? [];
-      for (const it of items) {
-        const prot = (it as any).protein_g ?? (it as any).protein ?? 0;
-        if (prot <= 0) continue;
-        const src = (it as any).protein_source;
-        if (src === 'plant') { plantG += prot; plantItems.push({ name: it.name, protein_g: prot }); }
-        else if (src === 'animal') { animalG += prot; animalItems.push({ name: it.name, protein_g: prot }); }
-        else if (src === 'mixed') { plantG += prot * 0.5; animalG += prot * 0.5; plantItems.push({ name: it.name, protein_g: prot * 0.5 }); animalItems.push({ name: it.name, protein_g: prot * 0.5 }); }
-        else if (prot >= 2) { uncItems.push({ name: it.name, protein_g: prot }); }
-      }
-    }
-    if (plantG + animalG <= 0) return null;
-    const total = plantG + animalG;
-    return {
-      plant_total_g: Math.round(plantG),
-      animal_total_g: Math.round(animalG),
-      plant_pct: total > 0 ? Math.round((plantG / total) * 100) : 0,
-      animal_pct: total > 0 ? Math.round((animalG / total) * 100) : 0,
-      plant: plantItems, animal: animalItems, unclassified: uncItems,
-    };
-  }, [proteinBreakdown, allVisible]);
+  const effectiveProteinBreakdown = useMemo(
+    () => proteinBreakdown ?? computeProteinBreakdown(allVisible.map(v => v.meal)),
+    [proteinBreakdown, allVisible],
+  );
+
+  const overviewScoreColor = visibleDayScore.score >= 70 ? colors.success : visibleDayScore.score >= 45 ? colors.warning : colors.error;
+  const overviewScoreLabel = visibleDayScore.score >= 70 ? 'Great' : visibleDayScore.score >= 45 ? 'Good progress' : 'Needs attention';
+  const calorieTargetLabel = formatNutritionPrimaryTarget('calories', targets.calories, { includeUnit: false });
+  const proteinTargetLabel = formatNutritionPrimaryTarget('protein', targets.protein, { includeUnit: false });
+  const overviewStats = [
+    {
+      label: 'Calories',
+      value: calorieTargetLabel ? `${actual.calories}/${calorieTargetLabel}` : `${actual.calories}`,
+      unit: 'cal',
+      color: section.strong,
+    },
+    {
+      label: 'Protein',
+      value: proteinTargetLabel ? `${actual.protein}/${proteinTargetLabel}` : `${actual.protein}`,
+      unit: 'g',
+      color: colors.primary,
+    },
+    {
+      label: 'Fiber',
+      value: dailyMicros.fiber > 0 ? `${Math.round(dailyMicros.fiber)}` : '0',
+      unit: 'g',
+      color: colors.success,
+    },
+    {
+      label: 'Whole foods',
+      value: visibleDayScore.indicators?.whole_food_pct != null ? `${Math.round(visibleDayScore.indicators.whole_food_pct)}` : '0',
+      unit: '%',
+      color: '#22C55E',
+    },
+  ];
 
   return (
     <View testID={testID} style={[styles.card, embedded && styles.cardEmbedded]}>
@@ -274,189 +713,225 @@ export default function NutritionCard({
           matching the WorkoutCard hierarchy (hero → stats → list). */}
       <View style={[styles.body, embedded && styles.bodyEmbedded]}>
         {title ? <Text style={styles.titleSubtle}>{title}</Text> : null}
-        {/* Macro tracker grid */}
-        <View style={styles.macrosGrid}>
-          <MacroTracker label="Calories" actual={actual.calories} target={targets.calories} unit=""  color={section.strong}    colors={colors} styles={styles} />
-          <MacroTracker label="Protein"  actual={actual.protein}  target={targets.protein}  unit="g" color={colors.primary}    colors={colors} styles={styles} />
-          <MacroTracker label="Carbs"    actual={actual.carbs}    target={targets.carbs}    unit="g" color="#F59E0B"           colors={colors} styles={styles} />
-          <MacroTracker label="Fat"      actual={actual.fat}      target={targets.fat}      unit="g" color="#A78BFA"           colors={colors} styles={styles} />
-        </View>
 
-        {/* Plant vs Meat protein ratio — computed from plan items when
-            server-authoritative breakdown isn't available. */}
-        {effectiveProteinBreakdown && (effectiveProteinBreakdown.plant_total_g + effectiveProteinBreakdown.animal_total_g) > 0 && (() => {
-          const plantG = effectiveProteinBreakdown.plant_total_g;
-          const animalG = effectiveProteinBreakdown.animal_total_g;
-          const total = plantG + animalG;
-          const plantPct = total > 0 ? (plantG / total) * 100 : 0;
-          // Plant green / animal warm-orange split bar — keeps the
-          // semantic ("plant"=green / "animal"=warm) consistent across
-          // themes without hardcoding theme-specific colors.
-          const plantColor = '#22C55E';
-          const animalColor = '#E07830';
-          return (
-            <TouchableOpacity
-              activeOpacity={0.85}
-              onPress={() => setShowProteinModal(true)}
-              style={{
-                marginTop: 10, padding: 12,
-                backgroundColor: colors.surface,
-                borderRadius: 10,
-                borderWidth: 1, borderColor: colors.border,
-              }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textSecondary, letterSpacing: 0.4 }}>
-                  PROTEIN SOURCE
-                </Text>
-                <View style={{ flex: 1 }} />
-                <Text style={{ fontSize: 11, fontWeight: '700', color: plantColor }}>
-                  Plant {Math.round(plantG)}g
-                </Text>
-                <Text style={{ fontSize: 11, color: colors.textMuted }}>·</Text>
-                <Text style={{ fontSize: 11, fontWeight: '700', color: animalColor }}>
-                  Meat {Math.round(animalG)}g
-                </Text>
-                <Ionicons name="chevron-forward" size={12} color={colors.textMuted} />
+        {glp1Enabled && (
+          <View style={styles.glp1SupportCard}>
+            <View style={styles.glp1SupportTop}>
+              <View style={styles.glp1SupportIcon}>
+                <Ionicons name="medkit-outline" size={15} color={colors.primary} />
               </View>
-              {/* Proportional split bar */}
-              <View style={{ flexDirection: 'row', height: 6, borderRadius: 3, overflow: 'hidden', backgroundColor: colors.border }}>
-                <View style={{ width: `${plantPct}%`, backgroundColor: plantColor }} />
-                <View style={{ flex: 1, backgroundColor: animalColor }} />
-              </View>
-              {effectiveProteinBreakdown.unclassified.length > 0 && (
-                <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 6 }}>
-                  +{effectiveProteinBreakdown.unclassified.length} unclassified item{effectiveProteinBreakdown.unclassified.length === 1 ? '' : 's'} — tap to see
+              <View style={{ flex: 1 }}>
+                <Text style={styles.glp1SupportTitle}>GLP-1 support</Text>
+                <Text style={styles.glp1SupportText}>
+                  Protein-first meals, smaller portions, hydration, and gentle fiber.
                 </Text>
-              )}
-            </TouchableOpacity>
-          );
-        })()}
-        {/* Day score — tap to open combined nutrition modal */}
-        {visibleDayScore.score > 0 && (() => {
+              </View>
+            </View>
+            <View style={styles.glp1ChipRow}>
+              {glp1SupportChips.map(chip => (
+                <View key={chip} style={styles.glp1Chip}>
+                  <Text style={styles.glp1ChipText}>{chip}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* Day score — compact tap target for the full nutrition modal. */}
+        {!hideScoreRow && visibleDayScore.score > 0 && (() => {
           const sc = visibleDayScore;
           const scoreColor = sc.score >= 70 ? colors.success : sc.score >= 45 ? colors.warning : colors.error;
           return (
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={() => setShowDetailModal(true)}
-              style={{ marginBottom: 4, marginTop: 2, paddingVertical: 6, paddingHorizontal: 2 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: scoreColor + '18', alignItems: 'center', justifyContent: 'center' }}>
-                    <Text style={{ fontSize: 12, fontWeight: '800', color: scoreColor }}>{sc.score}</Text>
-                  </View>
-                  <View>
-                    <Text style={{ fontSize: 11, fontWeight: '600', color: colors.textMuted, letterSpacing: 0.2 }}>Nutrition Score</Text>
-                    <Text style={{ fontSize: 11, color: colors.textSecondary }}>
-                      {sc.wins.length > 0 ? sc.wins[0] : sc.improvements.length > 0 ? sc.improvements[0] : 'Tap for details'}
-                    </Text>
-                  </View>
-                </View>
-                <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
-              </View>
-              {/* 2–4 chips: biggest wins + biggest gaps. Overview stays
-                  tight — full breakdown is in the modal. */}
-              {(() => {
-                const chips: Array<{ text: string; win: boolean }> = [];
-                for (const w of visibleDayScore.wins.slice(0, 2)) chips.push({ text: w, win: true });
-                for (const g of visibleDayScore.improvements.slice(0, 4 - chips.length)) chips.push({ text: g, win: false });
-                if (chips.length === 0) return null;
-                return (
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                    {chips.map((c, i) => (
-                      <View key={i} style={{
-                        paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12,
-                        backgroundColor: (c.win ? colors.success : colors.warning) + '18',
-                      }}>
-                        <Text style={{ fontSize: 10, fontWeight: '700', color: c.win ? colors.success : colors.warning }}>
-                          {c.win ? '✓ ' : '⚠ '}{c.text}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                );
-              })()}
-            </TouchableOpacity>
+            <View style={styles.scorePillRow}>
+              <PressableScale
+                testID="nutrition-day-score-row"
+                accessibilityRole="button"
+                accessibilityLabel={`Nutrition score ${sc.score}. Tap to view full details.`}
+                scaleDown={0.965}
+                onPress={() => setShowDetailModal(true)}
+                style={[styles.scorePill, { backgroundColor: scoreColor + '14', borderColor: scoreColor + '55' }]}>
+                <Ionicons name="nutrition-outline" size={14} color={scoreColor} />
+                <Text style={[styles.scorePillLabel, { color: colors.textPrimary }]}>Score</Text>
+                <Text style={[styles.scorePillValue, { color: scoreColor }]}>{sc.score}</Text>
+                <Text style={[styles.scorePillMeta, { color: colors.textMuted }]} numberOfLines={1}>
+                  {overviewScoreLabel}
+                </Text>
+                {scoreUpdating && <ActivityIndicator size="small" color={colors.textMuted} />}
+                <Ionicons name="chevron-forward" size={13} color={colors.textMuted} />
+              </PressableScale>
+              <TouchableOpacity
+                accessibilityLabel="How nutrition score is calculated"
+                onPress={() => setScoreInfoOpen(true)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={styles.scoreInfoButton}>
+                <Ionicons name="information-circle-outline" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
           );
         })()}
+
+        {/* Inline "Plant vs Meat" protein-source bar removed — it duplicated
+            the Plant vs Meat breakdown in the Nutrition Overview modal and the
+            per-food "Protein source today" drill-down. Protein source now also
+            surfaces via the tappable protein macro donut on the meals tab. */}
 
         {/* Combined Nutrition + Gut Health + Micronutrient Modal */}
         <Modal
           visible={showDetailModal}
           transparent
           animationType="slide"
-          onRequestClose={() => { setShowDetailModal(false); setDrillNutrient(null); }}>
+          onRequestClose={closeDetailModal}>
+          {showDetailModal && (
           <View style={styles.modalOverlay}>
-            <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Nutrition Overview</Text>
-                <TouchableOpacity onPress={() => { setShowDetailModal(false); setDrillNutrient(null); }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-                  <Ionicons name="close" size={22} color={colors.textMuted} />
-                </TouchableOpacity>
-              </View>
+            <View
+              {...detailModalSwipeHandlers}
+              style={[styles.modalContent, { backgroundColor: colors.surface }]}>
+              <LinearGradient
+                pointerEvents="none"
+                colors={[section.soft + '66', colors.surface, colors.background + 'AA'] as any}
+                locations={[0, 0.42, 1] as any}
+                style={StyleSheet.absoluteFillObject}
+              />
+              <ScrollView
+                style={styles.modalScroll}
+                contentContainerStyle={styles.modalScrollContent}
+                showsVerticalScrollIndicator={false}
+                onScroll={handleDetailModalScroll}
+                scrollEventThrottle={16}
+                bounces>
+                <ImageBackground
+                  source={NUTRITION_OVERVIEW_HEADER_IMAGE}
+                  style={styles.modalHero}
+                  imageStyle={styles.modalHeroImage}
+                  resizeMode="cover">
+                  <LinearGradient
+                    pointerEvents="none"
+                    colors={['rgba(2,6,23,0.22)', 'rgba(2,6,23,0.72)', 'rgba(2,6,23,0.94)'] as any}
+                    locations={[0, 0.56, 1] as any}
+                    style={StyleSheet.absoluteFillObject}
+                  />
+                  <View style={styles.modalHeroTop}>
+                    <View style={styles.modalHeroPill}>
+                      <Ionicons name="nutrition-outline" size={13} color="#FFFFFF" />
+                      <Text style={styles.modalHeroPillText}>Nutrition Overview</Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={closeDetailModal}
+                      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                      style={styles.modalHeroClose}>
+                      <Ionicons name="close" size={20} color="#FFFFFF" />
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.modalHeroBottom}>
+                    <View style={styles.modalHeroScoreRow}>
+                      <View style={[styles.modalHeroScoreBadge, { borderColor: overviewScoreColor + '99', backgroundColor: overviewScoreColor + '26' }]}>
+                        <Text style={[styles.modalHeroScore, { color: '#FFFFFF' }]}>{visibleDayScore.score > 0 ? visibleDayScore.score : '-'}</Text>
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.modalHeroTitle}>{overviewScoreLabel}</Text>
+                        <Text style={styles.modalHeroSubtitle} numberOfLines={1}>
+                          {visibleDayScore.wins[0] ?? visibleDayScore.improvements[0] ?? 'Daily fuel snapshot'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.modalHeroStats}>
+                      {overviewStats.map(stat => (
+                        <View key={stat.label} style={styles.modalHeroStat}>
+                          <View style={[styles.modalHeroStatDot, { backgroundColor: stat.color }]} />
+                          <Text style={styles.modalHeroStatValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                            {stat.value}<Text style={styles.modalHeroStatUnit}> {stat.unit}</Text>
+                          </Text>
+                          <Text style={styles.modalHeroStatLabel} numberOfLines={1}>{stat.label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </ImageBackground>
 
-              <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+                <View style={styles.modalScrollableBody}>
                 {/* ── Section 1: Nutrition Score ── */}
                 {visibleDayScore.score > 0 && (() => {
                   const sc = visibleDayScore;
-                  const scoreColor = sc.score >= 70 ? colors.success : sc.score >= 45 ? colors.warning : colors.error;
+                  const scoreParts = [
+                    { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? colors.success : sc.adherence >= 45 ? colors.warning : colors.error },
+                    { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? colors.success : sc.quality >= 45 ? colors.warning : colors.error },
+                    { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? colors.success : sc.micro >= 45 ? colors.warning : colors.error },
+                  ];
                   return (
-                    <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                        <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: scoreColor + '18', alignItems: 'center', justifyContent: 'center' }}>
-                          <Text style={{ fontSize: 20, fontWeight: '900', color: scoreColor }}>{sc.score}</Text>
+                    <Animated.View style={[styles.modalCard, styles.scoreOverviewCard, { borderColor: overviewScoreColor + '44', backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
+                      <LinearGradient
+                        pointerEvents="none"
+                        colors={[overviewScoreColor + '18', section.strong + '0C', 'transparent'] as any}
+                        locations={[0, 0.56, 1]}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.modalCardGradient}
+                      />
+                      <View style={styles.scoreOverviewTop}>
+                        <View style={[styles.scoreOverviewBadge, { borderColor: overviewScoreColor + '66', backgroundColor: overviewScoreColor + '18' }]}>
+                          <Text style={[styles.scoreOverviewNumber, { color: overviewScoreColor }]}>{sc.score}</Text>
+                          <Text style={styles.scoreOverviewBadgeLabel}>score</Text>
                         </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Nutrition Score</Text>
-                          <Text style={{ fontSize: 11, color: colors.textSecondary }}>
-                            {sc.score >= 70 ? 'Great' : sc.score >= 45 ? 'Good progress' : 'Room to improve'}
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.scoreOverviewTitle}>Score drivers</Text>
+                          <Text style={styles.scoreOverviewSubtitle} numberOfLines={2}>
+                            {sc.wins[0] ?? sc.improvements[0] ?? 'Daily fuel snapshot'}
                           </Text>
                         </View>
                       </View>
-                      {[
-                        { label: 'Adherence', value: sc.adherence, color: sc.adherence >= 70 ? colors.success : sc.adherence >= 45 ? colors.warning : colors.error },
-                        { label: 'Food Quality', value: sc.quality, color: sc.quality >= 70 ? colors.success : sc.quality >= 45 ? colors.warning : colors.error },
-                        { label: 'Micronutrients', value: sc.micro, color: sc.micro >= 70 ? colors.success : sc.micro >= 45 ? colors.warning : colors.error },
-                      ].map(sub => (
-                        <View key={sub.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                          <Text style={{ fontSize: 11, fontWeight: '600', color: colors.textSecondary, width: 85 }}>{sub.label}</Text>
-                          <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: colors.border }}>
-                            <View style={{ width: `${Math.min(100, sub.value)}%` as any, height: 5, borderRadius: 3, backgroundColor: sub.color }} />
+
+                      <View style={styles.scoreDriverList}>
+                        {scoreParts.map(sub => (
+                          <View key={sub.label} style={styles.scoreDriverRow}>
+                            <View style={styles.scoreDriverLabelRow}>
+                              <Text style={styles.scoreDriverLabel}>{sub.label}</Text>
+                              <Text style={[styles.scoreDriverValue, { color: sub.color }]}>{sub.value}</Text>
+                            </View>
+                            <View style={styles.scoreDriverTrack}>
+                              <View style={[styles.scoreDriverFill, { width: `${Math.min(100, Math.max(0, sub.value))}%` as any, backgroundColor: sub.color }]} />
+                            </View>
                           </View>
-                          <Text style={{ fontSize: 11, fontWeight: '700', color: sub.color, width: 26, textAlign: 'right' }}>{sub.value}</Text>
-                        </View>
-                      ))}
+                        ))}
+                      </View>
+
                       {sc.indicators && (
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border + '44' }}>
+                        <View style={styles.scoreSignalRow}>
                           {sc.indicators.total_calories > 0 && (
-                            <Text style={{ fontSize: 10, color: colors.textMuted }}>
-                              {Math.round(sc.indicators.total_calories)} / {Math.round(sc.indicators.target_calories)} cal
-                            </Text>
+                            <View style={styles.scoreSignalChip}>
+                              <Text style={styles.scoreSignalValue}>
+                                {Math.round(sc.indicators.total_calories)} / {formatNutritionPrimaryTarget('calories', sc.indicators.target_calories, { includeUnit: false }) || Math.round(sc.indicators.target_calories || 0)}
+                              </Text>
+                              <Text style={styles.scoreSignalLabel}>cal</Text>
+                            </View>
                           )}
                           {sc.indicators.total_protein > 0 && (
-                            <Text style={{ fontSize: 10, color: colors.textMuted }}>
-                              {Math.round(sc.indicators.total_protein)} / {Math.round(sc.indicators.target_protein)}g protein
-                            </Text>
+                            <View style={styles.scoreSignalChip}>
+                              <Text style={styles.scoreSignalValue}>
+                                {Math.round(sc.indicators.total_protein)} / {formatNutritionPrimaryTarget('protein', sc.indicators.target_protein) || `${Math.round(sc.indicators.target_protein || 0)}g`}
+                              </Text>
+                              <Text style={styles.scoreSignalLabel}>protein</Text>
+                            </View>
                           )}
                           {sc.indicators.whole_food_pct > 0 && (
-                            <Text style={{ fontSize: 10, color: colors.textMuted }}>
-                              {sc.indicators.whole_food_pct}% whole foods
-                            </Text>
+                            <View style={styles.scoreSignalChip}>
+                              <Text style={styles.scoreSignalValue}>{sc.indicators.whole_food_pct}%</Text>
+                              <Text style={styles.scoreSignalLabel}>whole foods</Text>
+                            </View>
                           )}
                         </View>
                       )}
                       {(sc.wins.length > 0 || sc.improvements.length > 0) && (
-                        <View style={{ marginTop: 6, gap: 3 }}>
+                        <View style={styles.scoreInsightList}>
                           {sc.wins.map(w => (
-                            <View key={w} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                            <View key={w} style={[styles.scoreInsightChip, { backgroundColor: colors.success + '14', borderColor: colors.success + '36' }]}>
                               <Ionicons name="checkmark-circle" size={12} color={colors.success} />
-                              <Text style={{ fontSize: 10, color: colors.success, fontWeight: '600' }}>{w}</Text>
+                              <Text style={[styles.scoreInsightText, { color: colors.success }]}>{w}</Text>
                             </View>
                           ))}
                           {sc.improvements.map(imp => (
-                            <View key={imp} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                            <View key={imp} style={[styles.scoreInsightChip, { backgroundColor: colors.warning + '14', borderColor: colors.warning + '36' }]}>
                               <Ionicons name="arrow-up-circle" size={12} color={colors.warning} />
-                              <Text style={{ fontSize: 10, color: colors.warning, fontWeight: '600' }}>{imp}</Text>
+                              <Text style={[styles.scoreInsightText, { color: colors.warning }]}>{imp}</Text>
                             </View>
                           ))}
                         </View>
@@ -493,6 +968,32 @@ export default function NutritionCard({
                         </View>
                       );
                     })}
+                    {(() => {
+                      const bd = visibleDayScore.quality_breakdown;
+                      if (!bd || bd.length < 4) return null;
+                      const ANTI_LABELS = ['Fiber density', 'Minimally processed', 'Plant diversity', 'Omega-3'];
+                      const PRO_LABELS = ['Added sugar', 'Saturated fat'];
+                      const antiCount = ANTI_LABELS.filter(lbl => bd.find(b => b.label === lbl)?.on_track).length;
+                      const proCount = PRO_LABELS.filter(lbl => {
+                        const item = bd.find(b => b.label === lbl);
+                        return item && !item.on_track && (item.value_pct ?? 100) < 50;
+                      }).length;
+                      const net = antiCount - proCount;
+                      const lean = net >= 2
+                        ? { label: 'Anti-inflammatory lean', color: '#22C55E' }
+                        : net === 1
+                        ? { label: 'Balanced lean', color: colors.primary }
+                        : net === 0
+                        ? { label: 'Mixed signals', color: '#F59E0B' }
+                        : { label: 'Pro-inflammatory lean', color: '#EF4444' };
+                      return (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 9, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border }}>
+                          <Ionicons name="flame-outline" size={13} color={lean.color} />
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: lean.color }}>{lean.label}</Text>
+                          <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 2 }}>based on today's food signals</Text>
+                        </View>
+                      );
+                    })()}
                     <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
                       See the Gut & Plants card for plant diversity and processing mix details.
                     </Text>
@@ -510,7 +1011,13 @@ export default function NutritionCard({
                       <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Gut signals</Text>
                       <Text style={{ fontSize: 10, color: colors.textMuted, marginLeft: 'auto' }}>today</Text>
                     </View>
-                    <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                    {/* 3-column grid (2 rows of 3). The earlier
+                        `flex:1 + flexWrap` layout produced uneven
+                        tile sizes when items wrapped. Six tiles always
+                        render — zero values show as "0" rather than
+                        "—" so the user can see the metric is populated
+                        but no qualifying foods were logged today. */}
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
                       {[
                         // Prefer authoritative server amount (from
                         // /meals/gut-health → today). Falls back to
@@ -520,27 +1027,60 @@ export default function NutritionCard({
                           label: 'Probiotic',
                           value: dailyProbioticCfuBillions != null && dailyProbioticCfuBillions > 0
                             ? `${dailyProbioticCfuBillions >= 10 ? Math.round(dailyProbioticCfuBillions) : dailyProbioticCfuBillions.toFixed(1)}B`
-                            : `${Math.round(_gutHealth.probiotic_servings)}`,
+                            : (dailyProbioticCfuBillions != null
+                                ? '0'
+                                : `${Math.round(_gutHealth.probiotic_servings)}`),
                           detail: dailyProbioticCfuBillions != null ? 'CFU' : 'svg',
                         },
                         {
                           label: 'Collagen',
-                          value: dailyCollagenG != null ? `${Math.round(dailyCollagenG)}g` : '—',
+                          value: dailyCollagenG == null
+                            ? '—'
+                            : dailyCollagenG > 0
+                              ? `${Math.round(dailyCollagenG)}g`
+                              : '0g',
                           detail: 'today',
                         },
-                        { label: 'Fermented', value: Math.round(_gutHealth.fermented_servings), detail: 'svg' },
-                        { label: 'Plants', value: _gutHealth.distinct_plant_foods, detail: 'types' },
-                        { label: 'Omega-3', value: _gutHealth.omega3_mg > 0 ? `${Math.round(_gutHealth.omega3_mg)}mg` : '0', detail: 'today' },
+                        {
+                          label: 'Prebiotic',
+                          // null = not yet fetched (plan-preview / unauth);
+                          // 0 = fetched but no prebiotic-rich foods logged
+                          // today. Distinguishing these stops the user
+                          // from thinking the metric is broken when the
+                          // backfill is fine and they simply ate no oats /
+                          // legumes / alliums today.
+                          value: dailyPrebioticG == null
+                            ? '—'
+                            : dailyPrebioticG > 0
+                              ? `${dailyPrebioticG >= 10 ? Math.round(dailyPrebioticG) : dailyPrebioticG.toFixed(1)}g`
+                              : '0g',
+                          detail: 'fiber',
+                        },
+                        { label: 'Fermented', value: `${Math.round(_gutHealth.fermented_servings)}`, detail: 'svg' },
+                        { label: 'Plants', value: `${_gutHealth.distinct_plant_foods}`, detail: 'types' },
+                        { label: 'Omega-3', value: _gutHealth.omega3_mg > 0 ? `${Math.round(_gutHealth.omega3_mg)}mg` : '0mg', detail: 'today' },
                       ].map(tile => (
-                        <View key={tile.label} style={{
-                          flex: 1, alignItems: 'center', backgroundColor: colors.background,
-                          borderRadius: 8, paddingVertical: 10,
-                        }}>
-                          <Text style={{ fontSize: 16, fontWeight: '800', color: colors.textPrimary }}>
+                        <View key={tile.label} style={styles.gutSignalTile}>
+                          <LinearGradient
+                            pointerEvents="none"
+                            colors={[colors.primary + '12', section.strong + '0A', 'transparent'] as any}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.gutSignalTileGradient}
+                          />
+                          <Text
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.7}
+                            style={{ fontSize: 16, fontWeight: '800', color: colors.textPrimary }}
+                          >
                             {tile.value}
                           </Text>
-                          <Text style={{ fontSize: 9, fontWeight: '600', color: colors.textMuted, marginTop: 2 }}>
+                          <Text style={{ fontSize: 10, fontWeight: '600', color: colors.textMuted, marginTop: 2 }}>
                             {tile.label}
+                          </Text>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, marginTop: 1 }}>
+                            {tile.detail}
                           </Text>
                         </View>
                       ))}
@@ -578,84 +1118,6 @@ export default function NutritionCard({
                   );
                 })()}
 
-                {/* Nutrient drill-down */}
-                {drillNutrient && (() => {
-                  const spec = microFieldSpec.find(s => s.out === drillNutrient);
-                  if (!spec) return null;
-                  const contributions: Array<{ food: string; meal: string; amount: number }> = [];
-                  for (const { meal } of allVisible) {
-                    let mealItemContributed = false;
-                    for (const it of (meal.items ?? [])) {
-                      const mn: any = it.micronutrients ?? {};
-                      let val = 0;
-                      for (const k of spec.keys) { if (mn[k] != null) { val = Number(mn[k]) || 0; break; } }
-                      if (val > 0) { contributions.push({ food: it.name, meal: meal.meal, amount: val }); mealItemContributed = true; }
-                    }
-                    if (!mealItemContributed) {
-                      const mn: any = meal.micronutrients ?? {};
-                      let val = 0;
-                      for (const k of spec.keys) { if (mn[k] != null) { val = Number(mn[k]) || 0; break; } }
-                      if (val > 0) contributions.push({ food: meal.meal, meal: '', amount: val });
-                    }
-                  }
-                  // Inject supplement contributions (vitamin D3, B12, magnesium, iron, omega-3)
-                  const _suppMicroMap: Record<string, { key: string; converter: number }> = {
-                    vitamin_d3: { key: 'vitaminD', converter: 1 / 40 },
-                    vitamin_b12: { key: 'vitaminB12', converter: 1 },
-                    magnesium: { key: 'magnesium', converter: 1 },
-                    iron: { key: 'iron', converter: 1 },
-                    omega_3: { key: 'omega3', converter: 1 },
-                  };
-                  if (todaySupplements) {
-                    for (const sup of todaySupplements) {
-                      if (!sup.ingredient_slug || sup.taken_count <= 0) continue;
-                      const mapping = _suppMicroMap[sup.ingredient_slug];
-                      if (!mapping || mapping.key !== spec.out) continue;
-                      const amount = sup.dose_amount * sup.taken_count * mapping.converter;
-                      if (amount > 0) contributions.push({ food: `${sup.ingredient_name ?? sup.custom_name ?? sup.ingredient_slug} (supplement)`, meal: '', amount });
-                    }
-                  }
-                  contributions.sort((a, b) => b.amount - a.amount);
-                  const total = contributions.reduce((s, c) => s + c.amount, 0);
-                  const displayLabel = spec.out.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
-                  const unitStr = ['fiber', 'sugar', 'addedSugar', 'saturatedFat', 'monounsaturatedFat', 'polyunsaturatedFat'].includes(spec.out) ? 'g' : ['vitaminD', 'vitaminB12'].includes(spec.out) ? 'mcg' : 'mg';
-                  return (
-                    <View style={{ backgroundColor: colors.primary + '15', borderRadius: 14, padding: 14, marginBottom: 14, borderWidth: 1, borderColor: colors.primary + '33' }}>
-                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: colors.textPrimary }}>{displayLabel} Sources</Text>
-                        <TouchableOpacity onPress={() => setDrillNutrient(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                          <Ionicons name="close" size={18} color={colors.textMuted} />
-                        </TouchableOpacity>
-                      </View>
-                      {contributions.length === 0 ? (
-                        <Text style={{ fontSize: 13, color: colors.textMuted, lineHeight: 18 }}>Per-food breakdown will appear after your next plan regeneration.</Text>
-                      ) : (
-                        <>
-                          {contributions.slice(0, 12).map((c, i) => {
-                            const pctOfTotal = total > 0 ? c.amount / total : 0;
-                            return (
-                              <View key={`${c.food}-${i}`} style={{ marginBottom: 10 }}>
-                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
-                                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.textPrimary, flex: 1 }} numberOfLines={1}>{c.food}</Text>
-                                  <Text style={{ fontSize: 13, fontWeight: '700', color: colors.primary, marginLeft: 8 }}>{c.amount < 10 ? (Math.round(c.amount * 10) / 10) : Math.round(c.amount)}{unitStr}</Text>
-                                </View>
-                                {c.meal ? <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>from {c.meal}</Text> : null}
-                                <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.border }}>
-                                  <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.primary, width: `${Math.round(pctOfTotal * 100)}%` as any }} />
-                                </View>
-                              </View>
-                            );
-                          })}
-                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 2, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}>
-                            <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Total</Text>
-                            <Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>{total < 10 ? (Math.round(total * 10) / 10) : Math.round(total)}{unitStr}</Text>
-                          </View>
-                        </>
-                      )}
-                    </View>
-                  );
-                })()}
-
                 {/* ── Plant vs Meat protein breakdown ──
                     Mirrors the tile on the card body so users who
                     open the overview modal also see the comparison
@@ -689,7 +1151,7 @@ export default function NutritionCard({
                         <View style={{ flex: 1, backgroundColor: '#E07830' }} />
                       </View>
                       <TouchableOpacity
-                        onPress={() => { setShowDetailModal(false); setTimeout(() => setShowProteinModal(true), 220); }}
+                        onPress={() => { closeDetailModal(); setTimeout(() => setShowProteinModal(true), 220); }}
                         style={{ alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: colors.background }}>
                         <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textSecondary }}>
                           See per-food breakdown ({effectiveProteinBreakdown.plant.length + effectiveProteinBreakdown.animal.length} sources)
@@ -700,6 +1162,9 @@ export default function NutritionCard({
                 })()}
 
                 {/* ── Section 5: Micronutrients ── */}
+                {/* Default chips are always visible. Advanced chips render
+                    only when value > 0 OR the user expands "Show all advanced".
+                    Ordering and groupings match the product spec (2026-05). */}
                 <View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}>
                   <Text style={[styles.modalSectionTitle, { marginBottom: 8 }]}>Essentials</Text>
                   <View style={styles.microGridLg}>
@@ -707,23 +1172,28 @@ export default function NutritionCard({
                     <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${Math.round(dailyMicros.sugar)}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} onPress={() => setDrillNutrient(drillNutrient === 'sugar' ? null : 'sugar')} />
                     <MicroChipLg label="Added Sugar" value={dailyMicros.addedSugar > 0 ? `${Math.round(dailyMicros.addedSugar)}g` : '—'} target="<36g" pct={dailyMicros.addedSugar > 0 ? Math.min(dailyMicros.addedSugar / 36, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.addedSugar > 36} onPress={() => setDrillNutrient(drillNutrient === 'addedSugar' ? null : 'addedSugar')} />
                     <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${Math.round(dailyMicros.sodium)}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} onPress={() => setDrillNutrient(drillNutrient === 'sodium' ? null : 'sodium')} />
-                    <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${Math.round(dailyMicros.cholesterol)}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} onPress={() => setDrillNutrient(drillNutrient === 'cholesterol' ? null : 'cholesterol')} />
-                  </View>
-
-                  <Text style={[styles.modalSectionTitle, { marginTop: 16, marginBottom: 8 }]}>Fats Panel</Text>
-                  <View style={styles.microGridLg}>
-                    <MicroChipLg label="Saturated" value={dailyMicros.saturatedFat > 0 ? `${Math.round(dailyMicros.saturatedFat)}g` : '—'} target="<20g" pct={dailyMicros.saturatedFat > 0 ? Math.min(dailyMicros.saturatedFat / 20, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.saturatedFat > 20} onPress={() => setDrillNutrient(drillNutrient === 'saturatedFat' ? null : 'saturatedFat')} />
-                    <MicroChipLg label="Mono" value={dailyMicros.monounsaturatedFat > 0 ? `${Math.round(dailyMicros.monounsaturatedFat)}g` : '—'} target="25g" pct={dailyMicros.monounsaturatedFat / 25} colors={colors} styles={styles} onPress={() => setDrillNutrient(drillNutrient === 'monounsaturatedFat' ? null : 'monounsaturatedFat')} />
-                    <MicroChipLg label="Poly" value={dailyMicros.polyunsaturatedFat > 0 ? `${Math.round(dailyMicros.polyunsaturatedFat)}g` : '—'} target="15g" pct={dailyMicros.polyunsaturatedFat / 15} colors={colors} styles={styles} onPress={() => setDrillNutrient(drillNutrient === 'polyunsaturatedFat' ? null : 'polyunsaturatedFat')} />
-                    <MicroChipLg label="Omega-3" value={dailyMicros.omega3 > 0 ? `${Math.round(dailyMicros.omega3)}mg` : '—'} target="1600mg" pct={dailyMicros.omega3 / 1600} colors={colors} styles={styles} low={dailyMicros.omega3 > 0 && dailyMicros.omega3 < 1000} onPress={() => setDrillNutrient(drillNutrient === 'omega3' ? null : 'omega3')} />
                   </View>
 
                   <Text style={[styles.modalSectionTitle, { marginTop: 16, marginBottom: 8 }]}>Minerals</Text>
                   <View style={styles.microGridLg}>
                     <MicroChipLg label="Potassium" value={dailyMicros.potassium > 0 ? `${Math.round(dailyMicros.potassium)}mg` : '—'} target="3400mg" pct={dailyMicros.potassium / 3400} colors={colors} styles={styles} low={dailyMicros.potassium > 0 && dailyMicros.potassium < 2300} onPress={() => setDrillNutrient(drillNutrient === 'potassium' ? null : 'potassium')} />
                     <MicroChipLg label="Calcium" value={dailyMicros.calcium > 0 ? `${Math.round(dailyMicros.calcium)}mg` : '—'} target="1000mg" pct={dailyMicros.calcium / 1000} colors={colors} styles={styles} low={dailyMicros.calcium > 0 && dailyMicros.calcium < 700} onPress={() => setDrillNutrient(drillNutrient === 'calcium' ? null : 'calcium')} />
-                    <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${(Math.round(dailyMicros.iron * 10) / 10)}mg` : '—'} target="18mg" pct={dailyMicros.iron / 18} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 12} onPress={() => setDrillNutrient(drillNutrient === 'iron' ? null : 'iron')} />
                     <MicroChipLg label="Magnesium" value={dailyMicros.magnesium > 0 ? `${Math.round(dailyMicros.magnesium)}mg` : '—'} target="400mg" pct={dailyMicros.magnesium / 400} colors={colors} styles={styles} low={dailyMicros.magnesium > 0 && dailyMicros.magnesium < 280} onPress={() => setDrillNutrient(drillNutrient === 'magnesium' ? null : 'magnesium')} />
+                    <MicroChipLg label="Iron" value={dailyMicros.iron > 0 ? `${(Math.round(dailyMicros.iron * 10) / 10)}mg` : '—'} target="18mg" pct={dailyMicros.iron / 18} colors={colors} styles={styles} low={dailyMicros.iron > 0 && dailyMicros.iron < 12} onPress={() => setDrillNutrient(drillNutrient === 'iron' ? null : 'iron')} />
+                    <MicroChipLg label="Zinc" value={dailyMicros.zinc > 0 ? `${Math.round(dailyMicros.zinc * 10) / 10}mg` : '—'} target="11mg" pct={dailyMicros.zinc / 11} colors={colors} styles={styles} low={dailyMicros.zinc > 0 && dailyMicros.zinc < 8} onPress={() => setDrillNutrient(drillNutrient === 'zinc' ? null : 'zinc')} />
+                  </View>
+
+                  <Text style={[styles.modalSectionTitle, { marginTop: 16, marginBottom: 8 }]}>Fats Panel</Text>
+                  <View style={styles.microGridLg}>
+                    <MicroChipLg label="Saturated" value={dailyMicros.saturatedFat > 0 ? `${Math.round(dailyMicros.saturatedFat)}g` : '—'} target="<20g" pct={dailyMicros.saturatedFat > 0 ? Math.min(dailyMicros.saturatedFat / 20, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.saturatedFat > 20} onPress={() => setDrillNutrient(drillNutrient === 'saturatedFat' ? null : 'saturatedFat')} />
+                    {/* Trans fat: target is 0g — any nonzero value warns. The
+                        chip stays visible even at 0 because it's a default
+                        completeness signal (we WANT to see "0g" confirmed). */}
+                    <MicroChipLg label="Trans Fat" value={dailyMicros.transFat > 0 ? `${(Math.round(dailyMicros.transFat * 10) / 10)}g` : (dailyMicros.transFat === 0 ? '0g' : '—')} target="0g" pct={dailyMicros.transFat > 0 ? Math.min(dailyMicros.transFat / 2, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.transFat > 0} onPress={() => setDrillNutrient(drillNutrient === 'transFat' ? null : 'transFat')} />
+                    <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${Math.round(dailyMicros.cholesterol)}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} onPress={() => setDrillNutrient(drillNutrient === 'cholesterol' ? null : 'cholesterol')} />
+                    <MicroChipLg label="Mono" value={dailyMicros.monounsaturatedFat > 0 ? `${Math.round(dailyMicros.monounsaturatedFat)}g` : '—'} target="25g" pct={dailyMicros.monounsaturatedFat / 25} colors={colors} styles={styles} onPress={() => setDrillNutrient(drillNutrient === 'monounsaturatedFat' ? null : 'monounsaturatedFat')} />
+                    <MicroChipLg label="Poly" value={dailyMicros.polyunsaturatedFat > 0 ? `${Math.round(dailyMicros.polyunsaturatedFat)}g` : '—'} target="15g" pct={dailyMicros.polyunsaturatedFat / 15} colors={colors} styles={styles} onPress={() => setDrillNutrient(drillNutrient === 'polyunsaturatedFat' ? null : 'polyunsaturatedFat')} />
+                    <MicroChipLg label="Omega-3" value={dailyMicros.omega3 > 0 ? `${Math.round(dailyMicros.omega3)}mg` : '—'} target="1600mg" pct={dailyMicros.omega3 / 1600} colors={colors} styles={styles} low={dailyMicros.omega3 > 0 && dailyMicros.omega3 < 1000} onPress={() => setDrillNutrient(drillNutrient === 'omega3' ? null : 'omega3')} />
                   </View>
 
                   <Text style={[styles.modalSectionTitle, { marginTop: 16, marginBottom: 8 }]}>Vitamins</Text>
@@ -731,8 +1201,104 @@ export default function NutritionCard({
                     <MicroChipLg label="Vitamin D" value={dailyMicros.vitaminD > 0 ? `${(Math.round(dailyMicros.vitaminD * 10) / 10)}mcg` : '—'} target="15mcg" pct={dailyMicros.vitaminD / 15} colors={colors} styles={styles} low={dailyMicros.vitaminD > 0 && dailyMicros.vitaminD < 10} onPress={() => setDrillNutrient(drillNutrient === 'vitaminD' ? null : 'vitaminD')} />
                     <MicroChipLg label="Vitamin C" value={dailyMicros.vitaminC > 0 ? `${Math.round(dailyMicros.vitaminC)}mg` : '—'} target="90mg" pct={dailyMicros.vitaminC / 90} colors={colors} styles={styles} low={dailyMicros.vitaminC > 0 && dailyMicros.vitaminC < 60} onPress={() => setDrillNutrient(drillNutrient === 'vitaminC' ? null : 'vitaminC')} />
                     <MicroChipLg label="Vitamin B12" value={dailyMicros.vitaminB12 > 0 ? `${(Math.round(dailyMicros.vitaminB12 * 10) / 10)}mcg` : '—'} target="2.4mcg" pct={dailyMicros.vitaminB12 / 2.4} colors={colors} styles={styles} low={dailyMicros.vitaminB12 > 0 && dailyMicros.vitaminB12 < 1.6} onPress={() => setDrillNutrient(drillNutrient === 'vitaminB12' ? null : 'vitaminB12')} />
+                    <MicroChipLg label="Folate" value={dailyMicros.folate > 0 ? `${Math.round(dailyMicros.folate)}mcg` : '—'} target="400mcg" pct={dailyMicros.folate / 400} colors={colors} styles={styles} low={dailyMicros.folate > 0 && dailyMicros.folate < 270} onPress={() => setDrillNutrient(drillNutrient === 'folate' ? null : 'folate')} />
                     <MicroChipLg label="Vitamin A" value={dailyMicros.vitaminA > 0 ? `${dailyMicros.vitaminA}%` : '—'} target="100% DV" pct={dailyMicros.vitaminA / 100} colors={colors} styles={styles} low={dailyMicros.vitaminA > 0 && dailyMicros.vitaminA < 50} onPress={() => setDrillNutrient(drillNutrient === 'vitaminA' ? null : 'vitaminA')} />
                   </View>
+
+                  {/* Advanced section: each chip renders only when present
+                      (or when the user expands). Avoids flooding the default
+                      view while still surfacing real data when it exists. */}
+                  {(() => {
+                    // Per-chip render config — target, RDA / cap, decimals.
+                    // Mirrors ADVANCED_MICRO_CHIPS ordering exactly.
+                    const ADV: Array<{
+                      key: string; target: string; rda: number;
+                      // 'g' | 'mg' | 'mcg'
+                      unit: 'g' | 'mg' | 'mcg';
+                      lowAt?: number;
+                      // Decimals at display time. Trace minerals (boron,
+                      // copper) need 2 decimals; most use 0–1.
+                      decimals: 0 | 1 | 2;
+                    }> = [
+                      { key: 'choline',    target: '550mg',  rda: 550,  unit: 'mg',  lowAt: 350, decimals: 0 },
+                      { key: 'iodine',     target: '150mcg', rda: 150,  unit: 'mcg', lowAt: 100, decimals: 0 },
+                      { key: 'vitaminK',   target: '120mcg', rda: 120,  unit: 'mcg', lowAt: 80,  decimals: 0 },
+                      { key: 'vitaminE',   target: '15mg',   rda: 15,   unit: 'mg',  lowAt: 10,  decimals: 1 },
+                      { key: 'phosphorus', target: '700mg',  rda: 700,  unit: 'mg',  lowAt: 500, decimals: 0 },
+                      { key: 'selenium',   target: '55mcg',  rda: 55,   unit: 'mcg', lowAt: 35,  decimals: 0 },
+                      { key: 'copper',     target: '0.9mg',  rda: 0.9,  unit: 'mg',  lowAt: 0.6, decimals: 2 },
+                      { key: 'manganese',  target: '2.3mg',  rda: 2.3,  unit: 'mg',  lowAt: 1.4, decimals: 2 },
+                      { key: 'boron',      target: '≤20mg',  rda: 20,   unit: 'mg',  decimals: 2 },
+                      { key: 'omega6',     target: '12g',    rda: 12000, unit: 'mg', decimals: 0 },
+                      { key: 'caffeine',   target: '<400mg', rda: 400,  unit: 'mg',  decimals: 0 },
+                      { key: 'alcohol',    target: '0g',     rda: 0,    unit: 'g',   decimals: 1 },
+                    ];
+                    const rendered = ADV.filter(c => showAllAdvanced || (dailyMicros[c.key] || 0) > 0);
+                    if (rendered.length === 0 && !showAllAdvanced) {
+                      // Show a thin entrypoint that expands the section so
+                      // users can discover the advanced chips even with no
+                      // current values.
+                      return (
+                        <TouchableOpacity
+                          onPress={() => setShowAllAdvanced(true)}
+                          accessibilityRole="button"
+                          accessibilityLabel="Show advanced micronutrients"
+                          style={{ marginTop: 14, paddingVertical: 8, alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textSecondary }}>
+                            Show advanced micronutrients ›
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    }
+                    return (
+                      <>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 16, marginBottom: 8 }}>
+                          <Text style={[styles.modalSectionTitle, { flex: 1, marginBottom: 0 }]}>Advanced</Text>
+                          <TouchableOpacity
+                            onPress={() => setShowAllAdvanced(v => !v)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            accessibilityRole="button"
+                            accessibilityLabel={showAllAdvanced ? 'Hide empty advanced chips' : 'Show all advanced micronutrients'}>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textSecondary }}>
+                              {showAllAdvanced ? 'Show less' : 'Show all'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                        <View style={styles.microGridLg}>
+                          {rendered.map(c => {
+                            const raw = Number(dailyMicros[c.key] || 0);
+                            const fac = c.decimals === 0 ? 1 : c.decimals === 1 ? 10 : 100;
+                            const display = raw > 0 ? `${Math.round(raw * fac) / fac}${c.unit}` : '—';
+                            const pct = c.rda > 0 ? raw / c.rda : 0;
+                            const low = c.lowAt != null && raw > 0 && raw < c.lowAt;
+                            // Caps (alcohol = 0g target, boron upper limit,
+                            // caffeine cap): warn when exceeded instead of "low".
+                            const warn =
+                              (c.key === 'alcohol' && raw > 0) ||
+                              (c.key === 'boron' && raw > 20) ||
+                              (c.key === 'caffeine' && raw > 400);
+                            return (
+                              <MicroChipLg
+                                key={c.key}
+                                label={microDisplayLabel(c.key)}
+                                value={display}
+                                target={c.target}
+                                pct={pct}
+                                colors={colors}
+                                styles={styles}
+                                low={low}
+                                warn={warn}
+                                onPress={() => setDrillNutrient(drillNutrient === c.key ? null : c.key)}
+                              />
+                            );
+                          })}
+                        </View>
+                        <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 6, lineHeight: 14 }}>
+                          Boron, caffeine, and alcohol are upper-limit chips — the bar fills as the value approaches the cap.
+                        </Text>
+                      </>
+                    );
+                  })()}
 
                   {!hasMicros && <Text style={styles.microNoData}>Nutrition details load with your next plan.</Text>}
                 </View>
@@ -743,8 +1309,9 @@ export default function NutritionCard({
                     { label: 'On track', color: colors.primary },
                     { label: 'Below target', color: colors.warning },
                     { label: 'Above target', color: colors.error },
-                    { label: 'Whole', color: colors.success },
-                    { label: 'Processed', color: colors.error },
+                    { label: PROCESSING_TIER_INFO.minimally_processed.label, color: PROCESSING_TIER_INFO.minimally_processed.color },
+                    { label: PROCESSING_TIER_INFO.processed.label, color: PROCESSING_TIER_INFO.processed.color },
+                    { label: PROCESSING_TIER_INFO.ultra_processed.label, color: PROCESSING_TIER_INFO.ultra_processed.color },
                   ].map(l => (
                     <View key={l.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: l.color }} />
@@ -752,9 +1319,18 @@ export default function NutritionCard({
                     </View>
                   ))}
                 </View>
+                </View>
               </ScrollView>
+              <NutrientSourcePopup
+                visible={!!drillNutrient}
+                detail={selectedNutrientDetail}
+                colors={colors}
+                styles={styles}
+                onClose={() => setDrillNutrient(null)}
+              />
             </View>
           </View>
+          )}
         </Modal>
 
         {/* Plant vs Meat protein drill-down modal */}
@@ -762,18 +1338,21 @@ export default function NutritionCard({
           visible={showProteinModal}
           transparent
           animationType="slide"
-          onRequestClose={() => setShowProteinModal(false)}>
+          onRequestClose={closeProteinModal}>
+          {showProteinModal && (
           <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' }}>
-            <View style={{
-              backgroundColor: colors.background,
-              borderTopLeftRadius: 24, borderTopRightRadius: 24,
-              padding: 18, maxHeight: '85%',
-            }}>
+            <View
+              {...proteinModalSwipeHandlers}
+              style={{
+                backgroundColor: colors.background,
+                borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                padding: 18, maxHeight: '85%',
+              }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
                 <Text style={{ fontSize: 18, fontWeight: '800', color: colors.textPrimary, flex: 1 }}>
                   Protein source today
                 </Text>
-                <TouchableOpacity onPress={() => setShowProteinModal(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <TouchableOpacity onPress={closeProteinModal} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                   <Ionicons name="close" size={22} color={colors.textMuted} />
                 </TouchableOpacity>
               </View>
@@ -783,7 +1362,11 @@ export default function NutritionCard({
                 const total = plantG + animalG;
                 const plantPct = total > 0 ? (plantG / total) * 100 : 0;
                 return (
-                  <ScrollView showsVerticalScrollIndicator={false}>
+                  <ScrollView
+                    showsVerticalScrollIndicator={false}
+                    onScroll={handleProteinModalScroll}
+                    scrollEventThrottle={16}
+                    bounces>
                     <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
                       <View style={{ flex: 1, padding: 12, backgroundColor: '#22C55E22', borderRadius: 10 }}>
                         <Text style={{ fontSize: 10, color: '#16803D', fontWeight: '800', letterSpacing: 0.5 }}>PLANT</Text>
@@ -867,11 +1450,11 @@ export default function NutritionCard({
               })()}
             </View>
           </View>
+          )}
         </Modal>
 
         {/* Meal rows — single unified list. Order is whatever the user
-            arranged with the up/down arrows. Routines are tagged with a
-            📌 emoji but are otherwise rendered identically to other meals. */}
+            arranged with the up/down arrows. */}
         <View style={[styles.meals, embedded && styles.mealsEmbedded]}>
           {visibleMeals.length > 0 && hasSwipeActions && !swipeHintDismissed && (
             <TouchableOpacity
@@ -884,32 +1467,44 @@ export default function NutritionCard({
               </Text>
             </TouchableOpacity>
           )}
-          {visibleMeals.map(({ key, emoji, meal }, i) => (
-            <FadeInView key={key} delay={i * 40} duration={260} slideDistance={8}>
-            <MealRow
-              emoji={emoji}
-              mealType={key}
-              meal={meal}
-              checked={!!checkedMeals[key]}
-              onToggle={onToggleMeal}
-              onEdit={onEditMeal}
-              onRemove={onRemoveMeal}
-              onHardDelete={onHardDeleteMeal}
-              onToggleRoutine={onToggleRoutine}
-              onShowRecipe={onShowRecipe}
-              onMoveUp={i > 0 && onMoveMeal ? () => onMoveMeal(key, -1) : undefined}
-              onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
-              onRenameMeal={onRenameMeal}
-              onShuffle={onShuffleMeal ? () => onShuffleMeal(key, meal) : undefined}
-              isShuffling={shufflingMealKey === key}
-              onToggleSave={onToggleSave}
-              colors={colors}
-              styles={styles}
-              mealAccent={section}
-              isSaved={(savedMealNames ?? new Set<string>()).has((meal.meal || '').toLowerCase().trim())}
-            />
-            </FadeInView>
-          ))}
+          {visibleMeals.map(({ key, legacyKey, reactKey, emoji, meal, macros }, i) => {
+            const savedMarker = (meal as any)._savedMealId;
+            const explicitSavedId = savedMarker != null ? Number(savedMarker) || 0 : 0;
+            const isSaved = savedMarker === null
+              ? false
+              : explicitSavedId !== 0
+                ? true
+                : (savedMealNames ?? new Set<string>()).has(
+                  `${(meal.meal || '').toLowerCase().trim()}|${(meal.items ?? meal.foods ?? []).length}|${Math.round(macros.calories)}`,
+                );
+            return (
+              <FadeInView key={reactKey} delay={i * 40} duration={260} slideDistance={8}>
+              <MealRow
+                emoji={emoji}
+                mealType={key}
+                meal={meal}
+                mealMacros={macros}
+                checked={!!checkedMeals[key] || !!checkedMeals[legacyKey]}
+                onToggle={onToggleMeal}
+                onEdit={onEditMeal}
+                onRemove={onRemoveMeal}
+                onHardDelete={onHardDeleteMeal}
+                onToggleRoutine={onToggleRoutine}
+                onShowRecipe={onShowRecipe}
+                onMoveUp={i > 0 && onMoveMeal ? () => onMoveMeal(key, -1) : undefined}
+                onMoveDown={i < visibleMeals.length - 1 && onMoveMeal ? () => onMoveMeal(key, 1) : undefined}
+                onDuplicate={onDuplicateMeal ? () => onDuplicateMeal(key, meal) : undefined}
+                onSplit={onSplitMeal ? () => onSplitMeal(key, meal) : undefined}
+                onToggleSave={onToggleSave}
+                onExpandItems={onMealRowExpand}
+                colors={colors}
+                styles={styles}
+                mealAccent={section}
+                isSaved={isSaved}
+              />
+              </FadeInView>
+            );
+          })}
           {hiddenMeals.length > 0 && (
             <View style={styles.hiddenMealRow}>
               <Text style={styles.hiddenMealText}>Removed: {hiddenMeals.map(m => m.meal.meal).join(', ')}</Text>
@@ -922,93 +1517,85 @@ export default function NutritionCard({
               </View>
             </View>
           )}
-          {/* Add-meal footer. When the user has any saved meals the
-              button splits into two side-by-side paths: "Empty meal"
-              (original behavior) and "From saved". Keeps the single-
-              button treatment when there are no saved meals yet. */}
-          {onAddSnack && onAddFromSaved && (savedMealNames?.size ?? 0) > 0 ? (
-            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-              <TouchableOpacity
-                style={[styles.addMealInline, { flex: 1, marginTop: 0 }]}
+          {/* Add-meal footer. If Favorites is wired, always expose it.
+              The picker itself owns the empty state, which makes the
+              path discoverable before the user has saved their first
+              reusable meal. */}
+          {onAddSnack && onAddFromSaved ? (
+            <View style={styles.addMealActions}>
+              <PressableScale
+                style={[styles.addMealPrimary, styles.addMealPrimaryWide]}
                 onPress={onAddSnack}
-                activeOpacity={0.7}
+                scaleDown={0.96}
+                accessibilityRole="button"
+                accessibilityLabel="Add meal"
               >
-                <Ionicons name="add-circle-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
-                <Text style={styles.addMealInlineText}>Empty meal</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.addMealInline, { flex: 1, marginTop: 0 }]}
+                <Ionicons name="add-circle" size={20} color={addMealOnColor} style={{ marginRight: 7 }} />
+                <Text style={styles.addMealPrimaryText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>Add Meal</Text>
+              </PressableScale>
+              <PressableScale
+                style={[styles.addMealInline, styles.addMealSecondary]}
                 onPress={onAddFromSaved}
-                activeOpacity={0.7}
+                scaleDown={0.965}
+                accessibilityRole="button"
+                accessibilityLabel="Add meal from favorites"
               >
-                <Ionicons name="heart-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
-                <Text style={styles.addMealInlineText}>From Favorites</Text>
-              </TouchableOpacity>
+                <Ionicons name="heart-outline" size={15} color={section.strong} style={{ marginRight: 5 }} />
+                <Text style={styles.addMealInlineText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>Favorites</Text>
+              </PressableScale>
             </View>
           ) : onAddSnack ? (
-            <TouchableOpacity style={styles.addMealInline} onPress={onAddSnack} activeOpacity={0.7}>
-              <Ionicons name="add-circle-outline" size={16} color={section.strong} style={{ marginRight: 4 }} />
-              <Text style={styles.addMealInlineText}>Add Meal</Text>
-            </TouchableOpacity>
+            <PressableScale style={styles.addMealPrimary} onPress={onAddSnack} scaleDown={0.96} accessibilityRole="button" accessibilityLabel="Add meal">
+              <Ionicons name="add-circle" size={20} color={addMealOnColor} style={{ marginRight: 7 }} />
+              <Text style={styles.addMealPrimaryText}>Add Meal</Text>
+            </PressableScale>
           ) : null}
         </View>
 
       </View>
-    </View>
-  );
-}
 
-// ── MacroTracker ──────────────────────────────────────────────────────────────
-
-function MacroTracker({
-  label, actual, target, unit, color, colors, styles,
-}: {
-  label: string; actual: number; target: number; unit: string; color: string;
-  colors: ReturnType<typeof getTheme>['colors'];
-  styles: ReturnType<typeof createStyles>;
-}) {
-  const pct      = target > 0 ? Math.min(actual / target, 1) : 0;
-  const over     = actual > target;
-  const barColor = over ? colors.error : color;
-  const barAnim  = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(barAnim, {
-      toValue: Math.round(pct * 100),
-      duration: 500,
-      useNativeDriver: false,
-    }).start();
-  }, [pct]);
-
-  return (
-    <View style={styles.macroTracker}>
-      <Text style={styles.macroTrackerLabel}>{label}</Text>
-      <View style={styles.macroTrackerValues}>
-        <AnimatedNumber value={actual} suffix={unit} style={[styles.macroActual, { color: over ? colors.error : color }]} />
-        <Text style={styles.macroSep}>/</Text>
-        <Text style={styles.macroTarget}>{target}{unit}</Text>
-      </View>
-      <View style={styles.macroBarTrack}>
-        <Animated.View style={[styles.macroBarFill, {
-          width: barAnim.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
-          backgroundColor: barColor,
-        }]} />
-      </View>
-      {over && (
-        <Text style={[styles.macroRemaining, { color: colors.error }]}>
-          +{actual - target}{unit}
-        </Text>
-      )}
+      <ScoreInfoModal
+        visible={scoreInfoOpen}
+        onClose={() => setScoreInfoOpen(false)}
+        eyebrow="NUTRITION SCORE"
+        title="How it's calculated"
+        iconName="nutrition-outline"
+        iconColor={colors.primary}
+        themeName={themeName}>
+        <ScoreInfoBody themeName={themeName}>
+          A 0–100 read of today's food choices, computed server-side
+          from what you've logged. It blends how close you are to your
+          daily calorie and macro ranges with quality measures like fiber,
+          plants, and added-sugar restraint.
+        </ScoreInfoBody>
+        <ScoreInfoSection title="What goes in" themeName={themeName}>
+          <ScoreInfoRow label="Adherence" value="calories + protein vs daily ranges" themeName={themeName} />
+          <ScoreInfoRow label="Quality" value="fiber, plants, whole foods" themeName={themeName} />
+          <ScoreInfoRow label="Micronutrients" value="key vitamins + minerals" themeName={themeName} />
+          <ScoreInfoRow label="Hydration" value="logged water + water-rich foods" themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoSection title="Rating bands" themeName={themeName}>
+          <ScoreInfoRow label="70+" value="In range" valueColor={colors.success} themeName={themeName} />
+          <ScoreInfoRow label="45–69" value="Decent — gaps to close" valueColor={colors.warning} themeName={themeName} />
+          <ScoreInfoRow label="Below 45" value="Off track today" valueColor={colors.error} themeName={themeName} />
+        </ScoreInfoSection>
+        <ScoreInfoBody themeName={themeName} muted>
+          The score only counts food you've actually logged. Days with
+          no meals logged stay at 0 — they don't count against your
+          weekly average.
+        </ScoreInfoBody>
+      </ScoreInfoModal>
     </View>
   );
 }
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onRenameMeal, onMoveUp, onMoveDown, onShuffle, isShuffling, onToggleSave, colors, styles, mealAccent, isSaved }: {
+function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onMoveUp, onMoveDown, onDuplicate, onSplit, onToggleSave, onExpandItems, colors, styles, mealAccent, isSaved }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
+  mealMacros: MealMacroTotals;
   checked: boolean;
   onToggle?: (mealType: string) => void;
   onEdit?:   (mealType: string, meal: MealSuggestion) => void;
@@ -1016,26 +1603,22 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   onHardDelete?: (mealType: string) => void;
   onToggleRoutine?: (mealType: string) => void;
   onShowRecipe?: (mealType: string, meal: MealSuggestion) => void;
-  onRenameMeal?: (mealType: string, newName: string) => void;
   onMoveUp?: () => void;
   onMoveDown?: () => void;
-  onShuffle?: () => void;
-  isShuffling?: boolean;
+  onDuplicate?: () => void;
+  onSplit?: () => void;
   onToggleSave?: (mealType: string, meal: MealSuggestion) => void;
+  onExpandItems?: (node: View | null) => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
-  /** True when this meal's name matches one of the user's Saved Meals.
-   *  Surfaces a star icon in the header so users can save/unsave. */
+  /** True when this meal's name matches one of the user's Saved Meals. */
   isSaved?: boolean;
 }) {
-  void onHardDelete;
   const [itemsExpanded, setItemsExpanded] = useState(true);
-  const [editingName, setEditingName] = useState(false);
-  const [nameDraft, setNameDraft] = useState(meal.meal);
+  const rowRef = useRef<View | null>(null);
   const isRoutineBacked = !!(meal as any)._routineId || !!meal.isRoutine;
-  const isProtectedMeal = isRoutineBacked || !!(meal as any)._localId;
-  useEffect(() => { if (!editingName) setNameDraft(meal.meal); }, [meal.meal, editingName]);
+  const loggedTime = formatLoggedMealTime(meal);
 
   // Meal-row animation values:
   //   • checkScale — drives the check icon's spring from 0 → 1.2 → 1.0
@@ -1074,44 +1657,60 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
   }, [checked, checkScale, rowFlash]);
   const rowFlashBg = rowFlash.interpolate({
     inputRange: [0, 1],
-    outputRange: ['transparent', mealAccent.strong + '33'],
+    outputRange: [colors.surfaceRaised, mealAccent.strong + '33'],
   });
-  const commitRename = () => {
-    const trimmed = nameDraft.trim();
-    setEditingName(false);
-    if (trimmed && trimmed !== meal.meal && onRenameMeal) {
-      onRenameMeal(mealType, trimmed);
-    } else {
-      setNameDraft(meal.meal);
-    }
-  };
+  const macroEnergy = [
+    { key: 'protein', value: mealMacros.protein * 4, color: colors.primary },
+    { key: 'carbs', value: mealMacros.carbs * 4, color: '#F59E0B' },
+    { key: 'fat', value: mealMacros.fat * 9, color: '#A78BFA' },
+  ].sort((a, b) => b.value - a.value);
+  const mealRowAccent = macroEnergy[0]?.value > 0 ? macroEnergy[0].color : mealAccent.strong;
   const withItems = ensureItems(meal);
+  const mealImageSpec = useMemo(() => resolveMealImage(meal as any), [meal]);
+  const showMealPhoto = mealImageSpec.kind === 'photo';
   const itemRows = withItems.items && withItems.items.length > 0
     ? withItems.items.map((it, i) => ({
         key: `${it.name}-${i}`,
         name: it.name,
         amount: formatItemAmount(it),
-        quality: classifyFood(it.name, it.food_quality),
+        processingBucket: processingBucketForItem(it),
       }))
     : meal.foods.map((f, i) => ({
         key: `${f}-${i}`,
         name: f,
         amount: meal.amounts?.[i] ?? '',
-        quality: classifyFood(f),
+        processingBucket: 'unknown' as ProcessingBucket,
       }));
 
   const swipeActions: SwipeAction[] = [];
   if (onShowRecipe) swipeActions.push({ icon: 'restaurant-outline', color: getContrastingTextColor(colors.primary), bgColor: colors.primary, onPress: () => onShowRecipe(mealType, meal), label: 'Recipe' });
-  if (onShuffle) swipeActions.push({ icon: 'shuffle', color: getContrastingTextColor(mealAccent.strong), bgColor: mealAccent.strong, onPress: onShuffle, label: 'Shuffle' });
+  if (onDuplicate) swipeActions.push({ icon: 'copy-outline', color: '#fff', bgColor: '#0EA5E9', onPress: onDuplicate, label: 'Again' });
+  if (onSplit) swipeActions.push({ icon: 'git-branch-outline', color: '#fff', bgColor: '#8B5CF6', onPress: onSplit, label: 'Split' });
   if (onMoveUp) swipeActions.push({ icon: 'arrow-up', color: '#fff', bgColor: '#6B7280', onPress: onMoveUp });
   if (onMoveDown) swipeActions.push({ icon: 'arrow-down', color: '#fff', bgColor: '#6B7280', onPress: onMoveDown });
-  if (onRemove) swipeActions.push({ icon: 'trash-outline', color: '#fff', bgColor: colors.error ?? '#EF4444', onPress: () => onRemove(mealType), label: 'Remove' });
+  if (onHardDelete || onRemove) {
+    swipeActions.push({
+      icon: 'trash-outline',
+      color: '#fff',
+      bgColor: colors.error ?? '#EF4444',
+      onPress: () => (onHardDelete ? onHardDelete(mealType) : onRemove?.(mealType)),
+      label: 'Remove',
+    });
+  }
 
   return (
+    <View ref={rowRef} collapsable={false}>
     <SwipeableRow actions={swipeActions}>
     <Animated.View testID={`meal-row-${mealType}`} style={[styles.mealItem, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
-      {/* Title row — checkbox + meal name + inline pin badge + actions. */}
-      <View style={styles.mealHeader}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={[mealRowAccent + (checked ? '18' : '22'), mealAccent.strong + (checked ? '18' : '0C'), 'transparent'] as any}
+        locations={[0, 0.58, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.mealItemGradient}
+      />
+      <View style={styles.mealTimeline}>
         <TouchableOpacity
           testID={`meal-check-${mealType}`}
           style={[styles.checkbox, checked && styles.checkboxDone]}
@@ -1123,113 +1722,71 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
           accessibilityState={{ checked, disabled: !onToggle }}>
           {checked && (
             <Animated.View style={{ transform: [{ scale: checkScale }] }}>
-              <Ionicons name="checkmark" size={14} color="#fff" />
+              {/* Contrast against the checked circle's fill (section.strong) —
+                  white on the onyx theme, so a hardcoded white check vanished. */}
+              <Ionicons name="checkmark" size={14} color={getContrastingTextColor(mealAccent.strong)} />
             </Animated.View>
           )}
         </TouchableOpacity>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            {editingName && onRenameMeal ? (
-              <TextInput
-                value={nameDraft}
-                onChangeText={setNameDraft}
-                onBlur={commitRename}
-                onSubmitEditing={commitRename}
-                autoFocus
-                returnKeyType="done"
-                blurOnSubmit
-                maxLength={80}
-                style={[
-                  styles.mealName,
-                  {
-                    flexShrink: 1,
-                    minWidth: 120,
-                    paddingVertical: 2,
-                    paddingHorizontal: 4,
-                    borderBottomWidth: 1,
-                    borderBottomColor: mealAccent.strong,
-                    color: colors.textPrimary,
-                  },
-                ]}
-                accessibilityLabel="Rename meal"
-              />
-            ) : (
-              <>
-                <TouchableOpacity
-                  onPress={() => { if (onRenameMeal) setEditingName(true); }}
-                  activeOpacity={0.7}
-                  style={{ flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 4 }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Meal: ${meal.meal}. Tap to rename.`}>
-                  <Text
-                    testID={`meal-row-name-${e2eId(meal.meal)}`}
-                    style={[styles.mealName, checked && styles.mealNameDone]}
-                    numberOfLines={2}
-                    ellipsizeMode="tail">
-                    {meal.meal}
-                  </Text>
-                  {onRenameMeal && (
-                    <Ionicons
-                      name="pencil"
-                      size={11}
-                      color={colors.textMuted}
-                      style={{ opacity: 0.6 }}
-                    />
-                  )}
-                </TouchableOpacity>
-              </>
-            )}
-            {isProtectedMeal && (
-              <View style={[
-                styles.protectedBadge,
-                {
-                  backgroundColor: mealAccent.strong + '16',
-                  borderColor: mealAccent.strong + '55',
-                },
-              ]}>
-                <Ionicons
-                  name={isRoutineBacked ? 'repeat-outline' : 'shield-checkmark-outline'}
-                  size={10}
-                  color={mealAccent.strong}
-                />
-                <Text {...dynamicCompactTextProps} style={[styles.protectedBadgeText, { color: mealAccent.strong }]}>
-                  {isRoutineBacked ? 'Routine' : 'Protected'}
-                </Text>
-              </View>
-            )}
-          </View>
+      </View>
+      {showMealPhoto ? (
+        <View style={[styles.mealPhotoThumb, checked && styles.mealPhotoThumbDone]}>
+          <MealThumbnail meal={meal as any} size="md" spec={mealImageSpec} />
         </View>
-        {/* Secondary icon strip — pencil (edit) stays muted + outlined so
-            it reads as a secondary action, not the primary CTA. The
-            primary action on a meal row is the check box on the left. */}
+      ) : null}
+      <View style={styles.mealContent}>
+      {/* Title row — meal name + inline pin badge + actions. */}
+      <View style={styles.mealHeader}>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text
+            testID={`meal-row-name-${e2eId(meal.meal)}`}
+            style={[styles.mealName, checked && styles.mealNameDone]}
+            numberOfLines={1}
+            ellipsizeMode="tail">
+            {meal.meal}
+          </Text>
+          {loggedTime && (
+            <Text style={styles.mealLoggedTime}>{loggedTime}</Text>
+          )}
+        </View>
+        {/* Keep the front row to the two high-frequency actions. Destructive
+            actions live behind swipe/confirm flows so they are harder to hit. */}
         <View style={styles.iconStrip}>
-          {isShuffling && (
-            <ActivityIndicator size="small" color={mealAccent.strong} style={{ marginRight: 4 }} />
-          )}
-          {onToggleRoutine && (
-            <TouchableOpacity
-              onPress={() => onToggleRoutine(mealType)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              style={[styles.iconBtn, isRoutineBacked && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}
-              accessibilityRole="button"
-              accessibilityLabel={isRoutineBacked ? `Unpin ${meal.meal} routine` : `Pin ${meal.meal} as a routine`}>
-              <Ionicons name={isRoutineBacked ? 'repeat' : 'repeat-outline'} size={16} color={isRoutineBacked ? mealAccent.strong : colors.textMuted} />
-            </TouchableOpacity>
-          )}
           {onToggleSave && (
             <TouchableOpacity
-              onPress={() => onToggleSave(mealType, meal)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              onPress={() => onToggleSave(mealType, {
+                ...meal,
+                calories: mealMacros.calories,
+                protein: mealMacros.protein,
+                carbs: mealMacros.carbs,
+                fat: mealMacros.fat,
+              })}
+              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
               activeOpacity={0.7}
               accessibilityRole="button"
               accessibilityLabel={isSaved ? `Remove ${meal.meal} from favorites` : `Add ${meal.meal} to favorites`}
               style={[styles.iconBtn, isSaved && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}>
-              <Ionicons name={isSaved ? 'star' : 'star-outline'} size={16} color={isSaved ? mealAccent.strong : colors.textMuted} />
+              <Ionicons name={isSaved ? 'star' : 'star-outline'} size={18} color={isSaved ? mealAccent.strong : colors.textMuted} />
+            </TouchableOpacity>
+          )}
+          {onToggleRoutine && (
+            <TouchableOpacity
+              onPress={() => onToggleRoutine(mealType)}
+              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+              style={[styles.iconBtn, isRoutineBacked && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}
+              accessibilityRole="button"
+              accessibilityLabel={isRoutineBacked ? `Unpin ${meal.meal} routine` : `Pin ${meal.meal} as a routine`}>
+              <Ionicons name={isRoutineBacked ? 'repeat' : 'repeat-outline'} size={18} color={isRoutineBacked ? mealAccent.strong : colors.textMuted} />
             </TouchableOpacity>
           )}
           {onEdit && (
-            <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel={`Edit ${meal.meal}`}>
-              <Ionicons name="pencil-outline" size={16} color={colors.textMuted} />
+            <TouchableOpacity
+              onPress={() => onEdit(mealType, meal)}
+              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+              style={styles.iconBtn}
+              accessibilityRole="button"
+              accessibilityLabel={`Edit ${meal.meal}`}>
+              <Ionicons name="pencil-outline" size={18} color={colors.textMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -1237,28 +1794,58 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
 
       {/* Item list — collapsed by default, tap to expand */}
       {itemRows.length > 0 && !itemsExpanded ? (
-        <TouchableOpacity onPress={() => { configureExpandAnimation(300); setItemsExpanded(true); }} activeOpacity={0.7} style={{ paddingVertical: 3, paddingLeft: 32 }}>
-          <Text style={{ fontSize: 12, color: colors.textSecondary, fontWeight: '500' }}>
+        <TouchableOpacity
+          onPress={() => {
+            configureExpandAnimation(300);
+            setItemsExpanded(true);
+            onExpandItems?.(rowRef.current);
+          }}
+          activeOpacity={0.7}
+          style={{ paddingVertical: 3 }}>
+          <Text style={{ fontSize: 13, color: colors.textSecondary, fontWeight: '700' }}>
             {itemRows.length} item{itemRows.length !== 1 ? 's' : ''} · tap to see details
           </Text>
         </TouchableOpacity>
       ) : itemRows.length > 0 ? (
         <TouchableOpacity onPress={() => { configureExpandAnimation(300); setItemsExpanded(false); }} activeOpacity={0.9}>
           <View style={styles.mealFoodsDetail}>
-            {itemRows.map(r => (
-              <View key={r.key} style={styles.mealFoodRow}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, marginRight: 6, marginTop: 5, backgroundColor: r.quality === 'whole' ? '#22C55E' : r.quality === 'processed' ? '#EF4444' : colors.border }} />
-                <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1 }]}>
-                  {r.name}
-                </Text>
-                {r.quality === 'processed' && (
-                  <Text style={{ fontSize: 9, color: '#EF4444', fontWeight: '600', marginRight: 6 }}>Processed</Text>
-                )}
-                {r.amount ? (
-                  <Text style={styles.mealFoodAmount}>{r.amount}</Text>
-                ) : null}
-              </View>
-            ))}
+            {itemRows.map(r => {
+              const iconSpec = getFoodIconSpec(r.name);
+              const processingInfo = PROCESSING_TIER_INFO[r.processingBucket];
+              const showProcessingBadge = r.processingBucket !== 'unknown';
+              return (
+                <View key={r.key} style={styles.mealFoodRow}>
+                  <View style={[styles.mealFoodProcessingDot, { backgroundColor: showProcessingBadge ? processingInfo.color : colors.border }]} />
+                  <MaterialCommunityIcons
+                    name={iconSpec.name}
+                    size={14}
+                    color={iconSpec.color}
+                    style={{ marginRight: 6, marginTop: 1, opacity: checked ? 0.5 : 1 }}
+                  />
+                  <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1, minWidth: 0 }]} numberOfLines={2}>
+                    {r.name}
+                  </Text>
+                  {showProcessingBadge && (
+                    <Text
+                      style={[
+                        styles.mealFoodProcessingBadge,
+                        {
+                          color: processingInfo.color,
+                          backgroundColor: processingInfo.color + '14',
+                          borderColor: processingInfo.color + '44',
+                        },
+                      ]}
+                      numberOfLines={1}
+                      accessibilityLabel={processingInfo.label}>
+                      {processingInfo.rowLabel}
+                    </Text>
+                  )}
+                  {r.amount ? (
+                    <Text style={styles.mealFoodAmount}>{r.amount}</Text>
+                  ) : null}
+                </View>
+              );
+            })}
             {meal.instructions && (
               <View style={styles.recipeBox}>
                 <Text style={styles.recipeLabel}>Recipe</Text>
@@ -1281,19 +1868,30 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         const highSodium = sodium >= 700;
         return (
           <View style={styles.mealBadges}>
-            <MacroPill label="cal" value={Math.round(meal.calories)} color={mealAccent.strong} styles={styles} />
-            <MacroPill label="p"   value={Math.round(meal.protein)}  color={colors.primary}    styles={styles} />
-            <MacroPill label="c"   value={Math.round(meal.carbs ?? 0)} color="#F59E0B"         styles={styles} />
-            <MacroPill label="f"   value={Math.round(meal.fat ?? 0)}   color="#A78BFA"         styles={styles} />
-            {fiber > 0 && <MacroPill label="fiber" value={fiber} color="#10B981" styles={styles} />}
-            {highSugar && <MacroPill label={addedSugar > 0 ? 'added sugar' : 'sugar'} value={addedSugar > 0 ? addedSugar : sugar} color="#EF4444" styles={styles} />}
-            {highSodium && <MacroPill label="sodium" value={sodium} color="#EF4444" styles={styles} />}
+            <MacroPill label="cal" value={mealMacros.calories} color={mealAccent.strong} styles={styles} />
+            <MacroPill label="p"   value={mealMacros.protein}  color={colors.primary}    styles={styles} />
+            <MacroPill label="c"   value={mealMacros.carbs}    color="#F59E0B"           styles={styles} />
+            <MacroPill label="f"   value={mealMacros.fat}      color="#A78BFA"           styles={styles} />
+            {/* Fiber / sugar / sodium pills removed — meal row stays macros-only. */}
           </View>
         );
       })()}
+      </View>
     </Animated.View>
     </SwipeableRow>
+    </View>
   );
+}
+
+const NutritionCard = memo(NutritionCardInner);
+export default NutritionCard;
+
+function formatLoggedMealTime(meal: MealSuggestion): string | null {
+  const raw = (meal as any)._consumedAt ?? (meal as any).consumed_at ?? (meal as any).created_at;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
 function MicroChipLg({ label, value, target, pct, colors, styles, warn, low, onPress }: {
@@ -1306,12 +1904,54 @@ function MicroChipLg({ label, value, target, pct, colors, styles, warn, low, onP
   const barPct = Math.min(pct, 1);
   const noData = value === '—';
   const barColor = noData ? colors.border : warn ? colors.error : low ? '#F59E0B' : colors.primary;
+  // Accessibility: state must NOT be color-only. A small glyph next to
+  // the label communicates the same state for color-blind users and
+  // shows up in VoiceOver via accessibilityHint. Glyph map:
+  //   warn   → arrow-up   (over target / "too high")
+  //   low    → arrow-down (under target / "low")
+  //   ontrk  → checkmark  (in band)
+  //   no data → no glyph; we show "—" already
+  const stateGlyph: 'arrow-up-circle' | 'arrow-down-circle' | 'checkmark-circle' | null =
+    noData ? null
+    : warn ? 'arrow-up-circle'
+    : low ? 'arrow-down-circle'
+    : (pct >= 0.7 ? 'checkmark-circle' : null);
+  const stateHint =
+    noData ? 'No data yet'
+    : warn ? `Above target ${target}`
+    : low ? `Below target ${target}`
+    : `On track toward ${target}`;
   const Wrapper = onPress ? TouchableOpacity : View;
-  const wrapperProps = onPress ? { onPress, activeOpacity: 0.7 } : {};
+  const wrapperProps = onPress
+    ? { onPress, activeOpacity: 0.7, accessibilityRole: 'button' as const }
+    : {};
   return (
-    <Wrapper {...wrapperProps} style={styles.microChipLg}>
+    <Wrapper
+      {...wrapperProps}
+      style={styles.microChipLg}
+      accessibilityLabel={`${label}, ${value}`}
+      accessibilityHint={stateHint}
+    >
       <View style={styles.microChipLgTop}>
-        <Text style={[styles.microChipLgLabel, (warn || low) && { color: barColor }]}>{label}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1, minWidth: 0 }}>
+          {stateGlyph ? (
+            <Ionicons
+              name={stateGlyph}
+              size={11}
+              color={barColor}
+              // Decorative — the accessibilityHint above already
+              // communicates the state to assistive tech.
+              accessibilityElementsHidden
+              importantForAccessibility="no"
+            />
+          ) : null}
+          <Text
+            style={[styles.microChipLgLabel, (warn || low) && { color: barColor }]}
+            numberOfLines={1}
+          >
+            {label}
+          </Text>
+        </View>
         <Text style={[styles.microChipLgValue, noData ? { color: colors.textMuted } : (warn || low) && { color: barColor }]}>{value}</Text>
       </View>
       <View style={styles.microChipLgBarTrack}>
@@ -1322,9 +1962,87 @@ function MicroChipLg({ label, value, target, pct, colors, styles, warn, low, onP
   );
 }
 
+function NutrientSourcePopup({
+  visible,
+  detail,
+  colors,
+  styles,
+  onClose,
+}: {
+  visible: boolean;
+  detail: MicroSourceDetail | null;
+  colors: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+  onClose: () => void;
+}) {
+  if (!visible || !detail) return null;
+
+  return (
+    <View style={styles.nutrientPopupOverlay}>
+      <TouchableOpacity
+        activeOpacity={1}
+        style={StyleSheet.absoluteFillObject}
+        onPress={onClose}
+        accessibilityRole="button"
+        accessibilityLabel="Close nutrient sources"
+      />
+      <View style={[styles.nutrientPopupCard, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}>
+        <View style={styles.nutrientPopupHeader}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.nutrientPopupTitle}>{detail.label} Sources</Text>
+            <Text style={styles.nutrientPopupSubtitle}>
+              {detail.contributions.length > 0
+                ? `${formatMicroSourceAmount(detail.total)}${detail.unit} total today`
+                : 'No item-level sources yet'}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={styles.nutrientPopupClose}>
+            <Ionicons name="close" size={20} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+
+        {detail.contributions.length === 0 ? (
+          <Text style={styles.nutrientPopupEmpty}>
+            Per-food breakdown will appear after your next plan regeneration.
+          </Text>
+        ) : (
+          <ScrollView style={styles.nutrientPopupScroll} showsVerticalScrollIndicator={false}>
+            {detail.contributions.slice(0, 12).map((source, i) => {
+              const pctOfTotal = detail.total > 0 ? source.amount / detail.total : 0;
+              return (
+                <View key={`${source.food}-${i}`} style={styles.nutrientSourceRow}>
+                  <View style={styles.nutrientSourceTopRow}>
+                    <Text style={styles.nutrientSourceName} numberOfLines={1}>{source.food}</Text>
+                    <Text style={styles.nutrientSourceAmount}>
+                      {formatMicroSourceAmount(source.amount)}{detail.unit}
+                    </Text>
+                  </View>
+                  {source.meal ? <Text style={styles.nutrientSourceMeal}>from {source.meal}</Text> : null}
+                  <View style={styles.nutrientSourceTrack}>
+                    <View
+                      style={[
+                        styles.nutrientSourceFill,
+                        {
+                          width: `${Math.round(pctOfTotal * 100)}%` as any,
+                          backgroundColor: colors.primary,
+                        },
+                      ]}
+                    />
+                  </View>
+                </View>
+              );
+            })}
+          </ScrollView>
+        )}
+      </View>
+    </View>
+  );
+}
+
 function MacroPill({ label, value, color, styles }: { label: string; value: number; color: string; styles: ReturnType<typeof createStyles> }) {
   return (
-    <View style={[styles.pill, { borderColor: color + '55' }]}>
+    <View style={[styles.pill, { borderColor: color + '55', backgroundColor: color + '12' }]}>
+      <View style={[styles.pillDot, { backgroundColor: color }]} />
       <Text style={[styles.pillValue, { color }]}>{value}</Text>
       <Text style={styles.pillLabel}>{label}</Text>
     </View>
@@ -1376,23 +2094,146 @@ const createStyles = (
     marginBottom: 10,
   },
 
-  // Inline "+ Add Meal" affordance at the bottom of the meal list,
-  // replacing the old top-of-card pill button. Dashed border keeps it
-  // visually distinct from real meal rows.
+  addMealActions: {
+    flexDirection: 'row',
+    gap: 9,
+    marginTop: 14,
+    alignItems: 'stretch',
+  },
   addMealInline: {
-    marginTop: 8,
     paddingVertical: 12,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: section.strong + '55',
-    borderStyle: 'dashed',
+    paddingHorizontal: 11,
+    minHeight: 54,
+    flexDirection: 'row',
+    justifyContent: 'center',
     alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: section.strong + '66',
     backgroundColor: section.soft,
   },
+  addMealSecondary: {
+    flex: 0.88,
+    marginTop: 0,
+    minWidth: 0,
+  },
   addMealInlineText: {
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0,
     color: section.strong,
+  },
+  addMealPrimary: {
+    marginTop: 10,
+    paddingVertical: 15,
+    paddingHorizontal: 16,
+    minHeight: 56,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: section.strong,
+    backgroundColor: section.strong,
+    shadowColor: section.strong,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.30,
+    shadowRadius: 12,
+    elevation: 5,
+  },
+  addMealPrimaryWide: {
+    flex: 1.42,
+    marginTop: 0,
+    minWidth: 0,
+  },
+  addMealPrimaryText: {
+    fontSize: 15,
+    fontWeight: '900',
+    letterSpacing: 0,
+    color: getContrastingTextColor(section.strong),
+  },
+
+  glp1SupportCard: {
+    marginTop: 10,
+    marginBottom: 6,
+    padding: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.primary + '33',
+    backgroundColor: colors.primary + '0F',
+    gap: 8,
+  },
+  glp1SupportTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  glp1SupportIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+  },
+  glp1SupportTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.primary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  glp1SupportText: { fontSize: 11, color: colors.textSecondary, lineHeight: 15, marginTop: 2 },
+  glp1ChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  glp1Chip: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.full,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.primary + '30',
+  },
+  glp1ChipText: { fontSize: 10, fontWeight: '700', color: colors.primary },
+
+  scorePillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 2,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  scorePill: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    borderWidth: 1,
+  },
+  scorePillLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  scorePillValue: {
+    fontSize: 14,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  scorePillMeta: {
+    maxWidth: 100,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  scoreInfoButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
 
   // ── Modal card section ────────────────────────────────────────────────────────
@@ -1401,56 +2242,67 @@ const createStyles = (
     borderWidth: 1,
     padding: 16,
     marginBottom: 12,
-  },
-
-  // ── Macro grid ────────────────────────────────────────────────────────────────
-  macrosGrid: {
-    flexDirection: 'row',
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-    marginBottom: 14,
-    gap: 2,
-    backgroundColor: section.soft,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: section.strong + '20',
-  },
-  macroTracker: { flex: 1, alignItems: 'center', gap: 3 },
-  macroTrackerLabel: {
-    ...typography.micro,
-    color: colors.textSecondary,
-  },
-  macroTrackerValues: { flexDirection: 'row', alignItems: 'baseline', gap: 2 },
-  macroActual:  { ...typography.cardTitle },
-  macroSep:     { ...typography.micro, color: colors.textMuted },
-  macroTarget:  { ...typography.micro, color: colors.textMuted },
-  macroBarTrack: {
-    width: '100%', height: 3,
-    backgroundColor: colors.border,
-    borderRadius: 2,
     overflow: 'hidden',
+    position: 'relative',
   },
-  macroBarFill:   { height: 3, borderRadius: 2 },
-  macroRemaining: { ...typography.micro },
 
   // ── Meals ────────────────────────────────────────────────────────────────────
   meals: { gap: 10, marginBottom: 14 },
   mealsEmbedded: { marginBottom: 0, gap: 9 },
 
   mealItem: {
-    backgroundColor: colors.surfaceRaised,
+    paddingVertical: 18,
+    paddingHorizontal: 14,
     borderRadius: 16,
-    padding: 14,
     borderWidth: 1,
     borderColor: colors.border,
-    gap: 6,
-    ...elevations.subtle,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 12,
+    position: 'relative',
+    overflow: 'hidden',
   },
-  // Completed state: no opacity fade — full strength with strikethrough
-  // title + muted subtitle so it reads "done", not "dead".
-  mealItemDone: { borderColor: section.strong + '55', backgroundColor: section.soft + '66' },
+  mealItemGradient: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    borderRadius: 16,
+    opacity: 0.18,
+  },
+  mealItemDone: { backgroundColor: section.soft + '40' },
 
-  mealHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  mealTimeline: {
+    width: 28,
+    alignItems: 'center',
+    position: 'relative',
+    flexShrink: 0,
+  },
+  mealPhotoThumb: {
+    width: 56,
+    height: 56,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    shadowColor: '#020617',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 3,
+    flexShrink: 0,
+  },
+  mealPhotoThumbDone: {
+    opacity: 0.62,
+  },
+  mealContent: {
+    flex: 1,
+    minWidth: 0,
+    gap: 6,
+  },
+  mealHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
 
   // Inline routine badge — small pill that sits next to the meal name
   // instead of taking its own row. Toggles pin/unpin on tap.
@@ -1465,32 +2317,20 @@ const createStyles = (
     fontWeight: '700',
     letterSpacing: 0.2,
   },
-  protectedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  protectedBadgeText: {
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.25,
-  },
-
-  // Trailing icon strip — reorder + actions, all icon-only, single row.
-  // Replaces the old separate "pin row" and "action row".
+  // Trailing row actions stay large enough to hit cleanly.
   iconStrip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 8,
+    flexShrink: 0,
   },
   iconBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 6,
+    width: 40,
+    height: 34,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1501,20 +2341,38 @@ const createStyles = (
   },
 
   checkbox: {
-    width: 22, height: 22, borderRadius: 6,
+    width: 24, height: 24, borderRadius: 12,
     borderWidth: 2, borderColor: section.strong + '88',
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'transparent',
+    backgroundColor: colors.surface,
+    zIndex: 1,
   },
   checkboxDone: { backgroundColor: section.strong, borderColor: section.strong },
   checkmark:    { fontSize: 12, color: '#fff', fontWeight: '800' },
 
-  mealName:     { ...typography.sectionTitle, color: colors.textPrimary },
+  mealName:     { ...typography.sectionTitle, fontSize: 17, lineHeight: 22, fontWeight: '900', letterSpacing: 0, color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
+  mealLoggedTime: { ...typography.micro, color: colors.textMuted, marginTop: 2 },
 
-  mealFoodsDetail: { gap: 3, marginTop: 6, paddingLeft: 32 },
-  mealFoodRow:     { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
-  mealFoodName:    { ...typography.body, color: colors.textSecondary, lineHeight: 17 },
+  mealFoodsDetail: { gap: 4, marginTop: 7, paddingLeft: 4 },
+  mealFoodRow:     { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  mealFoodProcessingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 6,
+  },
+  mealFoodName:    { ...typography.body, fontSize: 14, lineHeight: 19, fontWeight: '600', letterSpacing: 0, color: colors.textSecondary },
+  mealFoodProcessingBadge: {
+    flexShrink: 0,
+    maxWidth: 118,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    fontSize: 9,
+    fontWeight: '700',
+  },
   mealFoodsDone:   { color: colors.textMuted },
 
   recipeBox: {
@@ -1528,7 +2386,7 @@ const createStyles = (
   recipeLabel: { ...typography.micro, color: colors.textSecondary, marginBottom: 4 },
   recipeText:  { ...typography.body, color: colors.textPrimary, lineHeight: 18 },
 
-  mealBadges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginTop: 2 },
+  mealBadges: { flexDirection: 'row', gap: 7, flexWrap: 'wrap', marginTop: 4 },
 
   hiddenMealRow: {
     backgroundColor: section.soft,
@@ -1551,16 +2409,18 @@ const createStyles = (
   restoreBtnText: { fontSize: 12, color: section.text, fontWeight: '700' },
 
   pill: {
-    backgroundColor: colors.background,
+    minWidth: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     borderRadius: 10,
     borderWidth: 1,
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    alignItems: 'center',
-    minWidth: 44,
+    paddingVertical: 6,
   },
-  pillValue: { ...typography.bodyStrong },
-  pillLabel: { ...typography.micro, color: colors.textMuted, marginTop: 1 },
+  pillDot: { width: 6, height: 6, borderRadius: 3 },
+  pillValue: { fontSize: 14, lineHeight: 17, fontWeight: '900', fontVariant: ['tabular-nums'] as any },
+  pillLabel: { fontSize: 10, lineHeight: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'lowercase', letterSpacing: 0 },
 
   // ── Nutrition details inline link (muted, supplementary) ────────────────
   microBtn: {
@@ -1585,7 +2445,122 @@ const createStyles = (
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     paddingBottom: 36,
-    maxHeight: '88%',
+    maxHeight: '90%',
+    overflow: 'hidden',
+  },
+  modalHero: {
+    minHeight: 232,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 14,
+    justifyContent: 'space-between',
+    backgroundColor: colors.surfaceRaised,
+  },
+  modalHeroImage: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  modalHeroTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modalHeroPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  modalHeroPillText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  modalHeroClose: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(2,6,23,0.38)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  modalHeroBottom: {
+    gap: 12,
+  },
+  modalHeroScoreRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modalHeroScoreBadge: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  modalHeroScore: {
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  modalHeroTitle: {
+    fontSize: 21,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  modalHeroSubtitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.78)',
+    marginTop: 2,
+  },
+  modalHeroStats: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  modalHeroStat: {
+    width: '48%' as any,
+    minHeight: 54,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: radius.md,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  modalHeroStatDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 4,
+  },
+  modalHeroStatValue: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  modalHeroStatUnit: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: 'rgba(255,255,255,0.72)',
+  },
+  modalHeroStatLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.66)',
+    marginTop: 1,
   },
   modalHeader: {
     flexDirection: 'row',
@@ -1599,7 +2574,12 @@ const createStyles = (
   },
   modalTitle: { fontSize: 17, fontWeight: '800', color: colors.textPrimary },
   modalClose: { fontSize: 18, fontWeight: '700', color: colors.textMuted, padding: 4 },
-  modalScroll: { paddingHorizontal: 18, paddingTop: 14 },
+  modalScroll: {},
+  modalScrollContent: { paddingBottom: 18 },
+  modalScrollableBody: {
+    paddingHorizontal: 18,
+    paddingTop: 14,
+  },
   modalMacroRow: {
     flexDirection: 'row',
     gap: 6,
@@ -1622,6 +2602,157 @@ const createStyles = (
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 10,
+  },
+  modalCardGradient: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+  },
+  scoreOverviewCard: {
+    padding: 0,
+  },
+  scoreOverviewTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 12,
+  },
+  scoreOverviewBadge: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  scoreOverviewNumber: {
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  scoreOverviewBadgeLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginTop: -1,
+  },
+  scoreOverviewTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  scoreOverviewSubtitle: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 17,
+    marginTop: 3,
+  },
+  scoreDriverList: {
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
+  },
+  scoreDriverRow: {
+    gap: 5,
+  },
+  scoreDriverLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  scoreDriverLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textSecondary,
+  },
+  scoreDriverValue: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  scoreDriverTrack: {
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: colors.border + '80',
+    overflow: 'hidden',
+  },
+  scoreDriverFill: {
+    height: 7,
+    borderRadius: 999,
+  },
+  scoreSignalRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.border + '55',
+  },
+  scoreSignalChip: {
+    flexGrow: 1,
+    minWidth: 88,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface + 'B8',
+    borderWidth: 1,
+    borderColor: colors.border + '88',
+  },
+  scoreSignalValue: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  scoreSignalLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  scoreInsightList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+  },
+  scoreInsightChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  scoreInsightText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  gutSignalTile: {
+    width: '32%' as any,
+    alignItems: 'center',
+    backgroundColor: colors.surface + 'B8',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    borderWidth: 1,
+    borderColor: colors.border + '88',
+    overflow: 'hidden',
+  },
+  gutSignalTileGradient: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
   },
   modalLegend: {
     flexDirection: 'row',
@@ -1672,6 +2803,90 @@ const createStyles = (
     marginTop: 12,
     paddingHorizontal: 20,
     lineHeight: 18,
+  },
+
+  nutrientPopupOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.46)',
+    paddingHorizontal: 14,
+    paddingBottom: 18,
+  },
+  nutrientPopupCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 16,
+    maxHeight: '72%',
+    ...elevations.card,
+  },
+  nutrientPopupHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginBottom: 12,
+  },
+  nutrientPopupTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  nutrientPopupSubtitle: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  nutrientPopupClose: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.background,
+  },
+  nutrientPopupEmpty: {
+    fontSize: 13,
+    color: colors.textMuted,
+    lineHeight: 18,
+  },
+  nutrientPopupScroll: {
+    maxHeight: 360,
+  },
+  nutrientSourceRow: {
+    marginBottom: 10,
+  },
+  nutrientSourceTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 3,
+  },
+  nutrientSourceName: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  nutrientSourceAmount: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.primary,
+  },
+  nutrientSourceMeal: {
+    fontSize: 11,
+    color: colors.textMuted,
+    marginBottom: 4,
+  },
+  nutrientSourceTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+  },
+  nutrientSourceFill: {
+    height: 4,
+    borderRadius: 2,
   },
 
   // ── Footer ───────────────────────────────────────────────────────────────────

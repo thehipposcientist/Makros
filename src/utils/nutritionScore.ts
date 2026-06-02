@@ -11,12 +11,15 @@
 // keyword lists we used to maintain.
 
 import { DailyNutritionPlan, MealItem, MealSuggestion } from '../types';
+import { nutritionTargetRange } from './nutritionTargetRanges';
 
 export interface NutritionScoreBreakdownItem {
   label: string;
   value_pct: number;
   raw: number;
   target: number | null;
+  target_min?: number | null;
+  target_max?: number | null;
   unit: string;
   on_track: boolean;
 }
@@ -76,6 +79,9 @@ const MICRO_ALIASES: Record<string, string> = {
   fiber_g: 'fiber', selenium_mcg: 'selenium', folate_mcg: 'folate',
   added_sugar_g: 'added_sugar', addedSugars: 'added_sugar',
   folate_b9: 'folate',
+  // Display-only trace minerals — not scored, kept here so any micro
+  // readout that normalizes keys handles them consistently.
+  copper_mg: 'copper', manganese_mg: 'manganese', boron_mg: 'boron',
   vitaminD: 'vitamin_d', vitaminB12: 'vitamin_b12',
 };
 
@@ -99,8 +105,24 @@ const GOAL_WEIGHTS: Record<string, [number, number, number]> = {
   toning: [0.45, 0.35, 0.20],
 };
 
-function bd(label: string, valuePct: number, raw: number, target: number | null, unit: string, onTrack: boolean): NutritionScoreBreakdownItem {
-  return { label, value_pct: Math.max(0, Math.min(100, Math.round(valuePct))), raw: Math.round(raw * 10) / 10, target, unit, on_track: onTrack };
+function bd(
+  label: string,
+  valuePct: number,
+  raw: number,
+  target: number | null,
+  unit: string,
+  onTrack: boolean,
+  targetRange?: { min: number; max: number } | null,
+): NutritionScoreBreakdownItem {
+  return {
+    label,
+    value_pct: Math.max(0, Math.min(100, Math.round(valuePct))),
+    raw: Math.round(raw * 10) / 10,
+    target,
+    ...(targetRange ? { target_min: targetRange.min, target_max: targetRange.max } : {}),
+    unit,
+    on_track: onTrack,
+  };
 }
 
 function curve(value: number, low: number, mid: number, target: number, outOf: number): number {
@@ -186,10 +208,12 @@ export function computeNutritionScore(
   const targets = plan.targets;
   const removed = new Set(plan.removedMealIds ?? []);
   const activeMeals = plan.meals.filter((_, i) => !removed.has(String(i)));
+  if (!activeMeals.length) return empty;
   const items = collectAllItems(plan);
 
   const totalCal = activeMeals.reduce((s, m) => s + (m.calories || 0), 0);
   const totalPro = activeMeals.reduce((s, m) => s + (m.protein || 0), 0);
+  if (totalCal <= 0 && totalPro <= 0) return empty;
 
   const micros: Record<string, number> = {};
   for (const it of items) {
@@ -245,17 +269,25 @@ export function computeNutritionScore(
   const calAlignment = targets.calories > 0
     ? (() => {
         const dev = Math.abs(1 - totalCal / targets.calories);
-        if (dev <= 0.10) return 1.0;
-        return Math.max(0, 1 - (dev - 0.10) / 0.30);
+        if (dev <= 0.05) return 1.0;
+        if (dev <= 0.10) return 0.75 + ((0.10 - dev) / 0.05) * 0.25;
+        return Math.max(0, 0.75 * (1 - (dev - 0.10) / 0.30));
       })()
     : 0.5;
   const proRatio = targets.protein > 0 ? totalPro / targets.protein : 0.5;
   const proAlignment = proRatio >= 0.95 ? 1.0 : Math.max(0, proRatio / 0.95);
+  const calorieRange = nutritionTargetRange('calories', targets.calories);
+  const calorieGreenRange = nutritionTargetRange('calories', targets.calories, 'green');
+  const proteinRange = nutritionTargetRange('protein', targets.protein, 'green');
+  const calorieDeviation = targets.calories > 0 ? Math.abs(1 - totalCal / targets.calories) : null;
+  const caloriesOnTarget = calorieDeviation !== null && calorieDeviation <= 0.05;
+  const caloriesClose = calorieDeviation !== null && calorieDeviation <= 0.10;
+  const proteinMinHit = targets.protein > 0 && proRatio >= 0.95;
 
-  const adherence = Math.round(Math.min(100, calAlignment * 50 + proAlignment * 50));
+  const adherence = Math.round(Math.min(100, calAlignment * 40 + proAlignment * 60));
   const adherence_breakdown: NutritionScoreBreakdownItem[] = [
-    bd('Calories', calAlignment * 100, totalCal, targets.calories, 'kcal', calAlignment >= 0.9),
-    bd('Protein', proAlignment * 100, totalPro, targets.protein, 'g', proAlignment >= 0.95),
+    bd('Calories', calAlignment * 100, totalCal, targets.calories, 'kcal', caloriesOnTarget, calorieRange),
+    bd('Protein', proAlignment * 100, totalPro, targets.protein, 'g', proteinMinHit, proteinRange),
   ];
 
   // Food Quality — 7 inputs
@@ -343,8 +375,8 @@ export function computeNutritionScore(
 
   // Confidence
   const mealsLogged = activeMeals.length;
-  const mealsExpected = Math.max(1, plan.meals.length);
-  const loggingCompleteness = Math.min(1, mealsLogged / mealsExpected);
+  const plannedMeals = Math.max(1, plan.meals.length);
+  const loggingCompleteness = Math.min(1, mealsLogged / plannedMeals);
   const confidence: 'low' | 'medium' | 'high' =
     loggingCompleteness < 0.3 ? 'low'
       : (loggingCompleteness < 0.7 || microConfidence === 'low') ? 'medium' : 'high';
@@ -359,18 +391,22 @@ export function computeNutritionScore(
   const wins: string[] = [];
   const improvements: string[] = [];
   const calRatio = targets.calories > 0 ? totalCal / targets.calories : 1;
-  const proRatio2 = targets.protein > 0 ? totalPro / targets.protein : 1;
 
-  if (calRatio >= 0.9 && calRatio <= 1.1) {
+  if (caloriesOnTarget) {
     tags.push('Calories on target'); wins.push('Calories on target');
+  } else if (caloriesClose) {
+    tags.push('Calories close');
   } else if (calRatio > 1.1) {
     improvements.push(`Calories ${Math.round((calRatio - 1) * 100)}% over target`);
   } else if (totalCal > 0) {
-    improvements.push(`Calories ${Math.round((1 - calRatio) * 100)}% under target`);
+    improvements.push(`Calories ${Math.round((1 - calRatio) * 100)}% below target`);
   }
 
-  if (proRatio2 >= 0.9) { tags.push('Protein on target'); wins.push('Protein on target'); }
-  else if (totalPro > 0) improvements.push(`Protein ${Math.round(targets.protein - totalPro)}g below target`);
+  if (proteinMinHit) { tags.push('Protein target met'); wins.push('Protein target met'); }
+  else if (totalPro > 0) {
+    const proteinGap = Math.round(targets.protein - totalPro);
+    if (proteinGap > 0) improvements.push(`Protein ${proteinGap}g below target`);
+  }
 
   if (fiberPts >= 14) { tags.push('Fiber on track'); wins.push('Fiber on track'); }
   else if (fiberDensity < 8 && totalCal > 0) improvements.push('Fiber low');
@@ -379,8 +415,11 @@ export function computeNutritionScore(
   if (upfPct >= 35) improvements.push('Ultra-processed food intake high');
   if (addedSugarPct > 10) improvements.push(`Added sugar ${Math.round(addedSugarPct)}% of calories`);
   if (satFatPct > 10) improvements.push(`Saturated fat ${Math.round(satFatPct)}% of calories`);
-  if (plantCount >= 5) wins.push(`${plantCount} distinct plants`);
-  else if (plantCount < 3 && totalCal > 0) improvements.push('Add more plant variety');
+  // Plant diversity is already shown as a scored "Plant diversity" row in
+  // quality_breakdown and as a factual tile in the Gut signals strip, so it's
+  // intentionally not repeated here as a win (avoids the double-display under
+  // the nutrition score).
+  if (plantCount < 3 && totalCal > 0) improvements.push('Add more plant variety');
   if (omegaPts >= 8) wins.push('Omega-3 source included');
 
   for (const gap of gaps.slice(0, 3)) improvements.push(`Low ${gap.toLowerCase()}`);
@@ -394,6 +433,12 @@ export function computeNutritionScore(
     indicators: {
       calories_alignment: Math.round(calAlignment * 100) / 100,
       protein_alignment: Math.round(proAlignment * 100) / 100,
+      target_calories_green_min: calorieGreenRange?.min ?? null,
+      target_calories_green_max: calorieGreenRange?.max ?? null,
+      target_calories_min: calorieRange?.min ?? null,
+      target_calories_max: calorieRange?.max ?? null,
+      target_protein_min: proteinRange?.min ?? null,
+      target_protein_max: proteinRange?.max ?? null,
       fiber_density: Math.round(fiberDensity * 10) / 10,
       added_sugar_pct_cals: Math.round(addedSugarPct * 10) / 10,
       sat_fat_pct_cals: Math.round(satFatPct * 10) / 10,

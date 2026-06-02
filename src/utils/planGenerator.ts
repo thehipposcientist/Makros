@@ -8,11 +8,12 @@ import {
   MealSuggestion,
 } from '../types';
 import { FoodItem } from '../hooks/useMetaData';
+import { parseAmountString } from './mealItems';
 
 // ─── Equipment classification sets (kept local — plan-generator logic only) ──
 
 const GYM_MACHINE_ITEMS = new Set([
-  'Cable machine', 'Leg press', 'Smith machine', 'Lat pulldown',
+  'Cable machine', 'Single cable station', 'Dual cable station', 'Leg press', 'Smith machine', 'Lat pulldown',
   'Chest press machine', 'Seated row machine', 'Leg extension', 'Leg curl',
   'Shoulder press machine', 'Hack squat machine', 'Leg press v-squat', 'Leverage machines',
   'Assisted pull-up / dip machine', 'Pectoral fly / pec deck machine',
@@ -370,6 +371,8 @@ function cardioFocusedDays(days: number, gym: boolean, db: boolean, pu: boolean,
 }
 
 // Nutrition generation logic
+const DEFAULT_GENERATED_MEAL_TYPES = ['Breakfast', 'Lunch', 'Dinner'] as const;
+
 export function generateDailyNutrition(
   profile: UserProfile,
   availableFoods: FoodItem[] = [],
@@ -383,16 +386,15 @@ export function generateDailyNutrition(
   for (const f of (profile.customFoods ?? [])) foodMap[f.name.toLowerCase()] = f as FoodItem;
 
   const baseSeed = seedKey ?? `random-${Date.now()}-${Math.random()}`;
-  const mealCount = Math.max(1, Math.min(10, profile.mealsPerDay ?? 3));
-  const perCal = targets.calories / mealCount;
+  const perCal = targets.calories / DEFAULT_GENERATED_MEAL_TYPES.length;
 
-  const meals = Array.from({ length: mealCount }, (_, i) =>
+  const meals = DEFAULT_GENERATED_MEAL_TYPES.map((mealType, i) =>
     generateMealSuggestion(
-      `Meal ${i + 1}`,
+      mealType,
       perCal,
       profile.foodsAvailable,
       foodMap,
-      `${baseSeed}|Meal${i + 1}|${profile.goal}|${profile.goalDetails.pace}`,
+      `${baseSeed}|${mealType}|${profile.goal}|${profile.goalDetails.pace}`,
     ),
   );
 
@@ -444,7 +446,7 @@ function getActivityMultiplier(daysPerWeek: number): number {
   return 1.725;
 }
 
-function calculateNutritionTargets(profile: UserProfile): NutritionTargets {
+export function calculateNutritionTargets(profile: UserProfile): NutritionTargets {
   const bmr = calculateBMR(profile);
   const tdee = Math.round(bmr * getActivityMultiplier(profile.daysPerWeek));
   const adjustment = CALORIE_ADJUSTMENT[profile.goal]?.[profile.goalDetails.pace] ?? 0;
@@ -719,10 +721,34 @@ export function generateMealSuggestion(
   // Scale all items proportionally to hit the calorie target
   const scale = rawCal > 0 ? calorieTarget / rawCal : 1;
 
+  // Build legacy + structured outputs side-by-side. Round-tripping the
+  // string back through parseAmountString could collapse useable units
+  // ("1½ oz") to 'serving' if the parser misses an edge case, so we
+  // emit `items[]` with explicit quantity + unit derived from the same
+  // logic formatAmount uses for display.
+  const amountStrings = picked.map(f => formatAmount(f, scale));
+  const items = picked.map((f, i) => {
+    const parsed = parseAmountString(amountStrings[i]);
+    const perCal   = Math.round((f.calories || 0) * scale);
+    const perProt  = Math.round((f.protein  || 0) * scale);
+    const perCarbs = Math.round((f.carbs    || 0) * scale);
+    const perFat   = Math.round((f.fat      || 0) * scale);
+    return {
+      name: f.name,
+      quantity: parsed?.quantity ?? 1,
+      unit: parsed?.unit ?? 'serving',
+      calories: perCal,
+      protein:  perProt,
+      carbs:    perCarbs,
+      fat:      perFat,
+    };
+  });
+
   return {
     meal: mealType,
     foods: picked.map(f => f.name),
-    amounts: picked.map(f => formatAmount(f, scale)),
+    amounts: amountStrings,
+    items,
     calories: Math.round(calorieTarget),
     protein:  Math.round(rawProt  * scale),
     carbs:    Math.round(rawCarbs * scale),

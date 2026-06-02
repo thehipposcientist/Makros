@@ -1,29 +1,32 @@
-// Weekly end-of-week coach check-in — 5-step structured flow.
+// Weekly review - informational scorecard with explicit plan setup controls.
 //
-// Step 1: Scorecard — adherence, cardio, strength summary + coach headline
-// Step 2: Coach findings — wins, needs attention, recovery notes
-// Step 3: Quick questions — 3-4 tap-based questions (no text input)
-// Step 4: Recommended adjustments — concrete next-week changes
-// Step 5: Decision — apply / customize / keep / easier / harder
-//
-// No free-text input. All questions are tap-option selections.
-// Deterministic backend; no AI calls in this flow.
+// This surface does not submit coach answers or apply recommendation logic.
+// Users can review the week, optionally save durable plan setup preferences,
+// and choose whether those setup changes affect only future weeks or rebuild
+// the remaining unlocked days of the already-generated current week.
 
 import { useCallback, useEffect, useState } from 'react';
 import {
-  View, Text, Modal, ScrollView, TouchableOpacity,
-  ActivityIndicator, Platform,
+  ActivityIndicator,
+  Modal,
+  Platform,
+  ScrollView,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
-import { humanizeToken } from '../utils/exerciseGuide';
 import {
-  getWeekSummary, postWeekCheckin,
-  WeekSummaryResponse, WeekCheckinAnswers,
-  WeekCheckinResponse, RecommendedAdjustments,
-  DifficultyRating, BlockerType, PainArea, CheckinDecision,
-  submitPlanWeekCheckin, PlanWeekCheckinRecord,
+  applyPlanWeekCheckinSettings,
+  getActivePlanWeek,
+  getWeekSummary,
+  CheckinPlanSettingsResponse,
+  PlanWeekCheckinRecord,
+  PlanWeekResponse,
+  WeekCheckinResponse,
+  WeekSummaryResponse,
 } from '../services/api';
 
 interface Props {
@@ -34,7 +37,6 @@ interface Props {
   weekEnd?: string | null;
   goal?: string;
   themeName?: AppThemeName;
-  // Optional health signals to pass to backend
   weightSlopeLbsPerWeek?: number | null;
   avgSleepHours?: number | null;
   avgRestingHr?: number | null;
@@ -44,274 +46,177 @@ interface Props {
   onSkip?: () => void;
 }
 
-type Step = 1 | 2 | 3 | 4 | 5;
+type Step = 1 | 2 | 3 | 4;
 
-interface Answers {
-  difficulty?: DifficultyRating;
-  blocker?: BlockerType;
-  pain?: PainArea;
-  goalQ4?: string;
+interface PlanSetupDraft {
+  goal: string;
+  daysPerWeek: number;
+  sessionMinutes: number;
+  preferredSplit: string;
 }
 
-const DIFFICULTY_OPTIONS: Array<{ value: DifficultyRating; label: string }> = [
-  { value: 'too_easy',           label: 'Too easy' },
-  { value: 'about_right',        label: 'About right' },
-  { value: 'too_hard',           label: 'Too hard' },
-  { value: 'too_time_consuming', label: 'Too time-consuming' },
-  { value: 'did_not_like_plan',  label: 'Didn\'t like the plan' },
+type SetupMode = 'keep' | 'tune';
+
+const SETUP_GOALS = [
+  { value: 'body_recomp', label: 'Recomp' },
+  { value: 'lose_fat', label: 'Fat loss' },
+  { value: 'build_muscle', label: 'Build muscle' },
+  { value: 'build_strength', label: 'Strength' },
+  { value: 'improve_cardio', label: 'Endurance' },
+  { value: 'improve_athleticism', label: 'Athleticism' },
+  { value: 'longevity', label: 'Health' },
 ];
 
-const BLOCKER_OPTIONS: Array<{ value: BlockerType; label: string }> = [
-  { value: 'none',                 label: 'No blocker' },
-  { value: 'time',                 label: 'Time' },
-  { value: 'fatigue',              label: 'Fatigue / low energy' },
-  { value: 'soreness',             label: 'Soreness' },
-  { value: 'equipment',            label: 'Equipment' },
-  { value: 'motivation',           label: 'Motivation' },
-  { value: 'cardio_boring',        label: 'Cardio was boring' },
-  { value: 'exercise_discomfort',  label: 'Exercise discomfort' },
-  { value: 'nutrition_hard',       label: 'Nutrition was hard' },
+const SETUP_SPLITS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'full_body', label: 'Full body' },
+  { value: 'upper_lower', label: 'Upper / lower' },
+  { value: 'ppl', label: 'PPL' },
+  { value: 'ppl_upper_lower', label: 'PPL + UL' },
+  { value: 'bro', label: 'Bro split' },
 ];
 
-const PAIN_OPTIONS: Array<{ value: PainArea; label: string }> = [
-  { value: 'none',        label: 'None' },
-  { value: 'shoulder',    label: 'Shoulder' },
-  { value: 'elbow_wrist', label: 'Elbow / wrist' },
-  { value: 'low_back',    label: 'Low back' },
-  { value: 'knee',        label: 'Knee' },
-  { value: 'hip',         label: 'Hip' },
-  { value: 'foot_ankle',  label: 'Foot / ankle' },
-  { value: 'other',       label: 'Other' },
-];
+const SESSION_MINUTES = [30, 45, 60, 75, 90];
 
-const GOAL_Q4: Record<string, { question: string; options: Array<{ value: string; label: string }> }> = {
-  muscle_gain: {
-    question: 'Which muscle to prioritize next week?',
-    options: [
-      { value: 'no_preference', label: 'No preference' },
-      { value: 'chest',         label: 'Chest' },
-      { value: 'back',          label: 'Back' },
-      { value: 'shoulders',     label: 'Shoulders' },
-      { value: 'arms',          label: 'Arms' },
-      { value: 'legs',          label: 'Legs' },
-      { value: 'core',          label: 'Core' },
-    ],
-  },
-  body_recomp: {
-    question: 'Which muscle to prioritize next week?',
-    options: [
-      { value: 'no_preference', label: 'No preference' },
-      { value: 'chest',         label: 'Chest' },
-      { value: 'back',          label: 'Back' },
-      { value: 'shoulders',     label: 'Shoulders' },
-      { value: 'arms',          label: 'Arms' },
-      { value: 'legs',          label: 'Legs' },
-    ],
-  },
-  fat_loss: {
-    question: 'What was hardest to stick to?',
-    options: [
-      { value: 'hunger',        label: 'Hunger' },
-      { value: 'energy',        label: 'Low energy' },
-      { value: 'meal_logging',  label: 'Logging meals' },
-      { value: 'cardio',        label: 'Cardio sessions' },
-      { value: 'weekend_eating',label: 'Weekend eating' },
-      { value: 'protein',       label: 'Hitting protein' },
-    ],
-  },
-  strength: {
-    question: 'How did the heavy sets feel?',
-    options: [
-      { value: 'too_light',     label: 'Too light — could go heavier' },
-      { value: 'about_right',   label: 'About right' },
-      { value: 'too_heavy',     label: 'Too heavy — form suffered' },
-    ],
-  },
-  endurance: {
-    question: 'Preferred cardio mode?',
-    options: [
-      { value: 'running',       label: 'Running' },
-      { value: 'cycling',       label: 'Cycling / bike' },
-      { value: 'incline_walk',  label: 'Incline walk' },
-      { value: 'rowing',        label: 'Rowing' },
-      { value: 'mixed',         label: 'Mixed / no preference' },
-    ],
-  },
-  general_health: {
-    question: 'What should next week focus on?',
-    options: [
-      { value: 'zone2',          label: 'More Zone 2 cardio' },
-      { value: 'steps',          label: 'Daily step goal' },
-      { value: 'sleep',          label: 'Better sleep alignment' },
-      { value: 'mobility',       label: 'Mobility work' },
-      { value: 'strength',       label: 'Strength consistency' },
-      { value: 'reduce_fatigue', label: 'Reduce fatigue' },
-    ],
-  },
-  longevity: {
-    question: 'What should next week focus on?',
-    options: [
-      { value: 'zone2',          label: 'Zone 2 cardio' },
-      { value: 'mobility',       label: 'Mobility / flexibility' },
-      { value: 'strength',       label: 'Strength' },
-      { value: 'reduce_fatigue', label: 'Reduce fatigue' },
-      { value: 'sleep',          label: 'Sleep quality' },
-    ],
-  },
-};
+function dayMs(value?: string | null): number | null {
+  if (!value) return null;
+  const ms = new Date(`${value.slice(0, 10)}T00:00:00`).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
 
-const DECISION_OPTIONS: Array<{ value: CheckinDecision; label: string; sub: string }> = [
-  { value: 'apply_recommendations', label: 'Apply recommendations', sub: 'Let the coach adjust next week' },
-  { value: 'keep_current_style',    label: 'Keep current style',    sub: 'Same structure, no changes' },
-  { value: 'make_easier',           label: 'Make it easier',        sub: 'Lighter loads and shorter sessions' },
-  { value: 'make_harder',           label: 'Make it harder',        sub: 'More volume and intensity' },
-];
+function setupGoalForPicker(value: string): string {
+  const goal = String(value || '').trim().toLowerCase();
+  const map: Record<string, string> = {
+    fat_loss: 'lose_fat',
+    muscle_gain: 'build_muscle',
+    strength: 'build_strength',
+    endurance: 'improve_cardio',
+    athletic_performance: 'improve_athleticism',
+    general_health: 'longevity',
+    maintain: 'longevity',
+  };
+  return map[goal] ?? goal;
+}
 
-function humanList(items: string[]): string {
-  return items.map(item => humanizeToken(item).toLowerCase()).join(', ');
+function setupFromPlanWeek(planWeek: PlanWeekResponse | null, fallbackGoal: string): PlanSetupDraft {
+  return {
+    goal: setupGoalForPicker(planWeek?.goal ?? fallbackGoal),
+    daysPerWeek: Math.max(1, Math.min(7, Number(planWeek?.days_per_week ?? 4) || 4)),
+    sessionMinutes: Math.max(20, Math.min(120, Number(planWeek?.session_minutes ?? 45) || 45)),
+    preferredSplit: planWeek?.preferred_split ?? 'auto',
+  };
+}
+
+function setupChanged(base: PlanSetupDraft, draft: PlanSetupDraft | null, enabled: boolean): boolean {
+  if (!enabled || !draft) return false;
+  return base.goal !== draft.goal
+    || base.daysPerWeek !== draft.daysPerWeek
+    || base.sessionMinutes !== draft.sessionMinutes
+    || base.preferredSplit !== draft.preferredSplit;
 }
 
 export default function WeeklyCheckinModal({
-  visible, authToken, goal = 'body_recomp', themeName, onClose, onComplete,
-  planWeekId, weekEnd, onSkip,
-  weightSlopeLbsPerWeek, avgSleepHours, avgRestingHr, avgSteps,
+  visible,
+  authToken,
+  goal = 'body_recomp',
+  themeName,
+  onClose,
+  onComplete,
+  planWeekId,
+  weekEnd,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
+  const primaryTextColor = getContrastingTextColor(tc.primary);
 
   const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<WeekSummaryResponse | null>(null);
-  const [answers, setAnswers] = useState<Answers>({});
-  const [checkinResult, setCheckinResult] = useState<WeekCheckinResponse | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [activePlanWeek, setActivePlanWeek] = useState<PlanWeekResponse | null>(null);
+  const [setupMode, setSetupMode] = useState<SetupMode>('keep');
+  const [planSetup, setPlanSetup] = useState<PlanSetupDraft | null>(null);
+  const [applySetupToCurrent, setApplySetupToCurrent] = useState(false);
+  const [settingsResult, setSettingsResult] = useState<CheckinPlanSettingsResponse | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [savingSetup, setSavingSetup] = useState(false);
 
-  // Fetch summary on open
   useEffect(() => {
     if (!visible || !authToken) return;
     setStep(1);
-    setAnswers({});
-    setCheckinResult(null);
+    setActivePlanWeek(null);
+    setSetupMode('keep');
+    setPlanSetup(null);
+    setApplySetupToCurrent(false);
+    setSettingsResult(null);
+    setSettingsError(null);
+    setSavingSetup(false);
     setLoading(true);
+
     getWeekSummary(authToken, { planWeekId, endDate: weekEnd })
       .then(s => setSummary(s))
       .catch(() => setSummary(null))
       .finally(() => setLoading(false));
-  }, [visible, authToken, planWeekId, weekEnd]);
 
-  const goalQ4Config = GOAL_Q4[goal] ?? GOAL_Q4.general_health;
+    getActivePlanWeek(authToken)
+      .then(pw => {
+        setActivePlanWeek(pw);
+        setPlanSetup(setupFromPlanWeek(pw, goal));
+      })
+      .catch(() => {
+        setActivePlanWeek(null);
+        setPlanSetup(setupFromPlanWeek(null, goal));
+      });
+  }, [visible, authToken, planWeekId, weekEnd, goal]);
 
-  const handleSubmit = useCallback(async (decision: CheckinDecision) => {
+  const effectiveGoal = summary?.goal ?? activePlanWeek?.goal ?? goal;
+  const baselineSetup = setupFromPlanWeek(activePlanWeek, effectiveGoal);
+  const hasSetupChanges = setupChanged(baselineSetup, planSetup, setupMode === 'tune');
+  const currentWeekAlreadyGenerated = (() => {
+    const end = dayMs(weekEnd);
+    const activeStart = dayMs(activePlanWeek?.start_date);
+    return !!(end && activeStart && activeStart > end && activePlanWeek?.id !== planWeekId);
+  })();
+
+  const handleFinishReview = useCallback(async () => {
     if (!authToken) return;
-    setSubmitting(true);
-    try {
-      const payload: WeekCheckinAnswers = {
-        overall_difficulty: answers.difficulty,
-        biggest_blocker: answers.blocker,
-        pain_area: answers.pain,
-        goal_q4: answers.goalQ4,
-        user_decision: decision,
-        weight_slope_lbs_per_week: weightSlopeLbsPerWeek ?? null,
-        avg_sleep_hours: avgSleepHours ?? null,
-        avg_resting_hr: avgRestingHr ?? null,
-        avg_steps: avgSteps ?? null,
-      };
-      if (planWeekId) {
-        const result = await submitPlanWeekCheckin(authToken, planWeekId, {
-          overall_difficulty: answers.difficulty,
-          biggest_blocker: answers.blocker,
-          pain_area: answers.pain,
-          goal_q4: answers.goalQ4,
-          user_decision: decision,
-        });
-        const normalized = normalizePlanWeekCheckinResult(result);
-        setCheckinResult(normalized);
-      } else {
-        const result = await postWeekCheckin(authToken, payload);
-        setCheckinResult(result);
-      }
-      setStep(5);
-    } catch {
-      // Still move to step 5 so user can close
-      setStep(5);
-    } finally {
-      setSubmitting(false);
+    setSettingsResult(null);
+    setSettingsError(null);
+
+    if (!hasSetupChanges || !planSetup) {
+      setStep(4);
+      return;
     }
-  }, [authToken, planWeekId, answers, weightSlopeLbsPerWeek, avgSleepHours, avgRestingHr, avgSteps]);
 
-  const emptyAdjustment = (): RecommendedAdjustments => ({
-    difficulty_adjustment: 'same',
-    volume_adjustment_pct: 0,
-    intensity_adjustment: 'maintain',
-    session_length_adjustment: null,
-    cardio_adjustment: null,
-    mobility_adjustment: null,
-    nutrition_adjustment: null,
-    muscle_priorities: [],
-    avoid_patterns: [],
-    preferred_cardio_modes: [],
-    summary: 'No saved setting changes.',
-  });
-
-  const normalizePlanWeekCheckinResult = (record: PlanWeekCheckinRecord): WeekCheckinResponse => {
-    const snap = record.review_snapshot_json ?? {};
-    const summary = (snap.structured_adjustment ?? emptyAdjustment()) as RecommendedAdjustments;
-    const appliedRaw = Array.isArray(snap.structured_applied) ? snap.structured_applied : [];
-    const applied = appliedRaw.map((item: any) => ({
-      type: String(item?.type ?? 'applied'),
-      summary: String(item?.summary ?? item?.type ?? 'Applied'),
-      changed_fields: item?.changed_fields,
-      verified: item?.verified,
-    }));
-    return {
-      summary,
-      applied,
-      coach_message: record.ai_message ?? summary.summary ?? 'Your weekly check-in has been saved.',
-    };
-  };
-
-  // ── Shared UI helpers ────────────────────────────────────────────────────────
-
-  const chipStyle = (selected: boolean) => ({
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: radius.md,
-    borderWidth: 1.5,
-    borderColor: selected ? tc.primary : tc.border,
-    backgroundColor: selected ? tc.primary + '18' : tc.surface,
-    marginBottom: 8,
-  });
-
-  const chipTextStyle = (selected: boolean) => ({
-    fontSize: 14,
-    fontWeight: selected ? '700' as const : '500' as const,
-    color: selected ? tc.primary : tc.textSecondary,
-  });
-
-  const renderChips = <T extends string>(
-    options: Array<{ value: T; label: string }>,
-    selected: T | undefined,
-    onSelect: (v: T) => void,
-  ) => (
-    <View style={{ gap: 0 }}>
-      {options.map(o => (
-        <TouchableOpacity
-          key={o.value}
-          style={chipStyle(selected === o.value)}
-          onPress={() => onSelect(o.value)}
-          activeOpacity={0.75}
-        >
-          <Text style={chipTextStyle(selected === o.value)}>{o.label}</Text>
-        </TouchableOpacity>
-      ))}
-    </View>
-  );
+    setSavingSetup(true);
+    try {
+      const base = baselineSetup;
+      const settings = await applyPlanWeekCheckinSettings(authToken, {
+        goal: planSetup.goal !== base.goal ? planSetup.goal : null,
+        daysPerWeek: planSetup.daysPerWeek !== base.daysPerWeek ? planSetup.daysPerWeek : null,
+        preferredSplit: planSetup.preferredSplit !== base.preferredSplit ? planSetup.preferredSplit : null,
+        sessionMinutes: planSetup.sessionMinutes !== base.sessionMinutes ? planSetup.sessionMinutes : null,
+        applyToCurrentWeek: applySetupToCurrent,
+        reason: 'weekly_review',
+      });
+      setSettingsResult(settings);
+      setActivePlanWeek(settings.plan_week);
+    } catch (e: any) {
+      setSettingsError(e?.message ?? 'Plan setup changes could not be saved.');
+    } finally {
+      setSavingSetup(false);
+      setStep(4);
+    }
+  }, [authToken, hasSetupChanges, planSetup, baselineSetup, applySetupToCurrent]);
 
   const StatBox = ({ label, value, sub }: { label: string; value: string; sub?: string }) => (
     <View style={{
-      flex: 1, alignItems: 'center', padding: 12,
-      backgroundColor: tc.surface, borderRadius: radius.md,
-      borderWidth: 1, borderColor: tc.border,
+      flex: 1,
+      alignItems: 'center',
+      padding: 12,
+      backgroundColor: tc.surface,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: tc.border,
     }}>
       <Text style={{ fontSize: 22, fontWeight: '900', color: tc.primary }}>{value}</Text>
       <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.4 }}>{label}</Text>
@@ -326,25 +231,24 @@ export default function WeeklyCheckinModal({
     </View>
   );
 
-  // ── Step content ─────────────────────────────────────────────────────────────
-
   const renderStep1 = () => {
     if (loading || !summary) {
       return (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
           <ActivityIndicator color={tc.primary} />
-          <Text style={{ color: tc.textMuted, fontSize: 13 }}>Loading your week…</Text>
+          <Text style={{ color: tc.textMuted, fontSize: 13 }}>Loading your week...</Text>
         </View>
       );
     }
+
     const adherencePct = Math.round(summary.workout_adherence_pct ?? summary.adherence_pct);
     const adherenceColor = adherencePct >= 80 ? tc.success : adherencePct >= 60 ? tc.warning : tc.error;
     const nutritionLoggingPct = Math.round(summary.nutrition_logging_pct ?? summary.nutrition_adherence_pct);
+
     return (
       <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} showsVerticalScrollIndicator={false}>
         <Text style={{ fontSize: 13, color: tc.textMuted, lineHeight: 20 }}>{summary.headline}</Text>
 
-        {/* Adherence bar */}
         <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 16, borderWidth: 1, borderColor: tc.border }}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
             <Text style={{ fontSize: 12, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.5 }}>WORKOUT ADHERENCE</Text>
@@ -355,11 +259,10 @@ export default function WeeklyCheckinModal({
           </View>
           <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8 }}>
             {summary.completed_workouts} of {summary.planned_workouts} planned workouts completed
-            {summary.missed_workouts > 0 ? ` · ${summary.missed_workouts} missed` : ''}
+            {summary.missed_workouts > 0 ? ` - ${summary.missed_workouts} missed` : ''}
           </Text>
         </View>
 
-        {/* Stat grid */}
         <View style={{ flexDirection: 'row', gap: 8 }}>
           <StatBox label="CARDIO" value={`${Math.round(summary.cardio_minutes)}m`} />
           <StatBox label="ZONE 2" value={`${Math.round(summary.zone2_minutes)}m`} />
@@ -371,7 +274,7 @@ export default function WeeklyCheckinModal({
         <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 12, borderWidth: 1, borderColor: tc.border }}>
           <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.4 }}>NUTRITION LOGGING</Text>
           <Text style={{ fontSize: 13, color: tc.textSecondary, marginTop: 4, lineHeight: 18 }}>
-            {nutritionLoggingPct}% coverage — {summary.days_logged} of 7 day{summary.days_logged !== 1 ? 's' : ''} tracked
+            {nutritionLoggingPct}% coverage - {summary.days_logged} of 7 day{summary.days_logged !== 1 ? 's' : ''} tracked
           </Text>
           {summary.nutrition_summary ? (
             <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 6, lineHeight: 17 }}>
@@ -379,11 +282,11 @@ export default function WeeklyCheckinModal({
             </Text>
           ) : summary.days_logged > 0 ? (
             <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 6, lineHeight: 17 }}>
-              Avg {Math.round(summary.avg_calories ?? 0)} kcal · {Math.round(summary.avg_protein_g ?? 0)}g protein · {Math.round(summary.avg_fiber_g ?? 0)}g fiber.
+              Avg {Math.round(summary.avg_calories ?? 0)} kcal - {Math.round(summary.avg_protein_g ?? 0)}g protein - {Math.round(summary.avg_fiber_g ?? 0)}g fiber.
             </Text>
           ) : (
             <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 6, lineHeight: 17 }}>
-              No nutrition data yet, so the coach will hold calorie and macro changes.
+              No nutrition data yet, so this review keeps calorie and macro guidance informational.
             </Text>
           )}
         </View>
@@ -413,7 +316,26 @@ export default function WeeklyCheckinModal({
 
   const renderStep2 = () => {
     const findings = summary?.coach_findings;
-    if (!findings) return null;
+    const hasFindings = !!findings && (
+      findings.wins.length > 0
+      || findings.needs_attention.length > 0
+      || findings.recovery_notes.length > 0
+      || findings.nutrition_notes.length > 0
+    );
+
+    if (!hasFindings) {
+      return (
+        <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} showsVerticalScrollIndicator={false}>
+          <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 16, borderWidth: 1, borderColor: tc.border }}>
+            <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>No major review notes</Text>
+            <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 20, marginTop: 6 }}>
+              There are no flagged coaching actions from this week. You can still tune the plan setup on the next screen.
+            </Text>
+          </View>
+        </ScrollView>
+      );
+    }
+
     return (
       <ScrollView contentContainerStyle={{ padding: 20, gap: 20 }} showsVerticalScrollIndicator={false}>
         {findings.wins.length > 0 && (
@@ -444,159 +366,256 @@ export default function WeeklyCheckinModal({
     );
   };
 
-  const renderStep3 = () => (
-    <ScrollView contentContainerStyle={{ padding: 20, gap: 24 }} showsVerticalScrollIndicator={false}>
-      <View>
-        <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginBottom: 12 }}>
-          How did this week feel?
+  const renderStep3 = () => {
+    const draft = planSetup ?? baselineSetup;
+    const updateDraft = (patch: Partial<PlanSetupDraft>) => {
+      setPlanSetup(current => ({ ...(current ?? baselineSetup), ...patch }));
+    };
+    const setupIntro = currentWeekAlreadyGenerated
+      ? 'Your new week is already generated. You can keep it, save setup changes for later, or rebuild the remaining unlocked days.'
+      : 'These choices save to your profile now, so the next generated week can use them.';
+    const Pill = ({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) => (
+      <TouchableOpacity
+        onPress={onPress}
+        activeOpacity={0.75}
+        style={{
+          paddingHorizontal: 12,
+          paddingVertical: 9,
+          borderRadius: radius.md,
+          borderWidth: 1.5,
+          borderColor: active ? tc.primary : tc.border,
+          backgroundColor: active ? tc.primary + '16' : tc.surface,
+          marginRight: 8,
+          marginBottom: 8,
+        }}
+      >
+        <Text style={{ fontSize: 13, fontWeight: '700', color: active ? tc.primary : tc.textSecondary }}>
+          {label}
         </Text>
-        {renderChips(DIFFICULTY_OPTIONS, answers.difficulty, v => setAnswers(a => ({ ...a, difficulty: v })))}
-      </View>
-
-      <View>
-        <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginBottom: 12 }}>
-          Biggest blocker?
-        </Text>
-        {renderChips(BLOCKER_OPTIONS, answers.blocker, v => setAnswers(a => ({ ...a, blocker: v })))}
-      </View>
-
-      <View>
-        <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginBottom: 12 }}>
-          Any pain or discomfort?
-        </Text>
-        {renderChips(PAIN_OPTIONS, answers.pain, v => setAnswers(a => ({ ...a, pain: v })))}
-      </View>
-
-      <View>
-        <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginBottom: 12 }}>
-          {goalQ4Config.question}
-        </Text>
-        {renderChips(goalQ4Config.options, answers.goalQ4, v => setAnswers(a => ({ ...a, goalQ4: v })))}
-      </View>
-    </ScrollView>
-  );
-
-  const renderAdjRow = (label: string, value: string | null | undefined, icon: string) => {
-    if (!value) return null;
-    return (
-      <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10, alignItems: 'flex-start' }}>
-        <Ionicons name={icon as any} size={14} color={tc.primary} style={{ marginTop: 3 }} />
-        <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.4 }}>{label}</Text>
-          <Text style={{ fontSize: 13, color: tc.textSecondary, marginTop: 2 }}>{value}</Text>
-        </View>
-      </View>
+      </TouchableOpacity>
     );
-  };
-
-  const renderStep4 = () => {
-    if (submitting) {
-      return (
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <ActivityIndicator color={tc.primary} />
-          <Text style={{ color: tc.textMuted, fontSize: 13 }}>Computing next week…</Text>
-        </View>
-      );
-    }
-
-    // Build a preview from the answers without submitting
-    const adherence = summary?.adherence_pct ?? 0;
-    const difficulty = answers.difficulty;
-    const blocker = answers.blocker;
-    const pain = answers.pain;
-
-    let previewMessage = 'Continuing with the same plan structure.';
-    if (pain && pain !== 'none') previewMessage = `Adjusting to protect the ${pain.replace('_', '/')} area.`;
-    else if (adherence < 65 && blocker === 'time') previewMessage = 'Shortening sessions and trimming accessories.';
-    else if (difficulty === 'too_hard') previewMessage = 'Dialing back intensity — finishable sessions.';
-    else if (difficulty === 'too_easy' && adherence >= 80) previewMessage = 'Stepping up load and volume.';
-    else if (difficulty === 'did_not_like_plan') previewMessage = 'Prioritizing exercise variety.';
-    else if (blocker === 'nutrition_hard') previewMessage = 'Keeping training steady and simplifying the nutrition target.';
 
     return (
-      <ScrollView contentContainerStyle={{ padding: 20, gap: 20 }} showsVerticalScrollIndicator={false}>
-        <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 20 }}>
-          Based on your answers, here's what I recommend for next week:
-        </Text>
-
-        <View style={{
-          backgroundColor: tc.surface, borderRadius: radius.md,
-          padding: 16, borderWidth: 1, borderColor: tc.primary + '40',
-        }}>
-          <Text style={{ fontSize: 14, fontWeight: '700', color: tc.primary, marginBottom: 8 }}>Coach Note</Text>
-          <Text style={{ fontSize: 14, color: tc.textPrimary, lineHeight: 21 }}>{previewMessage}</Text>
+      <ScrollView contentContainerStyle={{ padding: 20, gap: 18 }} showsVerticalScrollIndicator={false}>
+        <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 14, borderWidth: 1, borderColor: tc.border }}>
+          <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 20 }}>{setupIntro}</Text>
         </View>
 
-        <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary }}>How do you want to proceed?</Text>
-
-        {DECISION_OPTIONS.map(d => (
+        <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary }}>Do you want to adjust the plan setup?</Text>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
           <TouchableOpacity
-            key={d.value}
+            onPress={() => { setSetupMode('keep'); setApplySetupToCurrent(false); }}
             style={{
-              padding: 14, borderRadius: radius.md,
-              borderWidth: 1.5, borderColor: tc.border,
-              backgroundColor: tc.surface, gap: 2,
+              flex: 1,
+              padding: 14,
+              borderRadius: radius.md,
+              borderWidth: 1.5,
+              borderColor: setupMode === 'keep' ? tc.primary : tc.border,
+              backgroundColor: setupMode === 'keep' ? tc.primary + '16' : tc.surface,
             }}
-            onPress={() => handleSubmit(d.value)}
-            activeOpacity={0.75}
           >
-            <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{d.label}</Text>
-            <Text style={{ fontSize: 12, color: tc.textMuted }}>{d.sub}</Text>
+            <Text style={{ fontSize: 14, fontWeight: '800', color: setupMode === 'keep' ? tc.primary : tc.textPrimary }}>Keep setup</Text>
+            <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 3 }}>No schedule changes</Text>
           </TouchableOpacity>
-        ))}
+          <TouchableOpacity
+            onPress={() => setSetupMode('tune')}
+            style={{
+              flex: 1,
+              padding: 14,
+              borderRadius: radius.md,
+              borderWidth: 1.5,
+              borderColor: setupMode === 'tune' ? tc.primary : tc.border,
+              backgroundColor: setupMode === 'tune' ? tc.primary + '16' : tc.surface,
+            }}
+          >
+            <Text style={{ fontSize: 14, fontWeight: '800', color: setupMode === 'tune' ? tc.primary : tc.textPrimary }}>Tune setup</Text>
+            <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 3 }}>Goal, days, split</Text>
+          </TouchableOpacity>
+        </View>
+
+        {setupMode === 'tune' && (
+          <>
+            <View>
+              <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 10 }}>GOAL</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {SETUP_GOALS.map(option => (
+                  <Pill
+                    key={option.value}
+                    label={option.label}
+                    active={draft.goal === option.value}
+                    onPress={() => updateDraft({ goal: option.value })}
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View>
+              <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 10 }}>TRAINING DAYS</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                <TouchableOpacity
+                  onPress={() => updateDraft({ daysPerWeek: Math.max(1, draft.daysPerWeek - 1) })}
+                  disabled={draft.daysPerWeek <= 1}
+                  style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: radius.md,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                    opacity: draft.daysPerWeek <= 1 ? 0.45 : 1,
+                  }}
+                >
+                  <Ionicons name="remove" size={18} color={tc.textPrimary} />
+                </TouchableOpacity>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text style={{ fontSize: 28, fontWeight: '900', color: tc.textPrimary }}>{draft.daysPerWeek}</Text>
+                  <Text style={{ fontSize: 12, color: tc.textMuted }}>day{draft.daysPerWeek !== 1 ? 's' : ''} per week</Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => updateDraft({ daysPerWeek: Math.min(7, draft.daysPerWeek + 1) })}
+                  disabled={draft.daysPerWeek >= 7}
+                  style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: radius.md,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                    opacity: draft.daysPerWeek >= 7 ? 0.45 : 1,
+                  }}
+                >
+                  <Ionicons name="add" size={18} color={tc.textPrimary} />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View>
+              <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 10 }}>SESSION LENGTH</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {SESSION_MINUTES.map(minutes => (
+                  <Pill
+                    key={minutes}
+                    label={`${minutes} min`}
+                    active={draft.sessionMinutes === minutes}
+                    onPress={() => updateDraft({ sessionMinutes: minutes })}
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View>
+              <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 10 }}>SPLIT</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {SETUP_SPLITS.map(option => (
+                  <Pill
+                    key={option.value}
+                    label={option.label}
+                    active={draft.preferredSplit === option.value}
+                    onPress={() => updateDraft({ preferredSplit: option.value })}
+                  />
+                ))}
+              </View>
+            </View>
+
+            {hasSetupChanges ? (
+              <View style={{ gap: 10 }}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary }}>When should these changes apply?</Text>
+                <TouchableOpacity
+                  onPress={() => setApplySetupToCurrent(false)}
+                  style={{
+                    padding: 13,
+                    borderRadius: radius.md,
+                    borderWidth: 1.5,
+                    borderColor: !applySetupToCurrent ? tc.primary : tc.border,
+                    backgroundColor: !applySetupToCurrent ? tc.primary + '14' : tc.surface,
+                  }}
+                >
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: !applySetupToCurrent ? tc.primary : tc.textPrimary }}>
+                    Future generated weeks
+                  </Text>
+                  <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 3 }}>Current week stays as generated.</Text>
+                </TouchableOpacity>
+                {currentWeekAlreadyGenerated && (
+                  <TouchableOpacity
+                    onPress={() => setApplySetupToCurrent(true)}
+                    style={{
+                      padding: 13,
+                      borderRadius: radius.md,
+                      borderWidth: 1.5,
+                      borderColor: applySetupToCurrent ? tc.primary : tc.border,
+                      backgroundColor: applySetupToCurrent ? tc.primary + '14' : tc.surface,
+                    }}
+                  >
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: applySetupToCurrent ? tc.primary : tc.textPrimary }}>
+                      Rebuild remaining days this week
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 3 }}>
+                      Completed, skipped, and started days stay locked.
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ) : (
+              <Text style={{ fontSize: 12, color: tc.textMuted, lineHeight: 18 }}>
+                No setup changes selected.
+              </Text>
+            )}
+          </>
+        )}
       </ScrollView>
     );
   };
 
-  const renderStep5 = () => {
-    const adj = checkinResult?.summary;
+  const renderStep4 = () => {
+    const setupMessage = settingsError
+      ?? settingsResult?.explanation
+      ?? 'No plan setup changes were saved. Your generated week stays as-is.';
+
     return (
       <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} showsVerticalScrollIndicator={false}>
         <View style={{
-          backgroundColor: tc.success + '18', borderRadius: radius.md,
-          padding: 16, borderWidth: 1, borderColor: tc.success + '40',
+          backgroundColor: tc.success + '18',
+          borderRadius: radius.md,
+          padding: 16,
+          borderWidth: 1,
+          borderColor: tc.success + '40',
         }}>
           <Text style={{ fontSize: 15, fontWeight: '800', color: tc.success, marginBottom: 6 }}>
-            Check-in complete
+            Review complete
           </Text>
           <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 20 }}>
-            {checkinResult?.coach_message ?? 'Your answers have been recorded.'}
+            This was informational only. No coach recommendations were applied.
           </Text>
         </View>
 
-        {adj && (
-          <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 16, borderWidth: 1, borderColor: tc.border }}>
-            <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 12 }}>NEXT WEEK CHANGES</Text>
-            {renderAdjRow('VOLUME', adj.volume_adjustment_pct !== 0 ? `${adj.volume_adjustment_pct > 0 ? '+' : ''}${adj.volume_adjustment_pct}%` : 'No change', 'barbell-outline')}
-            {renderAdjRow('INTENSITY', adj.intensity_adjustment !== 'maintain' ? adj.intensity_adjustment : undefined, 'trending-up-outline')}
-            {renderAdjRow('SESSION LENGTH', adj.session_length_adjustment ?? undefined, 'time-outline')}
-            {renderAdjRow('CARDIO', adj.cardio_adjustment ?? undefined, 'bicycle-outline')}
-            {renderAdjRow('NUTRITION', adj.nutrition_adjustment ?? undefined, 'nutrition-outline')}
-            {adj.muscle_priorities.length > 0 && renderAdjRow('PRIORITY MUSCLE', humanList(adj.muscle_priorities), 'body-outline')}
-            {adj.avoid_patterns.length > 0 && renderAdjRow('AVOIDING', humanList(adj.avoid_patterns), 'shield-outline')}
-          </View>
-        )}
-
-        {checkinResult && checkinResult.applied.length > 0 && (
-          <View>
-            <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 8 }}>APPLIED NOW</Text>
-            {checkinResult.applied.map((a, i) => (
-              <View key={i} style={{ flexDirection: 'row', gap: 8, marginBottom: 6, alignItems: 'center' }}>
-                <Ionicons name="checkmark-circle" size={14} color={tc.success} />
-                <Text style={{ fontSize: 13, color: tc.textSecondary, flex: 1 }}>{a.summary}</Text>
-              </View>
-            ))}
-          </View>
-        )}
+        <View style={{
+          backgroundColor: settingsError ? tc.error + '12' : tc.primary + '12',
+          borderRadius: radius.md,
+          padding: 14,
+          borderWidth: 1,
+          borderColor: settingsError ? tc.error + '55' : tc.primary + '44',
+        }}>
+          <Text style={{ fontSize: 11, fontWeight: '900', color: settingsError ? tc.error : tc.primary, letterSpacing: 0.5, marginBottom: 6 }}>
+            PLAN SETUP
+          </Text>
+          <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>
+            {setupMessage}
+          </Text>
+        </View>
 
         <TouchableOpacity
           style={{
-            backgroundColor: tc.primary, borderRadius: radius.md,
-            padding: 16, alignItems: 'center', marginTop: 8,
+            backgroundColor: tc.primary,
+            borderRadius: radius.md,
+            padding: 16,
+            alignItems: 'center',
+            marginTop: 8,
           }}
-          onPress={() => { onComplete(!!checkinResult?.applied.length, checkinResult ?? undefined); onClose(); }}
+          onPress={() => { onComplete(false); onClose(); }}
         >
-          <Text style={{ fontSize: 15, fontWeight: '800', color: '#FFF' }}>Done</Text>
+          <Text style={{ fontSize: 15, fontWeight: '800', color: primaryTextColor }}>Done</Text>
         </TouchableOpacity>
       </ScrollView>
     );
@@ -604,10 +623,9 @@ export default function WeeklyCheckinModal({
 
   const STEP_TITLES: Record<Step, string> = {
     1: 'Weekly Scorecard',
-    2: 'Coach Review',
-    3: 'Quick Check-In',
-    4: 'Recommendations',
-    5: 'Summary',
+    2: 'Review Notes',
+    3: 'Plan Setup',
+    4: 'Summary',
   };
 
   const canAdvance: Record<Step, boolean> = {
@@ -615,23 +633,23 @@ export default function WeeklyCheckinModal({
     2: true,
     3: true,
     4: true,
-    5: true,
   };
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <View style={{ flex: 1, backgroundColor: tc.background }}>
-        {/* Header */}
         <View style={{
-          flexDirection: 'row', alignItems: 'center',
+          flexDirection: 'row',
+          alignItems: 'center',
           paddingHorizontal: 16,
           paddingTop: Platform.OS === 'ios' ? 8 : 24,
           paddingBottom: 12,
-          borderBottomWidth: 1, borderBottomColor: tc.border,
+          borderBottomWidth: 1,
+          borderBottomColor: tc.border,
         }}>
           <View style={{ flex: 1 }}>
             <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.6 }}>
-              WEEK IN REVIEW  ·  {step}/5
+              WEEK IN REVIEW  -  {step}/4
             </Text>
             <Text style={{ fontSize: 17, fontWeight: '800', color: tc.textPrimary }}>
               {STEP_TITLES[step]}
@@ -642,39 +660,44 @@ export default function WeeklyCheckinModal({
           </TouchableOpacity>
         </View>
 
-        {/* Step indicator */}
         <View style={{ flexDirection: 'row', paddingHorizontal: 16, paddingVertical: 8, gap: 4 }}>
-          {([1, 2, 3, 4, 5] as Step[]).map(s => (
+          {([1, 2, 3, 4] as Step[]).map(s => (
             <View
               key={s}
               style={{
-                flex: 1, height: 3, borderRadius: 2,
+                flex: 1,
+                height: 3,
+                borderRadius: 2,
                 backgroundColor: s <= step ? tc.primary : tc.border,
               }}
             />
           ))}
         </View>
 
-        {/* Content */}
         <View style={{ flex: 1 }}>
           {step === 1 && renderStep1()}
           {step === 2 && renderStep2()}
           {step === 3 && renderStep3()}
           {step === 4 && renderStep4()}
-          {step === 5 && renderStep5()}
         </View>
 
-        {/* Footer nav — not shown on steps 4 (decisions are the nav) and 5 */}
-        {step < 4 && (
+        {step < 3 && (
           <View style={{
-            flexDirection: 'row', gap: 12, padding: 16,
-            borderTopWidth: 1, borderTopColor: tc.border,
+            flexDirection: 'row',
+            gap: 12,
+            padding: 16,
+            borderTopWidth: 1,
+            borderTopColor: tc.border,
           }}>
             {step > 1 && (
               <TouchableOpacity
                 style={{
-                  flex: 1, padding: 14, borderRadius: radius.md,
-                  borderWidth: 1, borderColor: tc.border, alignItems: 'center',
+                  flex: 1,
+                  padding: 14,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: tc.border,
+                  alignItems: 'center',
                 }}
                 onPress={() => setStep((step - 1) as Step)}
               >
@@ -683,28 +706,65 @@ export default function WeeklyCheckinModal({
             )}
             <TouchableOpacity
               style={{
-                flex: 2, padding: 14, borderRadius: radius.md,
+                flex: 2,
+                padding: 14,
+                borderRadius: radius.md,
                 backgroundColor: canAdvance[step] ? tc.primary : tc.border,
                 alignItems: 'center',
               }}
               onPress={() => canAdvance[step] && setStep((step + 1) as Step)}
               disabled={!canAdvance[step]}
             >
-              <Text style={{ fontSize: 14, fontWeight: '800', color: canAdvance[step] ? '#FFF' : tc.textMuted }}>
-                {step === 3 ? 'See Recommendations' : 'Next'}
+              <Text style={{ fontSize: 14, fontWeight: '800', color: canAdvance[step] ? primaryTextColor : tc.textMuted }}>
+                {step === 2 ? 'Plan setup' : 'Next'}
               </Text>
             </TouchableOpacity>
           </View>
         )}
-        {step === 4 && onSkip && (
-          <TouchableOpacity
-            onPress={onSkip}
-            style={{ alignItems: 'center', paddingBottom: 14 }}
-          >
-            <Text style={{ fontSize: 13, color: tc.textMuted, fontWeight: '600' }}>
-              Skip this week's check-in
-            </Text>
-          </TouchableOpacity>
+
+        {step === 3 && (
+          <View style={{
+            flexDirection: 'row',
+            gap: 12,
+            padding: 16,
+            borderTopWidth: 1,
+            borderTopColor: tc.border,
+          }}>
+            <TouchableOpacity
+              style={{
+                flex: 1,
+                padding: 14,
+                borderRadius: radius.md,
+                borderWidth: 1,
+                borderColor: tc.border,
+                alignItems: 'center',
+              }}
+              onPress={() => setStep(2)}
+              disabled={savingSetup}
+            >
+              <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textSecondary }}>Back</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{
+                flex: 2,
+                padding: 14,
+                borderRadius: radius.md,
+                backgroundColor: tc.primary,
+                alignItems: 'center',
+                opacity: savingSetup ? 0.7 : 1,
+              }}
+              onPress={handleFinishReview}
+              disabled={savingSetup}
+            >
+              {savingSetup ? (
+                <ActivityIndicator size="small" color={primaryTextColor} />
+              ) : (
+                <Text style={{ fontSize: 14, fontWeight: '800', color: primaryTextColor }}>
+                  {hasSetupChanges ? 'Save setup' : 'Done'}
+                </Text>
+              )}
+            </TouchableOpacity>
+          </View>
         )}
       </View>
     </Modal>

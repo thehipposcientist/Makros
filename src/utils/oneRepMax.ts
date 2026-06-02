@@ -51,22 +51,50 @@ export const REP_LIMIT_BY_CATEGORY: Record<LiftCategory, { min: number; max: num
   isolation: null,
 };
 
+/** Cap on `reps + rir` per category. Without this, a set like 225 × 10
+ *  @ 4 RIR would Epley out to a 14-rep equivalent (≈ 330 lb) — too
+ *  aggressive for daily prescription math. Mirrors the backend's
+ *  `_MAX_EFFECTIVE_REPS` in `rolling_e1rm.py` so the per-set 1RM the
+ *  client computes matches what the server sees. `null` for isolation
+ *  matches `REP_LIMIT_BY_CATEGORY` — the category refuses to score. */
+export const MAX_EFFECTIVE_REPS_BY_CATEGORY: Record<LiftCategory, number | null> = {
+  main_compound: 10,
+  machine_compound: 12,
+  isolation: null,
+};
+
+/** Public helper so callers (recommendation engine, validators) can
+ *  consult the cap without poking at the const map. */
+export function getMaxEffectiveReps(category: LiftCategory): number | null {
+  return MAX_EFFECTIVE_REPS_BY_CATEGORY[category];
+}
+
 /** Loose hard cap exported for legacy callers that don't yet pass a
  *  category. Equal to the upper bound of `main_compound` since that's
  *  the most common 1RM-bearing surface (PR cards, trend chart). */
 export const ONE_RM_REP_LIMIT = REP_LIMIT_BY_CATEGORY.main_compound!.max;
 
-/** Pure Epley over a single set. No category checks — call
- *  `estimate1RM` instead when display correctness matters. Exported
- *  primarily for tests and for any caller (e.g. server-bridge utils)
- *  that has already done its own validity check.
+/** Pure Epley over a single set with effective-rep cap.
  *
- *  Returns null only on impossible inputs (zero / negative / NaN). */
+ *   e1RM = weight × (1 + min(reps + rir, cap) / 30)
+ *
+ *  No upstream rep-window check — call `estimate1RM` instead when
+ *  display correctness matters. `category` defaults to `main_compound`
+ *  (the strictest cap = 10 effective reps) so existing call sites that
+ *  don't pass a category get the safe behaviour. Isolation returns
+ *  null to match the backend's refusal — matches `estimate1RM`.
+ *
+ *  Returns null only on impossible inputs (zero / negative / NaN) or
+ *  when category is `isolation`. */
 export function setE1RM(
   weightLbs: number | null | undefined,
   reps: number | null | undefined,
   rir: number | null | undefined,
+  category: LiftCategory = 'main_compound',
 ): number | null {
+  const cap = getMaxEffectiveReps(category);
+  if (cap == null) return null;  // isolation — refuse
+
   const w = Number(weightLbs);
   const baseReps = Number(reps);
   if (!Number.isFinite(w) || !Number.isFinite(baseReps)) return null;
@@ -76,7 +104,7 @@ export function setE1RM(
   // a way Epley can handle — clamp to 0 so the formula stays sane.
   const rirRaw = Number(rir);
   const rirSafe = Number.isFinite(rirRaw) && rirRaw > 0 ? rirRaw : 0;
-  const effectiveReps = baseReps + rirSafe;
+  const effectiveReps = Math.min(baseReps + rirSafe, cap);
 
   // r = 1 short-circuit. The formula gives 1.033× weight, which is
   // technically correct (a single lifted at 100% has 1RM ≈ 100), but
@@ -112,11 +140,15 @@ export function estimate1RM(
 
   const rirRaw = Number(options?.rir);
   const rirSafe = Number.isFinite(rirRaw) && rirRaw > 0 ? rirRaw : 0;
-  const effectiveReps = baseReps + rirSafe;
+  // Window check uses RAW effective reps so 11+ rep sets still get
+  // rejected entirely (we don't want to "rescue" a 12-rep set by
+  // capping its effective reps to 10 — that's hiding the fact that
+  // it's outside the validity window for main_compound).
+  const rawEffective = baseReps + rirSafe;
+  if (rawEffective < window.min || rawEffective > window.max) return null;
 
-  if (effectiveReps < window.min || effectiveReps > window.max) return null;
-
-  return setE1RM(w, baseReps, rirSafe);
+  // Pass category through so `setE1RM` applies the matching cap.
+  return setE1RM(w, baseReps, rirSafe, category);
 }
 
 /** Convenience wrapper that returns 0 instead of null. Use ONLY where

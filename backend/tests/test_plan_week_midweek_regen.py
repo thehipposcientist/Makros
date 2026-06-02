@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, field as dc_field
+from types import SimpleNamespace
 from typing import Any, List, Optional
 from unittest.mock import patch
 
@@ -44,6 +45,7 @@ class FakePlanWeek:
     goal: str = "body_recomp"
     days_per_week: int = 5
     preferred_split: Optional[str] = "ppl"
+    session_minutes: int | None = 60
     status: str = "active"
     created_at: datetime = dc_field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Any = None
@@ -266,6 +268,39 @@ def test_regen_updates_remaining_days_with_new_focus():
         if d.day_date >= today and d.day_date.weekday() in (0, 1, 2, 3, 4):
             assert d.workout_json is not None
             assert d.workout_json.get("focus") in {"Upper", "Lower"}
+
+
+def test_duration_update_only_touches_unlocked_current_and_future_days():
+    """Session-length changes rebuild only unlocked current/future workouts."""
+    today = date.today()
+    pw, days = _build_week(
+        today - timedelta(days=1),
+        locked_indexes=(2,),
+        rest_indexes=(3,),
+        focuses=["Past Push", "Pull", "Locked Legs", "Rest", "Upper", "Lower", "Push"],
+    )
+    days[1].workout_json["day"] = "Original Pull Day"
+    fresh = [
+        {"day": "Fresh A", "focus": "Pull", "exercises": [{"name": "Fresh Pull"}]},
+        {"day": "Fresh B", "focus": "Upper", "exercises": [{"name": "Fresh Upper"}]},
+        {"day": "Fresh C", "focus": "Lower", "exercises": [{"name": "Fresh Lower"}]},
+        {"day": "Fresh D", "focus": "Push", "exercises": [{"name": "Fresh Push"}]},
+    ]
+
+    with _patch_get_week_days(days):
+        updated = week_manager.update_remaining_workouts_for_duration(
+            FakeSession(), pw, fresh, 75,
+        )
+
+    assert pw.session_minutes == 75
+    assert days[0].workout_json["focus"] == "Past Push"
+    assert days[2].workout_json["focus"] == "Locked Legs"
+    assert days[3].workout_json is None
+    assert days[1].workout_json["focus"] == "Pull"
+    assert days[1].workout_json["day"] == "Original Pull Day"
+    assert days[1].workout_json["exercises"][0]["name"] == "Fresh Pull"
+    assert days[1].generation_source == "duration_update"
+    assert {d.day_index for d in updated} == {1, 4, 5, 6}
 
 
 def test_regen_with_no_fresh_days_clears_unlocked_workouts():
@@ -643,6 +678,137 @@ def test_injury_repair_prefers_same_focus_family_candidate():
 
     assert days[0].workout_json["focus"] == "Legs"
     assert days[0].workout_json["exercises"][0]["name"] == "Safe Legs"
+
+
+# ─── Section 3d: Immediate equipment repair ──────────────────────────────────
+
+
+def _equipment_seed(slug: str, bucket: str, required_slug: str | None = None) -> dict:
+    return {
+        "slug": slug,
+        "name": slug.replace("_", " ").title(),
+        "equipment_bucket": bucket,
+        "equipment": (
+            [{"slug": required_slug, "role": "primary", "required": True}]
+            if required_slug else []
+        ),
+    }
+
+
+def test_equipment_repair_swaps_only_incompatible_exercises():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(date(2026, 4, 29), rest_indexes=(5, 6))
+    days[0].workout_json = {
+        "day": "Day 1",
+        "focus": "Push",
+        "exercises": [
+            {
+                "name": "Barbell Bench Press",
+                "equipment": "barbell",
+                "_slug": "barbell_bench_press",
+                "_slot": "Horizontal Press",
+                "_role": "primary",
+                "_primary_muscle": "chest",
+            },
+            {
+                "name": "Push-Up",
+                "equipment": "bodyweight",
+                "_slug": "push_up",
+                "_slot": "Push Accessory",
+                "_role": "secondary",
+                "_primary_muscle": "chest",
+            },
+        ],
+    }
+    fresh = [{
+        "focus": "Push",
+        "exercises": [
+            {
+                "name": "Dumbbell Bench Press",
+                "equipment": "dumbbells",
+                "_slug": "dumbbell_bench_press",
+                "_slot": "Horizontal Press",
+                "_role": "primary",
+                "_primary_muscle": "chest",
+            },
+            {
+                "name": "Incline Push-Up",
+                "equipment": "bodyweight",
+                "_slug": "incline_push_up",
+                "_slot": "Push Accessory",
+                "_role": "secondary",
+                "_primary_muscle": "chest",
+            },
+        ],
+    }]
+    seeds = [
+        _equipment_seed("barbell_bench_press", "barbell", "barbell"),
+        _equipment_seed("dumbbell_bench_press", "dumbbells", "dumbbells"),
+        _equipment_seed("push_up", "bodyweight"),
+        _equipment_seed("incline_push_up", "bodyweight"),
+    ]
+
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        updated = week_manager.repair_remaining_workouts_for_equipment(
+            FakeSession(),
+            pw,
+            fresh,
+            {"dumbbells"},
+            seed_exercises=seeds,
+        )
+
+    assert [d.day_index for d in updated] == [0]
+    exercises = days[0].workout_json["exercises"]
+    assert [e["name"] for e in exercises] == ["Dumbbell Bench Press", "Push-Up"]
+    assert days[0].workout_json["focus"] == "Push"
+    assert days[0].generation_source == "equipment_repair"
+
+
+def test_equipment_repair_preserves_locked_rest_and_compatible_days():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(
+        date(2026, 4, 29),
+        locked_indexes=(1,),
+        rest_indexes=(5, 6),
+    )
+    days[0].workout_json = {
+        "focus": "Push",
+        "exercises": [{"name": "Push-Up", "equipment": "bodyweight", "_slug": "push_up"}],
+    }
+    days[1].workout_json = {
+        "focus": "Pull",
+        "exercises": [{"name": "Barbell Row", "equipment": "barbell", "_slug": "barbell_row"}],
+    }
+    locked_workout = days[1].workout_json
+    rest_workout = days[5].workout_json
+    seeds = [
+        _equipment_seed("push_up", "bodyweight"),
+        _equipment_seed("barbell_row", "barbell", "barbell"),
+        _equipment_seed("dumbbell_row", "dumbbells", "dumbbells"),
+    ]
+    fresh = [{"focus": "Pull", "exercises": [{"name": "Dumbbell Row", "equipment": "dumbbells", "_slug": "dumbbell_row"}]}]
+
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        updated = week_manager.repair_remaining_workouts_for_equipment(
+            FakeSession(),
+            pw,
+            fresh,
+            {"dumbbells"},
+            seed_exercises=seeds,
+        )
+
+    assert updated == []
+    assert days[0].generation_source == "initial"
+    assert days[1].workout_json == locked_workout
+    assert days[5].workout_json == rest_workout
 
 
 # ─── Section 4: Split change mid-week (PPL → PPLUL, etc.) ───────────────────
@@ -1520,6 +1686,109 @@ def test_scenario_user_locks_thursday_manually_then_regenerates():
     # Thu still pinned
     assert days[3].workout_json == pinned_workout
     assert days[3].locked is True
+
+
+def test_checkin_settings_can_apply_explicit_setup_to_current_week():
+    """Weekly check-in setup changes save prefs, then use remaining-week regen."""
+    from app.routers import plan_weeks as router
+
+    pw = FakePlanWeek(
+        goal="body_recomp",
+        days_per_week=4,
+        preferred_split="upper_lower",
+        session_minutes=45,
+    )
+    prefs = SimpleNamespace(
+        user_id=1,
+        days_per_week=4,
+        preferred_split="upper_lower",
+        workout_duration_minutes=45,
+        training_day_pattern=[0, 1, 2, 3],
+        updated_at=None,
+    )
+    profile = SimpleNamespace(weight_lbs=180)
+
+    class QueueSession(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.rows = [profile, prefs, None]
+            self.commits = 0
+
+        def exec(self, *_args, **_kwargs):
+            row = self.rows.pop(0) if self.rows else None
+            class _R:
+                def first(self_inner):
+                    return row
+                def all(self_inner):
+                    return [] if row is None else [row]
+            return _R()
+
+        def commit(self):
+            self.commits += 1
+
+    db = QueueSession()
+    regen_bodies = []
+
+    def fake_regenerate_remaining(body, current_user, db):
+        regen_bodies.append(body)
+        pw.days_per_week = body.new_days_per_week
+        pw.preferred_split = None if body.new_preferred_split == "auto" else body.new_preferred_split
+        return router.PlanWeekResponse(
+            id=pw.id,
+            start_date=str(pw.start_date),
+            end_date=str(pw.end_date),
+            status=pw.status,
+            needs_new_week=False,
+            planner_version=pw.planner_version,
+            goal=pw.goal,
+            days_per_week=pw.days_per_week,
+            session_minutes=pw.session_minutes,
+            preferred_split=pw.preferred_split,
+            days=[],
+        )
+
+    def response_for_week(plan_week, _days, _db):
+        return router.PlanWeekResponse(
+            id=plan_week.id,
+            start_date=str(plan_week.start_date),
+            end_date=str(plan_week.end_date),
+            status=plan_week.status,
+            needs_new_week=False,
+            planner_version=plan_week.planner_version,
+            goal=plan_week.goal,
+            days_per_week=plan_week.days_per_week,
+            session_minutes=plan_week.session_minutes,
+            preferred_split=plan_week.preferred_split,
+            days=[],
+        )
+
+    with patch.object(router, "get_active_week", return_value=pw), \
+         patch.object(router, "regenerate_remaining", side_effect=fake_regenerate_remaining), \
+         patch.object(router, "get_week_days", return_value=[]), \
+         patch.object(router, "_plan_week_to_response", side_effect=response_for_week):
+        result = router.apply_checkin_plan_settings(
+            router.CheckinPlanSettingsRequest(
+                days_per_week=5,
+                preferred_split="ppl",
+                session_minutes=75,
+                apply_to_current_week=True,
+            ),
+            current_user=SimpleNamespace(id=1),
+            db=db,
+        )
+
+    assert prefs.days_per_week == 5
+    assert prefs.preferred_split == "ppl"
+    assert prefs.workout_duration_minutes == 75
+    assert prefs.training_day_pattern is None
+    assert len(regen_bodies) == 1
+    assert regen_bodies[0].new_days_per_week == 5
+    assert regen_bodies[0].new_preferred_split == "ppl"
+    assert pw.session_minutes == 75
+    assert result.applied_to_current_week is True
+    assert result.changed_fields["days_per_week"] == {"from": 4, "to": 5}
+    assert result.changed_fields["preferred_split"] == {"from": "upper_lower", "to": "ppl"}
+    assert result.changed_fields["session_minutes"] == {"from": 45, "to": 75}
 
 
 # ─── Run ──────────────────────────────────────────────────────────────────────

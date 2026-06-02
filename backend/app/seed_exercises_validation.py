@@ -39,7 +39,7 @@ _NAME_EQUIPMENT_HINTS = {
     "barbell":   "barbell",
     "dumbbell":  "dumbbells",
     "kettlebell": "kettlebell",
-    "cable":     "cable_machine",
+    "cable":     "single_cable_station",
     "machine":   None,                  # generic — caught by hint #9
     "smith":     "smith_machine",
     "trap bar":  "trap_bar",
@@ -179,6 +179,12 @@ def validate_exercise_seed(
                     report.missing_required_support += 1
                     report.warn(
                         f"'{e.get('slug')}' has '{token}' in name but no preacher bench/machine in equipment"
+                    )
+            elif required_slug == "single_cable_station":
+                if not any(s in eq_slugs for s in ("single_cable_station", "dual_cable_station", "cable_machine")):
+                    report.missing_required_support += 1
+                    report.warn(
+                        f"'{e.get('slug')}' has '{token}' in name but no cable station in equipment"
                     )
             elif required_slug not in eq_slugs:
                 report.missing_required_support += 1

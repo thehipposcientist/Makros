@@ -15,9 +15,11 @@ Run:
 """
 from __future__ import annotations
 
+from datetime import date
 import math
 
 from app.services.workout.activity_impact import (
+    compute_rolling_fatigue,
     resolve_exercise_fatigue,
     resolve_focus_fatigue,
 )
@@ -220,8 +222,11 @@ def test_age_multiplier():
     assert old["chest"] > young["chest"]
 
 
-def test_cap_at_one():
-    """Even massive volume caps at 1.0 per muscle."""
+def test_extreme_volume_kept_raw_uncapped():
+    """resolve_exercise_fatigue keeps RAW values — a brutal session can
+    exceed 1.0 per muscle ("1.0+ very high load"). The per-session 1.0 cap
+    was intentionally removed so decay + readiness math can distinguish
+    extreme sessions; display/readiness code bounds the value downstream."""
     result = resolve_exercise_fatigue([{
         "name": "Squat",
         "primary_muscle": "quads",
@@ -229,7 +234,8 @@ def test_cap_at_one():
         "is_compound": True,
         "sets": [{"reps": 20, "weight_lbs": 315, "rir": 0}] * 20,
     }])
-    assert result["quads"] <= 1.0
+    assert result["quads"] > 1.0
+    assert math.isfinite(result["quads"])
 
 
 def test_multiple_exercises_accumulate():
@@ -335,6 +341,137 @@ def test_focus_upper_plus_cardio():
     assert result.get("chest", 0) > 0
     assert result.get("back", 0) > 0
     assert result.get("cardio", 0) > 0
+
+
+def test_focus_martial_arts_cardio_like():
+    """Martial arts should create cardio-style fatigue, not generic load."""
+    result = resolve_focus_fatigue("Martial Arts", duration_minutes=50)
+    assert result.get("cardio", 0) > 0
+    assert result.get("core", 0) > 0
+    assert result.get("systemic", 0) > 0
+
+
+def test_sprint_cycling_protects_legs():
+    """Hard interval cycling should meaningfully reduce lower-body readiness."""
+    steady = resolve_focus_fatigue(
+        "Cycling",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="cardio",
+        activity_subtype="ride",
+    )
+    sprint = resolve_focus_fatigue(
+        "Cycling",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="cardio",
+        activity_subtype="ride",
+        cardio_style="intervals",
+        cardio_load=60,
+    )
+    assert sprint["quads"] > steady["quads"]
+    assert sprint["quads"] >= 0.55, sprint
+
+    snap = compute_rolling_fatigue([{
+        "workout_date": date.today(),
+        "focus_label": "Cycling",
+        "duration_seconds": 20 * 60,
+        "activity_category": "cardio",
+        "activity_subtype": "ride",
+        "activity_intensity": "hard",
+        "cardio_style": "intervals",
+        "cardio_load": 60,
+        "resolved_muscle_fatigue": sprint,
+    }])
+    assert snap.focus_readiness["legs"] < 0.85, snap.focus_readiness
+
+
+def test_cardio_subtypes_resolve_local_muscles():
+    """Subtype should rescue generic focus labels like Cardio."""
+    spin = resolve_focus_fatigue(
+        "Cardio",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="cardio",
+        activity_subtype="spin",
+        cardio_style="class",
+    )
+    row = resolve_focus_fatigue(
+        "Cardio",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="cardio",
+        activity_subtype="row",
+    )
+    virtual_ride = resolve_focus_fatigue(
+        "Cardio",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="cardio",
+        activity_subtype="VirtualRide",
+    )
+    spin_class = resolve_focus_fatigue(
+        "Cardio",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="cardio",
+        activity_subtype="Spin Class",
+    )
+    assert spin.get("quads", 0) > 0.45, spin
+    assert row.get("back", 0) > 0.25 and row.get("quads", 0) > 0.20, row
+    assert virtual_ride.get("quads", 0) > 0.45, virtual_ride
+    assert spin_class.get("quads", 0) > 0.45, spin_class
+
+
+def test_supported_sports_resolve_local_muscles_from_subtype():
+    """Supported sport subtypes should not fall back to generic systemic load."""
+    basketball = resolve_focus_fatigue(
+        "Sport",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="sport",
+        activity_subtype="basketball",
+        cardio_style="intervals",
+    )
+    climbing = resolve_focus_fatigue(
+        "Sport",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="sport",
+        activity_subtype="climbing",
+    )
+    boxing = resolve_focus_fatigue(
+        "Sport",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="sport",
+        activity_subtype="boxing",
+    )
+    assert basketball.get("quads", 0) > 0.25 and basketball.get("calves", 0) > 0.25, basketball
+    assert climbing.get("back", 0) > 0.35 and climbing.get("biceps", 0) > 0.20, climbing
+    assert boxing.get("back", 0) > 0.15 and boxing.get("triceps", 0) > 0.10, boxing
+
+
+def test_sport_rpe_scales_local_fatigue():
+    """Session RPE should affect cardio/sport local fatigue, not just lifting."""
+    low = resolve_focus_fatigue(
+        "Sport",
+        intensity="hard",
+        duration_minutes=20,
+        activity_category="sport",
+        activity_subtype="boxing",
+        rpe=2,
+    )
+    high = resolve_focus_fatigue(
+        "Sport",
+        intensity="easy",
+        duration_minutes=20,
+        activity_category="sport",
+        activity_subtype="boxing",
+        rpe=9,
+    )
+    assert high["shoulders"] > low["shoulders"]
+    assert high["back"] > low["back"]
 
 
 def test_focus_intensity_scales():

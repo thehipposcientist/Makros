@@ -75,6 +75,7 @@ class DayArchetype(str, Enum):
     # ── Mobility / recovery ───────────────────────────────────────
     MOBILITY_FLOW = "mobility_flow"              # full-body mobility flow
     STRETCH_BLOCK = "stretch_block"              # focused static stretching
+    YOGA_FLOW = "yoga_flow"                      # ordered yoga sequence (warm→standing→floor→cool→breath)
     RECOVERY_EASY = "recovery_easy"              # easy walk / easy spin
     STRESS_RELIEF_EASY = "stress_relief_easy"    # low-intensity mood session
 
@@ -296,6 +297,11 @@ ARCHETYPE_META: dict[DayArchetype, ArchetypeMeta] = {
         default_name="Stretch Block", intensity_cost=1,
         accepts_types=frozenset({"mobility"}),
     ),
+    DayArchetype.YOGA_FLOW: ArchetypeMeta(
+        category="mobility", training_type="mobility",
+        default_name="Yoga Flow", intensity_cost=1,
+        accepts_types=frozenset({"mobility"}),
+    ),
     DayArchetype.RECOVERY_EASY: ArchetypeMeta(
         category="recovery", training_type="recovery",
         default_name="Easy Recovery", intensity_cost=1,
@@ -422,6 +428,7 @@ ARCHETYPE_TO_FOCUS_BUCKET: dict[DayArchetype, str] = {
     # Mobility / recovery
     DayArchetype.MOBILITY_FLOW: "mobility",
     DayArchetype.STRETCH_BLOCK: "mobility",
+    DayArchetype.YOGA_FLOW: "mobility",
     DayArchetype.RECOVERY_EASY: "recovery",
     DayArchetype.STRESS_RELIEF_EASY: "recovery",
     # Hybrids map to the body region they primarily stress
@@ -485,6 +492,7 @@ ARCHETYPE_TO_FOCUS_FAMILY: dict[DayArchetype, str] = {
     DayArchetype.COND_SPRINT_POWER: "cardio",
     DayArchetype.MOBILITY_FLOW: "mobility",
     DayArchetype.STRETCH_BLOCK: "mobility",
+    DayArchetype.YOGA_FLOW: "mobility",
     DayArchetype.RECOVERY_EASY: "recovery",
     DayArchetype.STRESS_RELIEF_EASY: "recovery",
     DayArchetype.HYBRID_STRENGTH_INTERVALS: "full_body",

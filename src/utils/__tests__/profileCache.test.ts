@@ -86,7 +86,7 @@ describe('profile cache merge', () => {
     });
   });
 
-  it('keeps newer local weight history when the pulled profile is stale', () => {
+  it('ignores legacy local weightHistory when pulled DB weight entries exist', () => {
     const encoded = encodePulledStateValueForStorage(
       'userProfile',
       {
@@ -100,6 +100,27 @@ describe('profile cache merge', () => {
         physicalStats: { weightLbs: 172.2 },
         weightHistory: [
           { date: '2026-05-05', weightLbs: 172.2, loggedAt: '2026-05-05T14:00:00.000Z' },
+        ],
+      }),
+    );
+
+    expect(JSON.parse(encoded).physicalStats.weightLbs).toBe(175);
+  });
+
+  it('can use newer DB-shaped local weight entries when the pulled profile is stale', () => {
+    const encoded = encodePulledStateValueForStorage(
+      'userProfile',
+      {
+        goal: 'body_recomp',
+        physicalStats: { weightLbs: 175 },
+        weightEntries: [
+          { date: '2026-05-01', weight_lbs: 175, logged_at: '2026-05-01T14:00:00.000Z' },
+        ],
+      },
+      JSON.stringify({
+        physicalStats: { weightLbs: 172.2 },
+        weightEntries: [
+          { date: '2026-05-05', weight_lbs: 172.2, logged_at: '2026-05-05T14:00:00.000Z' },
         ],
       }),
     );

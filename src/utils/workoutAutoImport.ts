@@ -6,6 +6,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { WorkoutSession, WorkoutDetail, ActivityCategory, ActivityIntensity, CardioStyle } from '../types';
 import { loadWorkoutHistory, saveWorkoutSession } from './workoutHistory';
+import { getAppleHealthWorkoutRoute, getWorkoutHrSummary } from '../services/appleHealth';
 
 // Persisted ids of HK imports the user has dismissed via Skip / Clear All.
 // Without this, "skipped" only filtered the in-memory candidate list and
@@ -79,13 +80,17 @@ export interface ImportCandidate {
   durationMin: number;
   calories?: number | null;
   distanceMiles?: number | null;
+  avgHeartRate?: number | null;
+  maxHeartRate?: number | null;
+  elevationGainFt?: number | null;
+  routeCoords?: Array<{ lat: number; lon: number; t_ms: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }> | null;
 }
 
 // Build a stable id from the HKWorkout start time, rounded to the nearest
 // minute. AH can return slightly different millisecond offsets between
 // fetches for the same workout, so rounding prevents dismissed workouts
 // from reappearing with a new ID.
-function externalIdFor(w: WorkoutDetail): string {
+export function externalIdFor(w: WorkoutDetail): string {
   const ms = new Date(w.startDate).getTime();
   const roundedMin = Math.round(ms / 60000) * 60000;
   return `hk_${roundedMin}`;
@@ -169,6 +174,10 @@ export async function detectUnloggedWorkouts(
       durationMin: Math.round(w.duration),
       calories: w.calories ?? null,
       distanceMiles: w.distanceMiles ?? null,
+      avgHeartRate: w.avgHeartRate ?? null,
+      maxHeartRate: w.maxHeartRate ?? null,
+      elevationGainFt: w.elevationGainFt ?? null,
+      routeCoords: w.routeCoords ?? null,
     });
   }
   // Most recent first
@@ -177,31 +186,44 @@ export async function detectUnloggedWorkouts(
 }
 
 // Map an Apple workout name → Thallo's ActivityCategory/subtype.
-function classifyActivity(name: string): { category: ActivityCategory; subtype: string; cardioStyle?: CardioStyle } {
+export function classifyActivity(name: string): { category: ActivityCategory; subtype: string; cardioStyle?: CardioStyle } {
   const n = (name || '').toLowerCase();
-  if (/run/.test(n))                               return { category: 'cardio', subtype: 'Running', cardioStyle: 'steady' };
-  if (/walk|hike/.test(n))                         return { category: 'cardio', subtype: n.includes('hike') ? 'Hiking' : 'Walking', cardioStyle: 'steady' };
-  if (/cycl|bike/.test(n))                         return { category: 'cardio', subtype: 'Cycling', cardioStyle: 'steady' };
-  if (/row/.test(n))                               return { category: 'cardio', subtype: 'Rowing', cardioStyle: 'steady' };
-  if (/swim/.test(n))                              return { category: 'cardio', subtype: 'Swimming', cardioStyle: 'steady' };
+  if (/run/.test(n))                               return { category: 'cardio', subtype: 'run', cardioStyle: 'steady' };
+  if (/walk|hike/.test(n))                         return { category: 'cardio', subtype: n.includes('hike') ? 'hike' : 'walk', cardioStyle: n.includes('walk') ? 'easy' : 'steady' };
+  if (/cycl|bike/.test(n))                         return { category: 'cardio', subtype: 'ride', cardioStyle: 'steady' };
+  if (/row/.test(n))                               return { category: 'cardio', subtype: 'row', cardioStyle: 'steady' };
+  if (/swim/.test(n))                              return { category: 'cardio', subtype: 'swim', cardioStyle: 'steady' };
   if (/yoga|pilates|stretch|mobility/.test(n))     return { category: 'mobility', subtype: name };
+  if (/\b(core|abs?|abdominal|plank|crunch|sit[- ]?up)\b/.test(n))
+                                                   return { category: 'strength', subtype: 'core' };
   if (/strength|lift|weight/.test(n))              return { category: 'strength', subtype: 'Strength training' };
-  if (/hiit|crossfit|functional/.test(n))          return { category: 'cardio', subtype: 'HIIT', cardioStyle: 'intervals' };
+  if (/hiit|crossfit|functional/.test(n))          return { category: 'cardio', subtype: 'hiit', cardioStyle: 'intervals' };
   // Stair climber = cardio machine (already mapped via "stair" to its own
   // path); rock climbing / bouldering = sport so it routes to the climbing
   // gear keywords. Order matters: check "stair" first so "stair climbing"
   // doesn't fall into the rock-climbing branch.
-  if (/stair/.test(n))                             return { category: 'cardio', subtype: 'Stair', cardioStyle: 'steady' };
+  if (/stair/.test(n))                             return { category: 'cardio', subtype: 'stair', cardioStyle: 'steady' };
   if (/climb|boulder/.test(n))                     return { category: 'sport', subtype: 'climbing' };
   if (/box|kickbox|martial/.test(n))               return { category: 'sport', subtype: /kickbox/.test(n) ? 'kickboxing' : (/martial/.test(n) ? 'martial_arts' : 'boxing') };
+  if (/volley/.test(n))                            return { category: 'sport', subtype: /beach/.test(n) ? 'beach_volleyball' : 'volleyball', cardioStyle: 'intervals' };
   if (/sport|basketball|soccer|tennis|pickleball|golf|surf|ski/.test(n))
                                                    return { category: 'sport', subtype: name };
   return { category: 'cardio', subtype: name || 'Workout', cardioStyle: 'steady' };
 }
 
-export async function importCandidate(c: ImportCandidate): Promise<void> {
+export async function importCandidate(c: ImportCandidate): Promise<WorkoutSession> {
   const info = classifyActivity(c.activityName);
   const durationSeconds = c.durationMin * 60;
+  const startMs = new Date(c.startDate).getTime();
+  const endMs = new Date(c.endDate).getTime();
+  const [hr, route] = await Promise.all([
+    c.avgHeartRate != null ? Promise.resolve(null) : getWorkoutHrSummary(startMs, endMs).catch(() => null),
+    c.routeCoords && c.routeCoords.length > 0 ? Promise.resolve(null) : getAppleHealthWorkoutRoute(startMs, endMs).catch(() => null),
+  ]);
+  const avgHeartRate = c.avgHeartRate ?? hr?.avgBpm ?? null;
+  const routeCoords = c.routeCoords && c.routeCoords.length > 0 ? c.routeCoords : route?.routeCoords ?? null;
+  const elevationGainFt = c.elevationGainFt ?? route?.elevationGainFt ?? null;
+  const details = elevationGainFt != null ? { elevationGainFt } : undefined;
   const session: WorkoutSession = {
     id: c.externalId,
     date: c.startDate,
@@ -219,7 +241,14 @@ export async function importCandidate(c: ImportCandidate): Promise<void> {
       source: 'apple_health' as any,
       distanceMiles: c.distanceMiles ?? undefined,
       caloriesBurned: c.calories ?? undefined,
+      avgHeartRate: avgHeartRate != null ? Math.round(avgHeartRate) : undefined,
+      ...(details ? { details } : {}),
+      ...(routeCoords && routeCoords.length > 0 ? { routeCoords: routeCoords as any } : {}),
     },
+    ...(routeCoords && routeCoords.length > 0
+      ? { routeCoords: routeCoords.map(p => ({ lat: p.lat, lon: p.lon })) }
+      : {}),
   };
   await saveWorkoutSession(session);
+  return session;
 }

@@ -23,17 +23,26 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Animated, FlatList, Image, RefreshControl,
-  StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, Animated, Dimensions, FlatList, Image, Keyboard, RefreshControl,
+  StyleSheet, Text, TextInput, TouchableOpacity, View,
+  type KeyboardEvent,
+  type ViewToken,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { getContrastingTextColor, getTheme, isLightThemeName, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import FadeInView from './FadeInView';
+import ScrollRevealView from './ScrollRevealView';
 import SocialAvatar from './SocialAvatar';
 import {
+  createFeedComment,
+  deleteFeedComment,
+  FeedComment,
   FeedItem,
   getSocialFeed,
+  listFeedComments,
+  type SocialDigest,
   toggleFeedLike,
 } from '../services/api';
 import { configureExpandAnimation } from '../utils/layoutAnim';
@@ -61,19 +70,20 @@ interface Props {
    *  Instagram-style infinite scroll. Default 10 — enough to feel
    *  alive at pilot scale without becoming a doom-scroll surface. */
   maxItems?: number;
-  /** Whether the current user has sharing enabled. When true a "Your
-   *  Activity" summary card is pinned at the top of the feed so the
-   *  user can see what their friends see. */
-  shareEnabled?: boolean;
-  myActivity?: { sessions: number; streak: number } | null;
-  myDisplayName?: string;
-  myAvatarUrl?: string | null;
   bottomPadding?: number;
+  digest?: SocialDigest | null;
+  friendCount?: number;
+  sharingEnabled?: boolean;
+  currentUserId?: number | null;
+  onOpenFriends?: () => void;
+  onTurnOnSharing?: () => void;
+  onShareInvite?: () => void;
 }
 
 // One bounded fetch — no pagination by design. The view is an "is
 // anything new?" check, not a content destination.
 const DEFAULT_MAX_ITEMS = 10;
+const QUICK_REACTIONS = ['Nice lift', 'Strong finish', 'Consistency', 'PR hype'];
 
 type GroupedItem = { workout: FeedItem; prs: FeedItem[] };
 type FeedWorkoutExercise = {
@@ -129,6 +139,17 @@ function exerciseRepCount(exercises: FeedWorkoutExercise[]): number {
     (total, ex) => total + (ex.sets ?? []).reduce((sum, set) => sum + (setReps(set) ?? 0), 0),
     0,
   );
+}
+
+function compactExerciseDetailLine(exercise: FeedWorkoutExercise): string {
+  const setSummaries = compactSocialSetSummaries(exercise.sets);
+  if (!setSummaries.length) {
+    const count = exercise.sets?.length ?? 0;
+    return count > 0 ? `${count} set${count === 1 ? '' : 's'}` : 'Logged workout';
+  }
+  const visible = setSummaries.slice(0, 2);
+  const hidden = setSummaries.length - visible.length;
+  return hidden > 0 ? `${visible.join(' · ')} · +${hidden} more` : visible.join(' · ');
 }
 
 function normalizeWorkoutSummary(item: FeedItem): FeedWorkoutSummary | null {
@@ -202,22 +223,108 @@ function RotatingChevron({ expanded, color }: { expanded: boolean; color: string
 
 export default function SocialFeedView({
   authToken, themeName, onViewAuthor, refreshKey, maxItems,
-  shareEnabled, myActivity, myDisplayName, myAvatarUrl, bottomPadding = 8,
+  bottomPadding = 8,
+  digest,
+  friendCount = 0,
+  sharingEnabled = false,
+  currentUserId = null,
+  onOpenFriends,
+  onTurnOnSharing,
+  onShareInvite,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const isLightTheme = isLightThemeName(theme.name);
+  const styles = useMemo(() => createStyles(colors, isLightTheme), [colors, isLightTheme]);
   const cap = maxItems ?? DEFAULT_MAX_ITEMS;
 
   const [items, setItems] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [expandedWorkoutIds, setExpandedWorkoutIds] = useState<Record<number, boolean>>({});
-  const [privacyExpanded, setPrivacyExpanded] = useState(false);
+  const [revealedWorkoutIds, setRevealedWorkoutIds] = useState<Record<number, boolean>>({});
   // Optimistic like state — keyed by item id. Lets the heart
   // animate instantly while the network call is in flight; rolls back
   // on failure.
   const [pendingLikes, setPendingLikes] = useState<Record<number, boolean>>({});
+  const [expandedCommentIds, setExpandedCommentIds] = useState<Record<number, boolean>>({});
+  const [commentRows, setCommentRows] = useState<Record<number, FeedComment[]>>({});
+  const [commentDrafts, setCommentDrafts] = useState<Record<number, string>>({});
+  const [loadingComments, setLoadingComments] = useState<Record<number, boolean>>({});
+  const [postingComments, setPostingComments] = useState<Record<number, boolean>>({});
+  const [deletingComments, setDeletingComments] = useState<Record<number, boolean>>({});
+  const [quickReactionPending, setQuickReactionPending] = useState<Record<string, boolean>>({});
+  const listRef = useRef<FlatList<GroupedItem> | null>(null);
+  const scrollYRef = useRef(0);
+  const commentInputRowsRef = useRef<Record<number, View | null>>({});
+  const focusedCommentItemIdRef = useRef<number | null>(null);
+  const keyboardTopYRef = useRef<number | null>(null);
+  const centerCommentTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const feedViewabilityConfig = useRef({ itemVisiblePercentThreshold: 18, minimumViewTime: 60 }).current;
+  const onViewableFeedItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken<GroupedItem>[] }) => {
+    setRevealedWorkoutIds(prev => {
+      let changed = false;
+      const next = { ...prev };
+      viewableItems.forEach(token => {
+        const workoutId = token.item?.workout?.id;
+        if (token.isViewable && workoutId != null && !next[workoutId]) {
+          next[workoutId] = true;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }).current;
+
+  const centerCommentInput = useCallback((itemId: number, index?: number, delay = 0) => {
+    focusedCommentItemIdRef.current = itemId;
+    if (centerCommentTimeoutRef.current) clearTimeout(centerCommentTimeoutRef.current);
+    centerCommentTimeoutRef.current = setTimeout(() => {
+      requestAnimationFrame(() => {
+        const inputRow = commentInputRowsRef.current[itemId];
+        if (!inputRow) {
+          if (index != null) {
+            listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
+          }
+          return;
+        }
+        inputRow.measureInWindow((_x, y, _width, height) => {
+          const inputCenterY = y + height / 2;
+          const visibleBottomY = keyboardTopYRef.current ?? Dimensions.get('window').height;
+          const targetCenterY = Math.max(140, visibleBottomY / 2);
+          const deltaY = inputCenterY - targetCenterY;
+          if (Math.abs(deltaY) < 12) return;
+          listRef.current?.scrollToOffset({
+            offset: Math.max(0, scrollYRef.current + deltaY),
+            animated: true,
+          });
+        });
+      });
+    }, delay);
+  }, []);
+
+  useEffect(() => () => {
+    if (centerCommentTimeoutRef.current) clearTimeout(centerCommentTimeoutRef.current);
+  }, []);
+
+  useEffect(() => {
+    const onKeyboardShow = (event: KeyboardEvent) => {
+      keyboardTopYRef.current = event.endCoordinates.screenY || null;
+      const itemId = focusedCommentItemIdRef.current;
+      if (itemId != null) centerCommentInput(itemId, undefined, 80);
+    };
+    const onKeyboardHide = () => {
+      keyboardTopYRef.current = null;
+    };
+    const showSub = Keyboard.addListener('keyboardDidShow', onKeyboardShow);
+    const changeSub = Keyboard.addListener('keyboardDidChangeFrame', onKeyboardShow);
+    const hideSub = Keyboard.addListener('keyboardDidHide', onKeyboardHide);
+    return () => {
+      showSub.remove();
+      changeSub.remove();
+      hideSub.remove();
+    };
+  }, [centerCommentInput]);
 
   const loadInitial = useCallback(async () => {
     setLoading(true);
@@ -305,6 +412,100 @@ export default function SocialFeedView({
     }
   }, [authToken]);
 
+  const updateCommentSummary = useCallback((itemId: number, comments: FeedComment[], count: number) => {
+    setItems(curr => curr.map(it => it.id === itemId
+      ? {
+          ...it,
+          comment_count: Math.max(0, Number(count) || 0),
+          recent_comments: comments.slice(-2),
+        }
+      : it));
+  }, []);
+
+  const loadComments = useCallback(async (itemId: number) => {
+    setLoadingComments(curr => ({ ...curr, [itemId]: true }));
+    try {
+      const result = await listFeedComments(authToken, itemId);
+      setCommentRows(curr => ({ ...curr, [itemId]: result.items }));
+      updateCommentSummary(itemId, result.items, result.comment_count);
+    } catch {
+      // Keep the preview comments if a full load fails.
+    } finally {
+      setLoadingComments(curr => {
+        const { [itemId]: _, ...rest } = curr;
+        return rest;
+      });
+    }
+  }, [authToken, updateCommentSummary]);
+
+  const toggleComments = useCallback((item: FeedItem, index: number) => {
+    const opening = !expandedCommentIds[item.id];
+    configureExpandAnimation(260);
+    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+    setExpandedCommentIds(prev => ({ ...prev, [item.id]: opening }));
+    if (opening && !commentRows[item.id]) void loadComments(item.id);
+    if (opening) centerCommentInput(item.id, index, 320);
+  }, [centerCommentInput, commentRows, expandedCommentIds, loadComments]);
+
+  const submitComment = useCallback(async (item: FeedItem) => {
+    const body = (commentDrafts[item.id] ?? '').trim();
+    if (!body || postingComments[item.id]) return;
+    setPostingComments(curr => ({ ...curr, [item.id]: true }));
+    try {
+      const result = await createFeedComment(authToken, item.id, body);
+      const next = [...(commentRows[item.id] ?? item.recent_comments ?? []), result.comment];
+      setCommentRows(curr => ({ ...curr, [item.id]: next }));
+      setCommentDrafts(curr => ({ ...curr, [item.id]: '' }));
+      setExpandedCommentIds(curr => ({ ...curr, [item.id]: true }));
+      updateCommentSummary(item.id, next, result.comment_count);
+    } catch {
+      // Server remains authoritative; leave draft intact so the user can retry.
+    } finally {
+      setPostingComments(curr => {
+        const { [item.id]: _, ...rest } = curr;
+        return rest;
+      });
+    }
+  }, [authToken, commentDrafts, commentRows, postingComments, updateCommentSummary]);
+
+  const submitQuickReaction = useCallback(async (item: FeedItem, body: string) => {
+    const key = `${item.id}:${body}`;
+    if (quickReactionPending[key]) return;
+    setQuickReactionPending(curr => ({ ...curr, [key]: true }));
+    try {
+      const result = await createFeedComment(authToken, item.id, body);
+      const next = [...(commentRows[item.id] ?? item.recent_comments ?? []), result.comment];
+      setCommentRows(curr => ({ ...curr, [item.id]: next }));
+      updateCommentSummary(item.id, next, result.comment_count);
+      import('../utils/feedback').then(f => f.hapticSuccess?.()).catch(() => {});
+    } catch {
+      // Quick reactions are best-effort; the full comment box remains available.
+    } finally {
+      setQuickReactionPending(curr => {
+        const { [key]: _, ...rest } = curr;
+        return rest;
+      });
+    }
+  }, [authToken, commentRows, quickReactionPending, updateCommentSummary]);
+
+  const removeComment = useCallback(async (item: FeedItem, comment: FeedComment) => {
+    if (deletingComments[comment.id]) return;
+    setDeletingComments(curr => ({ ...curr, [comment.id]: true }));
+    try {
+      const result = await deleteFeedComment(authToken, item.id, comment.id);
+      const next = (commentRows[item.id] ?? item.recent_comments ?? []).filter(c => c.id !== comment.id);
+      setCommentRows(curr => ({ ...curr, [item.id]: next }));
+      updateCommentSummary(item.id, next, result.comment_count);
+    } catch {
+      // Next feed refresh reconciles.
+    } finally {
+      setDeletingComments(curr => {
+        const { [comment.id]: _, ...rest } = curr;
+        return rest;
+      });
+    }
+  }, [authToken, commentRows, deletingComments, updateCommentSummary]);
+
   const renderItem = useCallback(({ item: grouped, index }: { item: GroupedItem; index: number }) => {
     const { workout: item, prs } = grouped;
     const author = item.display_name ?? item.username;
@@ -313,13 +514,13 @@ export default function SocialFeedView({
     const hasExerciseDetails = exercises.length > 0;
     const isExpanded = !!expandedWorkoutIds[item.id];
     const summaryMetrics = summary ? [
-      { key: 'time', icon: 'time-outline', value: formatSocialDuration(summary.duration_seconds), label: 'Time' },
-      { key: 'exercises', icon: 'barbell-outline', value: String(summary.exercises?.length ?? 0), label: 'Exercises' },
-      { key: 'sets', icon: 'layers-outline', value: String(summary.total_sets ?? 0), label: 'Sets' },
-      ...(summary.total_reps ? [{ key: 'reps', icon: 'repeat-outline', value: String(summary.total_reps), label: 'Reps' }] : []),
-      ...(summary.distance_miles ? [{ key: 'distance', icon: 'map-outline', value: formatSocialDistance(summary.distance_miles), label: 'Distance' }] : []),
-      ...(summary.hr_summary?.avgBpm ? [{ key: 'hr', icon: 'heart-outline', value: `${Math.round(Number(summary.hr_summary.avgBpm))}`, label: 'Avg bpm' }] : []),
-    ].filter(metric => !!metric.value) : [];
+      { key: 'time', icon: 'time-outline', text: formatSocialDuration(summary.duration_seconds) },
+      { key: 'exercises', icon: 'barbell-outline', text: `${summary.exercises?.length ?? 0} moves` },
+      { key: 'sets', icon: 'layers-outline', text: `${summary.total_sets ?? 0} sets` },
+      ...(summary.total_reps ? [{ key: 'reps', icon: 'repeat-outline', text: `${summary.total_reps} reps` }] : []),
+      ...(summary.distance_miles ? [{ key: 'distance', icon: 'map-outline', text: formatSocialDistance(summary.distance_miles) }] : []),
+      ...(summary.hr_summary?.avgBpm ? [{ key: 'hr', icon: 'heart-outline', text: `${Math.round(Number(summary.hr_summary.avgBpm))} bpm` }] : []),
+    ].filter(metric => !!metric.text) : [];
     const summarySubtitle = summary
       ? [summary.activity_subtype, summary.cardio_style].map(socialLabel).filter(Boolean).join(' · ')
       : '';
@@ -328,10 +529,28 @@ export default function SocialFeedView({
     const photo = item.payload.photo_base64;
     const dateLabel = formatWorkoutDate(socialWorkoutDateKey(item));
     const metaLabel = [`@${item.username}`, dateLabel, formatRelative(item.created_at)].filter(Boolean).join('  ·  ');
+    const commentsOpen = !!expandedCommentIds[item.id];
+    const loadedComments = commentRows[item.id];
+    const previewComments = item.recent_comments ?? [];
+    const shownComments = commentsOpen ? (loadedComments ?? previewComments) : [];
+    const commentCount = Math.max(0, Number(item.comment_count) || 0);
+    const commentDraft = commentDrafts[item.id] ?? '';
+    const commentsToggleLabel = commentsOpen
+      ? 'Hide comments'
+      : (commentCount > 0 ? `View ${commentCount} comment${commentCount === 1 ? '' : 's'}` : 'Comment');
+    const canQuickReact = currentUserId != null && item.user_id !== currentUserId;
+    const cardAccent = prs.length > 0 ? (colors.warning ?? '#F59E0B') : colors.primary;
 
     return (
-      <FadeInView delay={Math.min(index * 45, 260)} duration={280} slideDistance={10}>
+      <ScrollRevealView active={index < 2 || !!revealedWorkoutIds[item.id]} index={index} revealDistance={14}>
       <View testID={`social-feed-row-${index}`} style={styles.card}>
+        <LinearGradient
+          pointerEvents="none"
+          colors={[cardAccent + '18', 'transparent'] as any}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.cardWash}
+        />
         <View style={styles.cardHeader}>
           <TouchableOpacity
             testID={`social-feed-author-${index}`}
@@ -344,7 +563,7 @@ export default function SocialFeedView({
               avatarUrl={item.avatar_url}
               name={author}
               username={item.username}
-              size={36}
+              size={32}
               backgroundColor={colors.surface}
               borderColor={colors.border}
               textColor={colors.textPrimary}
@@ -377,7 +596,7 @@ export default function SocialFeedView({
                 <Ionicons name="barbell-outline" size={15} color={colors.primary} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.summaryFocus}>{summary.focus || 'Workout'}</Text>
+                <Text style={styles.summaryFocus} numberOfLines={1}>{summary.focus || 'Workout'}</Text>
                 {summarySubtitle ? (
                   <Text style={styles.summarySubtitle} numberOfLines={1}>{summarySubtitle}</Text>
                 ) : null}
@@ -388,12 +607,11 @@ export default function SocialFeedView({
                 </View>
               ) : null}
             </View>
-            <View style={styles.summaryMetricGrid}>
+            <View style={styles.summaryMetricRow}>
               {summaryMetrics.map(metric => (
-                <View key={metric.key} style={styles.summaryMetricTile}>
-                  <Ionicons name={metric.icon as any} size={13} color={colors.textMuted} />
-                  <Text style={styles.summaryMetricValue}>{metric.value}</Text>
-                  <Text style={styles.summaryMetricLabel}>{metric.label}</Text>
+                <View key={metric.key} style={styles.summaryMetricItem}>
+                  <Ionicons name={metric.icon as any} size={12} color={colors.textMuted} />
+                  <Text style={styles.summaryMetricText} numberOfLines={1}>{metric.text}</Text>
                 </View>
               ))}
             </View>
@@ -412,9 +630,9 @@ export default function SocialFeedView({
                 activeOpacity={0.75}
               >
                 <View style={styles.detailsToggleCopy}>
-                  <Text style={styles.detailsToggleText}>Workout details</Text>
-                  <Text style={styles.detailsToggleSubtext}>
-                    {isExpanded ? 'Hide recorded sets' : 'Show load, time, and cardio metrics'}
+                  <Text style={styles.detailsToggleText}>{isExpanded ? 'Hide details' : 'Workout details'}</Text>
+                  <Text style={styles.detailsToggleMeta}>
+                    {exercises.length} exercise{exercises.length === 1 ? '' : 's'}
                   </Text>
                 </View>
                 <RotatingChevron expanded={isExpanded} color={colors.textMuted} />
@@ -423,36 +641,32 @@ export default function SocialFeedView({
             {isExpanded ? (
               <View style={styles.exerciseList}>
                 {exercises.map((ex, exerciseIndex) => {
-                  const setSummaries = compactSocialSetSummaries(ex.sets);
                   const equipment = equipmentLabel(ex.equipment);
+                  const setCount = ex.sets?.length ?? 0;
+                  const meta = [setCount > 0 ? `${setCount} set${setCount === 1 ? '' : 's'}` : '', equipment]
+                    .filter(Boolean)
+                    .join(' · ');
                   return (
                     <FadeInView
                       key={`${item.id}-${exerciseIndex}-${ex.name ?? 'exercise'}`}
                       delay={Math.min(exerciseIndex * 35, 160)}
                       duration={220}
                       slideDistance={6}
-                      style={styles.exerciseDetailCard}
+                      style={[
+                        styles.exerciseDetailRow,
+                        exerciseIndex === 0 && styles.exerciseDetailRowFirst,
+                      ]}
                     >
-                    <View style={styles.exerciseRow}>
-                      <View style={styles.exerciseIndexPill}>
-                        <Text style={styles.exerciseIndexText}>{exerciseIndex + 1}</Text>
-                      </View>
-                      <View style={{ flex: 1, gap: 7 }}>
+                    <View style={styles.exerciseLine}>
+                      <View style={styles.exerciseDot} />
+                      <View style={styles.exerciseCopy}>
                         <View style={styles.exerciseTitleRow}>
-                          <Text style={styles.exerciseName}>{ex.name || 'Exercise'}</Text>
-                          {equipment ? (
-                            <View style={styles.exerciseEquipmentPill}>
-                              <Text style={styles.exerciseEquipment}>{equipment}</Text>
-                            </View>
-                          ) : null}
+                          <Text style={styles.exerciseName} numberOfLines={1}>{ex.name || 'Exercise'}</Text>
+                          {meta ? <Text style={styles.exerciseMeta} numberOfLines={1}>{meta}</Text> : null}
                         </View>
-                        <View style={styles.setChipWrap}>
-                          {(setSummaries.length ? setSummaries : [`${ex.sets?.length ?? 0} sets`]).map((label, setIndex) => (
-                            <View key={`${exerciseIndex}-${setIndex}-${label}`} style={styles.setChip}>
-                              <Text style={styles.setChipText}>{label}</Text>
-                            </View>
-                          ))}
-                        </View>
+                        <Text style={styles.exerciseSetLine} numberOfLines={1}>
+                          {compactExerciseDetailLine(ex)}
+                        </Text>
                       </View>
                     </View>
                     </FadeInView>
@@ -519,13 +733,273 @@ export default function SocialFeedView({
               {item.like_count > 0 ? item.like_count : ''}
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            testID={`social-feed-comments-${index}`}
+            accessibilityLabel={`social-feed-comments-${index}`}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: commentsOpen }}
+            onPress={() => toggleComments(item, index)}
+            style={[styles.commentBtn, commentsOpen && styles.commentBtnActive]}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={commentsOpen ? 'chatbubble' : 'chatbubble-outline'}
+              size={19}
+              color={commentsOpen ? colors.primary : colors.textSecondary}
+            />
+            <Text style={[styles.commentCount, commentsOpen && { color: colors.primary }]} numberOfLines={1}>
+              {commentsToggleLabel}
+            </Text>
+            <RotatingChevron expanded={commentsOpen} color={commentsOpen ? colors.primary : colors.textMuted} />
+          </TouchableOpacity>
         </View>
+
+        {canQuickReact ? (
+          <View style={styles.quickReactionRow}>
+            {QUICK_REACTIONS.map(reaction => {
+              const pending = !!quickReactionPending[`${item.id}:${reaction}`];
+              return (
+                <TouchableOpacity
+                  key={reaction}
+                  testID={`social-feed-reaction-${index}-${reaction.toLowerCase().replace(/\s+/g, '-')}`}
+                  accessibilityLabel={`Send ${reaction}`}
+                  onPress={() => submitQuickReaction(item, reaction)}
+                  disabled={pending}
+                  style={[styles.quickReactionChip, pending && { opacity: 0.55 }]}
+                  activeOpacity={0.78}
+                >
+                  <Text style={styles.quickReactionText}>{pending ? 'Sending' : reaction}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : null}
+
+        {(shownComments.length > 0 || commentsOpen) ? (
+          <View style={styles.commentsBlock}>
+            {shownComments.map(comment => {
+              const name = comment.display_name || comment.username;
+              return (
+                <View key={comment.id} style={styles.commentRow}>
+                  <SocialAvatar
+                    avatarUrl={comment.avatar_url}
+                    name={name}
+                    username={comment.username}
+                    size={24}
+                    backgroundColor={colors.surfaceRaised}
+                    borderColor={colors.border}
+                    textColor={colors.textPrimary}
+                  />
+                  <View style={styles.commentBubble}>
+                    <View style={styles.commentHeader}>
+                      <Text style={styles.commentAuthor} numberOfLines={1}>{name}</Text>
+                      {comment.can_delete ? (
+                        <TouchableOpacity
+                          testID={`social-feed-comment-delete-${comment.id}`}
+                          accessibilityLabel="Delete comment"
+                          onPress={() => removeComment(item, comment)}
+                          disabled={!!deletingComments[comment.id]}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          style={styles.commentDeleteBtn}
+                        >
+                          <Ionicons name="trash-outline" size={13} color={colors.textMuted} />
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                    <Text style={styles.commentBody}>{comment.body}</Text>
+                  </View>
+                </View>
+              );
+            })}
+            {commentsOpen && loadingComments[item.id] ? (
+              <View style={styles.commentsLoading}>
+                <ActivityIndicator size="small" color={colors.textMuted} />
+              </View>
+            ) : null}
+            {commentsOpen ? (
+              <View
+                ref={(node) => { commentInputRowsRef.current[item.id] = node; }}
+                style={styles.commentInputRow}
+              >
+                <TextInput
+                  testID={`social-feed-comment-input-${index}`}
+                  style={styles.commentInput}
+                  placeholder="Add a comment"
+                  placeholderTextColor={colors.textMuted}
+                  value={commentDraft}
+                  onChangeText={(text) => setCommentDrafts(prev => ({ ...prev, [item.id]: text }))}
+                  onFocus={() => centerCommentInput(item.id, index, 120)}
+                  onContentSizeChange={() => {
+                    if (focusedCommentItemIdRef.current === item.id) centerCommentInput(item.id, index);
+                  }}
+                  multiline
+                  maxLength={500}
+                />
+                <TouchableOpacity
+                  testID={`social-feed-comment-send-${index}`}
+                  accessibilityLabel="Post comment"
+                  onPress={() => submitComment(item)}
+                  disabled={!commentDraft.trim() || !!postingComments[item.id]}
+                  style={[
+                    styles.commentSendBtn,
+                    (!commentDraft.trim() || !!postingComments[item.id]) && styles.commentSendBtnDisabled,
+                  ]}
+                  activeOpacity={0.78}
+                >
+                  {postingComments[item.id] ? (
+                    <ActivityIndicator size="small" color={colors.textMuted} />
+                  ) : (
+                    <Ionicons
+                      name="send"
+                      size={15}
+                      color={commentDraft.trim() ? colors.primary : colors.textMuted}
+                    />
+                  )}
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
       </View>
-      </FadeInView>
+      </ScrollRevealView>
     );
-  }, [styles, colors, expandedWorkoutIds, pendingLikes, onViewAuthor, handleLike]);
+  }, [
+    styles,
+    colors,
+    expandedWorkoutIds,
+    expandedCommentIds,
+    commentRows,
+    commentDrafts,
+    loadingComments,
+    postingComments,
+    deletingComments,
+    pendingLikes,
+    revealedWorkoutIds,
+    quickReactionPending,
+    currentUserId,
+    onViewAuthor,
+    handleLike,
+    toggleComments,
+    submitComment,
+    submitQuickReaction,
+    removeComment,
+  ]);
 
   const keyExtractor = useCallback((it: GroupedItem) => String(it.workout.id), []);
+
+  const topFriend = useMemo(() => {
+    const topId = digest?.summary.top_user_id;
+    if (!topId) return null;
+    return digest?.friends.find(f => f.user_id === topId) ?? null;
+  }, [digest]);
+
+  const listHeader = useMemo(() => {
+    if (!digest) return null;
+    const friendTotal = digest.summary.friend_count;
+    const trained = digest.summary.friends_trained_this_week;
+    const topLabel = topFriend && digest.summary.top_sessions > 0
+      ? `${topFriend.display_name || topFriend.username} · ${digest.summary.top_sessions}`
+      : 'No leader yet';
+    return (
+      <View style={styles.digestCard} testID="social-activity-summary-card">
+        <LinearGradient
+          pointerEvents="none"
+          colors={[colors.primary + '22', (colors.warning ?? '#F59E0B') + '0F', 'transparent'] as any}
+          locations={[0, 0.52, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.cardWash}
+        />
+        <View style={styles.digestHeaderRow}>
+          <View>
+            <Text style={styles.digestLabel}>THIS WEEK</Text>
+            <Text style={styles.digestTitle}>Social pulse</Text>
+          </View>
+          <TouchableOpacity
+            style={styles.digestInviteBtn}
+            onPress={onShareInvite ?? onOpenFriends}
+            activeOpacity={0.78}
+          >
+            <Ionicons name="person-add-outline" size={14} color={colors.primary} />
+            <Text style={styles.digestInviteText}>Invite</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.digestStatGrid}>
+          <View style={styles.digestStat}>
+            <Text style={styles.digestStatValue}>{trained}/{friendTotal}</Text>
+            <Text style={styles.digestStatLabel}>trained</Text>
+          </View>
+          <View style={styles.digestStat}>
+            <Text style={styles.digestStatValue}>{digest.summary.total_friend_sessions}</Text>
+            <Text style={styles.digestStatLabel}>sessions</Text>
+          </View>
+          <View style={styles.digestStat}>
+            <Text style={styles.digestStatValue}>{digest.you.streak}</Text>
+            <Text style={styles.digestStatLabel}>your streak</Text>
+          </View>
+        </View>
+        <View style={styles.digestFooterRow}>
+          <View style={styles.digestFooterItem}>
+            <Ionicons name="trophy-outline" size={13} color={colors.warning ?? '#F59E0B'} />
+            <Text style={styles.digestFooterText} numberOfLines={1}>{topLabel}</Text>
+          </View>
+          {digest.summary.long_streak_count > 0 ? (
+            <View style={styles.digestFooterItem}>
+              <Ionicons name="flame-outline" size={13} color={colors.warning ?? '#F59E0B'} />
+              <Text style={styles.digestFooterText}>
+                {digest.summary.long_streak_count} long streak{digest.summary.long_streak_count === 1 ? '' : 's'}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+        {friendTotal > 0 && !sharingEnabled ? (
+          <TouchableOpacity style={styles.digestSharePrompt} onPress={onTurnOnSharing} activeOpacity={0.82}>
+            <Ionicons name="eye-off-outline" size={15} color={colors.warning ?? '#F59E0B'} />
+            <Text style={styles.digestSharePromptText}>Sharing is off</Text>
+            <Text style={styles.digestSharePromptAction}>Turn on</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    );
+  }, [
+    colors.primary,
+    colors.warning,
+    digest,
+    onOpenFriends,
+    onShareInvite,
+    onTurnOnSharing,
+    sharingEnabled,
+    styles,
+    topFriend,
+  ]);
+
+  const emptyConfig = useMemo(() => {
+    if (friendCount === 0) {
+      return {
+        icon: 'person-add-outline' as const,
+        title: 'Start your circle',
+        body: 'Add a friend by username or send your invite link.',
+        action: 'Invite friends',
+        onPress: onShareInvite ?? onOpenFriends,
+      };
+    }
+    if (!sharingEnabled) {
+      return {
+        icon: 'eye-off-outline' as const,
+        title: 'Sharing is off',
+        body: 'Your friends are connected. Turn on workout sharing when you want them to see your sessions and streak.',
+        action: 'Turn on sharing',
+        onPress: onTurnOnSharing,
+      };
+    }
+    return {
+      icon: 'barbell-outline' as const,
+      title: 'No workouts yet',
+      body: 'New friend workouts and your shared sessions will land here.',
+      action: 'Find friends',
+      onPress: onOpenFriends,
+    };
+  }, [friendCount, onOpenFriends, onShareInvite, onTurnOnSharing, sharingEnabled]);
 
   if (loading && items.length === 0) {
     return (
@@ -535,94 +1009,30 @@ export default function SocialFeedView({
     );
   }
 
-  const myActivityHeader = shareEnabled && myActivity ? (
-    <FadeInView delay={0} duration={260} slideDistance={8}>
-    <View style={[styles.card, styles.myActivityCard]}>
-      <View style={styles.cardHeader}>
-        <View style={styles.authorRow}>
-          <SocialAvatar
-            avatarUrl={myAvatarUrl}
-            name={myDisplayName || 'You'}
-            username="you"
-            size={36}
-            backgroundColor={colors.primary + '20'}
-            borderColor={colors.primary + '55'}
-            textColor={colors.textPrimary}
-          />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.authorName}>
-              {myDisplayName || 'You'}
-              <Text style={styles.myLabel}>  ·  Your activity</Text>
-            </Text>
-            <Text style={styles.authorMeta}>Shared with friends</Text>
-          </View>
-          <View style={styles.sharingBadge}>
-            <Ionicons name="globe-outline" size={11} color={colors.primary} />
-            <Text style={styles.sharingBadgeText}>Sharing on</Text>
-          </View>
-        </View>
-      </View>
-      <View style={styles.summaryBlock}>
-        <View style={styles.summaryStatsRow}>
-          <Text style={styles.summaryStat}>
-            <Text style={styles.summaryStatNum}>{myActivity.sessions}</Text>
-            {` session${myActivity.sessions === 1 ? '' : 's'} this week`}
-          </Text>
-          {myActivity.streak > 0 && (
-            <>
-              <Text style={styles.summaryStatDot}>·</Text>
-              <Text style={styles.summaryStat}>
-                <Text style={styles.summaryStatNum}>{myActivity.streak}</Text>
-                {myActivity.streak === 1 ? ' day streak' : ' day streak'}
-              </Text>
-            </>
-          )}
-        </View>
-        {myActivity.sessions === 0 && (
-          <Text style={[styles.authorMeta, { marginTop: 2 }]}>
-            Log a workout this week to appear in your friends' feeds.
-          </Text>
-        )}
-      </View>
-    </View>
-    </FadeInView>
-  ) : null;
-  const privacyHeader = (
-    <View style={styles.privacyWrap}>
-      <TouchableOpacity
-        testID="social-feed-privacy-toggle"
-        accessibilityLabel="Social privacy details"
-        accessibilityRole="button"
-        accessibilityState={{ expanded: privacyExpanded }}
-        onPress={() => setPrivacyExpanded(v => !v)}
-        style={styles.privacyIconButton}
-        activeOpacity={0.75}
-      >
-        <Ionicons name="shield-checkmark-outline" size={17} color={colors.primary} />
-      </TouchableOpacity>
-      {privacyExpanded ? (
-        <View style={styles.privacyBubble}>
-          <Text style={styles.privacyText}>
-            Friends see workout activity, including recorded load, time, and distance. Calories, macros, meals, body weight, and measurements stay private.
-          </Text>
-        </View>
-      ) : null}
-    </View>
-  );
-  const listHeader = (
-    <>
-      {privacyHeader}
-      {myActivityHeader}
-    </>
-  );
+  // The "Your activity" summary card that used to live here was
+  // removed — the same info (sessions this week, streak) is already
+  // surfaced on the Friends → Profile tab via the My Profile card,
+  // and pinning it above every feed render was duplicative noise.
 
   return (
     <FlatList
+      ref={listRef}
       testID="social-feed-list"
       data={displayItems}
       keyExtractor={keyExtractor}
       renderItem={renderItem}
       contentContainerStyle={[styles.listContent, { paddingBottom: bottomPadding }]}
+      keyboardShouldPersistTaps="handled"
+      onScroll={(event) => { scrollYRef.current = event.nativeEvent.contentOffset.y; }}
+      onViewableItemsChanged={onViewableFeedItemsChanged}
+      viewabilityConfig={feedViewabilityConfig}
+      onScrollToIndexFailed={(info) => {
+        listRef.current?.scrollToOffset({
+          offset: Math.max(0, info.averageItemLength * info.index),
+          animated: true,
+        });
+      }}
+      scrollEventThrottle={16}
       ListHeaderComponent={listHeader}
       refreshControl={
         <RefreshControl
@@ -634,11 +1044,16 @@ export default function SocialFeedView({
       ListEmptyComponent={
         <FadeInView delay={0} duration={240} slideDistance={8}>
         <View style={styles.empty}>
-          <Ionicons name="checkmark-circle-outline" size={28} color={colors.textMuted} />
-          <Text style={styles.emptyTitle}>You're all caught up</Text>
+          <Ionicons name={emptyConfig.icon} size={28} color={colors.textMuted} />
+          <Text style={styles.emptyTitle}>{emptyConfig.title}</Text>
           <Text style={styles.emptyBody}>
-            Nothing new from your friends right now. Pull to refresh.
+            {emptyConfig.body}
           </Text>
+          {emptyConfig.onPress ? (
+            <TouchableOpacity style={styles.emptyActionBtn} onPress={emptyConfig.onPress} activeOpacity={0.8}>
+              <Text style={styles.emptyActionText}>{emptyConfig.action}</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
         </FadeInView>
       }
@@ -655,13 +1070,100 @@ export default function SocialFeedView({
   );
 }
 
-function createStyles(c: ReturnType<typeof getTheme>['colors']) {
+function createStyles(c: ReturnType<typeof getTheme>['colors'], isLightTheme: boolean) {
+  const activityCardBackground = isLightTheme ? c.surface : c.surfaceRaised;
+  const activityInnerBackground = isLightTheme ? c.surfaceRaised : c.surface;
+
   return StyleSheet.create({
-    listContent: { paddingVertical: 8, paddingHorizontal: 12, gap: 10 },
+    listContent: { paddingVertical: 6, paddingHorizontal: 10, gap: 8 },
     center: { paddingVertical: 40, alignItems: 'center', justifyContent: 'center' },
     empty: { paddingVertical: 60, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 28 },
     emptyTitle: { fontSize: 16, fontWeight: '700', color: c.textPrimary, marginTop: 8 },
     emptyBody: { fontSize: 13, color: c.textSecondary, textAlign: 'center', lineHeight: 18 },
+    emptyActionBtn: {
+      marginTop: 6,
+      paddingHorizontal: 14,
+      paddingVertical: 9,
+      borderRadius: radius.full,
+      backgroundColor: c.primary,
+    },
+    emptyActionText: { fontSize: 12, fontWeight: '900', color: getContrastingTextColor(c.primary) },
+    digestCard: {
+      backgroundColor: activityCardBackground,
+      borderRadius: radius.sm,
+      padding: 12,
+      gap: 11,
+      borderWidth: 1,
+      borderColor: c.border,
+      overflow: 'hidden',
+    },
+    cardWash: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      top: 0,
+      bottom: 0,
+    },
+    digestHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+    },
+    digestLabel: { fontSize: 10, fontWeight: '900', color: c.textMuted, letterSpacing: 0.5 },
+    digestTitle: { fontSize: 16, fontWeight: '900', color: c.textPrimary, marginTop: 2 },
+    digestInviteBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      borderRadius: radius.full,
+      backgroundColor: c.primary + '12',
+      borderWidth: 1,
+      borderColor: c.primary + '25',
+    },
+    digestInviteText: { fontSize: 11, fontWeight: '900', color: c.primary },
+    digestStatGrid: { flexDirection: 'row', gap: 8 },
+    digestStat: {
+      flex: 1,
+      minHeight: 58,
+      borderRadius: radius.md,
+      backgroundColor: activityInnerBackground,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    digestStatValue: { fontSize: 19, fontWeight: '900', color: c.textPrimary, fontVariant: ['tabular-nums'] as any },
+    digestStatLabel: { fontSize: 10, fontWeight: '800', color: c.textMuted, marginTop: 2 },
+    digestFooterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+    digestFooterItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      maxWidth: '100%',
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: radius.full,
+      backgroundColor: activityInnerBackground,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    digestFooterText: { minWidth: 0, fontSize: 11, fontWeight: '800', color: c.textSecondary },
+    digestSharePrompt: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: (c.warning ?? '#F59E0B') + '55',
+      backgroundColor: (c.warning ?? '#F59E0B') + '10',
+      paddingHorizontal: 10,
+      paddingVertical: 9,
+    },
+    digestSharePromptText: { flex: 1, fontSize: 12, fontWeight: '800', color: c.textPrimary },
+    digestSharePromptAction: { fontSize: 12, fontWeight: '900', color: c.warning ?? '#F59E0B' },
     privacyWrap: {
       alignItems: 'flex-end',
       gap: 6,
@@ -681,7 +1183,7 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
       flexDirection: 'row',
       alignItems: 'flex-start',
       gap: 8,
-      backgroundColor: c.surface,
+      backgroundColor: activityInnerBackground,
       borderColor: c.border,
       borderWidth: 1,
       borderRadius: radius.md,
@@ -689,72 +1191,65 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     },
     privacyText: { flex: 1, fontSize: 11, color: c.textSecondary, lineHeight: 16, fontWeight: '600' },
     card: {
-      backgroundColor: c.surfaceRaised,
-      borderRadius: radius.lg,
-      padding: 14,
-      gap: 10,
+      backgroundColor: activityCardBackground,
+      borderRadius: radius.sm,
+      padding: 11,
+      gap: 8,
       borderWidth: 1,
       borderColor: c.border,
+      overflow: 'hidden',
     },
     cardHeader: { flexDirection: 'row', alignItems: 'center' },
-    authorRow: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-    authorName: { fontSize: 14, fontWeight: '700', color: c.textPrimary },
-    authorMeta: { fontSize: 11, color: c.textMuted, marginTop: 1 },
-    caption: { fontSize: 14, color: c.textPrimary, lineHeight: 19 },
+    authorRow: { flexDirection: 'row', alignItems: 'center', gap: 9, flex: 1 },
+    authorName: { fontSize: 13, fontWeight: '700', color: c.textPrimary },
+    authorMeta: { fontSize: 10, color: c.textMuted, marginTop: 1 },
+    caption: { fontSize: 13, color: c.textPrimary, lineHeight: 18 },
     photo: {
       width: '100%', aspectRatio: 4 / 3, borderRadius: radius.md,
-      backgroundColor: c.surface,
+      backgroundColor: activityInnerBackground,
     },
     summaryBlock: {
-      backgroundColor: c.surface,
-      borderRadius: radius.md,
-      padding: 12,
-      gap: 10,
+      backgroundColor: activityInnerBackground,
+      borderRadius: radius.sm,
+      padding: 10,
+      gap: 8,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.border,
     },
-    summaryHeader: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+    summaryHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     summaryIconBadge: {
-      width: 30,
-      height: 30,
-      borderRadius: 9,
+      width: 26,
+      height: 26,
+      borderRadius: 8,
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: c.primary + '14',
       borderColor: c.primary + '28',
       borderWidth: 1,
     },
-    summaryFocus: { fontSize: 14, fontWeight: '800', color: c.textPrimary, textTransform: 'capitalize' },
-    summarySubtitle: { fontSize: 11, color: c.textMuted, marginTop: 1, fontWeight: '600' },
+    summaryFocus: { fontSize: 13, fontWeight: '800', color: c.textPrimary, textTransform: 'capitalize' },
+    summarySubtitle: { fontSize: 10, color: c.textMuted, marginTop: 1, fontWeight: '600' },
     ratingBadge: {
-      paddingHorizontal: 8,
-      paddingVertical: 4,
+      paddingHorizontal: 7,
+      paddingVertical: 3,
       borderRadius: radius.full,
       backgroundColor: c.primary + '16',
       borderColor: c.primary + '26',
       borderWidth: 1,
     },
     ratingBadgeText: { fontSize: 10, fontWeight: '800', color: c.primary },
-    summaryMetricGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
-    summaryMetricTile: {
-      minWidth: 72,
-      flexGrow: 1,
-      flexBasis: '30%',
-      borderRadius: radius.sm,
-      borderWidth: 1,
-      borderColor: c.border,
-      backgroundColor: c.surfaceRaised,
-      paddingHorizontal: 8,
-      paddingVertical: 8,
+    summaryMetricRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, rowGap: 5 },
+    summaryMetricItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
       gap: 3,
+      minHeight: 18,
+      maxWidth: '100%',
     },
-    summaryMetricValue: { fontSize: 14, color: c.textPrimary, fontWeight: '800', fontVariant: ['tabular-nums'] as any },
-    summaryMetricLabel: { fontSize: 10, color: c.textMuted, fontWeight: '700', textTransform: 'uppercase' },
-    summaryStatsRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-    summaryStat: { fontSize: 12, color: c.textSecondary },
-    summaryStatNum: { fontWeight: '700', color: c.textPrimary },
-    summaryStatDot: { fontSize: 12, color: c.textMuted },
+    summaryMetricText: { fontSize: 11, color: c.textSecondary, fontWeight: '800', fontVariant: ['tabular-nums'] as any },
     detailsToggle: {
       marginTop: 2,
-      paddingTop: 8,
+      paddingTop: 7,
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: c.border,
       flexDirection: 'row',
@@ -764,81 +1259,125 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     },
     detailsToggleActive: { borderTopColor: c.primary + '35' },
     detailsToggleCopy: { flex: 1 },
-    detailsToggleText: { fontSize: 12, fontWeight: '800', color: c.textPrimary },
-    detailsToggleSubtext: { fontSize: 10, fontWeight: '600', color: c.textMuted, marginTop: 1 },
+    detailsToggleText: { fontSize: 11, fontWeight: '800', color: c.textPrimary },
+    detailsToggleMeta: { fontSize: 10, fontWeight: '700', color: c.textMuted, marginTop: 1 },
     exerciseList: {
-      gap: 8,
-      paddingTop: 8,
+      paddingTop: 2,
+    },
+    exerciseDetailRow: {
       borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: c.border,
-    },
-    exerciseDetailCard: {
-      borderRadius: radius.md,
-      borderWidth: 1,
       borderColor: c.border,
-      backgroundColor: c.surfaceRaised,
-      padding: 10,
+      paddingVertical: 8,
     },
-    exerciseRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
-    exerciseBullet: {
+    exerciseDetailRowFirst: { borderTopWidth: 0 },
+    exerciseLine: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+    exerciseDot: {
       width: 5,
       height: 5,
       borderRadius: 3,
       backgroundColor: c.primary,
-      marginTop: 6,
+      marginTop: 7,
     },
-    exerciseIndexPill: {
-      width: 22,
-      height: 22,
-      borderRadius: 7,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: c.primary + '12',
-      borderWidth: 1,
-      borderColor: c.primary + '25',
-    },
-    exerciseIndexText: { fontSize: 10, fontWeight: '800', color: c.primary },
-    exerciseTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-    exerciseName: { fontSize: 13, fontWeight: '800', color: c.textPrimary, lineHeight: 18, flexShrink: 1 },
-    exerciseEquipmentPill: {
-      paddingHorizontal: 7,
-      paddingVertical: 2,
-      borderRadius: radius.full,
-      backgroundColor: c.surface,
-      borderColor: c.border,
-      borderWidth: 1,
-    },
-    exerciseEquipment: { fontSize: 10, fontWeight: '700', color: c.textMuted },
-    setChipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-    setChip: {
-      paddingHorizontal: 8,
-      paddingVertical: 5,
-      borderRadius: radius.sm,
-      backgroundColor: c.primary + '10',
-      borderWidth: 1,
-      borderColor: c.primary + '22',
-      maxWidth: '100%',
-    },
-    setChipText: { fontSize: 11, color: c.textSecondary, fontWeight: '700', lineHeight: 14 },
-    exerciseSets: { fontSize: 11, color: c.textSecondary, lineHeight: 16, marginTop: 2 },
+    exerciseCopy: { flex: 1, minWidth: 0, gap: 2 },
+    exerciseTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+    exerciseName: { flex: 1, minWidth: 0, fontSize: 12, fontWeight: '800', color: c.textPrimary, lineHeight: 17 },
+    exerciseMeta: { maxWidth: '44%', fontSize: 10, fontWeight: '700', color: c.textMuted },
+    exerciseSetLine: { fontSize: 11, color: c.textSecondary, lineHeight: 15, fontWeight: '600' },
     prRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
     prBadge: {
       flexDirection: 'row', alignItems: 'center', gap: 4,
       paddingHorizontal: 8, paddingVertical: 3,
-      backgroundColor: c.surface,
+      backgroundColor: activityInnerBackground,
       borderRadius: 10, borderWidth: 1, borderColor: c.border,
     },
     prText: { fontSize: 11, fontWeight: '600', color: c.textSecondary, maxWidth: 160 },
     actionRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingTop: 4 },
     likeBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
     likeCount: { fontSize: 12, color: c.textSecondary, fontWeight: '600', minWidth: 12 },
-    myActivityCard: { borderColor: c.primary + '40' },
-    myLabel: { fontSize: 12, fontWeight: '400', color: c.textMuted },
-    sharingBadge: {
-      flexDirection: 'row', alignItems: 'center', gap: 3,
-      paddingHorizontal: 7, paddingVertical: 3,
-      borderRadius: 10, backgroundColor: c.primary + '15',
+    commentBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      flexShrink: 1,
+      minHeight: 28,
+      maxWidth: '78%',
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: radius.full,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: activityInnerBackground,
     },
-    sharingBadgeText: { fontSize: 10, fontWeight: '700', color: c.primary },
+    commentBtnActive: {
+      borderColor: c.primary + '32',
+      backgroundColor: c.primary + '10',
+    },
+    commentCount: { minWidth: 0, fontSize: 12, color: c.textSecondary, fontWeight: '700', flexShrink: 1 },
+    quickReactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+    quickReactionChip: {
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: radius.full,
+      backgroundColor: c.primary + '0F',
+      borderWidth: 1,
+      borderColor: c.primary + '22',
+    },
+    quickReactionText: { fontSize: 11, fontWeight: '800', color: c.primary },
+    commentsBlock: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.border,
+      paddingTop: 10,
+      gap: 9,
+    },
+    commentRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+    commentBubble: {
+      flex: 1,
+      minWidth: 0,
+      borderRadius: radius.md,
+      backgroundColor: activityInnerBackground,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+    },
+    commentHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    commentAuthor: { flex: 1, minWidth: 0, fontSize: 11, fontWeight: '800', color: c.textPrimary },
+    commentDeleteBtn: { width: 22, height: 22, alignItems: 'center', justifyContent: 'center' },
+    commentBody: { fontSize: 13, color: c.textSecondary, lineHeight: 18, marginTop: 2 },
+    commentsLoading: { paddingVertical: 4, alignItems: 'center' },
+    commentInputRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      gap: 8,
+      paddingTop: 2,
+    },
+    commentInput: {
+      flex: 1,
+      minHeight: 38,
+      maxHeight: 96,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: activityInnerBackground,
+      paddingHorizontal: 11,
+      paddingVertical: 9,
+      fontSize: 13,
+      color: c.textPrimary,
+      lineHeight: 18,
+    },
+    commentSendBtn: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.primary + '12',
+      borderWidth: 1,
+      borderColor: c.primary + '28',
+    },
+    commentSendBtnDisabled: {
+      backgroundColor: activityInnerBackground,
+      borderColor: c.border,
+    },
   });
 }

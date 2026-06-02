@@ -1,8 +1,9 @@
 // Open-ended live workout tracker. The user picks a category +
 // subtype, hits Start, and Thallo runs a timer + HR polling while
-// they're moving. On Finish, the session is handed to
-// LogActivityModal pre-filled with the actual duration, HR average,
-// and timestamps — the user just confirms intensity and saves.
+// they're moving. Quick-start workout picks hand off to the standard
+// ActiveWorkoutScreen flow when the parent provides it, so they finish
+// with the same recap/share summary as assigned workouts. The in-modal
+// stopwatch remains the fallback save path.
 //
 // Why not write directly to history on Finish?
 //   Users often want to bump intensity or add distance / notes once
@@ -15,21 +16,43 @@
 //   set logging, rest timers, PR modal. This tracker is for the
 //   "just going for a run" case where none of that matters.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import LiveCardioMap from './LiveCardioMap';
+
+// Conversion constant — `miToUnit` from utils/units uses miles as
+// canonical. The GPS tracker emits meters; we convert via km here.
+const MI_PER_KM = 0.6213711922;
+
+function fmtPaceSecPerMi(secPerKm: number | null): string {
+  if (secPerKm == null) return '—';
+  // sec/mi = sec/km / MI_PER_KM (mile is longer than km)
+  const secPerMi = secPerKm / MI_PER_KM;
+  const m = Math.floor(secPerMi / 60);
+  const s = Math.floor(secPerMi % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function fmtDistanceMi(meters: number): string {
+  if (meters <= 0) return '—';
+  const mi = (meters / 1000) * MI_PER_KM;
+  return mi < 100 ? `${mi.toFixed(2)}` : `${mi.toFixed(0)}`;
+}
 import {
-  AppState, Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet,
+  AppState, Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet, ImageBackground,
 } from 'react-native';
+import type { ImageSourcePropType } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import {
-  AppThemeName, WorkoutSession,
+  AppThemeName, ActivityCategory, CardioStyle, WorkoutSession,
 } from '../types';
 import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow, readHealthSummary } from '../services/appleHealth';
 import { getHRZones, type HRZone } from '../services/api';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
 import { startRestActivity, updateRestActivity, endRestActivity } from '../services/liveActivity';
+import { pushWorkoutToWatch, clearWorkoutFromWatch, WatchBridge } from '../utils/watchSync';
 import { clearManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
 import { hrZoneColorHex, hrZoneRangeText, liveActivityHrZoneFields, zoneForHeartRate } from '../utils/hrZones';
 import {
@@ -39,6 +62,8 @@ import {
   type LiveActivityInitialActivity,
   type LiveActivityQuickStartOption,
 } from '../utils/liveActivityQuickStart';
+import { estimateRouteElevationGainFt } from '../utils/cardioGpsTracker';
+import { defaultVenueForActivity, venueImpliesGps, type ActivityVenue } from '../utils/activityVenue';
 
 interface Props {
   visible: boolean;
@@ -58,12 +83,79 @@ interface Props {
    *  the user populates manually. Falls back to the stopwatch path
    *  when omitted. */
   onStartStrengthWorkout?: (focus: string) => void;
+  /** When set, non-strength picks (Run/Walk/Basketball/Yoga/etc.)
+   *  close this modal and hand off to the parent's active-workout flow
+   *  instead of the basic stopwatch path. The parent mounts
+   *  ActiveWorkoutScreen with a synthetic WorkoutDay so the user gets
+   *  the full recap/share experience. Falls back to the in-modal
+   *  stopwatch when omitted. */
+  onStartCardioWorkout?: (label: string, subtype: string, category?: ActivityCategory, cardioStyle?: CardioStyle, venue?: ActivityVenue) => void;
   enableHealthKit?: boolean;
   initialActivity?: LiveActivityInitialActivity | null;
   authToken?: string | null;
+  /** Bump to request that the tracker run its finish flow as if the
+   *  user had tapped the in-modal Finish button. Used when the watch
+   *  ends a session it started — without this, the watch's
+   *  `end_workout` command would only dismiss the companion modal and
+   *  the cardio session would never reach `/workouts/complete`. */
+  finishSignal?: number;
 }
 
 type Phase = 'pick' | 'running' | 'paused' | 'finishing';
+
+const QUICK_START_IMAGES: Record<string, ImageSourcePropType> = {
+  'strength:lift': require('../../assets/images/card-backgrounds/workout-card-free-weights-day-male.jpg'),
+  'strength:push': require('../../assets/images/card-backgrounds/workout-card-push-day-male.jpg'),
+  'strength:pull': require('../../assets/images/card-backgrounds/workout-card-pull-day-rowing.jpg'),
+  'strength:legs': require('../../assets/images/card-backgrounds/workout-card-legs-day-male.jpg'),
+  'strength:upper': require('../../assets/images/card-backgrounds/workout-card-push-day-female.jpg'),
+  'strength:lower': require('../../assets/images/card-backgrounds/workout-card-leg-extension-day-female.jpg'),
+  'strength:full_body': require('../../assets/images/card-backgrounds/workout-card-generic-gym-day-neutral.jpg'),
+  'strength:powerlifting': require('../../assets/images/card-backgrounds/workout-card-hinge-day-male.jpg'),
+  'strength:crossfit': require('../../assets/images/card-backgrounds/workout-card-hiit-day-female.jpg'),
+  'cardio:run:outdoor': require('../../assets/images/card-backgrounds/workout-card-running-day-male.jpg'),
+  'cardio:run:indoor': require('../../assets/images/card-backgrounds/workout-card-treadmill-day-neutral.jpg'),
+  'cardio:walk:outdoor': require('../../assets/images/card-backgrounds/workout-card-walking-day.jpg'),
+  'cardio:walk:indoor': require('../../assets/images/card-backgrounds/workout-card-treadmill-day-female.jpg'),
+  'cardio:hike': require('../../assets/images/card-backgrounds/workout-card-hiking-mountains-day.jpg'),
+  'cardio:hike:outdoor': require('../../assets/images/card-backgrounds/workout-card-hiking-mountains-day.jpg'),
+  'cardio:ride:outdoor': require('../../assets/images/card-backgrounds/workout-card-cycling-day.jpg'),
+  'cardio:ride:indoor': require('../../assets/images/card-backgrounds/workout-card-spin-class-day.jpg'),
+  'cardio:swim:indoor': require('../../assets/images/card-backgrounds/workout-card-swimming-day-neutral.jpg'),
+  'cardio:swim:outdoor': require('../../assets/images/card-backgrounds/workout-card-open-water-swim-day.jpg'),
+  'cardio:row:indoor': require('../../assets/images/card-backgrounds/workout-card-pull-day-rowing.jpg'),
+  'cardio:row:outdoor': require('../../assets/images/card-backgrounds/workout-card-rowing-outdoor-day.jpg'),
+  'cardio:spin': require('../../assets/images/card-backgrounds/workout-card-cycling-day.jpg'),
+  'cardio:spin:indoor': require('../../assets/images/card-backgrounds/workout-card-spin-class-day.jpg'),
+  'cardio:stair': require('../../assets/images/card-backgrounds/workout-card-treadmill-day-female.jpg'),
+  'cardio:stair:indoor': require('../../assets/images/card-backgrounds/workout-card-stair-day.jpg'),
+  'cardio:hiit': require('../../assets/images/card-backgrounds/workout-card-hiit-day-male.jpg'),
+  'cardio:hiit:indoor': require('../../assets/images/card-backgrounds/workout-card-hiit-day-male.jpg'),
+  'cardio:bootcamp': require('../../assets/images/card-backgrounds/workout-card-hiit-day-male.jpg'),
+  'sport:soccer:outdoor': require('../../assets/images/card-backgrounds/workout-card-soccer-day.jpg'),
+  'sport:soccer:indoor': require('../../assets/images/card-backgrounds/workout-card-soccer-indoor-day.jpg'),
+  'sport:basketball:indoor': require('../../assets/images/card-backgrounds/workout-card-basketball-day.jpg'),
+  'sport:basketball:outdoor': require('../../assets/images/card-backgrounds/workout-card-basketball-outdoor-day.jpg'),
+  'sport:tennis:outdoor': require('../../assets/images/card-backgrounds/workout-card-tennis-day.jpg'),
+  'sport:tennis:indoor': require('../../assets/images/card-backgrounds/workout-card-tennis-indoor-day.jpg'),
+  'sport:pickleball:outdoor': require('../../assets/images/card-backgrounds/workout-card-pickleball-day.jpg'),
+  'sport:pickleball:indoor': require('../../assets/images/card-backgrounds/workout-card-pickleball-indoor-day.jpg'),
+  'sport:volleyball:indoor': require('../../assets/images/card-backgrounds/workout-card-volleyball-day.jpg'),
+  'sport:volleyball:outdoor': require('../../assets/images/card-backgrounds/workout-card-volleyball-outdoor-day.jpg'),
+  'sport:beach_volleyball': require('../../assets/images/card-backgrounds/workout-card-beach-volleyball-day.jpg'),
+  'sport:beach_volleyball:outdoor': require('../../assets/images/card-backgrounds/workout-card-beach-volleyball-day.jpg'),
+  'sport:golf': require('../../assets/images/card-backgrounds/workout-card-golf-day.jpg'),
+  'sport:golf:outdoor': require('../../assets/images/card-backgrounds/workout-card-golf-day.jpg'),
+  'sport:martial_arts': require('../../assets/images/card-backgrounds/workout-card-martial-arts-day.jpg'),
+  'sport:martial_arts:indoor': require('../../assets/images/card-backgrounds/workout-card-martial-arts-day.jpg'),
+  'mobility:yoga': require('../../assets/images/card-backgrounds/workout-card-yoga-day.jpg'),
+  'mobility:yoga:indoor': require('../../assets/images/card-backgrounds/workout-card-yoga-day.jpg'),
+  'mobility:yoga:outdoor': require('../../assets/images/card-backgrounds/workout-card-yoga-outdoor-day.jpg'),
+  'mobility:pilates': require('../../assets/images/card-backgrounds/workout-card-pilates-day.jpg'),
+  'mobility:stretching': require('../../assets/images/card-backgrounds/workout-card-recovery-day-male.jpg'),
+};
+
+const QUICK_START_FALLBACK_IMAGE = require('../../assets/images/card-backgrounds/workout-card-generic-gym-day-neutral.jpg');
 
 function fmtElapsed(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -74,7 +166,7 @@ function fmtElapsed(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, enableHealthKit = true, initialActivity = null, authToken = null }: Props) {
+export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, onStartCardioWorkout, enableHealthKit = true, initialActivity = null, authToken = null, finishSignal = 0 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -92,11 +184,41 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   const [prefill, setPrefill] = useState<LogActivityPrefill | null>(null);
   const [logModalVisible, setLogModalVisible] = useState(false);
 
+  // ── Live GPS tracking (outdoor cardio only) ──────────────────────
+  // Activated when the user picks an outdoor cardio (Run/Walk/Bike/
+  // Hike) and the timer enters the running phase. Indoor cardio,
+  // strength, sport, mobility skip the tracker entirely so we never
+  // ask for location permission unless it actually drives the UI.
+  // Same `cardioGpsTracker` infrastructure ActiveWorkoutScreen uses.
+  const cardioGpsHandleRef = useRef<import('../utils/cardioGpsTracker').CardioGpsHandle | null>(null);
+  const [gpsDistanceMeters, setGpsDistanceMeters] = useState<number>(0);
+  const [gpsPaceSecPerKm, setGpsPaceSecPerKm] = useState<number | null>(null);
+  const [gpsCoords, setGpsCoords] = useState<ReadonlyArray<{ lat: number; lon: number }>>([]);
+  const [gpsCurrent, setGpsCurrent] = useState<{ lat: number; lon: number } | null>(null);
+  const lastGpsRouteLenRef = useRef(0);
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveActivityIdRef = useRef<string | null>(null);
   const liveActivityGenerationRef = useRef(0);
   const autoStartKeyRef = useRef<string | null>(null);
+  // Watch sync: each in-modal stopwatch session gets a sessionId pushed
+  // to the watch so it knows the phone is mid-workout. When the session
+  // was originated by a watch tap (`source: 'watch'` payload), we re-use
+  // its `watch-` sessionId so both devices end the same identity instead
+  // of leaking ghost sessions. `phone-` prefix when the user picked from
+  // the phone modal directly.
+  const watchSessionIdRef = useRef<string | null>(null);
+
+  /// True when the picked activity should pull GPS — drives whether
+  /// the map renders + whether we attach route coords on finish. Now keyed
+  /// off the chosen venue (indoor never GPS-tracks) rather than guessing by
+  /// subtype, so an "Indoor Run" / trainer ride stays quiet.
+  const isOutdoorCardio = useMemo(() => {
+    if (!choice) return false;
+    const venue = choice.venue ?? defaultVenueForActivity(choice.category, choice.subtype);
+    return venueImpliesGps(venue, choice.category, choice.subtype);
+  }, [choice]);
   const canUseHealthKit = enableHealthKit && isHealthKitAvailable();
   const liveZone = zoneForHeartRate(hr, hrZones);
   const liveZoneColor = hrZoneColorHex(liveZone?.zone, tc.primary);
@@ -108,8 +230,38 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     if (id) endRestActivity(id).catch(() => undefined);
   }, []);
 
+  // Tell the watch this phone-side session is over. Best-effort —
+  // failures are non-fatal (the watch's auto-renew handler will
+  // eventually surface today's plan workout instead). Only clears
+  // the watch when the active session was actually phone-initiated;
+  // for watch-initiated sessions the watch already drives its own
+  // teardown via the end_workout / cancel_workout command path.
+  const clearWatchSession = useCallback(async () => {
+    const sid = watchSessionIdRef.current;
+    watchSessionIdRef.current = null;
+    if (!sid) return;
+    if (sid.startsWith('watch-')) return;
+    try { await clearWorkoutFromWatch(); } catch {}
+  }, []);
+
+  // Stop + tear down the GPS tracker. Best-effort — failures are
+  // non-fatal because the tracker auto-stops when the watcher is
+  // garbage collected anyway. Clears local state so the next session
+  // starts from zero.
+  const stopGpsTracker = useCallback(async () => {
+    const handle = cardioGpsHandleRef.current;
+    cardioGpsHandleRef.current = null;
+    if (handle) { try { await handle.stop(); } catch {} }
+    setGpsDistanceMeters(0);
+    setGpsPaceSecPerKm(null);
+    setGpsCoords([]);
+    setGpsCurrent(null);
+    lastGpsRouteLenRef.current = 0;
+  }, []);
+
   const reset = useCallback(() => {
     endWorkoutLiveActivity();
+    void clearWatchSession();
     setPhase('pick');
     setChoice(null);
     setStartedAtMs(null);
@@ -123,7 +275,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     setLogModalVisible(false);
     clearManagedInterval(timerRef);
     clearManagedInterval(hrIntervalRef);
-  }, [endWorkoutLiveActivity]);
+    void stopGpsTracker();
+  }, [endWorkoutLiveActivity, clearWatchSession, stopGpsTracker]);
 
   useEffect(() => {
     if (!visible || !authToken || !enableHealthKit) {
@@ -152,6 +305,73 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       endWorkoutLiveActivity();
     };
   }, [visible, reset, endWorkoutLiveActivity]);
+
+  // GPS tracker lifecycle — fires once when the user actually starts
+  // an outdoor cardio session. We DON'T re-create the tracker on every
+  // pause/resume; pause/resume just toggle the handle's accumulator
+  // so distance freezes during pause but the watcher stays warm.
+  useEffect(() => {
+    if (phase !== 'running' || !isOutdoorCardio || !choice) return;
+    if (cardioGpsHandleRef.current) return;     // already started
+    let cancelled = false;
+    (async () => {
+      try {
+        const { activityFromFocus, isOutdoorCardio: isOutdoor, startCardioGpsTracker } =
+          await import('../utils/cardioGpsTracker');
+        const activity = activityFromFocus(choice.label);
+        if (!isOutdoor(activity)) return;
+        const handle = await startCardioGpsTracker({
+          activity,
+          onSample: (s) => {
+            if (cancelled) return;
+            setGpsDistanceMeters(s.distanceMeters);
+            setGpsPaceSecPerKm(s.paceSecPerKm);
+            if (s.lastCoord) setGpsCurrent(s.lastCoord);
+            // Re-snapshot the polyline only when a new point landed.
+            const liveHandle = cardioGpsHandleRef.current;
+            if (liveHandle) {
+              const route = liveHandle.getRouteCoords();
+              if (route.length !== lastGpsRouteLenRef.current) {
+                lastGpsRouteLenRef.current = route.length;
+                setGpsCoords(route.map(c => ({ lat: c.lat, lon: c.lon })));
+              }
+            }
+          },
+          onPermissionDenied: () => {
+            if (cancelled) return;
+            Alert.alert(
+              'Location off',
+              'Live distance + pace need location access. Enable it in Settings → Thallo to track outdoor cardio. Your workout will still log without GPS.',
+            );
+          },
+          onError: (msg) => console.warn('[liveTracker] GPS error:', msg),
+        });
+        if (cancelled) {
+          try { await handle?.stop(); } catch {}
+          return;
+        }
+        cardioGpsHandleRef.current = handle;
+      } catch (e: any) {
+        console.warn('[liveTracker] GPS start failed:', e?.message ?? e);
+      }
+    })();
+    return () => { cancelled = true; };
+    // The tracker should outlast pause/resume, so phase isn't a dep —
+    // we only care about the *transition* into running, captured by
+    // the early-return above. Re-keying on choice handles "user
+    // discarded and started a different activity" cleanly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, isOutdoorCardio, choice?.subtype]);
+
+  // Pause / resume the GPS tracker alongside the timer so distance
+  // and pace freeze when the user pauses, then resume cleanly without
+  // counting walking-during-the-break as part of the run.
+  useEffect(() => {
+    const h = cardioGpsHandleRef.current;
+    if (!h) return;
+    if (phase === 'paused') h.pause();
+    else if (phase === 'running') h.resume();
+  }, [phase]);
 
   // Timer tick — runs while phase=running; pauses accumulate a static
   // offset that's subtracted from elapsed so the paused period doesn't
@@ -218,6 +438,12 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       onClose();
       return;
     }
+    if (c.category !== 'strength' && onStartCardioWorkout) {
+      onStartCardioWorkout(c.label, c.subtype, c.category, c.cardioStyle, c.venue);
+      reset();
+      onClose();
+      return;
+    }
     const now = Date.now();
     setChoice(c);
     setStartedAtMs(now);
@@ -225,6 +451,35 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     const generation = liveActivityGenerationRef.current + 1;
     liveActivityGenerationRef.current = generation;
     const workoutId = `live_${now}`;
+    // Push the active session to the watch. Re-use the watch's own
+    // sessionId when the start was originated from the wrist; otherwise
+    // mint a `phone-` id so the watch's terminal-status guard knows
+    // which session to honor for dismissal vs ignore.
+    const watchSid = (typeof initialActivity?.sessionId === 'string' && initialActivity.sessionId.startsWith('watch-'))
+      ? initialActivity.sessionId
+      : `phone-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    watchSessionIdRef.current = watchSid;
+    const syntheticDay: any = {
+      day: new Date(now).toLocaleDateString('en-US', { weekday: 'long' }),
+      focus: c.label,
+      exercises: [],
+      stimulus: c.category === 'cardio' || c.cardioStyle ? 'conditioning' : 'mixed',
+      _source_context: c.category === 'cardio' || c.cardioStyle ? 'custom_cardio' : `custom_${c.category}`,
+      _custom_activity_category: c.category,
+      _custom_cardio_subtype: c.subtype,
+      _custom_cardio_style: c.cardioStyle,
+      _custom_activity_venue: c.venue ?? defaultVenueForActivity(c.category, c.subtype),
+    };
+    const pushToWatch = pushWorkoutToWatch(syntheticDay, {
+      status: 'active',
+      sessionId: watchSid,
+      reason: 'start_echo',
+    }).catch(() => false);
+    if (!watchSid.startsWith('watch-')) {
+      pushToWatch
+        .then(() => WatchBridge.startWatchWorkout())
+        .catch(() => false);
+    }
     startRestActivity({
       mode: 'elapsed',
       workoutId,
@@ -257,7 +512,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     if (autoStartKeyRef.current === key) return;
     autoStartKeyRef.current = key;
     handleStart(option);
-  }, [visible, phase, initialActivity?.category, initialActivity?.subtype]);
+  }, [visible, phase, initialActivity?.category, initialActivity?.subtype, initialActivity?.label, initialActivity?.venue]);
 
   const handlePause = () => {
     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
@@ -333,6 +588,20 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       } catch { /* swallow */ }
     }
 
+    // Snapshot GPS state BEFORE stopping the tracker — stop clears
+    // gpsCoords / gpsDistanceMeters async via the reset path, and the
+    // prefill needs the final values.
+    const capturedRoute = cardioGpsHandleRef.current?.getRouteCoords() ?? [];
+    const capturedElevationGainFt = estimateRouteElevationGainFt(capturedRoute);
+    const capturedDistanceMi = isOutdoorCardio && gpsDistanceMeters > 0
+      ? Math.round(((gpsDistanceMeters / 1000) * MI_PER_KM) * 100) / 100
+      : null;
+    if (isOutdoorCardio) {
+      // Stop GPS now so we don't keep watching position while the
+      // user is on the log/save modal.
+      void stopGpsTracker();
+    }
+
     setPrefill({
       // Namespacing the id with `live_` lets the save path tag the
       // session as `source: 'live_tracker'` for analytics, and keeps
@@ -345,12 +614,35 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       category: choice.category,
       subtype: choice.subtype,
       cardioStyle: choice.cardioStyle,
+      ...(choice.venue ? { indoorOutdoor: choice.venue } : {}),
       avgHeartRate: avgHr,
       caloriesBurned: kcal,
+      // Pre-fill distance from GPS so the user doesn't have to type
+      // it on the save form. They can override if they want.
+      ...(capturedDistanceMi != null ? { distanceMiles: capturedDistanceMi } : {}),
+      ...(capturedElevationGainFt != null ? { elevationGainFt: capturedElevationGainFt } : {}),
+      ...(capturedRoute.length > 0 ? { routeCoords: capturedRoute } : {}),
     });
     setPhase('finishing');
     setLogModalVisible(true);
   };
+
+  // Watch-initiated finish. The watch sends `end_workout` when the user
+  // taps End on their wrist; HomeScreen bumps `finishSignal` and we run
+  // the same flow as the in-modal Finish button so the cardio session
+  // actually reaches `/workouts/complete` instead of being silently
+  // dismissed. Guard against the initial 0 and against re-firing when
+  // we're already in 'finishing' (LogActivityModal is up).
+  const handleFinishRef = useRef(handleFinish);
+  useEffect(() => { handleFinishRef.current = handleFinish; });
+  const lastFinishSignalRef = useRef(finishSignal);
+  useEffect(() => {
+    if (finishSignal === lastFinishSignalRef.current) return;
+    lastFinishSignalRef.current = finishSignal;
+    if (finishSignal <= 0) return;
+    if (phase !== 'running' && phase !== 'paused') return;
+    handleFinishRef.current();
+  }, [finishSignal, phase]);
 
   const handleDiscard = () => {
     Alert.alert(
@@ -398,35 +690,46 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
               </View>
               <Text style={{ fontSize: 12, color: tc.textMuted, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 }}>
                 {canUseHealthKit
-                  ? "Pick a type. We'll time it and sync HR from Apple Health."
+                  ? "Pick a type. We'll time it and use Apple Health heart-rate samples when available."
                   : "Pick a type. We'll time it and save the activity to your log."}
               </Text>
-              <ScrollView contentContainerStyle={{ padding: 16, gap: 10 }}>
-                {LIVE_ACTIVITY_QUICK_START.map((c) => (
-                  <TouchableOpacity
-                    key={`${c.category}-${c.subtype}`}
-                    testID={`live-quickstart-${c.category}-${c.subtype}`}
-                    accessibilityLabel={`live-quickstart-${c.category}-${c.subtype}`}
-                    onPress={() => handleStart(c)}
-                    style={{
-                      flexDirection: 'row', alignItems: 'center', gap: 12,
-                      padding: 14, borderRadius: radius.lg,
-                      borderWidth: 1, borderColor: tc.border,
-                      backgroundColor: tc.surface,
-                    }}>
-                    <View style={{
-                      width: 40, height: 40, borderRadius: 20,
-                      alignItems: 'center', justifyContent: 'center',
-                      backgroundColor: tc.primary + '20',
-                    }}>
-                      <Ionicons name={c.icon as any} size={20} color={tc.primary} />
-                    </View>
-                    <Text style={{ flex: 1, fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>
-                      {c.label}
-                    </Text>
-                    <Ionicons name="play-circle" size={22} color={tc.primary} />
-                  </TouchableOpacity>
-                ))}
+              <ScrollView contentContainerStyle={styles.quickGrid} showsVerticalScrollIndicator={false}>
+                {LIVE_ACTIVITY_QUICK_START.map((c) => {
+                  const quickKey = liveActivityQuickStartKey(c);
+                  const testKey = quickKey.replace(/:/g, '-');
+                  return (
+                    <TouchableOpacity
+                      key={quickKey}
+                      testID={`live-quickstart-${testKey}`}
+                      accessibilityLabel={`live-quickstart-${testKey}`}
+                      onPress={() => handleStart(c)}
+                      activeOpacity={0.78}
+                      style={[styles.quickCard, { borderColor: tc.border }]}>
+                      <ImageBackground
+                        source={QUICK_START_IMAGES[quickKey] ?? QUICK_START_FALLBACK_IMAGE}
+                        style={styles.quickImage}
+                        imageStyle={styles.quickImageStyle}
+                        resizeMode="cover">
+                        <View style={styles.quickImageOverlay} />
+                        <View style={styles.quickCardTop}>
+                          <View style={styles.quickIconBubble}>
+                            <Ionicons name={c.icon as any} size={19} color="#fff" />
+                          </View>
+                          <Ionicons name="play-circle" size={22} color="#fff" />
+                        </View>
+                        <View style={styles.quickCardBottom}>
+                          <Text
+                            style={styles.quickLabel}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.82}>
+                            {c.label}
+                          </Text>
+                        </View>
+                      </ImageBackground>
+                    </TouchableOpacity>
+                  );
+                })}
               </ScrollView>
             </>
           ) : (
@@ -435,9 +738,24 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                 <Text style={{ fontSize: 12, color: tc.textMuted, letterSpacing: 1.4, fontWeight: '700' }}>
                   {choice?.label.toUpperCase()}
                 </Text>
+                {/* Live route map for outdoor cardio. Renders above the
+                    timer so the user sees their path drawing as they go.
+                    Hidden for indoor / strength / sport / mobility. */}
+                {isOutdoorCardio && (
+                  <View style={{ marginTop: 12, marginHorizontal: -8 }}>
+                    <LiveCardioMap
+                      themeName={themeName}
+                      coords={gpsCoords}
+                      current={gpsCurrent}
+                      height={170}
+                    />
+                  </View>
+                )}
                 <Text style={{
-                  fontSize: 84, fontWeight: '900', color: tc.textPrimary,
-                  marginTop: 6, letterSpacing: -3, fontVariant: ['tabular-nums'],
+                  fontSize: isOutdoorCardio ? 60 : 84,
+                  fontWeight: '900', color: tc.textPrimary,
+                  marginTop: isOutdoorCardio ? 12 : 6,
+                  letterSpacing: -3, fontVariant: ['tabular-nums'],
                 }}>
                   {fmtElapsed(elapsedSec)}
                 </Text>
@@ -447,6 +765,39 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                   </Text>
                 )}
                 <View style={{ flexDirection: 'row', gap: 20, marginTop: 28 }}>
+                  {/* Distance + Pace columns — only for outdoor cardio
+                      where GPS gives them. Indoor cardio + lifting hide
+                      these to avoid showing "—" placeholders. */}
+                  {isOutdoorCardio && (
+                    <>
+                      <View>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '700', letterSpacing: 1 }}>
+                          DISTANCE
+                        </Text>
+                        <Text style={{
+                          fontSize: 28, fontWeight: '900',
+                          color: gpsDistanceMeters > 0 ? tc.textPrimary : tc.textMuted,
+                          marginTop: 4, fontVariant: ['tabular-nums'],
+                        }}>
+                          {fmtDistanceMi(gpsDistanceMeters)}
+                        </Text>
+                        <Text style={{ fontSize: 10, color: tc.textMuted }}>mi</Text>
+                      </View>
+                      <View>
+                        <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '700', letterSpacing: 1 }}>
+                          PACE
+                        </Text>
+                        <Text style={{
+                          fontSize: 28, fontWeight: '900',
+                          color: gpsPaceSecPerKm != null ? tc.textPrimary : tc.textMuted,
+                          marginTop: 4, fontVariant: ['tabular-nums'],
+                        }}>
+                          {fmtPaceSecPerMi(gpsPaceSecPerKm)}
+                        </Text>
+                        <Text style={{ fontSize: 10, color: tc.textMuted }}>/mi</Text>
+                      </View>
+                    </>
+                  )}
                   <View>
                     <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '700', letterSpacing: 1 }}>
                       HEART RATE
@@ -555,4 +906,41 @@ const styles = StyleSheet.create({
   },
   headerBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { fontSize: 16, fontWeight: '800' },
+  quickGrid: {
+    padding: 16,
+    paddingBottom: 28,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  quickCard: {
+    width: '48%',
+    minHeight: 124,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    overflow: 'hidden',
+    backgroundColor: '#111827',
+  },
+  quickImage: { minHeight: 124, justifyContent: 'space-between' },
+  quickImageStyle: { borderRadius: radius.lg },
+  quickImageOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.42)' },
+  quickCardTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    padding: 10,
+  },
+  quickIconBubble: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+  },
+  quickCardBottom: { paddingHorizontal: 12, paddingBottom: 12 },
+  quickLabel: { fontSize: 15, fontWeight: '900', color: '#fff' },
 });

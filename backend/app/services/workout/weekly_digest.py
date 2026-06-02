@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from collections import Counter, defaultdict
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 
@@ -75,6 +76,7 @@ def _set_and_volume_stats(user_id: int, start: date, end: date, db: Session) -> 
         .where(WorkoutSession.workout_date >= start)
         .where(WorkoutSession.workout_date <= end)
         .where(ExerciseSet.completed == True)  # noqa: E712
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     ).all()
 
     total_sets = 0
@@ -152,7 +154,7 @@ def build_weekly_digest(user_id: int, *, today: date | None = None, db: Session)
       - sessions: {completed, planned, adherence_pct, focus_distribution, stimulus_distribution}
       - volume: {total_sets, volume_load_lbs}
       - prs: [ {exercise_name, kind, new_value, old_value, session_date, ...} ]
-      - nutrition: {avg_calories, avg_protein_g, days_logged, target_protein_g, protein_hit_pct}
+      - nutrition: {avg_calories, avg_protein_g, avg_*_when_logged, days_logged, target_protein_g, protein_hit_pct}
       - deltas: {sessions, sets, volume_load_lbs, avg_calories, avg_protein_g}
     """
     today = today or date.today()
@@ -222,9 +224,13 @@ def build_weekly_digest(user_id: int, *, today: date | None = None, db: Session)
                 target_protein_g = round(bw * 1.0, 0)
             else:
                 target_protein_g = round(bw * 0.8, 0)
-            if target_protein_g and nutrition_this.get("avg_protein_g"):
+            logged_day_protein = (
+                nutrition_this.get("avg_protein_g_when_logged")
+                or nutrition_this.get("avg_protein_g")
+            )
+            if target_protein_g and logged_day_protein:
                 protein_hit_pct = round(
-                    nutrition_this["avg_protein_g"] / target_protein_g * 100, 1
+                    logged_day_protein / target_protein_g * 100, 1
                 )
     except Exception:
         target_protein_g = None
@@ -266,6 +272,14 @@ def build_weekly_digest(user_id: int, *, today: date | None = None, db: Session)
         "nutrition": {
             "avg_calories": nutrition_this.get("avg_calories", 0),
             "avg_protein_g": nutrition_this.get("avg_protein_g", 0),
+            "avg_calories_when_logged": nutrition_this.get(
+                "avg_calories_when_logged",
+                nutrition_this.get("avg_calories", 0),
+            ),
+            "avg_protein_g_when_logged": nutrition_this.get(
+                "avg_protein_g_when_logged",
+                nutrition_this.get("avg_protein_g", 0),
+            ),
             "days_logged": nutrition_this.get("days_with_data", 0),
             "target_protein_g": target_protein_g,
             "protein_hit_pct": protein_hit_pct,

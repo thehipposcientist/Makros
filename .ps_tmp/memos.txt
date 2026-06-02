@@ -1,0 +1,45 @@
+7376:  const nodes = useMemo(() => sleepScore ? buildSleepConstellationNodes(sleepScore, bedtimeWindow) : [], [sleepScore, bedtimeWindow]);
+7377:  const defaultNode = useMemo(
+7389:  const contextInsights = useMemo(
+7922:  const styles = useMemo(() => createStyles(tc), [themeName]);
+7934:  const visibleProgressTabs = useMemo(() => {
+8310:  const workoutHistoryIndex = useMemo(() => buildWorkoutHistoryIndex(history), [history]);
+8313:  const chartExerciseOptions = useMemo(() => {
+8324:  const activeChartBucket = useMemo(
+8328:  const filteredChartExercises = useMemo(() => chartExerciseOptions.filter(option => {
+8333:  const selectedExerciseTrend = useMemo(
+8359:  const progressWeekWindow = useMemo(
+8363:  const cardioTrendSummary = useMemo(
+8367:  const localSelectedE1rmHistory = useMemo(
+8375:  const selectedE1rmHistory = useMemo(
+8383:  const cardioInsightsMemo = useMemo(
+8387:  const highValueTrendCards = useMemo(
+8418:  const activityTrendCards = useMemo(
+8422:  const visibleHighValueTrendCards = useMemo(
+8426:  const highValueTrendEditSections = useMemo(
+8430:  const visibleActivityTrendCards = useMemo(
+8434:  const activityHighlightEditSections = useMemo(
+8438:  const trendMetricSuggestions = useMemo(
+8488:  const cardioBestsMemo = useMemo(() => paceExerciseGroups.map(({ name, points }) => {
+8534:  const progressMilestones = useMemo(
+8546:  const comprehensiveHealthScore = useMemo(() => {
+8677:  const progressAnalytics = useMemo(
+8681:  const coachInsightVisuals = useMemo(
+8685:  const thisWeekOverview = useMemo(
+8689:  const liveGoalForecast = useMemo(
+8713:  const recompForecastNutritionSignal = useMemo(() => {
+8726:  const recompForecastScopeKey = useMemo(() => {
+8772:  const todayTrack = useMemo(
+8822:  const goalVo2Points = useMemo(
+8826:  const goalExecutionOverview = useMemo(
+8946:  const bedtimeWindow = useMemo(
+9327:  const planWeekZones = useMemo(() => {
+9337:  const mealHistoryDailyRows = useMemo(
+9341:  const mealMacroHeadline = useMemo(() => {
+9347:  const trainingSignals = useMemo(
+9351:  const prFocusOptions = useMemo(
+9355:  const filteredPrsForTab = useMemo(() => {
+9363:  const visiblePrsForTab = useMemo(
+10464:  const strengthRadarProfiles = useMemo(
+10669:  const cardioRadarInsight = useMemo(
+10691:  const cardioActivityMix = useMemo(() => {

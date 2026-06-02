@@ -28,6 +28,7 @@ try {
 
 export default function SwipeableRow({ actions, children, enabled = true }: Props) {
   const swipeRef = useRef<any>(null);
+  const actionPendingRef = useRef(false);
 
   if (!enabled || actions.length === 0 || !SwipeableComponent) {
     return <>{children}</>;
@@ -46,7 +47,15 @@ export default function SwipeableRow({ actions, children, enabled = true }: Prop
             <Animated.View key={i} style={[styles.actionBtn, { backgroundColor: action.bgColor, transform: [{ translateX: translate }] }]}>
               <TouchableOpacity
                 style={styles.actionTouchable}
-                onPress={() => { swipeRef.current?.close(); action.onPress(); }}>
+                onPress={() => {
+                  if (actionPendingRef.current) return;
+                  actionPendingRef.current = true;
+                  swipeRef.current?.close?.();
+                  setTimeout(() => {
+                    actionPendingRef.current = false;
+                    action.onPress();
+                  }, 80);
+                }}>
                 <Ionicons name={action.icon as any} size={18} color={action.color} />
                 {action.label && <Text style={[styles.actionLabel, { color: action.color }]}>{action.label}</Text>}
               </TouchableOpacity>

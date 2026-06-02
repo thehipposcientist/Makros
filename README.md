@@ -46,7 +46,7 @@ User → React Native (Expo) → FastAPI backend → PostgreSQL
 
 - **Frontend**: React Native 0.81.5 + Expo SDK 54 + expo-router 6 + TypeScript
 - **Backend**: FastAPI + SQLModel + PostgreSQL 16
-- **AI**: `gpt-4o-mini` for text flows and `gpt-5.4-mini` for dedicated image-analysis endpoints
+- **AI**: `gpt-4o-mini` for text flows, `gpt-4o-mini-transcribe` for phone speech-to-meal transcription, and `gpt-5.4-mini` for dedicated image-analysis endpoints
 - **Storage**: PostgreSQL source of truth + AsyncStorage hot/offline cache
 
 ## License

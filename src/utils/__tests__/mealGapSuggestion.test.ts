@@ -29,7 +29,7 @@ describe('meal gap suggestion', () => {
     expect(suggestion?.source).toBe('pantry');
     expect((suggestion?.meal.items?.length ?? 0) > 0).toBe(true);
     expect((suggestion?.meal.calories ?? 0) >= 350).toBe(true);
-    expect((suggestion?.meal.calories ?? 0) <= 650).toBe(true);
+    expect((suggestion?.meal.calories ?? 0) <= 800).toBe(true);
     expect((suggestion?.meal.protein ?? 0) >= 30).toBe(true);
     expect(suggestion?.meal.foods.length).toBe(suggestion?.meal.items?.length);
   });
@@ -58,7 +58,7 @@ describe('meal gap suggestion', () => {
     expect(suggestion).toBe(null);
   });
 
-  it('keeps pantry suggestions close to a small remaining calorie gap', () => {
+  it('prioritizes hitting remaining protein over a small calorie gap', () => {
     const suggestion = buildGapMealSuggestion({
       targets: { calories: 2200, protein: 160, carbs: 240, fat: 70 },
       consumed: { calories: 2110, protein: 115, carbs: 240, fat: 70 },
@@ -67,6 +67,26 @@ describe('meal gap suggestion', () => {
     });
 
     expect(suggestion?.source).toBe('pantry');
-    expect((suggestion?.meal.calories ?? 0) <= 180).toBe(true);
+    expect((suggestion?.meal.protein ?? 0) >= 45).toBe(true);
+    expect((suggestion?.meal.calories ?? 0) > 180).toBe(true);
+  });
+
+  it('prefers higher-quality foods when macro fit is comparable', () => {
+    const suggestion = buildGapMealSuggestion({
+      targets: { calories: 2000, protein: 130, carbs: 230, fat: 65 },
+      consumed: { calories: 1500, protein: 90, carbs: 160, fat: 50 },
+      pantryFoods: [
+        { name: 'Chicken breast', unit: '3 oz', calories: 140, protein: 26, carbs: 0, fat: 3 },
+        { name: 'Candy cereal', unit: '1 cup', calories: 200, protein: 4, carbs: 45, fat: 1, added_sugar_g: 24, fiber: 1, processing_bucket: 'ultra_processed' } as any,
+        { name: 'Plain oats', unit: '1 cup', calories: 200, protein: 6, carbs: 43, fat: 3, added_sugar_g: 0, fiber: 8, processing_bucket: 'minimally_processed', plant_count: 1 } as any,
+        { name: 'Olive oil', unit: '1 tbsp', calories: 119, protein: 0, carbs: 0, fat: 14 },
+        { name: 'Broccoli', unit: '1 cup', calories: 55, protein: 4, carbs: 11, fat: 0, fiber: 5, category: 'vegetables' } as any,
+      ],
+      seed: 'quality-gap',
+    });
+
+    expect(suggestion?.source).toBe('pantry');
+    expect(suggestion?.meal.foods.includes('Plain oats')).toBe(true);
+    expect(suggestion?.meal.foods.includes('Candy cereal')).toBe(false);
   });
 });

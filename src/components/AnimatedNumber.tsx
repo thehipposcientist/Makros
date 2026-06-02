@@ -12,6 +12,8 @@ interface Props {
   prefix?: string;
   decimals?: number;
   duration?: number;
+  from?: number;
+  animateOnMount?: boolean;
 }
 
 export default function AnimatedNumber({
@@ -21,16 +23,26 @@ export default function AnimatedNumber({
   prefix = '',
   decimals = 0,
   duration = 280,
+  from = 0,
+  animateOnMount = false,
 }: Props) {
-  const animVal = useRef(new Animated.Value(value)).current;
+  const initialValue = animateOnMount ? from : value;
+  const animVal = useRef(new Animated.Value(initialValue)).current;
+  const mountedRef = useRef(false);
   const [display, setDisplay] = useState(
-    `${prefix}${decimals > 0 ? value.toFixed(decimals) : Math.round(value)}${suffix}`
+    `${prefix}${decimals > 0 ? initialValue.toFixed(decimals) : Math.round(initialValue)}${suffix}`
   );
 
   useEffect(() => {
     const listener = animVal.addListener(({ value: v }) => {
       setDisplay(`${prefix}${decimals > 0 ? v.toFixed(decimals) : Math.round(v)}${suffix}`);
     });
+
+    if (!mountedRef.current && animateOnMount) {
+      animVal.setValue(from);
+      setDisplay(`${prefix}${decimals > 0 ? from.toFixed(decimals) : Math.round(from)}${suffix}`);
+    }
+    mountedRef.current = true;
 
     Animated.timing(animVal, {
       toValue: value,
@@ -39,7 +51,7 @@ export default function AnimatedNumber({
     }).start();
 
     return () => animVal.removeListener(listener);
-  }, [value, prefix, suffix, decimals, duration]);
+  }, [value, prefix, suffix, decimals, duration, from, animateOnMount]);
 
   return <Text style={style}>{display}</Text>;
 }

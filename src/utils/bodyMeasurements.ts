@@ -6,6 +6,8 @@ export interface MeasurementFields {
   thigh: string;
   calf: string;
   bodyFat: string;
+  bpSystolic: string;
+  bpDiastolic: string;
 }
 
 export const EMPTY_MEASUREMENT_FIELDS: MeasurementFields = {
@@ -16,6 +18,8 @@ export const EMPTY_MEASUREMENT_FIELDS: MeasurementFields = {
   thigh: '',
   calf: '',
   bodyFat: '',
+  bpSystolic: '',
+  bpDiastolic: '',
 };
 
 export interface BodyMeasurementsCheckinPayload {
@@ -29,6 +33,8 @@ export interface BodyMeasurementsCheckinPayload {
   thigh_in?: number;
   calf_in?: number;
   body_fat_pct?: number;
+  bp_systolic?: number;
+  bp_diastolic?: number;
   energy: number;
   sleep: number;
   adherence: number;
@@ -45,6 +51,24 @@ export function optionalPositiveNumber(value: string): number | undefined {
   if (!trimmed) return undefined;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+export function optionalPositiveInteger(value: string): number | undefined {
+  const parsed = optionalPositiveNumber(value);
+  if (parsed === undefined) return undefined;
+  return Number.isInteger(parsed) ? parsed : undefined;
+}
+
+export function bloodPressureInputError(fields: Pick<MeasurementFields, 'bpSystolic' | 'bpDiastolic'>): string | null {
+  const systolicEntered = fields.bpSystolic.trim().length > 0;
+  const diastolicEntered = fields.bpDiastolic.trim().length > 0;
+  if (!systolicEntered && !diastolicEntered) return null;
+  if (systolicEntered !== diastolicEntered) return 'Enter both systolic and diastolic values.';
+  const systolic = optionalPositiveInteger(fields.bpSystolic);
+  const diastolic = optionalPositiveInteger(fields.bpDiastolic);
+  if (systolic === undefined || diastolic === undefined) return 'Blood pressure values must be whole numbers.';
+  if (systolic <= diastolic) return 'Systolic should be higher than diastolic.';
+  return null;
 }
 
 function isoDate(dateInput: Date | string): string {
@@ -79,6 +103,8 @@ export function buildBodyMeasurementsCheckinPayload({
   const thigh = optionalPositiveNumber(fields.thigh);
   const calf = optionalPositiveNumber(fields.calf);
   const bodyFat = optionalPositiveNumber(fields.bodyFat);
+  const bpSystolic = optionalPositiveInteger(fields.bpSystolic);
+  const bpDiastolic = optionalPositiveInteger(fields.bpDiastolic);
 
   if (waist !== undefined) payload.waist_in = waist;
   if (chest !== undefined) payload.chest_in = chest;
@@ -87,6 +113,10 @@ export function buildBodyMeasurementsCheckinPayload({
   if (thigh !== undefined) payload.thigh_in = thigh;
   if (calf !== undefined) payload.calf_in = calf;
   if (bodyFat !== undefined) payload.body_fat_pct = bodyFat;
+  if (bpSystolic !== undefined && bpDiastolic !== undefined) {
+    payload.bp_systolic = bpSystolic;
+    payload.bp_diastolic = bpDiastolic;
+  }
 
   return payload;
 }

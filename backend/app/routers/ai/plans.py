@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import logging
 from datetime import datetime, timezone
@@ -26,6 +28,7 @@ from .utils import (
 from .prompts import build_workout_prompt
 from app.services.nutrition.meal_assembler import (
     assemble_nutrition_response,
+    cap_planned_item_quantity,
     food_names_for_generation,
     selected_food_names_for_generation,
 )
@@ -305,11 +308,6 @@ def _resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
     deterministic-planner path resolve equipment identically."""
     return resolve_owned_equipment_slugs(equipment)
 
-
-class _PlanReviewDisabled(Exception):
-    """Sentinel raised inside `_build_deterministic_workout` when the
-    AI plan review feature flag is off. Caught and silently swallowed
-    so the deterministic plan ships unchanged. Not a real error."""
 
 
 def _persist_active_workout_plan(
@@ -655,6 +653,16 @@ def _build_deterministic_workout(
             if completions:
                 snap = compute_rolling_fatigue(completions)
                 injury_boosts = injury_muscle_fatigue_boost(tuple(req.injuriesOrLimitations or ()))
+                # Severity-aware structured boosts win when both paths
+                # reference the same muscle. Legacy strings still
+                # contribute when no structured record covers them.
+                from app.services.workout.planner import injury_muscle_fatigue_boost_structured
+                structured_records = [
+                    r.model_dump() if hasattr(r, "model_dump") else r
+                    for r in (getattr(req, "injuriesStructured", None) or [])
+                ]
+                for muscle, boost in injury_muscle_fatigue_boost_structured(tuple(structured_records)).items():
+                    injury_boosts[muscle] = max(injury_boosts.get(muscle, 0.0), boost)
                 for muscle, boost in injury_boosts.items():
                     current = snap.muscle_fatigue.get(muscle)
                     if current < boost:
@@ -678,6 +686,14 @@ def _build_deterministic_workout(
         preferred_exercises=tuple(req.preferredExercises or ()),
         disliked_exercises=tuple(req.dislikedExercises or ()),
         injuries=tuple(req.injuriesOrLimitations or ()),
+        # Severity-aware structured records (optional). When empty, the
+        # planner falls back to substring-matching `injuries` strings —
+        # exactly the legacy behavior, so callers that never set this
+        # are unaffected.
+        injuries_structured=tuple(
+            r.model_dump() if hasattr(r, "model_dump") else r
+            for r in (getattr(req, "injuriesStructured", None) or [])
+        ),
         rng_seed=int(user_id or 0),
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
@@ -764,28 +780,13 @@ def _build_deterministic_workout(
         except Exception as e:
             print(f"[plan-gen workout] propagate_session_targets failed (non-fatal): {e}")
 
-    # Enrich exercises with image URLs from the DB
+    # Enrich exercises with image URLs + demo-db ids from the DB.
     if db is not None:
-        try:
-            from app.models import Exercise as ExModel
-            ex_names = set()
-            for d in plan.get("workout_plan", {}).get("days", []):
-                for ex in d.get("exercises", []):
-                    ex_names.add(ex.get("name", ""))
-            if ex_names:
-                img_rows = db.exec(
-                    select(ExModel.name, ExModel.image_url)
-                    .where(ExModel.name.in_(ex_names))
-                    .where(ExModel.image_url != None)
-                ).all()
-                img_map = {r[0]: r[1] for r in img_rows}
-                for d in plan.get("workout_plan", {}).get("days", []):
-                    for ex in d.get("exercises", []):
-                        url = img_map.get(ex.get("name"))
-                        if url:
-                            ex["image_url"] = url
-        except Exception:
-            pass
+        from app.services.workout.exercise_enrichment import enrich_exercises_with_demo_ids
+        enrich_exercises_with_demo_ids(
+            db,
+            [d.get("exercises", []) for d in plan.get("workout_plan", {}).get("days", [])],
+        )
 
     # ── Recent-history query (unconditional) ───────────────────────
     # MUST run regardless of whether the AI plan review is enabled. The
@@ -968,301 +969,9 @@ def _build_deterministic_workout(
             print(f"[plan-gen workout] skip query failed (non-fatal): {e}")
     plan["_skipped_days"] = skipped_days
 
-    # ── AI plan review — PERMANENTLY DISABLED ───────────────────────
-    # The deterministic planner + adjacency repair + validate_plan do
-    # all the QA we need. The AI reviewer added latency, cost, and
-    # occasional incorrect patches without measurable plan quality
-    # gain. If you want to re-enable it, restore the env-var gate AND
-    # the try block below — the review functions still exist in
-    # plan_review.py and pass their tests.
-    _plan_review_enabled = False
-    print("[plan-gen workout] plan ships deterministic — AI review disabled")
-
-    try:
-        if not _plan_review_enabled:
-            raise _PlanReviewDisabled()
-        from app.services.workout.plan_review import (
-            apply_patches,
-            build_plan_brief,
-            review_plan,
-        )
-
-        # Resolve focused muscle from the same precedence chain the
-        # deterministic planner uses: goalSelection.targetFocus wins
-        # if present, otherwise fall back to the legacy
-        # `focusedMuscleGroup` field. Previously this used
-        # `getattr(req, "focusedMuscle", None)` which is a field that
-        # DOES NOT EXIST on PlanRequest — so the AI review was always
-        # blind to the user's muscle focus.
-        _focused_for_ai: str | None = None
-        if req.goalSelection is not None:
-            _focused_for_ai = (
-                getattr(req.goalSelection, "targetFocus", None)
-                or req.focusedMuscleGroup
-            )
-        else:
-            _focused_for_ai = req.focusedMuscleGroup
-
-        # Extra goal context passed through so the reviewer can judge
-        # secondary goals + goal details in addition to the primary
-        # bucket. Secondary goal might be "maintain strength" on a fat
-        # loss plan, for example — changes what a balanced plan looks
-        # like to the reviewer.
-        # secondaryGoal is deprecated (always None). targetFocus is the
-        # only active "secondary" context the reviewer can use.
-        _secondary_goal = _focused_for_ai  # pass target focus as secondary context
-        _goal_details = None
-        try:
-            _goal_details = req.goalDetails.model_dump() if req.goalDetails else None
-        except Exception:
-            _goal_details = None
-
-        brief = build_plan_brief(
-            plan,
-            goal=req.goal or "muscle_gain",
-            days_per_week=int(req.daysPerWeek or 3),
-            experience=(req.experienceLevel or "intermediate"),
-            recent_completed=recent_completed_rows,
-            injuries=tuple(req.injuriesOrLimitations or ()),
-            focused_muscle=_focused_for_ai,
-            secondary_goal=_secondary_goal,
-            goal_details=_goal_details,
-        )
-        # Inject the user's chosen split so the reviewer doesn't
-        # propose patches that conflict with the split structure.
-        if req.preferredSplit:
-            brief["user_preferred_split"] = req.preferredSplit
-        # Inject skipped-day data so the reviewer can see patterns
-        # (e.g. user keeps skipping legs → flag or swap).
-        if skipped_days:
-            brief["skipped_days_7d"] = skipped_days
-        review = review_plan(brief)
-        logger.info(
-            "[plan-review] verdict status=%s patches=%s has_error=%s",
-            review.status,
-            len(review.patches),
-            bool(review.error),
-        )
-        for i, p in enumerate(review.patches):
-            print(
-                f"[plan-review] patch {i}: action={p.action} "
-                f"day={p.day_index} ex={p.exercise_index} "
-                f"new_name={p.new_name!r} new_sets={p.new_sets} "
-                f"new_reps={p.new_reps!r} reason={p.reason!r}"
-            )
-        if review.status == "modify" and review.patches:
-            # Belt-and-braces: any plan_day whose focus matches a
-            # session the user ALREADY completed today gets blocked
-            # from patches. The prompt is told to skip these, but the
-            # AI occasionally ignores the rule — filter defensively.
-            completed_today = set(brief.get("completed_today_focuses") or [])
-            blocked_day_indices: set[int] = set()
-            if completed_today:
-                for day_meta in brief.get("plan_days") or []:
-                    plan_focus = (day_meta.get("focus") or "").strip().lower()
-                    if plan_focus in completed_today:
-                        idx = day_meta.get("index")
-                        if isinstance(idx, int):
-                            blocked_day_indices.add(idx)
-                if blocked_day_indices:
-                    print(
-                        f"[plan-review] blocking patches on day_indices "
-                        f"{sorted(blocked_day_indices)} — user already "
-                        f"completed those focuses today"
-                    )
-            _, applied = apply_patches(
-                plan, review.patches,
-                blocked_day_indices=blocked_day_indices,
-            )
-            for msg in applied:
-                print(f"[plan-gen workout] review patch: {msg}")
-            # Re-stamp load metadata on any patched exercises so the
-            # new exercises inherit set schemes + target weights.
-            try:
-                from app.services.workout.planner import _stamp_load_metadata
-                from app.services.workout.set_programming import build_set_scheme
-                goal_bucket = plan.get("workout_plan", {}).get("goal_bucket") or "muscle_gain"
-                all_by_slug_local = {ex["slug"]: ex for ex in SEED_EXERCISES if ex.get("slug")}
-                for day in plan.get("workout_plan", {}).get("days", []) or []:
-                    for ex_out in day.get("exercises", []) or []:
-                        if not ex_out.get("_review_patched"):
-                            continue
-                        # Minimal exercise stub for set-scheme logic —
-                        # swapped-in exercises from AI may not match a
-                        # seed row, so we fall back to conservative
-                        # defaults (isolation dumbbell) for the scheme.
-                        exercise_stub = {
-                            "slug": None,
-                            "equipment_bucket": "dumbbell",
-                            "is_compound": ex_out.get("_role") in ("primary", "compound"),
-                            "movement_pattern": None,
-                            "primary_muscle": ex_out.get("_primary_muscle"),
-                        }
-                        scheme = build_set_scheme(
-                            exercise_stub,
-                            total_sets=int(ex_out.get("sets") or 3),
-                            reps=ex_out.get("reps", "8-12"),
-                            rir_target=float(ex_out.get("_rir_target") or 2.0),
-                            target_weight_lbs=ex_out.get("targetWeightLbs"),
-                            goal_bucket=goal_bucket,
-                            role=ex_out.get("_role") or "accessory",
-                            experience=(req.experienceLevel or "intermediate"),
-                        )
-                        ex_out["setScheme"] = [s.to_dict() for s in scheme]
-            except Exception as e:
-                print(f"[plan-gen workout] re-stamp after patch failed (non-fatal): {e}")
-        plan.setdefault("workout_plan", {})["review"] = {
-            "status": review.status,
-            "notes": review.notes,
-            "patch_count": len(review.patches),
-            "error": review.error,
-        }
-        # Attach the FULL brief + verdict + patches to the response
-        # under `_debug.review` so the client can log it directly from
-        # its own console. Backend also prints the same data so you
-        # can cross-reference server-side logs. The field name is
-        # underscore-prefixed so the frontend treats it as a debug
-        # sidecar and ignores it when rendering.
-        plan["_debug"] = {
-            "review": {
-                "brief": brief,
-                "verdict": {
-                    "status": review.status,
-                    "notes": review.notes,
-                    "error": review.error,
-                    "patches": [
-                        {
-                            "action": p.action,
-                            "day_index": p.day_index,
-                            "exercise_index": p.exercise_index,
-                            "new_name": p.new_name,
-                            "new_equipment": p.new_equipment,
-                            "new_sets": p.new_sets,
-                            "new_reps": p.new_reps,
-                            "new_rest_seconds": p.new_rest_seconds,
-                            "new_focus": p.new_focus,
-                            "reason": p.reason,
-                        }
-                        for p in review.patches
-                    ],
-                },
-            },
-        }
-
-        # ── AI plan regenerate fallback ────────────────────────────
-        # When the reviewer flags the deterministic plan as broken —
-        # either status=modify (patches emitted) OR status=ok with
-        # contradictory complaints in notes — ask the AI to build a
-        # replacement plan from the equipment catalog. This is the
-        # escape hatch for when the deterministic planner's output
-        # is wrong in a way surgical patches can't fix (e.g. "5
-        # lifting days for fat loss but no cardio"). AI success
-        # replaces the plan wholesale; AI failure keeps the
-        # deterministic (and possibly patched) plan.
-        # Only regenerate from scratch when the reviewer said "ok" but
-        # described real problems in notes (the ok-with-complaints
-        # contradiction). When status="modify" AND patches were applied,
-        # the plan is already fixed — regenerating would REPLACE the
-        # patched deterministic plan with a free-form AI plan that
-        # loses the user's chosen split, stimulus structure, etc.
-        # NEVER regenerate the plan from scratch. The AI regenerate
-        # path replaces the entire deterministic plan with a free-form
-        # AI plan that loses the user's chosen split, stimulus types,
-        # exercise families, and all planner invariants we enforce.
-        # The deterministic planner + surgical patches is the source
-        # of truth. The ok-with-complaints contradiction is logged
-        # for debugging but does NOT trigger regen — the reviewer
-        # frequently hallucinates issues (e.g. "no cardio days" when
-        # there are 2 cardio days in the plan).
-        should_regenerate = False
-        if should_regenerate:
-            try:
-                from app.services.workout.plan_ai_regenerate import (
-                    regenerate_plan_with_ai,
-                )
-                regen = regenerate_plan_with_ai(
-                    failed_plan=plan,
-                    review_notes=review.notes,
-                    goal=req.goal or "muscle_gain",
-                    days_per_week=int(req.daysPerWeek or 3),
-                    experience=(req.experienceLevel or "intermediate"),
-                    injuries=tuple(req.injuriesOrLimitations or ()),
-                    # Same focus resolution as the review brief above.
-                    focused_muscle=_focused_for_ai,
-                    secondary_goal=_secondary_goal,
-                    goal_details=_goal_details,
-                    session_minutes=getattr(req, "workoutDurationMinutes", None),
-                    recent_completed=recent_completed_rows,
-                    all_exercises=SEED_EXERCISES,
-                    owned_equipment_slugs=owned_slugs,
-                )
-            except Exception as e:
-                print(f"[plan-gen workout] AI regenerate failed (non-fatal): {e}")
-                regen = None
-
-            if regen is not None:
-                print(
-                    f"[plan-gen workout] AI regenerate accepted — "
-                    f"replacing deterministic plan with AI plan "
-                    f"({len(regen.plan['workout_plan']['days'])} days)"
-                )
-                # Preserve the debug sidecar from the original review
-                # so the client can still log what triggered the
-                # regeneration.
-                old_debug = plan.get("_debug")
-                plan = regen.plan
-                if old_debug:
-                    plan["_debug"] = old_debug
-                    plan["_debug"]["regenerated"] = {
-                        "reason": "review flagged issues",
-                        "notes": regen.notes,
-                        "source": "ai_regenerate",
-                    }
-                # Re-stamp load metadata so set schemes and target
-                # weights land on the AI-generated exercises (using
-                # the same perf_profiles we loaded earlier for the
-                # deterministic pass).
-                try:
-                    from app.services.workout.planner import _stamp_load_metadata
-                    from app.seed_exercises_data import SEED_EXERCISES as _seed
-                    from app.routers.ai.utils import infer_exercise_category  # noqa: F401 (touch to ensure import path)
-                    _all_by_slug = {ex["slug"]: ex for ex in _seed if ex.get("slug")}
-                    class _PresStub:
-                        __slots__ = ("sets", "reps", "rest_seconds", "rir_target")
-                        def __init__(self, s, r, rs, rir):
-                            self.sets, self.reps, self.rest_seconds, self.rir_target = s, r, rs, rir
-                    for day in plan.get("workout_plan", {}).get("days", []) or []:
-                        for ex_out in day.get("exercises", []) or []:
-                            slug = ex_out.get("_slug")
-                            seed_ex = _all_by_slug.get(slug, {})
-                            pres = _PresStub(
-                                s=int(ex_out.get("sets") or 3),
-                                r=str(ex_out.get("reps") or "8-12"),
-                                rs=int(ex_out.get("restSeconds") or 90),
-                                rir=float(ex_out.get("_rir_target") or 2.0),
-                            )
-                            _stamp_load_metadata(
-                                ex_out,
-                                exercise=seed_ex,
-                                prescription=pres,
-                                role=ex_out.get("_role") or "accessory",
-                                goal_bucket=req.goal or "muscle_gain",
-                                experience=(req.experienceLevel or "intermediate"),
-                                perf_profiles=perf_profiles_for_planner,
-                                all_exercises_by_slug=_all_by_slug,
-                                load_equipment_settings=req.equipmentSettings,
-                            )
-                except Exception as e:
-                    print(f"[plan-gen workout] re-stamp after AI regenerate failed (non-fatal): {e}")
-            else:
-                print(
-                    "[plan-gen workout] AI regenerate rejected — "
-                    "keeping deterministic plan"
-                )
-    except _PlanReviewDisabled:
-        pass  # Silently skip — the disabled log already fired above.
-    except Exception as e:
-        print(f"[plan-gen workout] plan review failed (non-fatal): {e}")
+    # AI plan review + AI regenerate were permanently disabled and have
+    # been removed — the deterministic planner + adjacency repair +
+    # validate_plan do all the QA. (Formerly plan_review.py / plan_ai_regenerate.py.)
 
     days = plan.get("workout_plan", {}).get("days") or []
     print(
@@ -2018,9 +1727,11 @@ def _normalize_template_to_target(
     # almost certainly indicates a structural failure (missing meals,
     # nonsense input).
     if scale < 0.2 or scale > 5.0:
+        _round_items_to_nice_units(nutrition_plan)
         return None
     # If we're already within 1%, skip — no need to mutate for rounding.
     if abs(scale - 1.0) < 0.01:
+        _round_items_to_nice_units(nutrition_plan)
         return None
 
     def _mul(v, factor: float) -> int:
@@ -2057,6 +1768,7 @@ def _normalize_template_to_target(
                 q = it.get("quantity")
                 if isinstance(q, (int, float)):
                     it["quantity"] = round(float(q) * scale, 2)
+                cap_planned_item_quantity(it)
 
     _round_items_to_nice_units(nutrition_plan)
 
@@ -2114,12 +1826,17 @@ def _round_items_to_nice_units(nutrition_plan: dict) -> None:
             q = it.get("quantity")
             if not isinstance(q, (int, float)) or q <= 0:
                 continue
+            if cap_planned_item_quantity(it):
+                q = it.get("quantity")
+                if not isinstance(q, (int, float)) or q <= 0:
+                    continue
             # Snap to the nearest step, with a floor so items don't round
             # to zero and disappear.
             snapped = round(float(q) / step) * step
             if snapped < step:
                 snapped = step
             if snapped == q:
+                cap_planned_item_quantity(it)
                 continue
             ratio = snapped / float(q)
             # Trim trailing float noise: "2.0" not "2.0000000004".
@@ -2128,6 +1845,7 @@ def _round_items_to_nice_units(nutrition_plan: dict) -> None:
                 v = it.get(macro_key)
                 if isinstance(v, (int, float)):
                     it[macro_key] = int(round(float(v) * ratio)) if macro_key == "calories" else round(float(v) * ratio, 1)
+            cap_planned_item_quantity(it)
 
         # Recompute meal-level totals from the re-rounded items so meal
         # cards match item-sum.
@@ -2274,6 +1992,121 @@ def _filter_allergens_before_normalization(
         return 0
 
 
+def _food_quality_label_for_bucket(bucket: object) -> str:
+    bucket_str = str(bucket or "").strip().lower()
+    if bucket_str == "minimally_processed":
+        return "whole"
+    if bucket_str in ("processed", "ultra_processed"):
+        return "processed"
+    return "unknown"
+
+
+def _meal_item_needs_food_quality_fields(item: dict) -> bool:
+    bucket = str(item.get("processing_bucket") or "").strip().lower()
+    quality = str(item.get("food_quality") or "").strip().lower()
+    if not bucket or bucket == "unknown" or not quality or quality == "unknown":
+        return True
+    if not item.get("protein_source"):
+        return True
+    if "plant_count" not in item:
+        return True
+    for key in ("fermented", "probiotic", "seafood"):
+        if key not in item:
+            return True
+    return not any(key in item for key in ("omega3_rich", "omega3_flag"))
+
+
+def _set_meal_item_field(item: dict, key: str, value: object) -> bool:
+    if item.get(key) == value:
+        return False
+    item[key] = value
+    return True
+
+
+def _apply_food_metadata_to_item(item: dict, meta: object) -> bool:
+    changed = False
+    bucket = getattr(meta, "processing_bucket", None) or "unknown"
+    omega3 = bool(getattr(meta, "omega3_flag", False))
+    seafood = bool(getattr(meta, "seafood_flag", False))
+    changed = _set_meal_item_field(item, "protein_source", getattr(meta, "protein_source", None) or "unknown") or changed
+    changed = _set_meal_item_field(item, "fermented", bool(getattr(meta, "fermented_flag", False))) or changed
+    changed = _set_meal_item_field(item, "probiotic", bool(getattr(meta, "probiotic_flag", False))) or changed
+    changed = _set_meal_item_field(item, "omega3_rich", omega3) or changed
+    changed = _set_meal_item_field(item, "omega3_flag", omega3) or changed
+    changed = _set_meal_item_field(item, "plant_count", int(getattr(meta, "plant_count_value", 0) or 0)) or changed
+    changed = _set_meal_item_field(item, "seafood", seafood) or changed
+    changed = _set_meal_item_field(item, "seafood_flag", seafood) or changed
+    changed = _set_meal_item_field(item, "fruit", bool(getattr(meta, "fruit_flag", False))) or changed
+    changed = _set_meal_item_field(item, "vegetable", bool(getattr(meta, "vegetable_flag", False))) or changed
+    changed = _set_meal_item_field(item, "alcohol", bool(getattr(meta, "alcohol_flag", False))) or changed
+    changed = _set_meal_item_field(item, "processed_meat", bool(getattr(meta, "processed_meat_flag", False))) or changed
+    changed = _set_meal_item_field(item, "refined_grain", bool(getattr(meta, "refined_grain_flag", False))) or changed
+    changed = _set_meal_item_field(item, "processing_bucket", bucket) or changed
+    changed = _set_meal_item_field(item, "food_quality", _food_quality_label_for_bucket(bucket)) or changed
+    return changed
+
+
+def _hydrate_food_quality_fields(
+    plans_list: list[dict],
+    db: Session | None,
+    *,
+    allow_ai: bool,
+) -> bool:
+    if db is None:
+        return False
+
+    from app.services.nutrition.ai_classify import get_or_create_metadata
+
+    changed = False
+    cache: dict[str, object] = {}
+    for np_ in plans_list:
+        if not isinstance(np_, dict):
+            continue
+        for meal in _iter_meals(np_):
+            for item in meal.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name or not _meal_item_needs_food_quality_fields(item):
+                    continue
+                cache_key = name.lower()
+                if cache_key not in cache:
+                    cache[cache_key] = get_or_create_metadata(name, db=db, allow_ai=allow_ai)
+                changed = _apply_food_metadata_to_item(item, cache[cache_key]) or changed
+    return changed
+
+
+def _hydrate_active_week_nutrition_quality_fields(
+    db: Session,
+    user_id: int,
+    *,
+    allow_ai: bool = False,
+) -> int:
+    from copy import deepcopy
+    from app.services.workout.week_manager import get_active_week, get_week_days
+
+    active_week = get_active_week(db, user_id)
+    if not active_week:
+        return 0
+
+    updated = 0
+    now = datetime.now(timezone.utc)
+    for plan_day in get_week_days(db, active_week.id):
+        if not isinstance(plan_day.nutrition_json, dict):
+            continue
+        payload = deepcopy(plan_day.nutrition_json)
+        if not _hydrate_food_quality_fields([payload], db, allow_ai=allow_ai):
+            continue
+        plan_day.nutrition_json = payload
+        plan_day.updated_at = now
+        db.add(plan_day)
+        updated += 1
+
+    if updated:
+        db.commit()
+    return updated
+
+
 async def run_full_plan_generation(
     req: PlanRequest,
     *,
@@ -2300,8 +2133,7 @@ async def run_full_plan_generation(
     # user expects routines, the client → backend plumbing dropped
     # them and the assembler will build a full-target plan.
     print(
-        f"[plan-gen] routine inputs — mealsPerDay={getattr(req, 'mealsPerDay', None)} "
-        f"routineMacros={getattr(req, 'routineMacros', None)} "
+        f"[plan-gen] routine inputs — routineMacros={getattr(req, 'routineMacros', None)} "
         f"routineSlots={getattr(req, 'routineSlots', None)} "
         f"mealRoutine={bool(getattr(req, 'mealRoutine', None))}"
     )
@@ -2506,111 +2338,8 @@ async def run_full_plan_generation(
     if custom_foods:
         result["custom_foods"] = custom_foods
 
-    # ── Post-assembly micro enrichment ─────────────────────────────
-    # Walk every meal item in every template. Any item missing Layer 2
-    # micros gets enriched via a batched AI call. This catches:
-    # - Items from thin DB foods the lazy enrichment missed
-    # - Items from routine meals that bypassed the enrichment path
-    # - Items from custom/scanned foods with macros-only
-    # Results are written directly onto the item dicts so the client
-    # sees full micros on every item.
     try:
-        _MICRO_CHECK = ("saturated_fat", "omega_3", "potassium", "calcium", "iron", "vitamin_d")
-        thin_items: list[dict] = []
-        for np_ in plans_list:
-            if not isinstance(np_, dict):
-                continue
-            for meal in np_.get("meals") or []:
-                if not isinstance(meal, dict):
-                    continue
-                # Check meal-level micros
-                mn = meal.get("micronutrients") or {}
-                has_layer2 = sum(1 for k in _MICRO_CHECK if isinstance(mn.get(k), (int, float)) and mn[k] > 0)
-                if has_layer2 >= 3:
-                    continue  # meal already has decent micros
-                # Check per-item micros
-                for it in meal.get("items") or []:
-                    if not isinstance(it, dict):
-                        continue
-                    it_mn = it.get("micronutrients") or {}
-                    it_has = sum(1 for k in _MICRO_CHECK if isinstance(it_mn.get(k), (int, float)) and it_mn[k] > 0)
-                    if it_has < 2 and it.get("name"):
-                        thin_items.append(it)
-
-        if thin_items:
-            print(f"[plan-gen] {len(thin_items)} meal items missing Layer 2 micros — enriching")
-            from app.routers.ai.utils import _ai_backfill_micros
-            # Build food-shaped dicts for the backfill function
-            # Batch in groups of 20 to cover ALL thin items, not just the first 20
-            all_backfill: dict[str, dict] = {}
-            for batch_start in range(0, len(thin_items), 20):
-                batch = thin_items[batch_start:batch_start + 20]
-                food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in batch]
-                chunk = _ai_backfill_micros(client, food_dicts)
-                if chunk:
-                    all_backfill.update(chunk)
-            if all_backfill:
-                for it in thin_items:
-                    key = str(it.get("name", "")).strip().lower()
-                    micros = all_backfill.get(key)
-                    if not micros:
-                        continue
-                    # Write micros onto the item
-                    it_mn = it.get("micronutrients") or {}
-                    for mk, mv in micros.items():
-                        if mk not in it_mn or not it_mn[mk]:
-                            it_mn[mk] = mv
-                            it[mk] = mv  # also top-level for legacy readers
-                    it["micronutrients"] = it_mn
-                # Re-sum meal-level micros from enriched items
-                for np_ in plans_list:
-                    if not isinstance(np_, dict):
-                        continue
-                    for meal in np_.get("meals") or []:
-                        if not isinstance(meal, dict):
-                            continue
-                        items = meal.get("items") or []
-                        if not items:
-                            continue
-                        resummed: dict[str, float] = {}
-                        for it in items:
-                            it_mn = it.get("micronutrients") or {}
-                            for mk, mv in it_mn.items():
-                                try:
-                                    resummed[mk] = resummed.get(mk, 0.0) + float(mv or 0)
-                                except (TypeError, ValueError):
-                                    continue
-                        if resummed:
-                            meal["micronutrients"] = {k: round(v, 2) for k, v in resummed.items()}
-                            if "fiber" in resummed:
-                                meal["fiber"] = round(resummed["fiber"], 1)
-                print(f"[plan-gen] enriched {len(all_backfill)} items, re-summed meal micros")
-    except Exception as exc:
-        print(f"[plan-gen] post-assembly micro enrichment failed (non-fatal): {exc}")
-
-    # ── Classify food quality + gut-health signals on each item ─────────
-    try:
-        from app.services.nutrition.food_classifier import classify_food
-        from app.services.nutrition.nutrition_score import classify_food_quality
-        for np_ in plans_list:
-            if not isinstance(np_, dict):
-                continue
-            for meal in np_.get("meals") or []:
-                if not isinstance(meal, dict):
-                    continue
-                for it in meal.get("items") or []:
-                    if not isinstance(it, dict):
-                        continue
-                    if not it.get("food_quality"):
-                        it["food_quality"] = classify_food_quality(it)
-                    name = it.get("name") or ""
-                    if name and not it.get("protein_source"):
-                        cls = classify_food(name)
-                        it["protein_source"] = cls.protein_source
-                        it["fermented"] = cls.fermented_flag
-                        it["probiotic"] = cls.probiotic_flag
-                        it["omega3_rich"] = cls.omega3_flag
-                        it["plant_count"] = cls.plant_count_value
+        await asyncio.to_thread(_hydrate_food_quality_fields, plans_list, db, allow_ai=True)
     except Exception:
         pass
 
@@ -2695,35 +2424,13 @@ def get_active_nutrition_plan(
         print(f"[nutrition-plan] malformed plans_json for user={current_user.id}: {exc}")
         raise HTTPException(status_code=404, detail="nutrition plan unreadable")
 
-    # Lazy enrichment: classify any items missing protein_source so the
-    # plant-vs-animal protein tile in NutritionCard has data to render.
-    # Runs once per plan (the `not it.get` guard is a no-op on subsequent
-    # loads). Writes back to DB only when at least one item was updated.
     try:
-        from app.services.nutrition.food_classifier import classify_food
-        enriched = False
-        for day in plans_parsed:
-            if not isinstance(day, dict):
-                continue
-            for meal in (day.get("meals") or []):
-                if not isinstance(meal, dict):
-                    continue
-                for it in (meal.get("items") or []):
-                    if not isinstance(it, dict):
-                        continue
-                    name = it.get("name") or ""
-                    if name and not it.get("protein_source"):
-                        cls = classify_food(name)
-                        it["protein_source"] = cls.protein_source
-                        it["fermented"]      = cls.fermented_flag
-                        it["probiotic"]      = cls.probiotic_flag
-                        it["omega3_rich"]    = cls.omega3_flag
-                        it["plant_count"]    = cls.plant_count_value
-                        enriched = True
+        enriched = _hydrate_food_quality_fields(plans_parsed, db, allow_ai=False)
         if enriched:
             row.plans_json = json.dumps(plans_parsed)
             db.add(row)
             db.commit()
+        _hydrate_active_week_nutrition_quality_fields(db, current_user.id, allow_ai=False)
     except Exception:
         pass  # classifier failure must never break plan delivery
 
@@ -2775,44 +2482,69 @@ class EnrichItemsRequest(_BaseModel):
 @router.post("/plans/enrich-items")
 async def enrich_items_endpoint(
     req: EnrichItemsRequest,
-    current_user: User = Depends(require_pro_feature("AI food enrichment")),
+    current_user: User = Depends(require_pro_feature("Food enrichment")),
 ):
-    """Enrich a list of food items with micronutrients.
+    """Return cached DB micronutrients for a list of food items.
 
     Accepts items like [{name, quantity, unit}] and returns them with
-    full Layer 2 micros filled in. Used by the client to enrich routine
-    meals and custom foods that bypass the normal plan gen enrichment."""
+    micronutrients when the food already exists locally. This endpoint does
+    not call AI or backfill missing food data."""
     if not req.items:
         return {"items": []}
 
-    try:
-        api_key = get_openai_api_key()
-        client = OpenAI(api_key=api_key)
-    except Exception:
-        return {"items": []}
+    from app.routers.ai.utils import _hydrate_foods_from_db
+    from app.services.nutrition.meal_assembler import MICRONUTRIENT_FIELDS
 
-    from app.routers.ai.utils import _ai_backfill_micros
-    food_dicts = [
-        {
-            "name": it.get("name"),
-            "serving": f"{it.get('quantity', 1)} {it.get('unit', 'serving')}",
-        }
-        for it in req.items[:20]
-        if it.get("name")
-    ]
-    if not food_dicts:
-        return {"items": []}
+    def _as_float(value: object) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
-    backfill = _ai_backfill_micros(client, food_dicts)
+    def _db_micros_for_item(item: dict) -> dict[str, float]:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return {}
+        hydrated, _unknowns = _hydrate_foods_from_db([name], user_id=current_user.id)
+        if not hydrated:
+            return {}
+        food = hydrated[0]
+        base_cal = _as_float(food.get("calories"))
+        requested_cal = _as_float(item.get("calories"))
+        scale = requested_cal / base_cal if base_cal > 0 and requested_cal > 0 else 1.0
+        micros: dict[str, float] = {}
+        for key in MICRONUTRIENT_FIELDS:
+            if key not in food:
+                continue
+            try:
+                micros[key] = round(float(food.get(key) or 0) * scale, 2)
+            except (TypeError, ValueError):
+                continue
+        return micros if any(v > 0 for v in micros.values()) else {}
+
+    limited_items = [it for it in req.items[:20] if it.get("name")]
+    db_micros_by_name: dict[str, dict[str, float]] = {}
+    missing = 0
+    for item in limited_items:
+        name_key = str(item.get("name") or "").strip().lower()
+        micros = _db_micros_for_item(item)
+        if micros:
+            db_micros_by_name[name_key] = micros
+        else:
+            missing += 1
+
     enriched = []
-    for it in req.items[:20]:
+    for it in limited_items:
         name = str(it.get("name", "")).strip().lower()
-        micros = backfill.get(name, {})
+        micros = db_micros_by_name.get(name, {})
         enriched.append({
             "name": it.get("name", ""),
             "micronutrients": micros,
         })
-    print(f"[enrich-items] enriched {len([e for e in enriched if e['micronutrients']])} of {len(enriched)} items")
+    print(
+        f"[enrich-items] enriched {len([e for e in enriched if e['micronutrients']])} "
+        f"of {len(enriched)} items (db={len(enriched) - missing}, ai=0)"
+    )
     return {"items": enriched}
 
 
@@ -2892,6 +2624,7 @@ async def generate_workout_plan(
         foodsAvailable=[],
         experienceLevel=req.experienceLevel,
         injuriesOrLimitations=req.injuriesOrLimitations,
+        injuriesStructured=getattr(req, "injuriesStructured", []) or [],
         userContext=req.userContext,
     )
     try:
@@ -2966,6 +2699,11 @@ async def run_nutrition_only_generation(
         if isinstance(_np, dict):
             _np["_plannerVersion"] = PLANNER_VERSION
 
+    try:
+        await asyncio.to_thread(_hydrate_food_quality_fields, plans_list, db, allow_ai=True)
+    except Exception:
+        pass
+
     result = {
         "nutritionistNote": nutrition_data.get("nutritionistNote", ""),
         "supplementStack":  nutrition_data.get("supplementStack", []),
@@ -2975,74 +2713,8 @@ async def run_nutrition_only_generation(
     if custom_foods:
         result["custom_foods"] = custom_foods
 
-    # Post-assembly micro enrichment (same as full plan gen path)
-    try:
-        _MICRO_CHECK = ("saturated_fat", "omega_3", "potassium", "calcium", "iron", "vitamin_d")
-        thin_items: list[dict] = []
-        for np_ in plans_list:
-            if not isinstance(np_, dict):
-                continue
-            for meal in np_.get("meals") or []:
-                if not isinstance(meal, dict):
-                    continue
-                mn = meal.get("micronutrients") or {}
-                if sum(1 for k in _MICRO_CHECK if isinstance(mn.get(k), (int, float)) and mn[k] > 0) >= 3:
-                    continue
-                for it in meal.get("items") or []:
-                    if not isinstance(it, dict):
-                        continue
-                    it_mn = it.get("micronutrients") or {}
-                    if sum(1 for k in _MICRO_CHECK if isinstance(it_mn.get(k), (int, float)) and it_mn[k] > 0) < 2 and it.get("name"):
-                        thin_items.append(it)
-        if thin_items:
-            print(f"[plan-gen nutrition] {len(thin_items)} items missing micros — enriching")
-            from app.routers.ai.utils import _ai_backfill_micros
-            # Batch in groups of 20 to cover ALL thin items
-            all_backfill: dict[str, dict] = {}
-            for batch_start in range(0, len(thin_items), 20):
-                batch = thin_items[batch_start:batch_start + 20]
-                food_dicts = [{"name": it.get("name"), "serving": f"{it.get('quantity',1)} {it.get('unit','serving')}"} for it in batch]
-                chunk = _ai_backfill_micros(client, food_dicts)
-                if chunk:
-                    all_backfill.update(chunk)
-            if all_backfill:
-                for it in thin_items:
-                    key = str(it.get("name", "")).strip().lower()
-                    micros = all_backfill.get(key)
-                    if not micros:
-                        continue
-                    it_mn = it.get("micronutrients") or {}
-                    for mk, mv in micros.items():
-                        if mk not in it_mn or not it_mn[mk]:
-                            it_mn[mk] = mv
-                            it[mk] = mv
-                    it["micronutrients"] = it_mn
-                for np_ in plans_list:
-                    if not isinstance(np_, dict):
-                        continue
-                    for meal in np_.get("meals") or []:
-                        if not isinstance(meal, dict):
-                            continue
-                        items = meal.get("items") or []
-                        if not items:
-                            continue
-                        resummed: dict[str, float] = {}
-                        for it in items:
-                            for mk, mv in (it.get("micronutrients") or {}).items():
-                                try:
-                                    resummed[mk] = resummed.get(mk, 0.0) + float(mv or 0)
-                                except (TypeError, ValueError):
-                                    continue
-                        if resummed:
-                            meal["micronutrients"] = {k: round(v, 2) for k, v in resummed.items()}
-                            if "fiber" in resummed:
-                                meal["fiber"] = round(resummed["fiber"], 1)
-                print(f"[plan-gen nutrition] enriched {len(all_backfill)} items")
-    except Exception as exc:
-        print(f"[plan-gen nutrition] post-assembly enrichment failed: {exc}")
-
-    # Persist as the new active nutrition plan after safety filtering,
-    # normalization, and micro enrichment so DB mirrors the response.
+    # Persist as the new active nutrition plan after safety filtering and
+    # normalization so DB mirrors the response.
     _persist_active_nutrition_plan(
         db, user_id, plans_list, req=plan_req,
         trainer_note=result.get("nutritionistNote") or None, reason="regen",
@@ -3075,7 +2747,6 @@ async def generate_nutrition_plan(
         supplementsAvailable=req.supplementsAvailable,
         dietaryPreference=req.dietaryPreference,
         allergies=req.allergies,
-        mealsPerDay=req.mealsPerDay,
         mealVariety=getattr(req, "mealVariety", 5) or 5,
         mealRoutine=req.mealRoutine,
         routineMacros=getattr(req, "routineMacros", None),
@@ -3097,27 +2768,70 @@ async def generate_nutrition_plan(
     return result
 
 
-@router.post("/parse-workouts")
-def parse_recent_workouts(
+def _extract_workout_pdf_text_from_base64(file_base64: str) -> str:
+    if file_base64.startswith("data:") and ";base64," in file_base64[:128]:
+        file_base64 = file_base64.split(";base64,", 1)[1]
+    try:
+        raw = base64.b64decode("".join(file_base64.split()), validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="file_base64 is not valid base64")
+    if len(raw) > 10_000_000:
+        raise HTTPException(status_code=400, detail="PDF is too large; upload a smaller file or screenshots")
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except Exception:
+        raise HTTPException(status_code=503, detail="PDF workout import is unavailable on this backend build")
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        parts: list[str] = []
+        for page in reader.pages[:10]:
+            text = page.extract_text() or ""
+            if text.strip():
+                parts.append(text)
+        content = "\n\n".join(parts).strip()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read that PDF. Try a screenshot or image file.")
+    if len(content) < 40:
+        raise HTTPException(status_code=400, detail="No readable workout text found in that PDF. Try a screenshot or image file.")
+    return content[:18000]
+
+
+def _build_workout_import_prompt(
     body: ParseWorkoutsRequest,
-    current_user: User = Depends(require_pro_feature("AI workout parsing")),
-):
-    """Parse text or a workout screenshot into review-first WorkoutSession data."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+    *,
+    today: str,
+    source_label: str,
+    source_text: str | None = None,
+) -> str:
+    context = (body.user_context or "").strip()[:1200]
+    context_block = f"\nUser context to help interpret the import:\n{context}\n" if context else ""
 
-    client = OpenAI(api_key=api_key)
-    today = body.currentDate or __import__("datetime").date.today().isoformat()
-    photo_base64 = (body.photo_base64 or "").strip()
+    if body.template_mode:
+        text_block = f"\nSource text:\n{source_text}\n" if source_text else ""
+        return f"""Extract saved workout template candidates from this {source_label}.
+Today's date is {today}.{context_block}{text_block}
 
-    if photo_base64:
-        mime = (body.photo_mime_type or "image/jpeg").strip() or "image/jpeg"
-        image_data_url = photo_base64 if photo_base64.startswith("data:image/") else f"data:{mime};base64,{photo_base64}"
-        prompt = f"""Extract workout data from this screenshot/photo for review-first import.
-Today's date is {today}. The image may be from Peloton, Apple Fitness, Strava, Garmin, a workout notes app, or a camera photo of a class/template.
+Return a JSON object with a "sessions" array. If the source contains a weekly program, PDF packet, multiple days, or multiple named workouts, create one session per distinct workout/template/day. Create only templates clearly supported by the source.
+For each session:
+- "date": "{today}" unless a date is clearly relevant.
+- "focus": the visible template/day title, e.g. "Upper Body", "Push A", "Lower Strength".
+- "completed": false.
+- "durationSeconds": estimated duration in seconds when visible, otherwise 3600.
+- "exercises": strength, cardio, conditioning, or mobility exercises in source order. Each exercise has:
+  - "name": exercise name.
+  - "equipment": equipment when visible or obvious.
+  - "sets_count": number of working sets when visible.
+  - "sets": array with "reps", "durationSeconds", and/or "weightLbs" when visible.
+  - "restSeconds": rest between sets when visible.
 
-Return a JSON object with a "sessions" array. Create only workouts clearly visible in the image.
+Preserve rep ranges like "8-12", AMRAP, and RPE notes inside the reps string when useful. Do not invent exercises or rewrite the user's plan. Never mutate an active plan; this endpoint only returns candidates for review before saving as templates.
+Return ONLY valid JSON: {{"sessions": []}} if nothing is parseable."""
+
+    text_block = f'\nUser said: "{body.text}"\n' if source_text is None else f"\nSource text:\n{source_text}\n"
+    return f"""Parse workout data from this {source_label} into structured session candidates.
+Today's date is {today}.{context_block}{text_block}
+
+Return a JSON object with a "sessions" array. Create only workouts clearly present.
 For each session:
 - "date": ISO date string (YYYY-MM-DD). Use {today} if no date is visible.
 - "focus": keep the visible title/type, e.g. "Peloton Ride", "Intervals", "Upper Body", "Push", "Run".
@@ -3126,29 +2840,119 @@ For each session:
 - "distanceMiles": number when visible, otherwise omit.
 - "caloriesBurned": number when visible, otherwise omit.
 - "avgHeartRate": number when visible, otherwise omit.
-- "source": "peloton" when Peloton is visible, otherwise omit unless another source is obvious.
-- "exercises": strength exercises only if the image clearly lists them; each exercise has "name" and optional "sets".
+- "source": obvious source app/vendor when visible, otherwise omit.
+- "exercises": strength exercises only if clearly listed; each exercise has "name" and optional "sets".
 
 Never mutate an active plan. This endpoint only returns candidates for the user to review before saving.
 Return ONLY valid JSON: {{"sessions": []}} if nothing is parseable."""
+
+
+def _sessions_from_ai_json(raw: str) -> list:
+    data = _extract_json(raw)
+    return data if isinstance(data, list) else data.get("sessions", data.get("workouts", []))
+
+
+@router.post("/parse-workouts")
+def parse_recent_workouts(
+    body: ParseWorkoutsRequest,
+    current_user: User = Depends(require_pro_feature("AI workout parsing")),
+):
+    """Parse text, screenshots, or PDFs into review-first workout data."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    client = OpenAI(api_key=api_key)
+    today = body.currentDate or __import__("datetime").date.today().isoformat()
+    photo_base64 = (body.photo_base64 or "").strip()
+    photo_base64_list = [
+        str(value or "").strip()
+        for value in (body.photo_base64_list or [])
+        if str(value or "").strip()
+    ]
+    photo_mime_types = list(body.photo_mime_types or [])
+    file_base64 = (body.file_base64 or "").strip()
+
+    if file_base64:
+        mime = (body.file_mime_type or "application/octet-stream").strip().lower()
+        filename = str(body.filename or "").lower()
+        is_pdf = mime == "application/pdf" or filename.endswith(".pdf")
         try:
+            if is_pdf:
+                report_text = _extract_workout_pdf_text_from_base64(file_base64)
+                prompt = _build_workout_import_prompt(
+                    body,
+                    today=today,
+                    source_label="PDF",
+                    source_text=report_text,
+                )
+                kwargs = _build_chat_kwargs(
+                    model_plan_generation(),
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=1600,
+                    timeout_secs=45,
+                )
+            else:
+                from .scanning import _image_block
+                image_data_url = file_base64 if file_base64.startswith("data:image/") else f"data:{mime};base64,{file_base64}"
+                prompt = _build_workout_import_prompt(
+                    body,
+                    today=today,
+                    source_label="image file",
+                )
+                kwargs = _build_chat_kwargs(
+                    model_image(),
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            _image_block(image_data_url, "high"),
+                        ],
+                    }],
+                    max_tokens=1400,
+                    timeout_secs=45,
+                )
+            resp = _chat_create(client, **kwargs)
+            sessions = _sessions_from_ai_json(resp.choices[0].message.content or "{}")
+            print(f"[parse-workouts] parsed {len(sessions)} sessions from file {body.filename or mime}")
+            return {"sessions": sessions}
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[parse-workouts] file error: {e}")
+            return {"sessions": []}
+
+    photo_payloads: list[tuple[str, str | None]] = []
+    if photo_base64:
+        photo_payloads.append((photo_base64, body.photo_mime_type))
+    for idx, item in enumerate(photo_base64_list):
+        photo_payloads.append((item, photo_mime_types[idx] if idx < len(photo_mime_types) else None))
+
+    if photo_payloads:
+        from .scanning import _image_block
+        prompt = _build_workout_import_prompt(
+            body,
+            today=today,
+            source_label="screenshots/photos" if len(photo_payloads) > 1 else "screenshot/photo",
+        )
+        try:
+            content: list[dict] = [{"type": "text", "text": prompt}]
+            for image_base64, image_mime in photo_payloads[:6]:
+                mime = (image_mime or "image/jpeg").strip() or "image/jpeg"
+                image_data_url = image_base64 if image_base64.startswith("data:image/") else f"data:{mime};base64,{image_base64}"
+                content.append(_image_block(image_data_url, "high"))
             kwargs = _build_chat_kwargs(
                 model_image(),
                 messages=[{
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
+                    "content": content,
                 }],
-                max_tokens=900,
-                timeout_secs=45,
+                max_tokens=1800 if body.template_mode or len(photo_payloads) > 1 else 900,
+                timeout_secs=60 if len(photo_payloads) > 1 else 45,
             )
             resp = _chat_create(client, **kwargs)
-            raw = resp.choices[0].message.content or "{}"
-            data = _extract_json(raw)
-            sessions = data if isinstance(data, list) else data.get("sessions", data.get("workouts", []))
-            print(f"[parse-workouts] parsed {len(sessions)} sessions from workout photo")
+            sessions = _sessions_from_ai_json(resp.choices[0].message.content or "{}")
+            print(f"[parse-workouts] parsed {len(sessions)} sessions from {len(photo_payloads)} workout photo(s)")
             return {"sessions": sessions}
         except Exception as e:
             print(f"[parse-workouts] photo error: {e}")
@@ -3188,14 +2992,15 @@ Return ONLY a valid JSON object with a "sessions" key — no markdown, no explan
 If nothing parseable, return: {{"sessions": []}}"""
 
     try:
-        resp = client.chat.completions.create(
-            model=model_plan_generation(),
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+        kwargs = _build_chat_kwargs(
+            model_plan_generation(),
+            [{"role": "user", "content": prompt}],
             max_tokens=800,
+            timeout_secs=30,
         )
+        resp = _chat_create(client, **kwargs)
         raw = resp.choices[0].message.content or "[]"
-        data = json.loads(raw)
+        data = _extract_json(raw)
         # Handle both {"sessions": [...]} and direct array
         sessions = data if isinstance(data, list) else data.get("sessions", data.get("workouts", []))
         print(f"[parse-workouts] parsed {len(sessions)} sessions from: {body.text[:80]}")

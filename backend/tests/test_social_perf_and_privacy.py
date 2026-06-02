@@ -19,7 +19,11 @@ from app.models import (
 )
 from app.enums import GoalType
 from app.services.social.digest import compute_digest
-from app.routers.social import _sanitize_feed_payload_for_read, get_feed
+from app.routers.social import (
+    SOCIAL_PHOTO_STORED_MAX_CHARS,
+    _sanitize_feed_payload_for_read,
+    get_feed,
+)
 
 
 def _ok(label: str) -> None:
@@ -261,6 +265,44 @@ def test_digest_respects_share_toggle():
     _ok("share toggle hides stats for opted-out friends")
 
 
+def test_digest_excludes_apple_health_imports_from_social_stats():
+    """Apple Health auto-imports still count in private history, but
+    should not show up as friend sessions or streaks."""
+    print("\n[test] digest: Apple Health completions stay out of social stats")
+    eng = _make_engine()
+    today = date(2026, 5, 21)
+    with Session(eng) as s:
+        _user(s, 1)
+        _user(s, 2, username="walker")
+        _seed_share_profile(s, 1)
+        _seed_share_profile(s, 2, share=True)
+        _seed_goal(s, 2)
+        _friendship(s, 1, 2)
+        s.add(WorkoutCompletion(
+            user_id=2,
+            workout_date=today,
+            focus_label="Outdoor Walk",
+            duration_seconds=1800,
+            source_context="apple_health",
+            activity_source="apple_health",
+        ))
+        s.add(WorkoutCompletion(
+            user_id=2,
+            workout_date=today - timedelta(days=1),
+            focus_label="Push",
+            duration_seconds=2400,
+        ))
+        s.commit()
+
+        digest = compute_digest(s, user_id=1, today=today)
+
+    friend = digest["friends"][0]
+    assert friend["username"] == "walker"
+    assert friend["sessions"] == 1
+    assert digest["summary"]["total_friend_sessions"] == 1
+    _ok("Apple Health auto-import excluded; deliberate workout remains visible")
+
+
 def test_digest_includes_avatar_url_without_sensitive_data():
     """Avatar URLs are public social-profile metadata; private training
     and body metrics still must not cross the digest boundary."""
@@ -372,15 +414,33 @@ def test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields():
     _ok("manual post payload keeps caption/photo plus sanitized workout metrics")
 
 
+def test_feed_sanitizer_strips_data_url_prefix_and_drops_oversized_photos():
+    """Feed list responses must stay thumbnail-sized even if legacy rows
+    contain old full-size blobs."""
+    print("\n[test] feed: post photos are feed-safe thumbnails only")
+    small = _sanitize_feed_payload_for_read("workout_post", {
+        "photo_base64": "data:image/jpeg;base64,abc123",
+    })
+    oversized = _sanitize_feed_payload_for_read("workout_post", {
+        "photo_base64": "x" * (SOCIAL_PHOTO_STORED_MAX_CHARS + 1),
+    })
+
+    assert small["photo_base64"] == "abc123"
+    assert "photo_base64" not in oversized
+    _ok("data URL prefix removed; oversized legacy photo omitted from feed payload")
+
+
 cases = [
     test_digest_drops_soft_deleted_friends,
     test_digest_query_count_is_constant,
     test_feed_query_count_is_constant,
     test_digest_with_zero_friends_doesnt_crash,
     test_digest_respects_share_toggle,
+    test_digest_excludes_apple_health_imports_from_social_stats,
     test_digest_includes_avatar_url_without_sensitive_data,
     test_feed_sanitizer_keeps_workout_metrics_and_removes_sensitive_fields,
     test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields,
+    test_feed_sanitizer_strips_data_url_prefix_and_drops_oversized_photos,
 ]
 
 

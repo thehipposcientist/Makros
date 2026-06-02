@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Pressable, Image } from 'react-native';
+import { memo, useMemo } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { WorkoutDay, AppThemeName } from '../types';
 import { elevations, getTheme, radius, typography } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
@@ -8,6 +9,7 @@ import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { shouldHideWeight } from '../utils/exerciseDisplay';
 import { estimateWorkoutMinutes } from '../utils/workoutDurationEstimate';
 import FadeInView from './FadeInView';
+import ExerciseThumbMedia, { hasExerciseThumbMedia } from './ExerciseThumbMedia';
 
 /** Turn a planner-emitted equipment string into a display label.
  *  The planner outputs comma-separated slugs like
@@ -44,7 +46,7 @@ interface WorkoutCardProps {
   embedded?: boolean;
 }
 
-export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpenExerciseVideo, onSwapExercise, onViewExercise, embedded = false }: WorkoutCardProps) {
+function WorkoutCardInner({ workout, themeName, sessionMinutes, onOpenExerciseVideo, onSwapExercise, onViewExercise, embedded = false }: WorkoutCardProps) {
   const theme  = getTheme(themeName);
   const c      = theme.colors;
   const s      = theme.sections.workout;
@@ -60,6 +62,14 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
           Stats strip is now a plain inline row, no colored background,
           matching the macros grid on the meal accordion. */}
       <View style={[styles.statsStrip, embedded && styles.statsStripEmbedded]}>
+        <LinearGradient
+          pointerEvents="none"
+          colors={[s.strong + '24', s.soft, c.surface + '00'] as any}
+          locations={[0, 0.58, 1] as any}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.statsStripGradient}
+        />
         <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} testID="workout-estimated-duration" />
         <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
         <StatItem icon="layers-outline" value={`${totalSets} sets`} color={s.strong} />
@@ -69,6 +79,11 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
       <Text style={styles.warmupHint}>
         Estimate includes warm-up, set rests, and transitions between exercises.
       </Text>
+
+      {/* Start / Log activity row moved into the DayCard expanded
+          section (sits under "Change Focus") so the two affordances
+          render side-by-side instead of squeezing into the card's
+          stats strip. */}
 
       {/* ── Exercise list ───────────────────────────────────────────────── */}
       <View style={[styles.body, embedded && styles.bodyEmbedded]}>
@@ -185,7 +200,7 @@ function StatItem({ icon, value, color, testID }: {
   testID?: string;
 }) {
   return (
-    <View testID={testID} accessibilityLabel={testID} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+    <View testID={testID} accessibilityLabel={value} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
       <Ionicons name={icon} size={12} color={color} />
       <Text style={{ fontSize: 11, fontWeight: '600', color, letterSpacing: 0.2 }}>{value}</Text>
     </View>
@@ -207,24 +222,39 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
   circuitMode?: boolean;
   circuitStep?: number;
 }) {
+  const stepLabel = circuitMode && circuitStep ? `A${circuitStep}` : String(index + 1).padStart(2, '0');
   return (
     <View style={[
       styles.exRow,
       circuitMode ? styles.exRowCircuit : styles.exRowCard,
       !isLast && !circuitMode && styles.exRowStackGap,
     ]}>
+      {!circuitMode && (
+        <LinearGradient
+          pointerEvents="none"
+          colors={[section.strong + '16', c.surface + '66', c.surface + '00'] as any}
+          locations={[0, 0.54, 1] as any}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.exRowGradient}
+        />
+      )}
+      <View style={styles.exTimeline}>
+        {/* Vertical spine line removed per UX — only the numbered dot remains. */}
+        <View style={[styles.exTimelineDot, { backgroundColor: section.strong }]}>
+          <Text style={styles.exTimelineDotText}>{stepLabel}</Text>
+        </View>
+      </View>
+      <View style={styles.exRowMain}>
       {/* Thumbnail — YouTube video frame when available, numbered tile
           otherwise. Tapping the thumbnail launches the form-video modal
           (separate hit target from the whole row so an accidental tap
           while scrolling the plan doesn't open video). */}
       {(() => {
-        const thumbUri = exerciseThumbSmall(exercise as any);
-        if (!thumbUri) {
-          return (
-            <View style={[styles.exNum, { backgroundColor: section.strong }]}>
-              <Text style={styles.exNumText}>{String(index + 1).padStart(2, '0')}</Text>
-            </View>
-          );
+        const thumbSrc = exerciseThumbSmall(exercise as any);
+        const demoExerciseDbId = (exercise as any).demo_exercise_db_id ?? null;
+        if (!hasExerciseThumbMedia({ exerciseName: exercise.name, demoExerciseDbId, fallbackSource: thumbSrc })) {
+          return null;
         }
         const inner = (
           <View style={{
@@ -250,15 +280,22 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
               width: '100%', height: '100%', borderRadius: 8,
               overflow: 'hidden',
             }}>
-            <Image source={{ uri: thumbUri }} style={{ width: 46, height: 46 }} resizeMode="cover" />
-            {/* Brightness lift — YouTube thumbnails often capture gym
-                interiors that are dim; a subtle white wash keeps the
-                content legible on dark themes without washing out the
-                colors. pointerEvents=none so the tap still reaches the
-                underlying TouchableOpacity wrapper. */}
+            {/* Always cover — the demo photos are 3:2 gym shots; contain
+                in a 46x46 tile shrinks the figure into an unreadable blob
+                with white margins. Cover clips the sides and keeps the
+                figure full-height in the tile. */}
+            <ExerciseThumbMedia
+              exerciseName={exercise.name}
+              demoExerciseDbId={demoExerciseDbId}
+              fallbackSource={thumbSrc}
+              style={{ width: '100%', height: '100%' }}
+              shouldPlayVideo={false}
+            />
+            {/* Brightness lift — both YouTube thumbnails and the demo
+                photos benefit from a subtle white wash on dark themes. */}
             <View pointerEvents="none" style={{
               position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-              backgroundColor: 'rgba(255,255,255,0.18)',
+              backgroundColor: 'rgba(255,255,255,0.12)',
             }} />
             <View pointerEvents="none" style={{
               position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
@@ -417,9 +454,13 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
           )}
         </View>
       </View>
+      </View>
     </View>
   );
 }
+
+const WorkoutCard = memo(WorkoutCardInner);
+export default WorkoutCard;
 
 function formatCircuitWorkLabel(exercise: WorkoutDay['exercises'][number]): string {
   const reps = String(exercise.reps ?? '').trim();
@@ -497,10 +538,21 @@ const createStyles = (
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: s.strong + '24',
+    position: 'relative',
+    overflow: 'hidden',
+    shadowColor: s.strong,
+    shadowOpacity: 0.10,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   statsStripEmbedded: {
     marginHorizontal: 0,
     marginTop: 2,
+  },
+  statsStripGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: radius.lg,
   },
   statsDivider: { width: 1, height: 14 },
 
@@ -518,37 +570,75 @@ const createStyles = (
   // Exercise row
   exRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-    paddingVertical: 12,
+    alignItems: 'stretch',
+    gap: 10,
+    paddingVertical: 10,
+    position: 'relative',
   },
   exRowCard: {
-    backgroundColor: c.surfaceRaised,
-    borderRadius: 16,
-    borderWidth: 1,
+    backgroundColor: c.surface + 'B8',
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: c.border,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
+    overflow: 'hidden',
     ...elevations.subtle,
   },
+  exRowGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 18,
+  },
   exRowCircuit: {
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
   },
   exRowStackGap: {
     marginBottom: 8,
   },
-  exNum: {
-    width: 28,
-    height: 28,
-    borderRadius: 10,
+  exTimeline: {
+    width: 32,
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 1,
+    justifyContent: 'flex-start',
+    position: 'relative',
+    paddingTop: 2,
+    paddingBottom: 2,
     flexShrink: 0,
   },
-  exNumText:   { fontSize: 10, fontWeight: '900', color: '#fff', letterSpacing: 0.5 },
+  exTimelineLine: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 2,
+    borderRadius: 999,
+  },
+  exTimelineDot: {
+    minWidth: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  exTimelineDotText: {
+    fontSize: 9,
+    fontWeight: '900',
+    color: '#fff',
+    letterSpacing: 0.4,
+  },
+  exRowMain: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
   exInfo:      { flex: 1, gap: 3 },
-  exName:      { ...typography.cardTitle, lineHeight: 19 },
-  exEquipment: { ...typography.micro, marginBottom: 6 },
+  exName:      { ...typography.cardTitle, lineHeight: 19, fontWeight: '800' },
+  exEquipment: { ...typography.micro, marginBottom: 6, fontWeight: '700' },
   exChips:     { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
   circuitCard: {
     borderRadius: 14,

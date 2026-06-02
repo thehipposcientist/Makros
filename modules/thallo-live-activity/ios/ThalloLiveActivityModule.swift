@@ -32,6 +32,14 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var hrZoneLow: Int?
         public var hrZoneHigh: Int?
         public var hrZoneColorHex: String?
+        // Cardio mode fields — see RestTimerAttributes.swift in
+        // targets/resttimer-widget for the canonical comments. Both
+        // structs MUST stay in sync because the Codable-based
+        // ActivityKit IPC links them by qualified name.
+        public var distanceMeters: Double?
+        public var paceSecPerKm: Double?
+        public var activeCalories: Double?
+        public var distanceUnit: String?
     }
 
     public var workoutId: String
@@ -60,6 +68,19 @@ private func boolValue(_ value: Any?, fallback: Bool) -> Bool {
         if lower == "false" || lower == "0" { return false }
     }
     return fallback
+}
+
+private func optionalDoubleValue(_ value: Any?) -> Double? {
+    if value == nil || value is NSNull { return nil }
+    if let value = value as? Double, value.isFinite { return value }
+    if let value = value as? Int { return Double(value) }
+    if let value = value as? NSNumber { return value.doubleValue }
+    if let value = value as? String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty { return nil }
+        if let d = Double(cleaned), d.isFinite { return d }
+    }
+    return nil
 }
 
 private func optionalIntValue(_ value: Any?) -> Int? {
@@ -125,7 +146,11 @@ public class ThalloLiveActivityModule: Module {
                 hrZoneLabel: optionalStringValue(payload["hrZoneLabel"]),
                 hrZoneLow: optionalIntValue(payload["hrZoneLow"]),
                 hrZoneHigh: optionalIntValue(payload["hrZoneHigh"]),
-                hrZoneColorHex: optionalStringValue(payload["hrZoneColorHex"])
+                hrZoneColorHex: optionalStringValue(payload["hrZoneColorHex"]),
+                distanceMeters: optionalDoubleValue(payload["distanceMeters"]),
+                paceSecPerKm: optionalDoubleValue(payload["paceSecPerKm"]),
+                activeCalories: optionalDoubleValue(payload["activeCalories"]),
+                distanceUnit: optionalStringValue(payload["distanceUnit"])
             )
             let attrs = RestTimerAttributes(
                 workoutId: (payload["workoutId"] as? String) ?? UUID().uuidString
@@ -167,7 +192,11 @@ public class ThalloLiveActivityModule: Module {
                     hrZoneLabel: payload.keys.contains("hrZoneLabel") ? optionalStringValue(payload["hrZoneLabel"]) : activity.content.state.hrZoneLabel,
                     hrZoneLow: payload.keys.contains("hrZoneLow") ? optionalIntValue(payload["hrZoneLow"]) : activity.content.state.hrZoneLow,
                     hrZoneHigh: payload.keys.contains("hrZoneHigh") ? optionalIntValue(payload["hrZoneHigh"]) : activity.content.state.hrZoneHigh,
-                    hrZoneColorHex: payload.keys.contains("hrZoneColorHex") ? optionalStringValue(payload["hrZoneColorHex"]) : activity.content.state.hrZoneColorHex
+                    hrZoneColorHex: payload.keys.contains("hrZoneColorHex") ? optionalStringValue(payload["hrZoneColorHex"]) : activity.content.state.hrZoneColorHex,
+                    distanceMeters: payload.keys.contains("distanceMeters") ? optionalDoubleValue(payload["distanceMeters"]) : activity.content.state.distanceMeters,
+                    paceSecPerKm: payload.keys.contains("paceSecPerKm") ? optionalDoubleValue(payload["paceSecPerKm"]) : activity.content.state.paceSecPerKm,
+                    activeCalories: payload.keys.contains("activeCalories") ? optionalDoubleValue(payload["activeCalories"]) : activity.content.state.activeCalories,
+                    distanceUnit: payload.keys.contains("distanceUnit") ? optionalStringValue(payload["distanceUnit"]) : activity.content.state.distanceUnit
                 )
                 await activity.update(.init(state: state, staleDate: nil))
                 return true
@@ -197,6 +226,10 @@ public class ThalloLiveActivityModule: Module {
                     "hrZoneLow": anyOrNull(state.hrZoneLow),
                     "hrZoneHigh": anyOrNull(state.hrZoneHigh),
                     "hrZoneColorHex": anyOrNull(state.hrZoneColorHex),
+                    "distanceMeters": anyOrNull(state.distanceMeters),
+                    "paceSecPerKm": anyOrNull(state.paceSecPerKm),
+                    "activeCalories": anyOrNull(state.activeCalories),
+                    "distanceUnit": anyOrNull(state.distanceUnit),
                     "workoutId": activity.attributes.workoutId
                 ]
             }

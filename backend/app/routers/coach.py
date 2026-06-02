@@ -25,7 +25,16 @@ from app.models import (
     UserFlag,
     UserRollup,
 )
+from app.routers.ai.models import WorkoutCoachQuestionRequest
 from app.services.coach.checkin_ai import CheckinAIError, call_checkin_llm
+from app.services.coach.meal_day_evaluator import (
+    MealDayEvaluatorError,
+    evaluate_meal_day,
+)
+from app.services.coach.week_evaluator import (
+    WeekEvaluatorError,
+    evaluate_week as evaluate_week_service,
+)
 from app.services.coach.checkin_evaluator import (
     evaluate_week,
     recommend_from_evaluation,
@@ -86,6 +95,23 @@ def apply_recommendation_action(
     return result.to_dict()
 
 
+@router.post("/workout-question")
+def ask_workout_question(
+    body: WorkoutCoachQuestionRequest,
+    current_user: User = Depends(require_pro_feature("In-workout coach")),
+    db: Session = Depends(get_session),
+):
+    """Canonical namespace for the true AI in-workout coach/chat surface.
+
+    Display-only: it may explain load/form/pain/substitution choices, but it
+    never writes to the active PlanWeek. `/ai/workout-question` remains as a
+    compatibility alias for already-shipped clients.
+    """
+    from app.routers.ai.chat import ask_workout_question as _legacy_ask_workout_question
+
+    return _legacy_ask_workout_question(body, current_user=current_user, db=db)
+
+
 @router.post("/recompute")
 def recompute(
     as_of: date | None = Query(default=None, description="Defaults to today"),
@@ -128,6 +154,8 @@ def get_rollups(
                 "carbs_g": r.carbs_g,
                 "fat_g": r.fat_g,
                 "meals_logged": r.meals_logged,
+                "nutrition_log_status": getattr(r, "nutrition_log_status", "unknown"),
+                "nutrition_log_confidence": getattr(r, "nutrition_log_confidence", 0),
                 "session_planned": r.session_planned,
                 "session_completed": r.session_completed,
                 "session_focus": r.session_focus,
@@ -391,3 +419,59 @@ def get_history(
             for r in rows
         ]
     }
+
+
+# ─── AI evaluate-meal-day ────────────────────────────────────────────────────
+
+class EvaluateMealDayBody(BaseModel):
+    """Optional client-supplied targets — when present, the AI evaluator
+    sees exactly what the user sees on /meals/adjusted-daily-target so
+    coach feedback can't drift from the visible targets. When absent we
+    fall back to the user's profile targets."""
+    target_date: date
+    targets: dict | None = None
+
+
+@router.post("/evaluate-meal-day")
+def evaluate_meal_day_endpoint(
+    body: EvaluateMealDayBody,
+    current_user: User = Depends(require_pro_feature("AI meal-day evaluation")),
+    db: Session = Depends(get_session),
+):
+    """Pro-only AI critique of one day of logged meals. Returns a
+    headline, summary, observations, and actionable suggestions. The
+    response is read-only — no targets, plans, or coaching state are
+    mutated. State changes still flow through /coach/apply-action."""
+    try:
+        result = evaluate_meal_day(
+            db, current_user.id, body.target_date, targets=body.targets,
+        )
+    except MealDayEvaluatorError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result
+
+
+# ─── AI evaluate-week ────────────────────────────────────────────────────────
+
+class EvaluateWeekBody(BaseModel):
+    end_date: date | None = None
+    days: int = Field(default=7, ge=1, le=14)
+
+
+@router.post("/evaluate-week")
+def evaluate_week_endpoint(
+    body: EvaluateWeekBody,
+    current_user: User = Depends(require_pro_feature("AI week evaluation")),
+    db: Session = Depends(get_session),
+):
+    """Pro-only AI critique of one workout week. Reuses the deterministic
+    weekly review (compute_weekly_review) for the numbers; the AI only
+    phrases the verdict and picks 1-3 takeaways. Read-only — state
+    changes still flow through /coach/apply-action."""
+    try:
+        result = evaluate_week_service(
+            db, current_user.id, end_date=body.end_date, days=body.days,
+        )
+    except WeekEvaluatorError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result

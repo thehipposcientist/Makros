@@ -27,11 +27,19 @@ from app.models import (
     ExerciseSet,
     Meal,
     MealItem,
+    PlanDay,
+    PlanWeek,
     UserRollup,
     UserProfile,
+    UserDayState,
     WeeklyCheckIn,
     WorkoutExercise,
     WorkoutSession,
+)
+from app.services.nutrition.day_completeness import (
+    USABLE_NUTRITION_LOG_STATUSES,
+    classify_nutrition_day,
+    classify_nutrition_day_from_context,
 )
 from .plan import PlanSnapshot, get_plan_snapshot
 
@@ -62,6 +70,8 @@ class _WindowCache:
     # Sorted ascending so we can find "latest ≤ day" via reverse linear scan.
     checkins_sorted: list = field(default_factory=list)
     rollup_by_day: dict[date, "DailyRollup"] = field(default_factory=dict)
+    day_state_by_day: dict[date, "UserDayState"] = field(default_factory=dict)
+    nutrition_plan_by_day: dict[date, dict] = field(default_factory=dict)
 
 
 def _preload_window(db: Session, user_id: int, start: date, end: date) -> _WindowCache:
@@ -138,6 +148,40 @@ def _preload_window(db: Session, user_id: int, start: date, end: date) -> _Windo
     ).all()
     for r in rollups:
         cache.rollup_by_day[r.day] = r
+
+    day_states = db.exec(
+        select(UserDayState)
+        .where(
+            UserDayState.user_id == user_id,
+            UserDayState.day_key >= start,
+            UserDayState.day_key <= end,
+        )
+    ).all()
+    for state in day_states:
+        cache.day_state_by_day[state.day_key] = state
+
+    if day_states:
+        active_weeks = db.exec(
+            select(PlanWeek)
+            .where(
+                PlanWeek.user_id == user_id,
+                PlanWeek.status == "active",
+                PlanWeek.start_date <= end,
+                PlanWeek.end_date >= start,
+            )
+        ).all()
+        week_ids = [w.id for w in active_weeks]
+        if week_ids:
+            plan_days = db.exec(
+                select(PlanDay)
+                .where(
+                    PlanDay.plan_week_id.in_(week_ids),
+                    PlanDay.day_date >= start,
+                    PlanDay.day_date <= end,
+                )
+            ).all()
+            for plan_day in plan_days:
+                cache.nutrition_plan_by_day[plan_day.day_date] = plan_day.nutrition_json
 
     return cache
 
@@ -343,6 +387,25 @@ def compute_daily_rollup(
     row.carbs_g = carbs
     row.fat_g = fat
     row.meals_logged = meals_logged
+    if cache is not None:
+        completeness = classify_nutrition_day_from_context(
+            state=cache.day_state_by_day.get(day),
+            plan=cache.nutrition_plan_by_day.get(day),
+            logged_calories=kcal,
+            meals_logged=meals_logged,
+            calorie_target=float(plan.kcal) if plan else None,
+        )
+    else:
+        completeness = classify_nutrition_day(
+            db,
+            user_id,
+            day,
+            logged_calories=kcal,
+            meals_logged=meals_logged,
+            calorie_target=float(plan.kcal) if plan else None,
+        )
+    row.nutrition_log_status = completeness.status
+    row.nutrition_log_confidence = completeness.confidence
     row.kcal_target = float(plan.kcal) if plan else None
     row.protein_target_g = float(plan.protein_g) if plan else None
     row.session_planned = sess["session_planned"]
@@ -409,7 +472,18 @@ def _aggregate_window(rows: list[DailyRollup]) -> _WindowAgg:
     if not rows:
         return _WindowAgg(None, None, None, 0, None, 0, 0, None, None, None, None, None)
 
-    logged_days = [r for r in rows if r.meals_logged > 0]
+    def _usable_nutrition_row(row: DailyRollup) -> bool:
+        if row.meals_logged <= 0:
+            return False
+        status = getattr(row, "nutrition_log_status", None)
+        if status in USABLE_NUTRITION_LOG_STATUSES:
+            return True
+        # Backwards compatibility for test fixtures / rows created before
+        # nutrition_log_status existed. Fresh recomputes classify these as
+        # partial or rough_estimate, so this only preserves legacy rows.
+        return status in (None, "", "unknown")
+
+    logged_days = [r for r in rows if _usable_nutrition_row(r)]
     kcal_avg = round(fmean(r.kcal for r in logged_days), 0) if logged_days else None
 
     # kcal_target_delta_pct: mean over days that have both logged kcal and a target
@@ -419,20 +493,20 @@ def _aggregate_window(rows: list[DailyRollup]) -> _WindowAgg:
         deltas = [(r.kcal - r.kcal_target) / r.kcal_target for r in target_days]
         kcal_target_delta_pct = round(fmean(deltas) * 100, 1)
 
-    # Protein adherence: % of logged days hitting ≥85% of protein target
+    # Protein adherence: % of logged days hitting >=95% of protein target
     protein_target_days = [r for r in logged_days if r.protein_target_g]
     protein_adherence_pct: float | None = None
     if protein_target_days:
         hits = sum(
-            1 for r in protein_target_days if r.protein_g >= 0.85 * r.protein_target_g
+            1 for r in protein_target_days if r.protein_g >= 0.95 * r.protein_target_g
         )
         protein_adherence_pct = round(hits / len(protein_target_days) * 100, 1)
 
-    # Calorie adherence: % of logged days within ±15% of kcal target
+    # Calorie adherence: % of logged days within +/-5% of kcal target
     adherence_pct: float | None = None
     if target_days:
         ok = sum(
-            1 for r in target_days if abs(r.kcal - r.kcal_target) <= 0.15 * r.kcal_target
+            1 for r in target_days if abs(r.kcal - r.kcal_target) <= 0.05 * r.kcal_target
         )
         adherence_pct = round(ok / len(target_days) * 100, 1)
 

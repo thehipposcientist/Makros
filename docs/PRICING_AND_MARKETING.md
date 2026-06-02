@@ -1,6 +1,6 @@
 # Thallo Pricing And Marketing Strategy
 
-Last updated: 2026-04-29
+Last updated: 2026-05-18
 Audience: product, marketing, launch planning
 
 This document reflects the current app after reviewing the frontend, backend, native modules, Apple Watch target, and architecture notes. It intentionally avoids treating Thallo as a pre-core prototype. The product now has enough substance to support a premium positioning, but production billing and native reliability still need to be proven before a paid public launch.
@@ -14,11 +14,10 @@ Recommended launch pricing:
 - Monthly: $12.99
 - Annual: $79.99
 - Founding member annual: $59.99 for the first launch cohort
-- Closed beta: free
+- New-user trial: 7 days of Pro
+- Closed beta override: opt-in only
 
-Do not charge publicly until StoreKit/RevenueCat, server-side entitlements, restore purchases, and paywall analytics are implemented. The current subscription state should be treated as a dev/product tier simulation, not real monetization.
-
-Decision as of 2026-05-01: the external beta is free and should run with `expo.extra.freeBetaFullAccess=true` plus backend `BETA_FULL_ACCESS_ENABLED=1` so testers can exercise the full guided plan, AI, readiness, and Watch loop without billing infrastructure.
+Decision as of 2026-05-18: new accounts receive a server-authoritative 7-day Pro trial (`SIGNUP_TRIAL_DAYS=7`). Paid Pro access is mirrored from RevenueCat through `/billing/revenuecat/webhook` and `/billing/revenuecat/sync`; `EXPO_PUBLIC_BILLING_REVENUECAT=1` exposes the signup trial banner and store purchase/restore controls for beta testing. `BETA_FULL_ACCESS_ENABLED=1` and `expo.extra.freeBetaFullAccess=true` are explicit free-beta overrides, not defaults.
 
 ## Product Reality That Changes Pricing
 
@@ -38,11 +37,9 @@ Current value drivers:
 
 Current monetization limits:
 
-- No production IAP/RevenueCat flow yet.
-- No server-verified paid entitlement source yet.
-- No restore-purchases flow yet.
+- RevenueCat project, App Store Connect / Play Console products, and webhook secrets still need production configuration.
 - Paywall analytics and conversion instrumentation are not launch-ready.
-- Native capabilities still need signed TestFlight and real-device validation.
+- Native purchase flows still need signed TestFlight / Play internal testing validation.
 
 Pricing can be premium, but launch should be disciplined.
 
@@ -84,7 +81,7 @@ The free tier should prove the product, not replace it. The paid tier should own
 
 ### Current Implemented Split
 
-This is the accurate in-app split as of May 1, 2026.
+This is the accurate in-app split as of May 18, 2026.
 
 ### Free
 
@@ -92,11 +89,13 @@ Current free access:
 
 - Account creation and onboarding.
 - Manual workouts and custom activity logging.
-- Manual meals, hydration, and meal routines.
+- Manual meals, hydration, saved meals, meal routines, and supplement stack logging.
 - Weight and body measurement tracking.
 - Basic history and progress views.
-- Exercise library, equipment, injury, and preference settings.
+- Friends/activity sharing, exercise library, equipment, injury, and preference settings.
 - Up to 3 saved workout templates.
+- Up to 5 saved meals and 3 meal routines.
+- Rule-based supplement suggestions.
 
 Free should not promise full generated programming or AI help. In the current client, free users see manual tracking scaffolds while Pro surfaces are prompted at use.
 
@@ -106,12 +105,15 @@ Current Pro access:
 
 - Visible generated workout PlanWeeks.
 - Change Focus, deterministic swaps, and day rebuilds.
+- Manual week planning from saved templates.
 - AI meal plans, meal swaps, and grocery help.
 - Food photo scanning and AI food lookup.
+- AI supplement lookup, supplement photo scanning, and supplement insights.
+- Equipment photo scanning.
 - Coach chat for training and nutrition.
 - Body and form photo analysis.
 - Nutrition scoring, gut insights, and weekly digest surfaces.
-- Readiness, fatigue, sleep, and recovery cards.
+- Readiness, fatigue, sleep, Apple Health context, and recovery cards.
 
 ### Launch Target
 

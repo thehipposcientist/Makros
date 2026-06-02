@@ -9,10 +9,18 @@
 // Pure orchestration — no UI, no state. Returns the input bundle the
 // caller can hand directly to scorePreparedness().
 
-import { isHealthKitAvailable, readHealthSummary, loadSleepHistory, getCycleStatus } from './appleHealth';
+import {
+  getPlatformCycleStatus,
+  isPlatformHealthAvailable,
+  loadPlatformSleepHistory,
+  readPlatformHealthSummary,
+} from './platformHealth';
 import { getFatigueScore, getMealAverages } from './api';
 import { loadWorkoutHistory } from '../utils/workoutHistory';
 import type { PreparednessInput } from './preparedness';
+import {
+  readinessHrvMsFromSummary,
+} from '../utils/readinessHealthSignals';
 
 export interface PreparednessLoaderArgs {
   authToken: string;
@@ -29,14 +37,14 @@ export interface PreparednessLoaderArgs {
 /** Builds the exact input bundle scorePreparedness expects. Caller
  *  computes the score themselves to keep this function pure. */
 export async function loadPreparednessInputs(opts: PreparednessLoaderArgs): Promise<PreparednessInput> {
-  const summary = opts.cachedHealthSummary ?? (await readHealthSummary({ age: opts.age ?? null }).catch(() => null));
-  const ahAvailable = isHealthKitAvailable() && summary != null;
+  const summary = opts.cachedHealthSummary ?? (await readPlatformHealthSummary({ age: opts.age ?? null }).catch(() => null));
+  const healthAvailable = isPlatformHealthAvailable() && summary != null;
 
   const [history, f, meals, cycle] = await Promise.all([
-    loadSleepHistory().catch(() => []),
+    loadPlatformSleepHistory().catch(() => []),
     getFatigueScore(opts.authToken).catch(() => null),
     getMealAverages(opts.authToken, 7).catch(() => null),
-    ahAvailable ? getCycleStatus().catch(() => null) : Promise.resolve(null),
+    healthAvailable ? getPlatformCycleStatus().catch(() => null) : Promise.resolve(null),
   ]);
 
   const workouts = await loadWorkoutHistory().catch(() => []);
@@ -49,13 +57,13 @@ export async function loadPreparednessInputs(opts: PreparednessLoaderArgs): Prom
   const focusReadiness =
     focusKey && (f as any)?.focus_readiness?.[focusKey] != null
       ? Math.round((f as any).focus_readiness[focusKey] * 100)
-      : (f as any)?.readiness_score ?? null;
+      : (f as any)?.muscle_recovery_score ?? (f as any)?.readiness_score ?? null;
 
   return {
-    sleepScore: ahAvailable ? summary?.sleepScore ?? null : null,
-    hrvMs: ahAvailable ? summary?.hrvAvg ?? null : null,
+    sleepScore: healthAvailable ? summary?.sleepScore ?? null : null,
+    hrvMs: healthAvailable ? readinessHrvMsFromSummary(summary) : null,
     hrvHistory: (history as any[]).map((n: any) => n.hrv).filter((v: any) => typeof v === 'number' && v > 0),
-    restingHeartRate: ahAvailable ? summary?.restingHeartRate ?? null : null,
+    restingHeartRate: healthAvailable ? summary?.restingHeartRate ?? null : null,
     rhrHistory: [],
     readinessFromBackend: focusReadiness,
     proteinGrams: (meals as any)?.avg_protein_g ?? null,

@@ -87,9 +87,9 @@ Returns events from accepted friends where the event_type
 matches the friend's privacy settings.
 ```
 
-### Reactions
+### Reactions + Comments
 
-Simple — one reaction type: a fist bump (single tap, toggle on/off). No comments in v1 (avoids moderation burden).
+Simple — one reaction type: a fist bump (single tap, toggle on/off). Workout feed items also support text-only, friends-only comments with a short length cap and delete-own-comment controls.
 
 ```sql
 social_reactions (
@@ -241,7 +241,7 @@ Total: ~4 weeks of focused work.
 
 ## 9. Key Decisions / Trade-offs
 
-- **No comments** — avoids moderation, keeps it lightweight. Fist bumps are enough for v1.
+- **Lightweight comments only** — text-only, friends-only, and tied to workout feed visibility so the social layer stays accountability-focused.
 - **No nutrition sharing** — deliberate. Weight/body data is sensitive; sharing macro counts invites unhealthy comparison.
 - **Weight direction only** — "down this month" not "167.3 lb". Protects privacy while still sharing progress.
 - **90-day event TTL** — keeps the DB lean, feed relevant. Nobody scrolls back 6 months.

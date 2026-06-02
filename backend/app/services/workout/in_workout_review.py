@@ -1,7 +1,7 @@
 """Deterministic in-workout next-set recommendation.
 
 Wraps the deterministic `recommend_next_set` from set_programming.py
-with a two-stage review:
+with a two-stage rule review:
 
     1. Run deterministic recommender (cheap, always).
     2. Run `is_suspicious()` — rule-based detector flags cases where
@@ -9,9 +9,12 @@ with a two-stage review:
        reps, first session of exercise, big overshoot/undershoot, etc).
     3. Return the deterministic result with suspicion reasons attached.
 
-Every response carries a `source` tag. This module does NOT talk to the
-DB — the caller passes in whatever history they have, typically the current
-session's previous sets and last-session results.
+This module never calls an LLM and never persists a load/reps choice. AI can
+explain, coach, or answer form/pain/substitution questions in the separate
+in-workout coach surface, but live load/reps remain deterministic and
+auditable. This module also does NOT talk to the DB — the caller passes in
+whatever history they have, typically the current session's previous sets and
+last-session results.
 """
 from __future__ import annotations
 
@@ -285,9 +288,11 @@ def reviewed_set_recommendation_structured(
         planned=planned_set,
         actual_reps=actual_reps,
         actual_weight=actual_weight_lbs,
+        actual_rir=actual_rir,
         feel=feel,
         is_first_session=is_first_session,
         is_first_set=is_first_set,
         rep_range=parse_rep_range(planned_set.target_reps),
         source="deterministic",
+        data_source="session_state",
     )

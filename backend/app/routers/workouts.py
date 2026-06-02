@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 from sqlalchemy import func
 from datetime import datetime, date, timezone, timedelta
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.database import get_session
 from app.entitlements import require_pro_feature
@@ -15,6 +15,70 @@ from app.auth import get_current_user
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+_PLAN_DAY_PROTECTED_STATUSES = {"completed", "started", "skipped"}
+_PLAN_DAY_PROTECTED_LOCK_REASONS = {
+    "completed",
+    "started",
+    "skipped",
+    "auto_skip_unlogged",
+}
+
+
+def _plan_day_is_protected(plan_day) -> bool:
+    status = str(getattr(plan_day, "status", "") or "").lower().strip()
+    reason = str(getattr(plan_day, "lock_reason", "") or "").lower().strip()
+    return status in _PLAN_DAY_PROTECTED_STATUSES or reason in _PLAN_DAY_PROTECTED_LOCK_REASONS
+
+
+def _resolve_exercise_seed_row(db: Session, slug: str | None, name: str | None):
+    from app.models import Exercise as _Exercise
+    from app.services.workout.exercise_metadata import resolve_seed_exercise_slug
+
+    if slug:
+        seed = db.exec(select(_Exercise).where(_Exercise.slug == slug)).first()
+        if seed is not None:
+            return seed
+    if name:
+        seed = db.exec(select(_Exercise).where(_Exercise.name.ilike(name))).first()
+        if seed is not None:
+            return seed
+        alias_slug = resolve_seed_exercise_slug(name, None)
+        if alias_slug:
+            return db.exec(select(_Exercise).where(_Exercise.slug == alias_slug)).first()
+    return None
+
+
+def _muscle_value(raw) -> str | None:
+    if raw is None:
+        return None
+    return str(raw.value if hasattr(raw, "value") else raw).lower()
+
+
+def _muscle_list(raw) -> list[str]:
+    if isinstance(raw, list):
+        return [str(m.value if hasattr(m, "value") else m).lower() for m in raw]
+    return []
+
+
+_ALLOWED_COMPLETED_SET_TYPES = {
+    "working",
+    "warmup",
+    "heavy_top",
+    "backoff",
+    "volume",
+    "technique",
+    "dropset",
+    "amrap",
+}
+
+
+def _normalize_completed_set_type(raw: str | None) -> str:
+    value = (raw or "working").strip().lower().replace("-", "_").replace(" ", "_")
+    if value == "warm_up":
+        value = "warmup"
+    return value if value in _ALLOWED_COMPLETED_SET_TYPES else "working"
 
 
 def _infer_focus_from_muscles(top_muscles: list[str]) -> str | None:
@@ -33,6 +97,74 @@ def _infer_focus_from_muscles(top_muscles: list[str]) -> str | None:
     return None
 
 
+def _focus_wants_cardio_finisher(focus: str | None) -> bool:
+    return "+ cardio" in (focus or "").lower()
+
+
+def _day_has_cardio_exercise(day: dict | None) -> bool:
+    if not isinstance(day, dict):
+        return False
+    for ex in day.get("exercises") or []:
+        if not isinstance(ex, dict):
+            continue
+        role = str(ex.get("slot_role") or ex.get("_role") or "").lower()
+        if role == "warmup":
+            continue
+        exercise_type = str(ex.get("exercise_type") or "").lower()
+        primary = str(ex.get("primary_muscle") or ex.get("_primary_muscle") or "").lower()
+        movement = str(ex.get("movement_pattern") or "").lower()
+        muscles = [
+            str(m).lower()
+            for m in (ex.get("muscles_targeted") or ex.get("_secondary_muscles") or [])
+        ]
+        if (
+            exercise_type == "cardio"
+            or primary == "cardio"
+            or movement == "cardio"
+            or "cardio" in muscles
+        ):
+            return True
+    return False
+
+
+def _with_cardio_finisher_if_requested(
+    day: dict,
+    requested_focus: str | None,
+    *,
+    session_minutes: int | None,
+    equipment_owned: list[str] | None,
+) -> dict:
+    if not _focus_wants_cardio_finisher(requested_focus):
+        return day
+
+    updated = {**day, "focus": requested_focus}
+    if _day_has_cardio_exercise(updated):
+        return updated
+
+    from app.services.workout.planner import generate_cardio_day
+    finisher_day = generate_cardio_day(
+        min(25, max(15, (session_minutes or 45) // 3)),
+        "body_recomp",
+        equipment_owned=equipment_owned,
+    )
+    finisher_exs = [
+        ex for ex in finisher_day.get("exercises", [])
+        if ex.get("slot_role") != "warmup"
+    ]
+    if not finisher_exs:
+        return updated
+
+    pick = finisher_exs[0].copy()
+    pick["slot_role"] = "isolation"
+    pick["name"] = f"{pick.get('name', 'Cardio')} (Finisher)"
+    if "rest_seconds" in pick and "restSeconds" not in pick:
+        pick["restSeconds"] = pick.pop("rest_seconds")
+    else:
+        pick.pop("rest_seconds", None)
+    updated["exercises"] = [*(day.get("exercises") or []), pick]
+    return updated
+
+
 class CompletedSetPayload(BaseModel):
     """One logged set from the mobile active-workout screen. Reps and
     weight are the actual values the user put in — not planned."""
@@ -47,6 +179,8 @@ class CompletedSetPayload(BaseModel):
     actual_pace: str | None = None
     heart_rate_avg: int | None = None
     cardio_metrics: dict | None = None
+    notes: str | None = None             # free-form per-set commentary
+    set_type: str | None = None          # working | warmup | dropset | amrap
 
 
 class CompletedExercisePayload(BaseModel):
@@ -61,6 +195,11 @@ class CompletedExercisePayload(BaseModel):
     primary_muscle: str | None = None
     secondary_muscles: list[str] | None = None
     is_compound: bool | None = None
+    movement_pattern: str | None = None
+    impact_level: str | None = None
+    load_type: str | None = None
+    intensity_estimate: float | None = None
+    novelty_flag: bool | None = None
     order_index: int = 0
     sets: list[CompletedSetPayload] = []
 
@@ -88,10 +227,17 @@ class WorkoutCompleteRequest(BaseModel):
     cardio_style: str | None = None
     distance_miles: float | None = None
     calories_burned: int | None = None
+    # Per-subtype structured detail — see WorkoutCompletion.activity_details.
+    activity_details: dict | None = None
+    # GPS route — list of {lat, lon, t_ms, acc_m, alt_m, v_acc_m} samples. Captured by
+    # cardioGpsTracker (iPhone) or HKWorkoutRouteBuilder (watch).
+    # Lifting + indoor cardio omit this field; the column stays NULL.
+    route_coords: list[dict] | None = None
     hr_summary: dict | None = None  # {avgBpm, maxBpm, zoneMinutes}
     started_at: datetime | None = None
     ended_at: datetime | None = None
     external_source_id: str | None = None
+    idempotency_key: str | None = None
     # Post-workout feedback. Used by weekly_review's struggle metrics
     # (e.g. 3 of 4 sessions felt rough → trainer suggests pulling back).
     # All optional — silent log paths still work.
@@ -99,6 +245,11 @@ class WorkoutCompleteRequest(BaseModel):
     intensity: int | None = None            # 1..5
     soreness_areas: list[str] | None = None  # ["lower_back", "knees"]
     feedback_notes: str | None = None
+    # Deterministic client-computed workout score shown in activity history.
+    training_score: int | None = Field(default=None, ge=0, le=100)
+    training_rating: Literal["Crushed", "Solid", "Light", "Below"] | None = None
+    training_pillars: dict | None = None
+    training_pillar_breakdown: list[dict] | None = None
     # Per-session gear attribution. None = legacy keyword auto-match,
     # [] = explicit "no gear used today", [ids] = only credit these.
     gear_ids: list[int] | None = None
@@ -118,6 +269,7 @@ def _has_activity_detail(body: WorkoutCompleteRequest) -> bool:
         body.distance_miles is not None,
         body.calories_burned is not None,
         body.hr_summary is not None,
+        body.activity_details is not None,
     ))
 
 
@@ -130,15 +282,170 @@ def _has_feedback_detail(body: WorkoutCompleteRequest) -> bool:
     ))
 
 
-def _is_feedback_only_patch(body: WorkoutCompleteRequest) -> bool:
+def _has_training_score_detail(body: WorkoutCompleteRequest) -> bool:
+    return any((
+        body.training_score is not None,
+        body.training_rating is not None,
+        body.training_pillars is not None,
+        body.training_pillar_breakdown is not None,
+    ))
+
+
+def _is_completion_metadata_patch(body: WorkoutCompleteRequest) -> bool:
     return (
-        _has_feedback_detail(body)
+        (_has_feedback_detail(body) or _has_training_score_detail(body))
         and not _has_exercise_detail(body)
         and not _has_activity_detail(body)
     )
 
 
-_MANUAL_COMPLETION_CONTEXTS = {"manual_activity", "apple_health", "watch", "coach_log"}
+_MANUAL_COMPLETION_CONTEXTS = {"manual_activity", "custom_strength", "custom_cardio", "apple_health", "watch", "coach_log"}
+_DIRECT_MANUAL_PLAN_CONTEXTS = {"saved_template", "custom_strength", "custom_cardio"}
+_EXTRA_WORKOUT_CONTEXTS = _MANUAL_COMPLETION_CONTEXTS | {"saved_template"}
+_PLANNED_COMPLETION_CONTEXTS = {"planned", "plan", "generated"}
+
+
+def _completion_context_counts_for_plan(
+    source_context: str | None,
+    *,
+    plan_day_id: int | None = None,
+    activity_category: str | None = None,
+) -> bool:
+    """True only when a completion should satisfy the scheduled PlanDay.
+
+    Extra workouts still create WorkoutCompletion rows for fatigue,
+    nutrition, history, and gear mileage, but they must not turn the
+    front-page PlanDay card into "Done" unless they explicitly carry the
+    target plan_day_id.
+    """
+    if plan_day_id is not None:
+        return True
+    context = (source_context or "").strip().lower()
+    if context in _PLANNED_COMPLETION_CONTEXTS:
+        return True
+    if context in _EXTRA_WORKOUT_CONTEXTS or context.startswith("custom_"):
+        return False
+    if context:
+        return False
+    return not bool(activity_category)
+
+
+def _manual_completion_workout_json(
+    body: WorkoutCompleteRequest,
+    *,
+    plan_day_id: int,
+    source_context: str,
+) -> dict:
+    exercises: list[dict] = []
+    for idx, ex in enumerate(body.exercises or []):
+        target_sets = ex.target_sets if ex.target_sets and ex.target_sets > 0 else None
+        if target_sets is None and ex.sets:
+            target_sets = len(ex.sets)
+        order_index = ex.order_index if ex.order_index is not None else idx
+        payload = {
+            "name": ex.name,
+            "order_index": order_index,
+            "slug": ex.slug,
+            "_slug": ex.slug,
+            "sets": target_sets,
+            "targetSets": target_sets,
+            "reps": ex.target_reps,
+            "targetReps": ex.target_reps,
+            "equipment": ex.equipment,
+            "primary_muscle": ex.primary_muscle,
+            "_primary_muscle": ex.primary_muscle,
+            "secondary_muscles": ex.secondary_muscles,
+            "_secondary_muscles": ex.secondary_muscles,
+            "is_compound": ex.is_compound,
+            "movement_pattern": ex.movement_pattern,
+            "impact_level": ex.impact_level,
+            "load_type": ex.load_type,
+        }
+        exercises.append({k: v for k, v in payload.items() if v is not None})
+
+    payload = {
+        "day": body.workout_date.strftime("%A"),
+        "focus": body.focus_label,
+        "stimulus": body.stimulus or ("conditioning" if body.activity_category else "mixed"),
+        "exercises": exercises,
+        "plan_day_id": plan_day_id,
+        "planDayId": plan_day_id,
+        "_source_context": source_context,
+        "sourceContext": source_context,
+        "_template_id": body.template_id,
+        "templateId": body.template_id,
+        "activity_category": body.activity_category,
+        "activity_subtype": body.activity_subtype,
+        "activity_intensity": body.activity_intensity,
+        "cardio_style": body.cardio_style,
+    }
+    return {k: v for k, v in payload.items() if v is not None}
+
+
+def _maybe_bind_direct_manual_completion_to_plan_day(
+    db: Session,
+    user_id: int,
+    body: WorkoutCompleteRequest,
+) -> int | None:
+    if body.plan_day_id is not None:
+        return None
+    source_context = (body.source_context or "").strip().lower()
+    if source_context not in _DIRECT_MANUAL_PLAN_CONTEXTS:
+        return None
+
+    from app.models import PlanDay, PlanWeek, UserPreferences
+
+    prefs = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == user_id)
+    ).first()
+    if not prefs or not bool(getattr(prefs, "workout_manual_mode", False)):
+        return None
+
+    active_week = db.exec(
+        select(PlanWeek)
+        .where(PlanWeek.user_id == user_id)
+        .where(PlanWeek.status == "active")
+        .where(PlanWeek.start_date <= body.workout_date)
+        .where(PlanWeek.end_date >= body.workout_date)
+        .order_by(PlanWeek.start_date.desc(), PlanWeek.id.desc())
+    ).first()
+    if not active_week or active_week.id is None:
+        return None
+
+    plan_day = db.exec(
+        select(PlanDay)
+        .where(PlanDay.plan_week_id == active_week.id)
+        .where(PlanDay.day_date == body.workout_date)
+    ).first()
+    if (
+        not plan_day
+        or plan_day.id is None
+        or plan_day.is_rest
+        or plan_day.status in {"completed", "skipped"}
+    ):
+        return None
+    if plan_day.locked and plan_day.lock_reason not in {None, "manual_edit", "started"}:
+        return None
+
+    if isinstance(plan_day.workout_json, dict):
+        if not _start_focus_matches_plan_day(plan_day, body.focus_label):
+            return None
+    else:
+        plan_day.workout_json = _manual_completion_workout_json(
+            body,
+            plan_day_id=plan_day.id,
+            source_context=source_context,
+        )
+        plan_day.is_rest = False
+        plan_day.status = "edited"
+        plan_day.locked = True
+        plan_day.locked_at = datetime.now(timezone.utc)
+        plan_day.lock_reason = "manual_edit"
+        plan_day.generation_source = "manual"
+
+    db.add(plan_day)
+    db.flush()
+    return plan_day.id
 
 
 def _as_aware_utc(value: datetime | None) -> datetime | None:
@@ -181,6 +488,72 @@ def _estimated_activity_calories(
         cardio_style=body.cardio_style,
     )
 
+
+def _completion_hr_summary(body: WorkoutCompleteRequest) -> dict | None:
+    """The hr_summary to persist on the completion row.
+
+    Real wearable data (Apple Health / watch / Strava all send an
+    hr_summary) passes through untouched. A manually logged *cardio*
+    session with no HR data gets an estimated zone-minute breakdown so
+    it still feeds the cardio base score. Strength and other non-cardio
+    activities are never given cardio zone minutes.
+    """
+    if isinstance(body.hr_summary, dict):
+        return body.hr_summary
+    if (body.activity_category or "").strip().lower() != "cardio":
+        return None
+    from app.services.workout.activity_energy import estimate_cardio_zone_minutes
+    zones = estimate_cardio_zone_minutes(
+        duration_seconds=body.duration_seconds,
+        intensity=body.activity_intensity,
+        cardio_style=body.cardio_style,
+    )
+    return {"zoneMinutes": zones} if zones is not None else None
+
+
+def _activity_details_with_estimated_cycling_power(
+    body: WorkoutCompleteRequest,
+    *,
+    db: Session,
+    user_id: int,
+) -> dict | None:
+    details = dict(body.activity_details or {})
+    existing_watts = details.get("avgWatts") or details.get("avg_watts")
+    try:
+        if existing_watts is not None and float(existing_watts) > 0:
+            return body.activity_details
+    except Exception:
+        pass
+
+    category = str(body.activity_category or "").lower()
+    subtype = str(body.activity_subtype or "").lower()
+    focus = str(body.focus_label or "").lower()
+    text = f"{category} {subtype} {focus}"
+    if category != "cardio" or not any(token in text for token in ("bike", "cycling", "cycle", "ride", "spin", "peloton")):
+        return body.activity_details
+    if not body.distance_miles or not body.duration_seconds:
+        return body.activity_details
+
+    profile = db.exec(select(UserProfile).where(UserProfile.user_id == user_id)).first()
+    if not profile or not profile.weight_lbs:
+        return body.activity_details
+
+    from app.services.workout.cycling_power import estimate_cycling_power_watts
+    indoor_outdoor = str(details.get("indoorOutdoor") or details.get("indoor_outdoor") or body.cardio_style or "").lower()
+    elevation_gain_ft = details.get("elevationGainFt") or details.get("elevation_gain_ft")
+    watts = estimate_cycling_power_watts(
+        distance_miles=body.distance_miles,
+        duration_seconds=body.duration_seconds,
+        rider_weight_lbs=float(profile.weight_lbs),
+        elevation_gain_ft=elevation_gain_ft,
+        indoor="indoor" in indoor_outdoor or subtype in {"spin", "stationary_bike"},
+    )
+    if watts is None:
+        return body.activity_details
+    details["avgWatts"] = watts
+    details["avgWattsSource"] = "estimated_from_distance_duration_elevation"
+    return details
+
 # ─── Response models ──────────────────────────────────────────────────────────
 
 class WorkoutStatusResponse(BaseModel):
@@ -201,6 +574,11 @@ class NutritionContext(BaseModel):
 
 
 class FatigueScoreResponse(BaseModel):
+    muscle_recovery_score: int
+    muscle_recovery_label: str
+    # Deprecated compatibility aliases. New UI should use
+    # muscle_recovery_score / muscle_recovery_label so this endpoint does not
+    # look like a second training-readiness engine.
     readiness_score: int
     readiness_label: str
     muscle_fatigue: dict[str, float]
@@ -210,6 +588,9 @@ class FatigueScoreResponse(BaseModel):
     days_analyzed: int
     activities: list[dict]
     nutrition_context: NutritionContext
+    explanations: list[dict] = Field(default_factory=list)
+    recommendations: list[dict] = Field(default_factory=list)
+    raw_muscle_fatigue: dict[str, float] = Field(default_factory=dict)
 
 
 router = APIRouter(prefix="/workouts", tags=["workouts"])
@@ -314,6 +695,7 @@ def progression_insights(
             select(ExerciseSet)
             .where(col(ExerciseSet.workout_exercise_id).in_(ex_ids))
             .where(ExerciseSet.completed == True)  # noqa: E712
+            .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
         ).all()
         for st in all_sets:
             sets_by_exercise.setdefault(st.workout_exercise_id, []).append(st)
@@ -487,8 +869,17 @@ class GenerateDayRequest(BaseModel):
     preferred_split: str | None = None
     priority_region: str = "balanced"
     injuries: list[str] = []
+    # Optional severity-aware structured records. When present, the
+    # planner uses these instead of substring-matching `injuries`.
+    # Legacy free-text strings remain the fallback path; callers can
+    # send only `injuries` and behavior is unchanged.
+    injuries_structured: list[dict] = []
     disliked_exercises: list[str] = []     # exercises to exclude from selection
     focus_override: str | None = None      # force a specific focus (e.g. "Legs")
+    # Optional stimulus preference for one-off/manual generation. This is
+    # deterministic selection among planner-produced archetype variants:
+    # strength/heavy, hypertrophy/balanced, or volume/pump.
+    stimulus_override: str | None = None
     # Optional: focus labels the client already has queued up in the
     # preceding days of the plan (e.g. user tapped Switch Day on day 2
     # → they've now fixed day 2's focus to "Pull", but that pick won't
@@ -527,6 +918,10 @@ class GenerateWeekRequest(BaseModel):
     preferred_split: str | None = None
     priority_region: str = "balanced"
     injuries: list[str] = []
+    # Optional severity-aware structured records (same shape as
+    # GenerateDayRequest.injuries_structured). Optional — legacy
+    # callers sending only `injuries` keep their behavior.
+    injuries_structured: list[dict] = []
     disliked_exercises: list[str] = []
     # Switch-Day pin.
     pin_day_index: int | None = None
@@ -542,13 +937,65 @@ class GenerateWeekRequest(BaseModel):
     day_statuses: list[str] | None = None
 
 
+class StandaloneSessionRequest(BaseModel):
+    """Body for ad-hoc 'I want to stretch right now' sessions launched from
+    the rest-day card. Returns ephemeral workout JSON — no PlanDay row,
+    no week mutation, no auto-tick of a planned day."""
+    kind: Literal["stretch", "yoga", "foam_roll"]
+    duration_minutes: int = 15
+
+
+@router.post("/standalone/generate")
+def generate_standalone_session(
+    body: StandaloneSessionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Generate a one-off stretch / yoga / foam-roll session that the
+    client launches directly into ActiveWorkoutScreen. Bypasses the
+    weekly recipe and PlanDay system entirely — there is no plan_day_id
+    in the response, so completion of this session will not tick any
+    scheduled day as done."""
+    from app.services.workout.planner import (
+        generate_yoga_day, generate_stretch_session,
+        generate_foam_roll_session, _normalize_rest_key,
+    )
+
+    duration = max(5, min(int(body.duration_minutes or 15), 60))
+    if body.kind == "yoga":
+        day = generate_yoga_day(duration)
+    elif body.kind == "stretch":
+        day = generate_stretch_session(duration)
+    else:
+        day = generate_foam_roll_session(duration)
+
+    for ex in day.get("exercises", []) or []:
+        if isinstance(ex, dict):
+            _normalize_rest_key(ex)
+
+    return {
+        "day": {
+            "day": day.get("day", body.kind.replace("_", " ").title()),
+            "focus": day.get("focus", body.kind.replace("_", " ").title()),
+            "stimulus": day.get("stimulus", "mobility"),
+            "exercises": day.get("exercises", []),
+            "_standalone": True,
+            "_standalone_kind": body.kind,
+        },
+    }
+
+
 @router.post("/generate-day")
 def generate_single_day(
     body: GenerateDayRequest,
     current_user: User = Depends(require_pro_feature("Generated workout plans")),
     db: Session = Depends(get_session),
 ):
-    print(f"[generate-day] ENTRY: session_minutes={body.session_minutes} focus_override={body.focus_override!r} goal={body.goal}")
+    print(
+        f"[generate-day] ENTRY: session_minutes={body.session_minutes} "
+        f"focus_override={body.focus_override!r} "
+        f"stimulus_override={body.stimulus_override!r} goal={body.goal}"
+    )
     """Generate exercises for ONE day using the full deterministic planner
     pipeline with the user's recent history. The recipe (split structure)
     is computed fresh each time so the day type matches the rotation, and
@@ -557,6 +1004,10 @@ def generate_single_day(
     This replaces the old "rotate through cached 7-day plan" approach
     with fresh per-day generation that varies exercises across sessions."""
     from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.custom_catalog import (
+        planner_catalog_for_user,
+        with_custom_catalog_inputs,
+    )
     from app.services.workout.planner import PlannerInputs, generate_workout_plan
     from app.services.workout.history import (
         build_history_familiarity, most_recent_completed_focus,
@@ -682,10 +1133,12 @@ def generate_single_day(
         user_age=user_age,
         load_equipment_settings=load_equipment_settings,
     )
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
+    inputs = with_custom_catalog_inputs(inputs, custom_owned_slugs)
 
     # Generate full plan (fast — deterministic, no AI)
     plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
+        inputs, exercise_catalog,
         history_familiarity=history_familiarity,
         recent_muscle_exercises=recent_muscle_exercises,
     )
@@ -694,36 +1147,56 @@ def generate_single_day(
     if not days:
         raise HTTPException(status_code=500, detail="Planner produced no days")
 
-    # Enrich exercises with image URLs from the DB
-    try:
-        from app.models import Exercise as ExModel
-        ex_names = set()
-        for d in days:
-            for ex in d.get("exercises", []):
-                ex_names.add(ex.get("name", ""))
-        if ex_names:
-            img_rows = db.exec(
-                select(ExModel.name, ExModel.image_url)
-                .where(ExModel.name.in_(ex_names))
-                .where(ExModel.image_url != None)
-            ).all()
-            img_map = {r[0]: r[1] for r in img_rows}
-            for d in days:
-                for ex in d.get("exercises", []):
-                    url = img_map.get(ex.get("name"))
-                    if url:
-                        ex["image_url"] = url
-    except Exception:
-        pass
+    # Enrich exercises with image URLs and demo-db ids from the DB.
+    # Both fields live on the Exercise table but the planner runs off
+    # the in-memory SEED_EXERCISES list, so we patch them in here.
+    from app.services.workout.exercise_enrichment import enrich_exercises_with_demo_ids
+    enrich_exercises_with_demo_ids(db, [d.get("exercises", []) for d in days])
 
     # Pick the requested day from the generated plan.
     idx = body.day_index % len(days)
     day = days[idx]
 
+    def _clean_label(value: object) -> str:
+        return str(value or "").lower().strip().replace("_", " ")
+
+    def _desired_stimulus(value: str | None) -> str | None:
+        raw = _clean_label(value)
+        if raw in ("heavy", "strength", "pr"):
+            return "strength"
+        if raw in ("pump", "volume"):
+            return "volume"
+        if raw in ("balanced", "hypertrophy"):
+            return "hypertrophy"
+        return None
+
+    desired_stimulus = _desired_stimulus(body.stimulus_override)
+
+    def _matches_stimulus(candidate: dict) -> bool:
+        if not desired_stimulus:
+            return True
+        stim = _clean_label(candidate.get("stimulus"))
+        archetype = _clean_label(candidate.get("archetype"))
+        if desired_stimulus == "strength":
+            return stim == "strength" or "heavy" in archetype or "strength" in archetype
+        if desired_stimulus == "volume":
+            return stim == "volume" or "volume" in archetype
+        if desired_stimulus == "hypertrophy":
+            return stim == "hypertrophy"
+        return True
+
+    def _pick_focus_candidate(candidates: list[tuple[int, dict]]) -> tuple[int, dict] | None:
+        if not candidates:
+            return None
+        for candidate in candidates:
+            if _matches_stimulus(candidate[1]):
+                return candidate
+        return candidates[0]
+
     # Focus override: user explicitly chose a focus (e.g. tapped "Legs").
     # Find the recipe day that matches, so exercises are correct for that focus.
     if body.focus_override:
-        override_lower = body.focus_override.lower().strip()
+        override_lower = _clean_label(body.focus_override)
 
         # Special focus types that need a generated day, not a recipe match
         if override_lower in ("recovery", "active recovery"):
@@ -745,14 +1218,19 @@ def generate_single_day(
             )
             logger.debug("[generate-day] focus override → generated Cardio day")
         else:
-            matched = False
-            for alt_idx, alt_day in enumerate(days):
-                if alt_day.get("focus", "").lower().strip() == override_lower:
-                    day = alt_day
-                    idx = alt_idx
-                    logger.debug(f"[generate-day] focus override '{body.focus_override}' → day {alt_idx}")
-                    matched = True
-                    break
+            matches = [
+                (alt_idx, alt_day)
+                for alt_idx, alt_day in enumerate(days)
+                if _clean_label(alt_day.get("focus")) == override_lower
+            ]
+            picked = _pick_focus_candidate(matches)
+            matched = picked is not None
+            if picked is not None:
+                idx, day = picked
+                logger.debug(
+                    f"[generate-day] focus override '{body.focus_override}' "
+                    f"stimulus={desired_stimulus or 'any'} → day {idx}"
+                )
             if not matched:
                 # Same fix as switch-day: regenerate with the split that
                 # contains the requested focus, then lift that day's
@@ -771,16 +1249,24 @@ def generate_single_day(
                         from dataclasses import replace as _dc_replace
                         alt_inputs = _dc_replace(inputs, preferred_split=forced_split)
                         alt_plan = generate_workout_plan(
-                            alt_inputs, SEED_EXERCISES,
+                            alt_inputs, exercise_catalog,
                             history_familiarity=history_familiarity,
                             recent_muscle_exercises=recent_muscle_exercises,
                         )
-                        for ad in alt_plan.get("workout_plan", {}).get("days", []):
-                            if (ad.get("focus") or "").lower().strip() == override_lower:
-                                day = ad
-                                substituted = True
-                                logger.debug(f"[generate-day] focus override '{body.focus_override}' → split substitution (split={forced_split})")
-                                break
+                        alt_matches = [
+                            (ad_idx, ad)
+                            for ad_idx, ad in enumerate(alt_plan.get("workout_plan", {}).get("days", []))
+                            if _clean_label(ad.get("focus")) == override_lower
+                        ]
+                        picked_alt = _pick_focus_candidate(alt_matches)
+                        if picked_alt is not None:
+                            _, day = picked_alt
+                            substituted = True
+                            logger.debug(
+                                f"[generate-day] focus override '{body.focus_override}' "
+                                f"stimulus={desired_stimulus or 'any'} → "
+                                f"split substitution (split={forced_split})"
+                            )
                     except Exception as e:
                         logger.warning(f"[generate-day] focus override substitution failed: {e}")
                 if not substituted:
@@ -794,7 +1280,7 @@ def generate_single_day(
         day_readiness = fatigue_snapshot.focus_readiness.get(day_family, 1.0) if day_family else 1.0
         systemic = fatigue_snapshot.muscle_fatigue.systemic
 
-        # TIER 0: Force recovery when systemically overtrained
+        # TIER 0: Force recovery when systemic load is very high.
         if fatigue_snapshot.readiness_score < 20 or systemic > 0.8:
             day = {
                 "day": day.get("day", "Day 1"),
@@ -903,6 +1389,10 @@ def generate_full_week(
         f"split={body.preferred_split}"
     )
     from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.custom_catalog import (
+        planner_catalog_for_user,
+        with_custom_catalog_inputs,
+    )
     from app.services.workout.planner import PlannerInputs, generate_workout_plan
     from app.services.workout.history import (
         build_history_familiarity, most_recent_completed_focus,
@@ -937,8 +1427,19 @@ def generate_full_week(
         completions = get_recent_completions_for_fatigue(current_user.id, db)
         if completions:
             fatigue_snapshot = compute_rolling_fatigue(completions)
-            from app.services.workout.planner import injury_muscle_fatigue_boost
+            from app.services.workout.planner import (
+                injury_muscle_fatigue_boost,
+                injury_muscle_fatigue_boost_structured,
+            )
+            # Structured payload (severity-aware) takes precedence; legacy
+            # strings still contribute via the union, so a half-migrated
+            # profile still gets a fatigue penalty.
             injury_boosts = injury_muscle_fatigue_boost(tuple(body.injuries))
+            structured_boosts = injury_muscle_fatigue_boost_structured(
+                tuple(body.injuries_structured or ())
+            )
+            for muscle, boost in structured_boosts.items():
+                injury_boosts[muscle] = max(injury_boosts.get(muscle, 0.0), boost)
             for muscle, boost in injury_boosts.items():
                 current = fatigue_snapshot.muscle_fatigue.get(muscle)
                 if current < boost:
@@ -974,6 +1475,7 @@ def generate_full_week(
         preferred_split=body.preferred_split,
         priority_region=body.priority_region,
         injuries=tuple(body.injuries),
+        injuries_structured=tuple(body.injuries_structured or ()),
         disliked_exercises=tuple(body.disliked_exercises),
         rng_seed=current_user.id,  # stable across the week (not per-day)
         recent_focus_buckets=recent_focus_buckets,
@@ -982,6 +1484,8 @@ def generate_full_week(
         user_age=user_age,
         load_equipment_settings=load_equipment_settings,
     )
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
+    inputs = with_custom_catalog_inputs(inputs, custom_owned_slugs)
 
     # Single-day swap mode: caller sent their current week. Skip the
     # full regen — pin against the user's existing plan so only the
@@ -1003,7 +1507,7 @@ def generate_full_week(
         )
     else:
         plan = generate_workout_plan(
-            inputs, SEED_EXERCISES,
+            inputs, exercise_catalog,
             history_familiarity=history_familiarity,
             recent_muscle_exercises=recent_muscle_exercises,
         )
@@ -1093,7 +1597,7 @@ def generate_full_week(
                     target_split = SPLIT_FOR_FOCUS[sample_base]
             alt_inputs = _dc_replace(inputs, preferred_split=target_split)
             alt_plan = generate_workout_plan(
-                alt_inputs, SEED_EXERCISES,
+                alt_inputs, exercise_catalog,
                 history_familiarity=history_familiarity,
                 recent_muscle_exercises=recent_muscle_exercises,
             )
@@ -1119,8 +1623,20 @@ def generate_full_week(
                         **picked_day,
                         "focus": proposed_focus,
                     }
+                    cdt_result.proposed_days[ex_idx] = _with_cardio_finisher_if_requested(
+                        cdt_result.proposed_days[ex_idx],
+                        proposed_focus,
+                        session_minutes=body.session_minutes,
+                        equipment_owned=body.equipment,
+                    )
                 else:
                     cdt_result.proposed_days[ex_idx]["focus"] = proposed_focus
+                    cdt_result.proposed_days[ex_idx] = _with_cardio_finisher_if_requested(
+                        cdt_result.proposed_days[ex_idx],
+                        proposed_focus,
+                        session_minutes=body.session_minutes,
+                        equipment_owned=body.equipment,
+                    )
 
         result_days = cdt_result.proposed_days
         result_plan = {"days": result_days, "name": ""}
@@ -1188,6 +1704,11 @@ def generate_full_week(
                 for recipe_idx in cdt_result.changed_indices:
                     if recipe_idx >= len(result_days):
                         continue
+                    target_status = (
+                        day_statuses[recipe_idx]
+                        if recipe_idx < len(day_statuses)
+                        else "pending"
+                    )
                     if calendar_index_mode:
                         pd_row = next(
                             (pd for pd in plan_days if pd.day_index == recipe_idx),
@@ -1198,14 +1719,22 @@ def generate_full_week(
                     else:
                         pd_row = None
                     is_target_day = recipe_idx == body.pin_day_index
-                    if not pd_row or pd_row.day_date < date.today():
+                    target_allowed_by_client = (
+                        is_target_day
+                        and str(target_status).lower().strip() not in {
+                            "completed",
+                            "started",
+                            "locked",
+                            "skipped",
+                        }
+                    )
+                    if not pd_row:
                         continue
-                    if (
-                        pd_row.locked
-                        and not (
-                            is_target_day
-                            and pd_row.lock_reason == "manual_edit"
-                        )
+                    if pd_row.day_date < date.today() and not target_allowed_by_client:
+                        continue
+                    if pd_row.locked and (
+                        _plan_day_is_protected(pd_row)
+                        or not target_allowed_by_client
                     ):
                         continue
                     day_json = result_days[recipe_idx]
@@ -1215,6 +1744,10 @@ def generate_full_week(
                         focus_norm in ("rest", "")
                         or (not day_json.get("exercises") and focus_norm != "empty")
                     )
+                    pd_row.status = "edited"
+                    pd_row.locked = True
+                    pd_row.locked_at = now2
+                    pd_row.lock_reason = "manual_edit"
                     pd_row.generation_source = "change_focus"
                     pd_row.updated_at = now2
                     db.add(pd_row)
@@ -1249,27 +1782,11 @@ def generate_full_week(
             },
         }
 
-    # Image enrichment — mirrors generate-day.
-    try:
-        from app.models import Exercise as ExModel
-        ex_names: set[str] = set()
-        for d in days:
-            for ex in d.get("exercises", []):
-                ex_names.add(ex.get("name", ""))
-        if ex_names:
-            img_rows = db.exec(
-                select(ExModel.name, ExModel.image_url)
-                .where(ExModel.name.in_(ex_names))
-                .where(ExModel.image_url != None)
-            ).all()
-            img_map = {r[0]: r[1] for r in img_rows}
-            for d in days:
-                for ex in d.get("exercises", []):
-                    url = img_map.get(ex.get("name"))
-                    if url:
-                        ex["image_url"] = url
-    except Exception:
-        pass
+    # Image + demo-id enrichment — mirrors generate-day. Uses the
+    # shared helper so /generate-day, /generate-week, /week/active and
+    # the AI plan path all stay in sync.
+    from app.services.workout.exercise_enrichment import enrich_exercises_with_demo_ids
+    enrich_exercises_with_demo_ids(db, [d.get("exercises", []) for d in days])
 
     # Pin resolution — delegate to the pure `switch_day` helper so the
     # algorithm is unit-tested in isolation. The router still owns the
@@ -1337,7 +1854,7 @@ def generate_full_week(
                 from dataclasses import replace as _dc_replace
                 alt_inputs = _dc_replace(inputs, preferred_split=decision.regen_split)
                 alt_plan = generate_workout_plan(
-                    alt_inputs, SEED_EXERCISES,
+                    alt_inputs, exercise_catalog,
                     history_familiarity=history_familiarity,
                     recent_muscle_exercises=recent_muscle_exercises,
                 )
@@ -1369,35 +1886,19 @@ def generate_full_week(
         # Cardio-finisher promotion — applies after the primary action
         # for any lifting pin where the user requested "X + Cardio".
         if decision.wants_cardio_finisher and decision.action != "replace_day":
-            target_day = days[target_idx]
-            current_focus = (target_day.get("focus") or "").lower()
-            if " + cardio" not in current_focus:
-                from app.services.workout.planner import generate_cardio_day
-                finisher_day = generate_cardio_day(
-                    min(25, max(15, (body.session_minutes or 45) // 3)),
-                    "body_recomp",
-                    equipment_owned=body.equipment,
+            before_count = len(days[target_idx].get("exercises") or [])
+            days[target_idx] = _with_cardio_finisher_if_requested(
+                days[target_idx],
+                body.pin_focus,
+                session_minutes=body.session_minutes,
+                equipment_owned=body.equipment,
+            )
+            after_count = len(days[target_idx].get("exercises") or [])
+            if after_count > before_count:
+                logger.info(
+                    f"[generate-week] pin promote: appended cardio finisher "
+                    f"to target day"
                 )
-                finisher_exs = [
-                    ex for ex in finisher_day.get("exercises", [])
-                    if ex.get("slot_role") != "warmup"
-                ]
-                if finisher_exs:
-                    pick = finisher_exs[0].copy()
-                    pick["slot_role"] = "isolation"
-                    pick["name"] = f"{pick.get('name', 'Cardio')} (Finisher)"
-                    if "rest_seconds" in pick and "restSeconds" not in pick:
-                        pick["restSeconds"] = pick.pop("rest_seconds")
-                    else:
-                        pick.pop("rest_seconds", None)
-                    updated = {**target_day}
-                    updated["exercises"] = [*(target_day.get("exercises") or []), pick]
-                    updated["focus"] = body.pin_focus
-                    days[target_idx] = updated
-                    logger.info(
-                        f"[generate-week] pin promote: appended cardio finisher "
-                        f"'{pick.get('name')}' to target day"
-                    )
 
     result_plan = {
         "days": days,
@@ -1466,11 +1967,25 @@ def mark_workout_complete(
          analytics) real per-set history instead of just a duration.
     """
     plan_lock_focus_label = body.focus_label
-    feedback_only_patch = _is_feedback_only_patch(body)
+    metadata_only_patch = _is_completion_metadata_patch(body)
     source_context = (body.source_context or "").strip().lower()
     external_source_id = (body.external_source_id or "").strip() or None
+    idempotency_key = (body.idempotency_key or "").strip() or external_source_id
+    session_identity_key = external_source_id or idempotency_key
     activity_started_at, activity_ended_at = _activity_time_bounds(body)
     calories_burned = _estimated_activity_calories(
+        body,
+        db=db,
+        user_id=current_user.id,
+    )
+    hr_summary_value = _completion_hr_summary(body)
+    # Edwards' TRIMP — only meaningful when we have zone minutes (real wearable
+    # or `_completion_hr_summary` synthesized them for a manual cardio log).
+    # Strength / mobility / non-cardio sessions get None, which keeps cardio
+    # load reports honest (no fake "lifting added 0 TRIMP" rows).
+    from app.services.workout.activity_energy import cardio_load_from_hr_summary
+    cardio_load_value = cardio_load_from_hr_summary(hr_summary_value)
+    body.activity_details = _activity_details_with_estimated_cycling_power(
         body,
         db=db,
         user_id=current_user.id,
@@ -1484,7 +1999,8 @@ def mark_workout_complete(
     has_real_data = (
         (body.duration_seconds and body.duration_seconds > 30) or
         bool(body.activity_category) or
-        bool(body.exercises and len(body.exercises) > 0)
+        bool(body.exercises and len(body.exercises) > 0) or
+        metadata_only_patch
     )
     if not has_real_data:
         raise HTTPException(
@@ -1492,16 +2008,34 @@ def mark_workout_complete(
             detail="Empty completion rejected — log sets, duration, or pick an activity first.",
         )
 
+    bound_plan_day_id = _maybe_bind_direct_manual_completion_to_plan_day(
+        db,
+        current_user.id,
+        body,
+    )
+    if bound_plan_day_id is not None:
+        body.plan_day_id = bound_plan_day_id
+
     existing = None
-    if external_source_id:
+    if idempotency_key:
+        existing = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.idempotency_key == idempotency_key)
+        ).first()
+    if existing is None and external_source_id:
         existing = db.exec(
             select(WorkoutCompletion)
             .where(WorkoutCompletion.user_id == current_user.id)
             .where(WorkoutCompletion.external_source_id == external_source_id)
         ).first()
     allow_date_focus_upsert = (
-        feedback_only_patch
-        or source_context not in _MANUAL_COMPLETION_CONTEXTS
+        metadata_only_patch
+        or _completion_context_counts_for_plan(
+            body.source_context,
+            plan_day_id=body.plan_day_id,
+            activity_category=body.activity_category,
+        )
     )
     if existing is None and allow_date_focus_upsert:
         existing = db.exec(
@@ -1510,7 +2044,7 @@ def mark_workout_complete(
             .where(WorkoutCompletion.workout_date == body.workout_date)
             .where(WorkoutCompletion.focus_label == body.focus_label)
         ).first()
-    if existing is None and feedback_only_patch:
+    if existing is None and metadata_only_patch:
         existing = db.exec(
             select(WorkoutCompletion)
             .where(WorkoutCompletion.user_id == current_user.id)
@@ -1520,7 +2054,7 @@ def mark_workout_complete(
 
     completion_row_for_request: WorkoutCompletion | None = None
     if existing:
-        if not feedback_only_patch or body.duration_seconds > 0:
+        if not metadata_only_patch or body.duration_seconds > 0:
             existing.duration_seconds = body.duration_seconds
         existing.stimulus           = body.stimulus if body.stimulus is not None else existing.stimulus
         existing.source_context     = body.source_context or existing.source_context
@@ -1533,15 +2067,31 @@ def mark_workout_complete(
         existing.cardio_style       = body.cardio_style or existing.cardio_style
         existing.distance_miles     = body.distance_miles if body.distance_miles is not None else existing.distance_miles
         existing.calories_burned    = calories_burned if calories_burned is not None else existing.calories_burned
-        existing.hr_summary         = body.hr_summary if body.hr_summary is not None else existing.hr_summary
+        existing.activity_details   = body.activity_details if body.activity_details is not None else existing.activity_details
+        existing.route_coords       = body.route_coords if body.route_coords is not None else existing.route_coords
+        existing.hr_summary         = hr_summary_value if hr_summary_value is not None else existing.hr_summary
+        # Recompute load only when we have a new hr_summary; otherwise keep
+        # the previously stored value so re-imports without HR data don't
+        # erase a real wearable signal.
+        if hr_summary_value is not None:
+            existing.cardio_load    = cardio_load_value if cardio_load_value is not None else existing.cardio_load
         existing.feeling            = body.feeling if body.feeling is not None else existing.feeling
         existing.intensity          = body.intensity if body.intensity is not None else existing.intensity
         existing.soreness_areas     = body.soreness_areas if body.soreness_areas is not None else existing.soreness_areas
         existing.feedback_notes     = body.feedback_notes if body.feedback_notes is not None else existing.feedback_notes
+        existing.training_score     = body.training_score if body.training_score is not None else existing.training_score
+        existing.training_rating    = body.training_rating if body.training_rating is not None else existing.training_rating
+        existing.training_pillars   = body.training_pillars if body.training_pillars is not None else existing.training_pillars
+        existing.training_pillar_breakdown = (
+            body.training_pillar_breakdown
+            if body.training_pillar_breakdown is not None
+            else existing.training_pillar_breakdown
+        )
         existing.started_at         = activity_started_at if activity_started_at is not None else existing.started_at
         existing.ended_at           = activity_ended_at if body.ended_at is not None or body.started_at is not None else existing.ended_at
         existing.external_source_id = external_source_id or existing.external_source_id
-        if not feedback_only_patch:
+        existing.idempotency_key    = idempotency_key or existing.idempotency_key
+        if not metadata_only_patch:
             existing.completed_at = activity_ended_at
         db.add(existing)
         completion_row_for_request = existing
@@ -1562,14 +2112,22 @@ def mark_workout_complete(
             cardio_style=body.cardio_style,
             distance_miles=body.distance_miles,
             calories_burned=calories_burned,
-            hr_summary=body.hr_summary,
+            activity_details=body.activity_details,
+            route_coords=body.route_coords,
+            hr_summary=hr_summary_value,
+            cardio_load=cardio_load_value,
             started_at=activity_started_at,
             ended_at=activity_ended_at,
             external_source_id=external_source_id,
+            idempotency_key=idempotency_key,
             feeling=body.feeling,
             intensity=body.intensity,
             soreness_areas=body.soreness_areas,
             feedback_notes=body.feedback_notes,
+            training_score=body.training_score,
+            training_rating=body.training_rating,
+            training_pillars=body.training_pillars,
+            training_pillar_breakdown=body.training_pillar_breakdown,
             completed_at=activity_ended_at,
         )
         db.add(completion_row_for_request)
@@ -1590,6 +2148,7 @@ def mark_workout_complete(
     # completion — the user has finished their workout and expects
     # the app to move on.
     session_rows_created = 0
+    structured_session_id: int | None = None
     if body.exercises:
         try:
             from app.models import Exercise as _Exercise, WorkoutSource, EquipmentType
@@ -1635,17 +2194,32 @@ def mark_workout_complete(
                     return WorkoutSource.LOGGED
                 return WorkoutSource.CUSTOM
 
-            # Upsert WorkoutSession by (user, date, focus). If the same
-            # (date, focus) pair already has a session, overwrite its
-            # exercises so re-submitting a completion replaces rather
-            # than duplicates — matches the lightweight-row upsert
-            # above and protects against the user tapping Finish twice.
-            existing_session = db.exec(
-                select(WorkoutSession)
-                .where(WorkoutSession.user_id == current_user.id)
-                .where(WorkoutSession.workout_date == body.workout_date)
-                .where(WorkoutSession.focus == body.focus_label)
-            ).first()
+            # Upsert WorkoutSession using the same identity semantics as
+            # WorkoutCompletion: stable external ids win; planned/template
+            # workouts can still date+focus upsert; custom/manual sessions
+            # without an id stay distinct so analytics do not lose sets.
+            existing_session = None
+            if session_identity_key:
+                existing_session = db.exec(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.user_id == current_user.id)
+                    .where(WorkoutSession.external_source_id == session_identity_key)
+                ).first()
+            if existing_session is None and allow_date_focus_upsert:
+                existing_session = db.exec(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.user_id == current_user.id)
+                    .where(WorkoutSession.workout_date == body.workout_date)
+                    .where(WorkoutSession.focus == body.focus_label)
+                ).first()
+            if existing_session is None and source_context in _MANUAL_COMPLETION_CONTEXTS:
+                existing_session = db.exec(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.user_id == current_user.id)
+                    .where(WorkoutSession.workout_date == body.workout_date)
+                    .where(WorkoutSession.focus == body.focus_label)
+                    .where(WorkoutSession.completed_at.is_(None))
+                ).first()
             if existing_session:
                 # Drop old exercises + sets so we can re-insert cleanly.
                 # Was N+1: one SELECT per session for exercises, then one
@@ -1663,6 +2237,7 @@ def mark_workout_complete(
                     db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(old_ex_ids)))
                 existing_session.completed_at = activity_ended_at
                 existing_session.source = _session_source(body.source_context)
+                existing_session.external_source_id = session_identity_key or existing_session.external_source_id
                 session_row = existing_session
                 db.add(session_row)
                 db.flush()
@@ -1674,21 +2249,14 @@ def mark_workout_complete(
                     workout_date=body.workout_date,
                     source=_session_source(body.source_context),
                     completed_at=activity_ended_at,
+                    external_source_id=session_identity_key,
                 )
                 db.add(session_row)
                 db.flush()
 
             for idx, ex_payload in enumerate(body.exercises):
                 resolved_exercise_id = None
-                seed = None
-                if ex_payload.slug:
-                    seed = db.exec(
-                        select(_Exercise).where(_Exercise.slug == ex_payload.slug)
-                    ).first()
-                if seed is None and ex_payload.name:
-                    seed = db.exec(
-                        select(_Exercise).where(_Exercise.name.ilike(ex_payload.name))
-                    ).first()
+                seed = _resolve_exercise_seed_row(db, ex_payload.slug, ex_payload.name)
                 if seed is not None:
                     resolved_exercise_id = seed.id
 
@@ -1711,6 +2279,11 @@ def mark_workout_complete(
                     if ex_payload.is_compound is not None
                     else getattr(seed, "is_compound", None)
                 )
+                movement_pattern_snapshot = (
+                    (ex_payload.movement_pattern or "").strip().lower()
+                    or getattr(seed, "movement_pattern", None)
+                    or None
+                )
 
                 exercise = WorkoutExercise(
                     session_id=session_row.id,
@@ -1722,6 +2295,11 @@ def mark_workout_complete(
                     primary_muscle_snapshot=primary_snapshot,
                     secondary_muscles_snapshot=secondary_snapshot,
                     is_compound_snapshot=is_compound_snapshot,
+                    movement_pattern_snapshot=movement_pattern_snapshot,
+                    impact_level=ex_payload.impact_level,
+                    load_type=ex_payload.load_type,
+                    intensity_estimate=ex_payload.intensity_estimate,
+                    novelty_flag=ex_payload.novelty_flag,
                     target_reps_text=ex_payload.target_reps,
                     rest_seconds=None,
                 )
@@ -1729,6 +2307,7 @@ def mark_workout_complete(
                 db.flush()
 
                 for set_payload in ex_payload.sets:
+                    trimmed_notes = (set_payload.notes or "").strip() or None
                     db.add(ExerciseSet(
                         workout_exercise_id=exercise.id,
                         set_number=set_payload.set_number,
@@ -1741,10 +2320,13 @@ def mark_workout_complete(
                         actual_pace=set_payload.actual_pace,
                         heart_rate_avg=set_payload.heart_rate_avg,
                         cardio_metrics=set_payload.cardio_metrics,
+                        notes=trimmed_notes,
+                        set_type=_normalize_completed_set_type(set_payload.set_type),
                         completed=True,
                         completed_at=activity_ended_at,
                     ))
             session_rows_created = 1
+            structured_session_id = session_row.id
         except Exception as e:
             logger.warning(
                 f"[workouts/complete] structured persistence FAILED "
@@ -1759,7 +2341,12 @@ def mark_workout_complete(
     # Resolve per-muscle fatigue and store on the completion row.
     # Uses per-exercise data when available, falls back to focus-label estimate.
     try:
-        from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue
+        from app.services.workout.activity_impact import (
+            build_fatigue_context_from_exercises,
+            resolve_exercise_fatigue,
+            resolve_focus_fatigue,
+            session_rpe_from_details,
+        )
         completion_row = (
             db.get(WorkoutCompletion, completion_row_id)
             if completion_row_id is not None
@@ -1791,7 +2378,7 @@ def mark_workout_complete(
                 user_age = None
 
             should_keep_existing_fatigue = (
-                feedback_only_patch
+                metadata_only_patch
                 and isinstance(completion_row.resolved_muscle_fatigue, dict)
                 and bool(completion_row.resolved_muscle_fatigue)
             )
@@ -1833,12 +2420,27 @@ def mark_workout_complete(
                     duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
                     user_age=user_age,
                 )
+                details = dict(completion_row.activity_details or body.activity_details or {})
+                existing_ctx = details.get("fatigue_context")
+                if not isinstance(existing_ctx, dict):
+                    existing_ctx = {}
+                details["fatigue_context"] = {
+                    **existing_ctx,
+                    **build_fatigue_context_from_exercises(ex_list),
+                }
+                completion_row.activity_details = details
             else:
                 resolved = resolve_focus_fatigue(
                     body.focus_label,
                     intensity=body.activity_intensity or "moderate",
                     duration_minutes=body.duration_seconds // 60 if body.duration_seconds > 0 else 60,
                     user_age=user_age,
+                    rpe=session_rpe_from_details(body.activity_details),
+                    activity_category=body.activity_category,
+                    activity_subtype=body.activity_subtype,
+                    cardio_style=body.cardio_style,
+                    cardio_load=cardio_load_value,
+                    hr_summary=hr_summary_value,
                 )
             completion_row.resolved_muscle_fatigue = resolved
             # If exercises were provided, infer the correct focus from the
@@ -1890,57 +2492,71 @@ def mark_workout_complete(
     except Exception as e:
         logger.info(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
 
-    if not feedback_only_patch:
+    if not metadata_only_patch:
         try:
-            from app.routers.social import write_activity
-            write_activity(db, current_user.id, "workout_completed", {
-                "focus": body.focus_label,
-                "duration_seconds": body.duration_seconds,
-                "date": str(body.workout_date),
-                "exercise_count": len(body.exercises) if body.exercises else 0,
-                "activity_category": body.activity_category,
-                "activity_subtype": body.activity_subtype,
-                "cardio_style": body.cardio_style,
-                "distance_miles": body.distance_miles,
-                "hr_summary": body.hr_summary,
-                "exercises": [
-                    {
-                        "name": ex.name,
-                        "equipment": ex.equipment,
-                        "sets": [
-                            {
-                                "reps": s.reps,
-                                "weight_lbs": s.weight_lbs,
-                                "duration_seconds": s.duration_seconds,
-                                "actual_distance": s.actual_distance,
-                                "actual_pace": s.actual_pace,
-                                "heart_rate_avg": s.heart_rate_avg,
-                                "cardio_metrics": s.cardio_metrics,
-                            }
-                            for s in ex.sets
-                        ],
-                    }
-                    for ex in (body.exercises or [])
-                ],
-            })
+            from app.services.social.privacy import completion_is_shareable_to_social
+            if completion_is_shareable_to_social(
+                source_context=body.source_context,
+                activity_source=body.activity_source,
+                import_source=getattr(completion_row_for_request, "import_source", None),
+            ):
+                from app.routers.social import write_activity
+                write_activity(db, current_user.id, "workout_completed", {
+                    "focus": body.focus_label,
+                    "duration_seconds": body.duration_seconds,
+                    "date": str(body.workout_date),
+                    "exercise_count": len(body.exercises) if body.exercises else 0,
+                    "activity_category": body.activity_category,
+                    "activity_subtype": body.activity_subtype,
+                    "cardio_style": body.cardio_style,
+                    "distance_miles": body.distance_miles,
+                    "hr_summary": body.hr_summary,
+                    "exercises": [
+                        {
+                            "name": ex.name,
+                            "equipment": ex.equipment,
+                            "sets": [
+                                {
+                                    "reps": s.reps,
+                                    "weight_lbs": s.weight_lbs,
+                                    "duration_seconds": s.duration_seconds,
+                                    "actual_distance": s.actual_distance,
+                                    "actual_pace": s.actual_pace,
+                                    "heart_rate_avg": s.heart_rate_avg,
+                                    "cardio_metrics": s.cardio_metrics,
+                                }
+                                for s in ex.sets
+                            ],
+                        }
+                        for ex in (body.exercises or [])
+                    ],
+                })
         except Exception:
             pass
 
     db.commit()
     logger.info(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")
 
-    # Auto-lock the corresponding PlanDay if the weekly model is active.
-    try:
-        from app.services.workout.week_manager import lock_day_on_complete
-        lock_day_on_complete(
-            db,
-            current_user.id,
-            body.workout_date,
-            plan_lock_focus_label,
-            plan_day_id=body.plan_day_id,
-        )
-    except Exception as e:
-        logger.debug(f"[workouts/complete] plan_day lock failed (non-fatal): {e}")
+    # Auto-lock the corresponding PlanDay only for planned completions or
+    # user-started direct workouts that were bound to a manual-mode day.
+    # Imported/manual activities still affect fatigue/history, but they sit
+    # in Extra workouts and leave the scheduled PlanDay queued.
+    if _completion_context_counts_for_plan(
+        body.source_context,
+        plan_day_id=body.plan_day_id,
+        activity_category=body.activity_category,
+    ):
+        try:
+            from app.services.workout.week_manager import lock_day_on_complete
+            lock_day_on_complete(
+                db,
+                current_user.id,
+                body.workout_date,
+                plan_lock_focus_label,
+                plan_day_id=body.plan_day_id,
+            )
+        except Exception as e:
+            logger.debug(f"[workouts/complete] plan_day lock failed (non-fatal): {e}")
 
     # Yesterday-strain pillar in readiness changes the moment a workout
     # lands. Drop the cache so the next /readiness/today recomputes.
@@ -1973,12 +2589,20 @@ def mark_workout_complete(
     if body.exercises and session_rows_created:
         try:
             from app.services.workout.pr_detection import detect_prs
-            session_row = db.exec(
-                select(WorkoutSession)
-                .where(WorkoutSession.user_id == current_user.id)
-                .where(WorkoutSession.workout_date == body.workout_date)
-                .where(WorkoutSession.focus == body.focus_label)
-            ).first()
+            session_row = db.get(WorkoutSession, structured_session_id) if structured_session_id is not None else None
+            if session_row is None and external_source_id:
+                session_row = db.exec(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.user_id == current_user.id)
+                    .where(WorkoutSession.external_source_id == external_source_id)
+                ).first()
+            if session_row is None:
+                session_row = db.exec(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.user_id == current_user.id)
+                    .where(WorkoutSession.workout_date == body.workout_date)
+                    .where(WorkoutSession.focus == body.focus_label)
+                ).first()
             if session_row is not None:
                 prs = detect_prs(current_user.id, session_row.id, db)
                 if prs:
@@ -1986,6 +2610,27 @@ def mark_workout_complete(
                         f"[workouts/complete] PRs detected user={current_user.id} "
                         f"session={session_row.id} count={len(prs)}"
                     )
+                    try:
+                        pr_context_row = verify or completion_row
+                        if pr_context_row is not None:
+                            details = dict(pr_context_row.activity_details or {})
+                            fatigue_ctx = details.get("fatigue_context")
+                            if not isinstance(fatigue_ctx, dict):
+                                fatigue_ctx = {}
+                            fatigue_ctx.update({
+                                "pr_count": len(prs),
+                                "pr_kinds": sorted({
+                                    str(pr.get("kind") or "")
+                                    for pr in prs
+                                    if isinstance(pr, dict) and pr.get("kind")
+                                }),
+                            })
+                            details["fatigue_context"] = fatigue_ctx
+                            pr_context_row.activity_details = details
+                            db.add(pr_context_row)
+                            db.commit()
+                    except Exception:
+                        pass
                     try:
                         from app.routers.social import write_activity
                         for pr in prs:
@@ -2077,6 +2722,10 @@ def mark_workout_complete(
         "ok": True,
         "structured_persisted": bool(session_rows_created),
         "prs": prs,
+        "calories_burned": calories_burned,
+        "hr_summary": body.hr_summary,
+        "training_score": getattr(verify or completion_row_for_request, "training_score", None),
+        "training_rating": getattr(verify or completion_row_for_request, "training_rating", None),
     }
 
 
@@ -2144,19 +2793,135 @@ def delete_workout_completion(
     db.commit()
 
 
+class InjuryConflictsRequest(BaseModel):
+    """Detect injury conflicts in the user's active PlanWeek.
+
+    Sent by EditProfile after a new injury is saved (or by any flow
+    that wants to verify a hypothetical injury list against the active
+    plan). Either field can be empty: structured records take
+    precedence; legacy strings are unioned in for half-migrated
+    profiles. The handler reads the active PlanWeek server-side so
+    callers don't have to bundle the plan into the request.
+    """
+    structured_injuries: list[dict] = []
+    legacy_injuries: list[str] = []
+
+
+@router.post("/injury-conflicts")
+def detect_injury_conflicts(
+    body: InjuryConflictsRequest,
+    current_user: User = Depends(require_pro_feature("Injury-aware PlanWeek conflict checks")),
+    db: Session = Depends(get_session),
+):
+    """Return upcoming exercises in the active PlanWeek that conflict
+    with the supplied injuries. Completed days are excluded (we never
+    rewrite history). The response is purely informational — the
+    client decides whether to swap, skip, or ignore. See
+    `app.services.workout.injury_conflicts` for the rules.
+    """
+    from datetime import date as _date
+
+    from app.models import PlanWeek, PlanDay
+    from app.services.workout.injury_conflicts import (
+        detect_active_week_conflicts, summarize_conflicts,
+    )
+
+    week = db.exec(
+        select(PlanWeek).where(
+            PlanWeek.user_id == current_user.id,
+            PlanWeek.status == "active",
+        )
+    ).first()
+    if not week:
+        return {"conflicts": [], "summary": "", "today_index": 0}
+
+    plan_days = db.exec(
+        select(PlanDay).where(PlanDay.plan_week_id == week.id).order_by(PlanDay.day_index)
+    ).all()
+
+    today = _date.today()
+    today_index = max(
+        0,
+        min(len(plan_days) - 1, (today - week.start_date).days)
+        if week.start_date else 0,
+    )
+
+    payloads = [
+        {"workout": d.workout_json, "day_index": d.day_index}
+        for d in plan_days
+    ]
+
+    conflicts = detect_active_week_conflicts(
+        payloads,
+        structured_injuries=body.structured_injuries or [],
+        legacy_injuries=body.legacy_injuries or [],
+        today_index=today_index,
+    )
+    return {
+        "conflicts": conflicts,
+        "summary": summarize_conflicts(conflicts),
+        "today_index": today_index,
+    }
+
+
 @router.get("/status", response_model=WorkoutStatusResponse)
 def get_workout_status(
     workout_date: date = Query(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Returns whether the user has a completed workout on the given date."""
-    completion = db.exec(
+    """Returns whether the scheduled PlanDay is completed on the date."""
+    completions = db.exec(
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
         .where(WorkoutCompletion.workout_date == workout_date)
-    ).first()
-    return {"done": completion is not None}
+    ).all()
+
+    try:
+        from app.models import PlanDay, PlanWeek
+        from app.services.workout.week_manager import _completion_matches_plan_day
+
+        active_week = db.exec(
+            select(PlanWeek).where(
+                PlanWeek.user_id == current_user.id,
+                PlanWeek.status == "active",
+            )
+        ).first()
+        plan_day = None
+        if active_week:
+            plan_day = db.exec(
+                select(PlanDay).where(
+                    PlanDay.plan_week_id == active_week.id,
+                    PlanDay.day_date == workout_date,
+                )
+            ).first()
+
+        if plan_day is not None:
+            if plan_day.status == "completed" and plan_day.lock_reason == "completed":
+                return {"done": True}
+            for completion in completions:
+                if not _completion_context_counts_for_plan(
+                    completion.source_context,
+                    plan_day_id=completion.plan_day_id,
+                    activity_category=completion.activity_category,
+                ):
+                    continue
+                matched_by_id = completion.plan_day_id is not None and completion.plan_day_id == plan_day.id
+                if matched_by_id or _completion_matches_plan_day(plan_day, completion.focus_label):
+                    return {"done": True}
+            return {"done": False}
+    except Exception as e:
+        logger.debug(f"[workouts/status] plan-aware status failed (fallback): {e}")
+
+    done = any(
+        _completion_context_counts_for_plan(
+            completion.source_context,
+            plan_day_id=completion.plan_day_id,
+            activity_category=completion.activity_category,
+        )
+        for completion in completions
+    )
+    return {"done": done}
 
 
 class WorkoutSyncRequest(BaseModel):
@@ -2167,6 +2932,7 @@ class WorkoutSyncRequest(BaseModel):
     workout_date: date
     focus_label: str
     exercises: list[CompletedExercisePayload]
+    source_context: str | None = None
 
 
 @router.post("/sync")
@@ -2209,6 +2975,7 @@ def sync_in_progress_workout(
             .where(WorkoutSession.user_id == current_user.id)
             .where(WorkoutSession.workout_date == body.workout_date)
             .where(WorkoutSession.focus == body.focus_label)
+            .where(WorkoutSession.completed_at.is_(None))
         ).first()
         if existing_session:
             # Bulk delete child rows — same N+1 elimination as the
@@ -2224,37 +2991,61 @@ def sync_in_progress_workout(
                 db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(old_ex_ids)))
             session_row = existing_session
         else:
+            source = WorkoutSource.GENERATED
+            if (body.source_context or "").lower() in {"manual_activity", "apple_health", "watch", "coach_log"}:
+                source = WorkoutSource.LOGGED
+            elif (body.source_context or "").strip().lower():
+                source = WorkoutSource.CUSTOM
             session_row = WorkoutSession(
                 user_id=current_user.id,
                 name=body.focus_label or "Workout",
                 focus=body.focus_label or "",
                 workout_date=body.workout_date,
-                source=WorkoutSource.GENERATED,
+                source=source,
             )
             db.add(session_row)
         db.flush()
 
         total_sets = 0
         for idx, ex_payload in enumerate(body.exercises):
-            resolved_exercise_id = None
-            if ex_payload.name:
-                seed = db.exec(
-                    select(_Exercise).where(_Exercise.name.ilike(ex_payload.name))
-                ).first()
-                if seed is not None:
-                    resolved_exercise_id = seed.id
+            seed = _resolve_exercise_seed_row(db, ex_payload.slug, ex_payload.name)
+            resolved_exercise_id = seed.id if seed is not None else None
+            primary_snapshot = (
+                (ex_payload.primary_muscle or "").strip().lower()
+                or _muscle_value(getattr(seed, "primary_muscle", None))
+            )
+            secondary_snapshot = (
+                [str(m).lower() for m in ex_payload.secondary_muscles]
+                if ex_payload.secondary_muscles is not None
+                else _muscle_list(getattr(seed, "secondary_muscles", None))
+            )
+            slug_snapshot = (
+                (ex_payload.slug or "").strip()
+                or getattr(seed, "slug", None)
+                or None
+            )
+            is_compound_snapshot = (
+                ex_payload.is_compound
+                if ex_payload.is_compound is not None
+                else getattr(seed, "is_compound", None)
+            )
             exercise = WorkoutExercise(
                 session_id=session_row.id,
                 exercise_id=resolved_exercise_id,
                 name=ex_payload.name,
                 order_index=ex_payload.order_index or idx,
                 equipment=_coerce_equipment(ex_payload.equipment),
+                exercise_slug_snapshot=slug_snapshot,
+                primary_muscle_snapshot=primary_snapshot,
+                secondary_muscles_snapshot=secondary_snapshot,
+                is_compound_snapshot=is_compound_snapshot,
                 target_reps_text=ex_payload.target_reps,
                 rest_seconds=None,
             )
             db.add(exercise)
             db.flush()
             for set_payload in ex_payload.sets:
+                trimmed_notes = (set_payload.notes or "").strip() or None
                 db.add(ExerciseSet(
                     workout_exercise_id=exercise.id,
                     set_number=set_payload.set_number,
@@ -2267,6 +3058,8 @@ def sync_in_progress_workout(
                     actual_pace=set_payload.actual_pace,
                     heart_rate_avg=set_payload.heart_rate_avg,
                     cardio_metrics=set_payload.cardio_metrics,
+                    notes=trimmed_notes,
+                    set_type=_normalize_completed_set_type(set_payload.set_type),
                     completed=True,
                     completed_at=datetime.now(timezone.utc),
                 ))
@@ -2361,6 +3154,40 @@ def get_weekly_volume(
     the recommendation pass."""
     from app.services.workout.weekly_volume import compute_weekly_volume
     snap = compute_weekly_volume(db, current_user.id, days=max(3, min(28, days)))
+    return snap.to_dict()
+
+
+@router.get("/weekly-cardio-load")
+def get_weekly_cardio_load(
+    weeks: int = 8,
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
+    db: Session = Depends(get_session),
+):
+    """Weekly Edwards' TRIMP rollup — the cardio analogue to weekly volume.
+
+    Returns one row per ISO week (oldest first), plus a trend label
+    comparing the current week to the rolling baseline. Sessions without
+    `cardio_load` (no HR zone data) are excluded so the chart reflects
+    real aerobic stimulus, not session count."""
+    from app.services.workout.weekly_cardio_load import compute_weekly_cardio_load
+    snap = compute_weekly_cardio_load(
+        db, current_user.id, weeks=max(2, min(26, weeks))
+    )
+    return snap.to_dict()
+
+
+@router.get("/cardio-progression")
+def get_cardio_progression(
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
+    db: Session = Depends(get_session),
+):
+    """Pace bests + recent-vs-prior trends per activity + load summary.
+
+    Powers the Cardio Progression tab on Progress. PR matching is
+    distance-band-aware (5K, 10K, 10mi, half marathon, marathon) and
+    activity-aware (no walking PRs)."""
+    from app.services.workout.cardio_progression import compute_cardio_progression
+    snap = compute_cardio_progression(db, current_user.id)
     return snap.to_dict()
 
 
@@ -2459,6 +3286,7 @@ def get_e1rm_history(
 
 @router.get("/e1rm/all")
 def get_all_e1rm(
+    days: int = Query(default=365, ge=30, le=3650),
     current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
@@ -2478,12 +3306,14 @@ def get_all_e1rm(
     """
     from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
 
+    cutoff = date.today() - timedelta(days=days)
     rows = db.exec(
         select(ExerciseSet, WorkoutExercise, WorkoutSession)
         .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
         .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
         .where(
             WorkoutSession.user_id == current_user.id,
+            WorkoutSession.workout_date >= cutoff,
             ExerciseSet.completed == True,  # noqa: E712
         )
     ).all()
@@ -2510,7 +3340,7 @@ def get_all_e1rm(
         est = compute_rolling_e1rm(sets, role="primary")
         if est is not None and est.e1rm_lbs > 0:
             out[name_key] = round(est.e1rm_lbs, 1)
-    return {"exercises": out}
+    return {"exercises": out, "days": days}
 
 
 @router.get("/completions")
@@ -2554,6 +3384,7 @@ def list_completions(
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
             "external_source_id": r.external_source_id,
+            "idempotency_key": r.idempotency_key,
             "activity_category": r.activity_category,
             "activity_subtype": r.activity_subtype,
             "activity_intensity": r.activity_intensity,
@@ -2561,7 +3392,14 @@ def list_completions(
             "cardio_style": r.cardio_style,
             "distance_miles": r.distance_miles,
             "calories_burned": r.calories_burned,
+            "activity_details": r.activity_details,
+            "route_coords": r.route_coords,
             "hr_summary": r.hr_summary,
+            "training_score": r.training_score,
+            "training_rating": r.training_rating,
+            "training_pillars": r.training_pillars,
+            "training_pillar_breakdown": r.training_pillar_breakdown,
+            "import_source": r.import_source,
         }
         for r in rows
     ]
@@ -2569,8 +3407,18 @@ def list_completions(
 
 @router.get("/hr-zones")
 def get_hr_zones(
+    # Legacy single-value RHR — still accepted, treated as the
+    # lowest-priority "user_profile" source.
     resting_hr: int | None = Query(default=None),
     vo2_max: float | None = Query(default=None),
+    # New priority-aware inputs. The frontend resolver decides which to
+    # populate; the backend just resolves the highest-priority value
+    # that's present and returns the source so UI can label
+    # confidence ("From your Apple Health 7-day average").
+    user_max_hr: int | None = Query(default=None),
+    observed_max_hr: int | None = Query(default=None),
+    rhr_7d: int | None = Query(default=None),
+    rhr_30d: int | None = Query(default=None),
     current_user: User = Depends(require_pro_feature("Health-powered training zones")),
     db: Session = Depends(get_session),
 ):
@@ -2592,7 +3440,15 @@ def get_hr_zones(
         age = 30
 
     from app.services.workout.cardio import compute_hr_zones
-    return compute_hr_zones(age, resting_hr, vo2_max)
+    return compute_hr_zones(
+        age,
+        resting_hr,
+        vo2_max,
+        user_max_hr=user_max_hr,
+        observed_max_hr=observed_max_hr,
+        rhr_7d=rhr_7d,
+        rhr_30d=rhr_30d,
+    )
 
 
 @router.get("/pace-history")
@@ -2659,20 +3515,46 @@ def get_pace_history(
             secs = 0
         return f"{mins}:{secs:02d}/mi"
 
+    def _detail_int(details: dict | None, *keys: str) -> int | None:
+        if not isinstance(details, dict):
+            return None
+        for key in keys:
+            value = details.get(key)
+            try:
+                parsed = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+        return None
+
     for row in completion_rows:
         if exercise and exercise.lower() not in (row.activity_subtype or row.focus_label or "").lower():
             continue
         distance_miles = float(row.distance_miles or 0.0)
         if distance_miles <= 0:
             continue
+        details = row.activity_details if isinstance(row.activity_details, dict) else {}
+        moving_seconds = _detail_int(details, "movingSeconds", "moving_seconds")
+        elapsed_seconds = _detail_int(details, "elapsedSeconds", "elapsed_seconds")
+        stopped_seconds = _detail_int(details, "stoppedSeconds", "stopped_seconds")
+        duration_source = str(details.get("durationSource") or details.get("duration_source") or "").strip() or (
+            "moving_time" if moving_seconds else "duration_seconds"
+        )
+        pace_duration_seconds = moving_seconds or row.duration_seconds
         points.append({
             "exercise": row.activity_subtype or row.focus_label,
             "date": row.workout_date.isoformat(),
             "distance": distance_miles,
-            "pace": _pace_from_duration(distance_miles, row.duration_seconds),
+            "pace": _pace_from_duration(distance_miles, pace_duration_seconds),
             "duration_seconds": row.duration_seconds,
+            "pace_duration_seconds": pace_duration_seconds,
+            "moving_seconds": moving_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "stopped_seconds": stopped_seconds,
+            "duration_source": duration_source,
             "metrics": {
-                "source": row.activity_source,
+                "source": row.activity_source or row.import_source,
                 "category": row.activity_category,
                 "cardio_style": row.cardio_style,
             },
@@ -2692,8 +3574,43 @@ def get_fatigue_score(
 
     completions = get_recent_completions_for_fatigue(current_user.id, db)
     logger.debug(f"[fatigue] user={current_user.id} completions={len(completions)} dates={[c.get('workout_date') for c in completions]}")
-    snapshot = compute_rolling_fatigue(completions)
-    logger.debug(f"[fatigue] readiness={snapshot.readiness_score}% muscles={snapshot.muscle_fatigue.to_dict()}")
+    recovery_context: dict = {}
+    try:
+        from app.models import DailyHealthSnapshot, SleepLog
+        today = date.today()
+        sleep = db.exec(
+            select(SleepLog)
+            .where(SleepLog.user_id == current_user.id)
+            .where(SleepLog.night_date >= today - timedelta(days=1))
+            .order_by(SleepLog.night_date.desc())
+        ).first()
+        if sleep and sleep.score is not None:
+            recovery_context["sleep"] = {"score": int(sleep.score)}
+
+        today_snap = db.exec(
+            select(DailyHealthSnapshot)
+            .where(DailyHealthSnapshot.user_id == current_user.id)
+            .where(DailyHealthSnapshot.snapshot_date == today)
+        ).first()
+        prior_snaps = db.exec(
+            select(DailyHealthSnapshot)
+            .where(DailyHealthSnapshot.user_id == current_user.id)
+            .where(DailyHealthSnapshot.snapshot_date >= today - timedelta(days=14))
+            .where(DailyHealthSnapshot.snapshot_date < today)
+        ).all()
+        rhrs = [float(s.resting_hr) for s in prior_snaps if s.resting_hr is not None]
+        hrvs = [float(s.hrv_ms) for s in prior_snaps if s.hrv_ms is not None]
+        if today_snap and rhrs and hrvs and today_snap.resting_hr is not None and today_snap.hrv_ms is not None:
+            recovery_context["hr"] = {
+                "current_rhr": float(today_snap.resting_hr),
+                "baseline_rhr": sorted(rhrs)[len(rhrs) // 2],
+                "current_hrv": float(today_snap.hrv_ms),
+                "baseline_hrv": sorted(hrvs)[len(hrvs) // 2],
+            }
+    except Exception as e:
+        logger.debug(f"[fatigue] recovery context lookup failed (non-fatal): {e}")
+    snapshot = compute_rolling_fatigue(completions, recovery_context=recovery_context)
+    logger.debug(f"[fatigue] muscle_recovery={snapshot.readiness_score}% muscles={snapshot.muscle_fatigue.to_dict()}")
 
     # Nutrition recovery bonus — scales to % of user's protein target instead
     # of absolute grams so users at every bodyweight are evaluated fairly.
@@ -2739,7 +3656,7 @@ def get_fatigue_score(
                 from app.services.workout.activity_impact import recompute_readiness
                 snapshot.readiness_score, snapshot.focus_readiness = recompute_readiness(snapshot.muscle_fatigue)
                 nutrition_context["recovery_bonus_applied"] = True
-                logger.debug(f"[fatigue] nutrition bonus: protein_ratio={ratio:.2f} bonus={recovery_bonus:.3f} readiness={snapshot.readiness_score}%")
+                logger.debug(f"[fatigue] nutrition bonus: protein_ratio={ratio:.2f} bonus={recovery_bonus:.3f} muscle_recovery={snapshot.readiness_score}%")
             elif ratio >= 0.60 and ratio < 0.80:
                 penalty = 0.03
                 for muscle in ("chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes", "calves", "core"):
@@ -2748,11 +3665,13 @@ def get_fatigue_score(
                         snapshot.muscle_fatigue.add(muscle, current * penalty)
                 from app.services.workout.activity_impact import recompute_readiness as _recompute
                 snapshot.readiness_score, snapshot.focus_readiness = _recompute(snapshot.muscle_fatigue)
-                logger.debug(f"[fatigue] low protein penalty: protein_ratio={ratio:.2f} readiness={snapshot.readiness_score}%")
+                logger.debug(f"[fatigue] low protein penalty: protein_ratio={ratio:.2f} muscle_recovery={snapshot.readiness_score}%")
     except Exception as e:
         logger.debug(f"[fatigue] nutrition recovery check failed (non-fatal): {e}")
 
     return {
+        "muscle_recovery_score": snapshot.readiness_score,
+        "muscle_recovery_label": snapshot.readiness_label,
         "readiness_score": snapshot.readiness_score,
         "readiness_label": snapshot.readiness_label,
         "muscle_fatigue": snapshot.muscle_fatigue.to_dict(),
@@ -2762,6 +3681,9 @@ def get_fatigue_score(
         "days_analyzed": snapshot.days_analyzed,
         "activities": snapshot.activities,
         "nutrition_context": nutrition_context,
+        "explanations": snapshot.explanations,
+        "recommendations": snapshot.recommendations,
+        "raw_muscle_fatigue": snapshot.raw_muscle_fatigue,
     }
 
 
@@ -2793,10 +3715,7 @@ def create_workout(
         # back to the free-text name path in that case.
         resolved_exercise_id = ex_body.exercise_id
         if resolved_exercise_id is None and ex_body.name:
-            from app.models import Exercise as _Exercise  # local to avoid cycle
-            seed = db.exec(
-                select(_Exercise).where(_Exercise.name.ilike(ex_body.name))
-            ).first()
+            seed = _resolve_exercise_seed_row(db, None, ex_body.name)
             if seed is not None:
                 resolved_exercise_id = seed.id
 
@@ -2809,6 +3728,11 @@ def create_workout(
             notes=ex_body.notes,
             target_reps_text=ex_body.target_reps_text,
             rest_seconds=ex_body.rest_seconds,
+            movement_pattern_snapshot=ex_body.movement_pattern,
+            impact_level=ex_body.impact_level,
+            load_type=ex_body.load_type,
+            intensity_estimate=ex_body.intensity_estimate,
+            novelty_flag=ex_body.novelty_flag,
         )
         db.add(exercise)
         db.flush()
@@ -2902,6 +3826,9 @@ def log_set(
     exercise_set.actual_reps = body.actual_reps
     exercise_set.actual_weight_lbs = body.actual_weight_lbs
     exercise_set.rpe = body.rpe
+    if body.notes is not None:
+        trimmed = body.notes.strip()
+        exercise_set.notes = trimmed or None
     exercise_set.completed = True
     exercise_set.completed_at = datetime.now(timezone.utc)
     db.add(exercise_set)

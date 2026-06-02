@@ -720,6 +720,39 @@ def _is_protected_isolation_slot(slot: Slot) -> bool:
     )
 
 
+def _cardio_finisher_minutes(session_minutes: Optional[int]) -> int:
+    """Real time cost of a lift-day cardio finisher, matched to the
+    session-scaled prescription bands in prescriptions.py (top of each
+    band, for a conservative reserve). The role-cost table prices any
+    "secondary" slot at ~8 min, but the finisher is a 12-25 min block —
+    pricing it honestly here is what lets density trim enough lift
+    accessories to keep a lift+cardio day inside the user's time cap
+    (a 60-min cap was overrunning to ~75)."""
+    sm = int(session_minutes or 45)
+    if sm <= 45:
+        return 5
+    if sm <= 60:
+        return 12
+    if sm <= 75:
+        return 18
+    return 25
+
+
+def _slot_cost(
+    slot: Slot,
+    cost: dict[str, int],
+    session_minutes: Optional[int],
+    category: str,
+) -> int:
+    """Minute cost of one slot for the density budget. Lift/hybrid-day
+    cardio finishers are priced at their real session-scaled duration;
+    every other slot uses the per-category role-cost table (which already
+    prices cardio-day blocks correctly via the "cond" map)."""
+    if category in ("lift", "hybrid") and (getattr(slot, "movement_pattern", "") or "").lower() == "cardio":
+        return _cardio_finisher_minutes(session_minutes)
+    return cost.get(slot.role, 6)
+
+
 def density_adjust_slots(
     slots: list[Slot],
     session_minutes: Optional[int],
@@ -749,7 +782,7 @@ def density_adjust_slots(
         return list(slots)
     budget = max(20, min(180, int(session_minutes)))
     cost = _ROLE_MINUTES_BY_CATEGORY.get(category, _DEFAULT_ROLE_MINUTES)
-    total = sum(cost.get(s.role, 6) for s in slots)
+    total = sum(_slot_cost(s, cost, session_minutes, category) for s in slots)
 
     # ── Underfill case ─────────────────────────────────────────────────
     # Recipes are fixed-length templates; without this pass, picking a
@@ -805,7 +838,7 @@ def density_adjust_slots(
                     break
             if drop_idx is None:
                 break
-            total -= cost.get(role, 6)
+            total -= _slot_cost(kept[drop_idx], cost, session_minutes, category)
             kept.pop(drop_idx)
         if total <= budget:
             break
@@ -819,7 +852,7 @@ def density_adjust_slots(
                         break
                 if drop_idx is None:
                     break
-                total -= cost.get(role, 6)
+                total -= _slot_cost(kept[drop_idx], cost, session_minutes, category)
                 kept.pop(drop_idx)
             if total <= budget:
                 break

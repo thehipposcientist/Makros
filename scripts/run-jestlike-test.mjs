@@ -27,6 +27,9 @@ function expect(actual) {
     toContain(expected) {
       if (!actual?.includes?.(expected)) throw new Error(`expected ${format(actual)} to contain ${format(expected)}`);
     },
+    toBeNull() {
+      if (actual !== null) throw new Error(`expected ${format(actual)} to be null`);
+    },
     toBeGreaterThan(expected) {
       if (!(actual > expected)) throw new Error(`expected ${format(actual)} to be greater than ${format(expected)}`);
     },

@@ -33,6 +33,10 @@ from app.models import (
     Meal, MealItem, UserProfile, UserGoal,
     DailyNutritionMetrics, WorkoutCompletion,
 )
+from app.services.nutrition.day_completeness import (
+    USABLE_NUTRITION_LOG_STATUSES,
+    classify_nutrition_day,
+)
 from app.services.nutrition.nutrition_score import RDA
 
 
@@ -48,7 +52,6 @@ FAT_AMBER_PCT = 20.0           # 15-20% = amber
 DEFAULT_BF_PCT_MALE = 0.18
 DEFAULT_BF_PCT_FEMALE = 0.28
 DEFAULT_BF_PCT_OTHER = 0.23
-
 
 @dataclass
 class FlagState:
@@ -113,7 +116,14 @@ def compute_energy_availability(
     intake_by_day: dict[date, float] = {}
     for r in rows:
         if (r.calories_total or 0) > 0:
-            intake_by_day[r.metric_date] = float(r.calories_total)
+            completeness = classify_nutrition_day(
+                db,
+                user_id,
+                r.metric_date,
+                logged_calories=float(r.calories_total or 0),
+            )
+            if completeness.usable_for_recovery:
+                intake_by_day[r.metric_date] = float(r.calories_total)
     exercise_by_day: dict[date, float] = {}
     for c in comps:
         if c.calories_burned:
@@ -145,6 +155,7 @@ def compute_energy_availability(
         "avg_ea_kcal_per_kg_ffm": round(avg_ea, 1),
         "ffm_kg": round(ffm_kg, 1),
         "days_with_data": len(ea_values),
+        "usable_statuses": sorted(USABLE_NUTRITION_LOG_STATUSES),
         "daily": per_day,
     }
 
@@ -168,7 +179,22 @@ def compute_flags(
         .where(DailyNutritionMetrics.metric_date <= end_date)
     ).all()
 
-    logged_rows = [r for r in rows if (r.calories_total or 0) > 0]
+    completeness_by_day = {
+        r.metric_date: classify_nutrition_day(
+            db,
+            user_id,
+            r.metric_date,
+            logged_calories=float(r.calories_total or 0),
+        )
+        for r in rows
+        if (r.calories_total or 0) > 0
+    }
+    logged_rows = [
+        r for r in rows
+        if (r.calories_total or 0) > 0
+        and completeness_by_day.get(r.metric_date)
+        and completeness_by_day[r.metric_date].usable_for_recovery
+    ]
 
     flags: list[FlagState] = []
 
@@ -217,6 +243,9 @@ def compute_flags(
             if d is not None:
                 item_ids_by_day.setdefault(d, []).append(item)
     for d, items in item_ids_by_day.items():
+        completeness = completeness_by_day.get(d) or classify_nutrition_day(db, user_id, d)
+        if not completeness.usable_for_recovery:
+            continue
         day_cals = sum(float(i.calories or 0) for i in items)
         day_fat_g = sum(float(i.fat_g or 0) for i in items)
         if day_cals >= 600:
@@ -235,7 +264,7 @@ def compute_flags(
         if avg_fat_pct < FAT_RED_PCT and low_days >= MIN_DAYS_FOR_FLAG:
             state = "red"
             detail = f"Fat {avg_fat_pct:.0f}% of calories — below recovery floor."
-            action = "Add avocado, olive oil, nuts, or fatty fish to 1–2 meals/day."
+            action = "Add avocado, olive oil, nuts, or fatty fish to one or two meals."
         elif avg_fat_pct < FAT_AMBER_PCT and low_days >= MIN_DAYS_FOR_FLAG:
             state = "amber"
             detail = f"Fat {avg_fat_pct:.0f}% of calories — near the low end."
@@ -252,7 +281,15 @@ def compute_flags(
 
     # ── 3. Recovery nutrients ────────────────────────────────────────
     user_allergens = getattr(profile, "allergies", None) or []
-    nutrient_state = _recovery_nutrients_flag(db, user_id=user_id, start=start, end_date=end_date, sex=sex, allergens=user_allergens)
+    nutrient_state = _recovery_nutrients_flag(
+        db,
+        user_id=user_id,
+        start=start,
+        end_date=end_date,
+        sex=sex,
+        allergens=user_allergens,
+        completeness_by_day=completeness_by_day,
+    )
     flags.append(nutrient_state)
 
     # ── 4. Metabolic support (cardiometabolic dietary pattern) ──────
@@ -383,13 +420,14 @@ def _metabolic_support_flag(*, rows: list) -> "FlagState":
 def _recovery_nutrients_flag(
     db: Any, *, user_id: int, start: date, end_date: date, sex: str | None,
     allergens: list[str] | None = None,
+    completeness_by_day: dict[date, Any] | None = None,
 ) -> FlagState:
-    """Read magnesium, zinc, vitamin D, selenium from daily meal items over
-    the window. Flag when multiple are chronically low."""
+    """Read magnesium, zinc, vitamin D, selenium, copper from daily meal
+    items over the window. Flag when multiple are chronically low."""
     from app.services.nutrition.score_builder import _aggregate_micros, _add_supplement_micros
 
     # For each day, aggregate micros and check adequacy.
-    nutrients = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg"]
+    nutrients = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg", "copper_mg"]
     days_analyzed = 0
     below_50_counts = {k: 0 for k in nutrients}
     below_70_counts = {k: 0 for k in nutrients}
@@ -400,6 +438,10 @@ def _recovery_nutrients_flag(
 
     current = start
     while current <= end_date:
+        completeness = (completeness_by_day or {}).get(current) or classify_nutrition_day(db, user_id, current)
+        if not completeness.usable_for_recovery:
+            current = current + timedelta(days=1)
+            continue
         meals_d = db.exec(
             select(Meal).where(Meal.user_id == user_id).where(Meal.meal_date == current)
         ).all()
@@ -427,7 +469,7 @@ def _recovery_nutrients_flag(
         return FlagState(
             key="recovery_nutrients", state="not_enough_data",
             label="Recovery nutrient adequacy",
-            detail="Log at least 5 days to estimate magnesium, zinc, vitamin D, and selenium intake.",
+            detail="Log at least 5 days to estimate magnesium, zinc, vitamin D, selenium, and copper intake.",
         )
 
     # Consider chronically low = below 50% RDA on >=5 of logged days
@@ -437,6 +479,7 @@ def _recovery_nutrients_flag(
     pretty = {
         "magnesium_mg": "magnesium", "zinc_mg": "zinc",
         "vitamin_d_mcg": "vitamin D", "selenium_mcg": "selenium",
+        "copper_mg": "copper",
     }
     if len(chronic_low) >= 2:
         state = "red"
@@ -477,6 +520,7 @@ def _action_for(keys: list[str], allergens: list[str] | None = None) -> str:
         "zinc_mg": ["beef", "shellfish", "lentils", "pumpkin seeds", "chickpeas"],
         "vitamin_d_mcg": ["fatty fish", "egg yolks", "fortified dairy", "sun exposure", "mushrooms"],
         "selenium_mcg": ["brazil nuts (1-2/day)", "tuna", "sardines", "eggs", "sunflower seeds"],
+        "copper_mg": ["shellfish", "cashews", "sunflower seeds", "dark chocolate", "lentils"],
     }
     if allergens:
         from app.services.nutrition.allergen_filter import ALLERGEN_KEYWORDS

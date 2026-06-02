@@ -23,7 +23,7 @@ from app.routers.ai.utils import (
     _chat_create,
     _extract_json,
     get_openai_api_key,
-    model_image,
+    model_image_light,
 )
 
 router = APIRouter(prefix="/gear", tags=["gear"])
@@ -353,7 +353,7 @@ def identify_gear(
         {"role": "user", "content": user_content},
     ]
     kwargs = _build_chat_kwargs(
-        model_image(),
+        model_image_light(),
         messages,
         max_tokens=300,
         timeout_secs=30,

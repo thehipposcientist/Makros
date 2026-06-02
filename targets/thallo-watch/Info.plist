@@ -15,9 +15,9 @@
   <key>CFBundlePackageType</key>
   <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.0.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>140</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -46,12 +46,19 @@
   <key>NSHealthShareUsageDescription</key>
   <string>Thallo reads your heart rate during workouts so you can see live heart-rate and zone updates on your watch.</string>
   <key>NSHealthUpdateUsageDescription</key>
-  <string>Thallo writes your completed workouts to Apple Health so they appear in the Fitness app alongside your other sessions.</string>
+  <string>Thallo writes completed workouts, calories, distance, and route data to Apple Health when you save a workout with those details.</string>
   <!-- Speech recognition + microphone — used by the speech-to-meal feature
        so users can dictate what they ate and log it from the watch. -->
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>Thallo uses speech recognition to let you describe meals by voice so you can log food directly from your watch.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Thallo uses the microphone to transcribe meals you describe by voice on your Apple Watch.</string>
+  <!-- Location — used during outdoor cardio (run/walk/bike/hike) to draw
+       the live route map on the watch and to feed GPS coordinates into
+       HKWorkoutSession's distance pipeline. Only active during a workout. -->
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Thallo uses your location during outdoor cardio workouts to draw your route on the map and track distance.</string>
+  <key>NSMotionUsageDescription</key>
+  <string>Thallo uses motion data during workouts to estimate reps, steps, and distance on your watch.</string>
 </dict>
 </plist>

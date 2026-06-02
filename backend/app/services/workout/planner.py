@@ -92,6 +92,13 @@ class PlannerInputs:
     preferred_exercises: tuple[str, ...] = ()
     disliked_exercises: tuple[str, ...] = ()
     injuries: tuple[str, ...] = ()
+    # Optional structured injury records — one dict per active/recovering
+    # injury with keys: bodyPart, status, severity, muscleGroups,
+    # estimatedRecoveryDate. When provided, the planner uses these
+    # (severity-aware) instead of substring-matching the flat strings.
+    # Legacy `injuries` strings remain the fallback so existing callers
+    # keep working unchanged. See _injury_blocked_patterns_combined.
+    injuries_structured: tuple[dict, ...] = ()
     # Seed for deterministic tie-breaking on candidate selection. Pass a
     # stable per-user value (e.g. user_id) to keep plans consistent across
     # regenerations when nothing else has changed.
@@ -145,6 +152,11 @@ class PlannerInputs:
     # adjustable dumbbell range/step. Optional; missing preserves the
     # legacy 5 lb / 2.5 lb load progression behavior.
     load_equipment_settings: dict | None = None
+    # Accepted coach adjustments for future generated weeks. These are
+    # durable UserCoachingState inputs; they never rewrite an active week.
+    volume_adjustment_pct: int = 0
+    muscle_volume_adjustments: dict | None = None
+    intensity_adjustment_pct: int = 0
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────
@@ -325,6 +337,27 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
     if cycle_multiplier:
         for muscle, target in list(base.items()):
             base[muscle] = max(4, int(round(target * cycle_multiplier)))
+
+    global_pct = int(getattr(inputs, "volume_adjustment_pct", 0) or 0)
+    muscle_adjustments = getattr(inputs, "muscle_volume_adjustments", None) or {}
+    if global_pct:
+        global_factor = max(0.5, min(1.4, 1.0 + global_pct / 100.0))
+        for muscle, target in list(base.items()):
+            base[muscle] = max(2, int(round(target * global_factor)))
+
+    if isinstance(muscle_adjustments, dict):
+        for raw_muscle, data in muscle_adjustments.items():
+            muscle = str(raw_muscle or "").strip().lower()
+            if muscle not in base:
+                continue
+            if isinstance(data, dict):
+                pct = int(data.get("pct") or 0)
+            else:
+                pct = int(data or 0) if isinstance(data, (int, float)) else 0
+            if pct == 0:
+                continue
+            factor = max(0.5, min(1.4, 1.0 + pct / 100.0))
+            base[muscle] = max(2, int(round(base[muscle] * factor)))
 
     return base
 
@@ -578,21 +611,40 @@ _PRIMARY_LOAD_TIER = {
     "sandbag": 2,
     "medicine_ball": 2,
     "cable_machine": 1,
+    "single_cable_station": 1,
+    "dual_cable_station": 1,
 }
 
 
-def _exercise_load_tier(exercise: dict) -> int:
+def _owned_equipment_set(owned_equipment_slugs: Iterable[str] | None) -> set[str] | None:
+    if owned_equipment_slugs is None:
+        return None
+    return _expanded_owned_equipment({
+        str(slug)
+        for slug in owned_equipment_slugs
+        if str(slug or "").strip()
+    })
+
+
+def _exercise_load_tier(
+    exercise: dict,
+    owned_equipment_slugs: Iterable[str] | None = None,
+) -> int:
     """Return 0 for bodyweight-bucket exercises, or the best
     `_PRIMARY_LOAD_TIER` value found among the exercise's equipment
     entries. Used both for the tier-split in `pick_for_slot` and for
     scoring's load-preference term."""
     if exercise.get("equipment_bucket") == "bodyweight":
         return 0
+    owned = _owned_equipment_set(owned_equipment_slugs)
     best = 0
     for e in exercise.get("equipment") or []:
         if e.get("role") != "primary":
             continue
-        t = _PRIMARY_LOAD_TIER.get(e.get("slug", ""), 0)
+        slug = e.get("slug", "")
+        if owned is not None and slug not in owned:
+            continue
+        t = _PRIMARY_LOAD_TIER.get(slug, 0)
         if t > best:
             best = t
     return best
@@ -786,13 +838,13 @@ def score_candidate(
             score -= 4.0
         else:
             score += 3.0
-            score += 0.1 * _exercise_load_tier(exercise)
+            score += 0.1 * _exercise_load_tier(exercise, inputs.equipment_slugs)
     elif not is_cardio_exercise and is_lift_focused and role == "isolation":
         if is_bodyweight:
             score -= 1.5
         else:
             score += 1.5
-            score += 0.05 * _exercise_load_tier(exercise)
+            score += 0.05 * _exercise_load_tier(exercise, inputs.equipment_slugs)
     elif not is_cardio_exercise:
         # Preserve the old light "free-weight primary" bonus for the
         # non-lift-focused goals so behavior there is unchanged.
@@ -1011,12 +1063,24 @@ def pick_for_slot(
     is_lift_focused = bucket in _LIFT_FOCUSED_BUCKETS
     split_pools = is_lift_focused and slot.role in ("primary", "secondary")
 
+    # Main lifts must be compounds. A primary/secondary ("main") slot prefers a
+    # real compound (back/front squat, hip thrust, RDL, …) and only falls back
+    # to a non-compound when the pool contains no compound at all. This is what
+    # stops an isolation like a glute kickback from ever winning a main slot
+    # while a hip thrust / squat is available — the score bonus alone didn't
+    # guarantee it, since a mislabeled isolation got no penalty.
+    def _prefer_compound(pool: list[dict]) -> list[dict]:
+        if slot.role not in ("primary", "secondary"):
+            return pool
+        compounds = [c for c in pool if c.get("is_compound")]
+        return compounds or pool
+
     if split_pools:
         loaded = [c for c in candidates if c.get("equipment_bucket") != "bodyweight"]
         bodyweight = [c for c in candidates if c.get("equipment_bucket") == "bodyweight"]
-        return _best_of(loaded) or _best_of(bodyweight)
+        return _best_of(_prefer_compound(loaded)) or _best_of(_prefer_compound(bodyweight))
 
-    return _best_of(candidates)
+    return _best_of(_prefer_compound(candidates))
 
 
 # ─── Layer 6 — Prescription assembler ────────────────────────────────────────
@@ -1206,7 +1270,34 @@ def prescribe_sets_reps(
 # ─── Layer 7 — Top-level orchestrator ────────────────────────────────────────
 
 
-def _equipment_label(exercise: dict) -> str:
+def _best_owned_primary_slug(primary_slugs: list[str], owned: set[str]) -> str | None:
+    best_slug: str | None = None
+    best_tier = -1
+    for slug in primary_slugs:
+        if slug not in owned:
+            continue
+        tier = _PRIMARY_LOAD_TIER.get(slug, 0)
+        if tier > best_tier:
+            best_slug = slug
+            best_tier = tier
+    return best_slug
+
+
+def _dedupe_slugs(slugs: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for slug in slugs:
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        out.append(slug)
+    return out
+
+
+def _equipment_label(
+    exercise: dict,
+    owned_equipment_slugs: Iterable[str] | None = None,
+) -> str:
     """Build a human-readable equipment label for the planner output.
 
     Old logic: `", ".join(slug for required) or "bodyweight"`.
@@ -1216,23 +1307,44 @@ def _equipment_label(exercise: dict) -> str:
     in the output even though they're loaded movements.
 
     New logic, in priority order:
-      1. Required primary or support slugs (the canonical needs)
-      2. Any primary slugs (even if `required=False`) — handles "Goblet
-         Squat → dumbbells" where the load is technically optional
-      3. Literal "bodyweight" only when the bucket is actually bodyweight
-      4. First slug in the equipment list as a last-resort fallback
+      1. Concrete primary implement selected from owned gear when the
+         seed models alternatives (preacher curl: EZ bar/barbell/DB).
+      2. Required support slugs (bench/rack/pad) after the implement.
+      3. Required primary slugs, or all primary alternatives when no
+         owned-equipment context is available.
+      4. Literal "bodyweight" only when the bucket is actually bodyweight.
+      5. First slug in the equipment list as a last-resort fallback.
     """
+    explicit = str(exercise.get("equipment_label") or "").strip()
+    if explicit:
+        return explicit
     eq = exercise.get("equipment") or []
-    required_named = [
+    bucket = exercise.get("equipment_bucket")
+    owned = _owned_equipment_set(owned_equipment_slugs)
+    required_primary = [
         e["slug"] for e in eq
-        if e.get("required") and e.get("role") in ("primary", "support")
+        if e.get("required") and e.get("role") == "primary"
     ]
-    if required_named:
-        return ", ".join(required_named)
     primary_named = [e["slug"] for e in eq if e.get("role") == "primary"]
-    if primary_named:
-        return ", ".join(primary_named)
-    if exercise.get("equipment_bucket") == "bodyweight":
+    required_support = [
+        e["slug"] for e in eq
+        if e.get("required") and e.get("role") == "support"
+    ]
+
+    selected_primary: list[str] = []
+    if required_primary:
+        selected_primary = required_primary
+    elif primary_named and bucket != "bodyweight":
+        if owned is not None:
+            best_owned = _best_owned_primary_slug(primary_named, owned)
+            selected_primary = [best_owned] if best_owned else []
+        else:
+            selected_primary = primary_named
+
+    label_slugs = _dedupe_slugs([*selected_primary, *required_support])
+    if label_slugs:
+        return ", ".join(label_slugs)
+    if bucket == "bodyweight":
         return "bodyweight"
     if eq:
         return eq[0].get("slug", "bodyweight")
@@ -1246,6 +1358,7 @@ def _equipment_label(exercise: dict) -> str:
 # frontend) can rely on a stable shape.
 _CANONICAL_PLANNED_EXERCISE_KEYS: tuple[str, ...] = (
     "name", "sets", "reps", "restSeconds", "equipment", "image_url", "video_id",
+    "demo_exercise_db_id",
     "targetWeightLbs",
     "weightRecommendationSource", "weightRecommendationConfidence", "weightRecommendationReason",
     "setScheme",
@@ -1301,6 +1414,7 @@ def build_planner_exercise(
     perf_profiles: dict | None = None,
     all_exercises_by_slug: dict | None = None,
     load_equipment_settings: dict | None = None,
+    owned_equipment_slugs: Iterable[str] | None = None,
 ) -> dict:
     """Build the canonical planner-output exercise dict from a seed
     exercise row + prescription. SINGLE source of truth for the shape
@@ -1318,18 +1432,27 @@ def build_planner_exercise(
         `_primary_muscle`, `_secondary_muscles`, `_archetype`,
         `_training_type`) is always populated or None.
     """
+    equipment_label = _equipment_label(
+        exercise,
+        owned_equipment_slugs=owned_equipment_slugs,
+    )
     out_ex: dict = {
         "name": exercise.get("name"),
         "sets": prescription.sets,
         "reps": prescription.reps,
         "restSeconds": int(prescription.rest_seconds),
-        "equipment": _equipment_label(exercise),
+        "equipment": equipment_label,
         "image_url": exercise.get("image_url") or None,
         "video_id": exercise.get("video_id") or None,
+        "demo_exercise_db_id": exercise.get("demo_exercise_db_id") or None,
         # Prescription type + cardio guidance for the client to render
         # the correct tracking UI (duration/speed/HR vs sets/reps).
         "prescriptionType": prescription.prescription_type,
         "cardioGuidance": prescription.cardio_guidance,
+        # Guided-flow ordering tag for stretches/yoga/foam-roll. The client
+        # uses this to enable GuidedFlowView (auto-advance, transition cue)
+        # and to filter same-category candidates when swapping a pose.
+        "flowCategory": exercise.get("flow_category") or None,
         # Internal metadata the canonicalizer + progression engine read.
         "_slug": exercise.get("slug"),
         "_slot": slot_label,
@@ -1350,19 +1473,26 @@ def build_planner_exercise(
         perf_profiles=perf_profiles,
         all_exercises_by_slug=all_exercises_by_slug,
         load_equipment_settings=load_equipment_settings,
+        equipment_label=equipment_label,
     )
     return out_ex
 
 
 def _normalize_rest_key(out_ex: dict) -> dict:
     """Ensure the planner-output dict uses camelCase `restSeconds`,
-    never `rest_seconds`. Mutates AND returns the dict for convenience.
-    Idempotent and safe on dicts that already only have `restSeconds`.
+    never `rest_seconds`, and surface guided-flow fields in camelCase
+    (`prescriptionType`, `flowCategory`) for pre-generated mobility/yoga
+    days that come straight from a pool dict. Mutates AND returns the
+    dict for convenience. Idempotent.
     """
     if "rest_seconds" in out_ex:
         if "restSeconds" not in out_ex:
             out_ex["restSeconds"] = out_ex.get("rest_seconds")
         out_ex.pop("rest_seconds", None)
+    if "prescription_type" in out_ex and "prescriptionType" not in out_ex:
+        out_ex["prescriptionType"] = out_ex.get("prescription_type")
+    if "flow_category" in out_ex and "flowCategory" not in out_ex:
+        out_ex["flowCategory"] = out_ex.get("flow_category")
     return out_ex
 
 
@@ -1377,6 +1507,7 @@ def _stamp_load_metadata(
     perf_profiles: dict | None,
     all_exercises_by_slug: dict | None,
     load_equipment_settings: dict | None = None,
+    equipment_label: str | None = None,
 ) -> None:
     """Attach deterministic load recommendation + set-scheme metadata
     to a planner output exercise dict IN PLACE.
@@ -1393,6 +1524,7 @@ def _stamp_load_metadata(
     plank, and leaving `target_weight_lbs` stamped made the plan
     review prompt show nonsense like "Treadmill Intervals at 140 lb".
     """
+    from .exercise_metadata import uses_numeric_load
     from .recommendation import recommend_starting_weight
     from .set_programming import build_set_scheme, parse_rep_range
 
@@ -1414,7 +1546,12 @@ def _stamp_load_metadata(
     )
     is_timed_only = rep_range is None  # "30s", "3-5 min", "25-40 min", etc.
     is_bodyweight = equipment_bucket == "bodyweight"
-    skip_load = is_cardio_or_mobility or is_timed_only or is_bodyweight
+    skip_load = (
+        is_cardio_or_mobility
+        or is_timed_only
+        or is_bodyweight
+        or not uses_numeric_load(exercise)
+    )
 
     if not skip_load and perf_profiles is not None and all_exercises_by_slug is not None:
         try:
@@ -1438,7 +1575,7 @@ def _stamp_load_metadata(
             from .load_equipment import snap_load_lbs
             snapped = snap_load_lbs(
                 target_w,
-                _equipment_label(exercise),
+                equipment_label or _equipment_label(exercise),
                 load_equipment_settings,
                 fallback_increment=2.5 if equipment_bucket == "dumbbell" else 5.0,
             )
@@ -1574,7 +1711,7 @@ def generate_workout_plan(
     # Archetypes that bypass the slot system and use dedicated generators
     _GENERATED_ARCHETYPES = {
         DayArchetype.MOBILITY_FLOW, DayArchetype.RECOVERY_EASY,
-        DayArchetype.STRESS_RELIEF_EASY,
+        DayArchetype.STRESS_RELIEF_EASY, DayArchetype.YOGA_FLOW,
     }
     for idx, archetype in enumerate(recipe):
         meta = ARCHETYPE_META[archetype]
@@ -1584,6 +1721,8 @@ def generate_workout_plan(
             # user's committed minutes properly.
             if archetype == DayArchetype.MOBILITY_FLOW:
                 gen_day = generate_mobility_day(inputs.session_minutes)
+            elif archetype == DayArchetype.YOGA_FLOW:
+                gen_day = generate_yoga_day(inputs.session_minutes)
             elif archetype == DayArchetype.RECOVERY_EASY:
                 gen_day = generate_recovery_day(inputs.session_minutes)
             else:
@@ -1612,17 +1751,28 @@ def generate_workout_plan(
     #     carry) so users don't do the same plank every session
     #   • core always placed at END of the day's slot list
     from .core_programmer import program_core_across_week
-    templates = program_core_across_week(
+    templates, _core_summary = program_core_across_week(
         templates=templates,
         goal=profile.bucket,
         days_per_week=inputs.days_per_week,
         session_minutes=inputs.session_minutes,
         seed=inputs.rng_seed or 0,
+        return_summary=True,
+    )
+    logger.debug(
+        "[workout_planner] CORE_SUMMARY target=%d actual=%d skip_reasons=%s",
+        _core_summary.target_core_days,
+        _core_summary.actual_core_days_generated,
+        list(_core_summary.core_skip_reasons),
     )
     targets = weekly_set_targets(inputs)
     # Injury-aware movement-pattern blocklist. Built once from the
-    # user's injury tags and passed into every slot pick.
-    blocked_patterns = _injury_blocked_patterns(inputs.injuries)
+    # user's injury tags and passed into every slot pick. Prefers the
+    # structured-record path (severity-aware); falls back to legacy
+    # string parsing when only inputs.injuries is populated.
+    blocked_patterns = _injury_blocked_patterns_combined(
+        inputs.injuries, inputs.injuries_structured,
+    )
     if blocked_patterns:
         logger.debug(f"[workout_planner] injury-blocked patterns: {sorted(blocked_patterns)}")
     # Running tally of assigned working sets per primary muscle. The
@@ -1749,6 +1899,7 @@ def generate_workout_plan(
                 perf_profiles=perf_profiles,
                 all_exercises_by_slug=all_exercises_by_slug,
                 load_equipment_settings=inputs.load_equipment_settings,
+                owned_equipment_slugs=inputs.equipment_slugs,
             )
             exercises_out.append(out_ex)
             # Warmup-role exercises don't count toward lifting volume.
@@ -1978,6 +2129,7 @@ def generate_workout_plan(
                     perf_profiles=perf_profiles,
                     all_exercises_by_slug=all_exercises_by_slug,
                     load_equipment_settings=inputs.load_equipment_settings,
+                    owned_equipment_slugs=inputs.equipment_slugs,
                 )
                 days_out[host].setdefault("exercises", []).append(focus_out)
                 if focus_ex.get("slug"):
@@ -2574,6 +2726,146 @@ def injury_muscle_fatigue_boost(injuries: tuple[str, ...] | list[str] | None) ->
     return boosts
 
 
+# ─── Structured-injury path (severity-aware) ─────────────────────────────────
+#
+# When the caller passes structured injury records (see PlannerInputs.
+# injuries_structured) we use them instead of the flat-string fallback.
+# Each record is a dict with: bodyPart, status, severity, muscleGroups.
+#
+# Severity rules (deterministic, no AI):
+#   mild     → only avoid direct aggravators (the recovering subset).
+#              Equivalent to today's "recovering" treatment for an active
+#              injury — the user can still train near it.
+#   moderate → block the mapping's full blocked_patterns set. Same as
+#              the legacy default for an active injury.
+#   severe   → block moderate's set PLUS the family-adjacent patterns
+#              (e.g. shoulder injury also blocks horizontal_press; knee
+#              also blocks lunge/squat together). Adds a stronger
+#              fatigue boost so readiness drops further.
+#
+# Status overrides:
+#   resolved   → the record contributes nothing.
+#   recovering → severity is one notch softer (severe→moderate, etc.).
+
+_SEVERE_FAMILY_EXPANSION: dict[str, set[str]] = {
+    "vertical_press":   {"horizontal_press"},
+    "horizontal_press": {"vertical_press"},
+    "vertical_pull":    {"horizontal_pull"},
+    "horizontal_pull":  {"vertical_pull"},
+    "squat":            {"lunge"},
+    "lunge":            {"squat"},
+    "hinge":            {"squat"},
+}
+
+
+def _resolve_structured_record(rec: dict) -> tuple[_InjuryMapping | None, str, str]:
+    """Return (mapping, effective_severity, status) for one structured record.
+
+    `bodyPart` is matched into _INJURY_MAP via the same substring lookup
+    the legacy path uses, so onboarding pickers and AI-emitted entries
+    both resolve. Recovering status softens severity one notch."""
+    body_part = str(rec.get("bodyPart") or "").strip()
+    status = str(rec.get("status") or "active").strip().lower() or "active"
+    severity = str(rec.get("severity") or "moderate").strip().lower() or "moderate"
+    if severity not in {"mild", "moderate", "severe"}:
+        severity = "moderate"
+    if status == "recovering":
+        severity = {"severe": "moderate", "moderate": "mild", "mild": "mild"}[severity]
+    mapping = _lookup_injury(body_part) if body_part else None
+    return mapping, severity, status
+
+
+def _patterns_for_record(rec: dict) -> set[str]:
+    """Movement patterns to hard-exclude for one structured record."""
+    mapping, severity, status = _resolve_structured_record(rec)
+    if mapping is None or status == "resolved":
+        return set()
+    if severity == "mild":
+        # Direct aggravators only — the smaller "recovering" subset.
+        return set(mapping.recovering_patterns)
+    blocked = set(mapping.blocked_patterns)
+    if severity == "severe":
+        for pat in list(blocked):
+            blocked |= _SEVERE_FAMILY_EXPANSION.get(pat, set())
+    return blocked
+
+
+def _blocked_patterns_from_structured(records: tuple[dict, ...] | list[dict] | None) -> set[str]:
+    if not records:
+        return set()
+    out: set[str] = set()
+    for rec in records:
+        if isinstance(rec, dict):
+            out |= _patterns_for_record(rec)
+    return out
+
+
+def _injury_blocked_patterns_combined(
+    injuries: tuple[str, ...] | list[str] | None,
+    injuries_structured: tuple[dict, ...] | list[dict] | None,
+) -> set[str]:
+    """Union of blocked patterns from both sources.
+
+    Structured records take precedence (they carry severity), but legacy
+    string injuries still contribute so a partially-migrated profile
+    (some structured, some only free-text) still gets full coverage.
+    """
+    blocked = _blocked_patterns_from_structured(injuries_structured)
+    if injuries:
+        # Skip any injury string that is just a flattened restatement of
+        # an entry we already covered structurally — heuristic: if the
+        # string mentions the same bodyPart token, drop it.
+        body_parts_already = {
+            str(rec.get("bodyPart") or "").lower().strip()
+            for rec in (injuries_structured or [])
+            if isinstance(rec, dict)
+        }
+        legacy_only: list[str] = []
+        for s in injuries:
+            sl = str(s).lower()
+            if not any(bp and bp in sl for bp in body_parts_already):
+                legacy_only.append(s)
+        blocked |= _injury_blocked_patterns(tuple(legacy_only))
+    return blocked
+
+
+def injury_muscle_fatigue_boost_structured(
+    records: tuple[dict, ...] | list[dict] | None,
+) -> dict[str, float]:
+    """Severity-aware fatigue boost for structured records.
+
+    Magnitudes (active):
+      mild     → 0.25
+      moderate → 0.50  (matches legacy default)
+      severe   → 0.70
+
+    Recovering status softens severity one notch (handled in
+    _resolve_structured_record). Resolved injuries contribute nothing.
+    Where multiple records affect the same muscle, the largest boost
+    wins.
+    """
+    if not records:
+        return {}
+    out: dict[str, float] = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        mapping, severity, status = _resolve_structured_record(rec)
+        if mapping is None or status == "resolved":
+            continue
+        boost = {"mild": 0.25, "moderate": 0.5, "severe": 0.7}[severity]
+        # Prefer explicit muscleGroups from the record; fall back to
+        # mapping defaults so AI-emitted records that omit the field
+        # still penalise the right muscles.
+        muscles = rec.get("muscleGroups") or mapping.muscle_groups
+        for m in muscles:
+            key = str(m).strip().lower()
+            if not key:
+                continue
+            out[key] = max(out.get(key, 0), boost)
+    return out
+
+
 # ─── Phase 2 placeholder — session-to-session progression ───────────────────
 
 
@@ -2829,6 +3121,113 @@ def generate_recovery_day(session_minutes: int = 45) -> dict:
     if walk_time >= 5:
         exercises.append({"name": "Easy Walk", "sets": 1, "reps": f"{walk_time} min", "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "recovery", "muscles_targeted": ["cardio"]})
     return {"day": "Recovery Day", "focus": "Recovery", "stimulus": "recovery", "exercises": exercises}
+
+
+def _flow_pool_from_seed(category: str | tuple) -> list[dict]:
+    """Pull seed exercises matching a flow_category (or set of categories)
+    and shape them as planner-pool entries. Returns a fresh list each call
+    so generators can mutate without polluting the seed."""
+    from app.seed_exercises_data import SEED_EXERCISES
+    cats = {category} if isinstance(category, str) else set(category)
+    out: list[dict] = []
+    for ex in SEED_EXERCISES:
+        fc = ex.get("flow_category")
+        if not fc or fc not in cats:
+            continue
+        unilateral = bool(ex.get("is_unilateral", False))
+        # Default hold durations: unilateral 30-45s/side, bilateral 45-60s
+        reps = "45s each side" if unilateral else "60s hold"
+        if fc == "breath":
+            reps = "60s"
+        muscles = [ex.get("primary_muscle")] + list(ex.get("secondary_muscles") or [])
+        muscles = [m for m in muscles if m]
+        out.append({
+            "slug": ex.get("slug"),
+            "name": ex.get("name"),
+            "sets": 1,
+            "reps": reps,
+            "rest_seconds": 10,
+            "equipment": ex.get("equipment_bucket", "bodyweight"),
+            "slot_role": "mobility" if fc != "foam_roll" else "recovery",
+            "muscles_targeted": muscles,
+            "flow_category": fc,
+            "_pose_seconds": 60,
+        })
+    return out
+
+
+def _yoga_prescription_type(flow_category: str) -> str:
+    if flow_category == "breath":
+        return "yoga_flow"
+    if flow_category == "foam_roll":
+        return "mobility"
+    return "yoga_flow"
+
+
+def generate_yoga_day(session_minutes: int = 20) -> dict:
+    """Generate an ordered yoga sequence: warm → standing → floor → cool → breath.
+
+    Pulls poses tagged with `flow_category` from SEED_EXERCISES and packs
+    them into roughly the user's session minutes. Each pose is ~1 min
+    (45-60s hold + 10s transition). Deterministic ordering — preserves the
+    "workout planner is deterministic" invariant. Output exercises carry
+    `flow_category` so the client renders GuidedFlowView."""
+    sm = max(10, session_minutes)
+    quotas = {
+        "warm": max(2, round(sm * 0.20)),
+        "standing": max(3, round(sm * 0.30)),
+        "floor": max(3, round(sm * 0.30)),
+        "cool": max(2, round(sm * 0.15)),
+        "breath": 1 if sm >= 12 else 0,
+    }
+    ordered: list[dict] = []
+    for cat in ("warm", "standing", "floor", "cool", "breath"):
+        candidates = _flow_pool_from_seed(cat)
+        n = min(quotas.get(cat, 0), len(candidates))
+        for ex in candidates[:n]:
+            ex["prescription_type"] = _yoga_prescription_type(cat)
+            ordered.append(ex)
+    return {
+        "day": "Yoga Flow",
+        "focus": "Yoga",
+        "stimulus": "mobility",
+        "exercises": ordered,
+    }
+
+
+def generate_stretch_session(session_minutes: int = 15) -> dict:
+    """Standalone stretch session: passive static holds. Pulls the warm,
+    floor, and cool flow categories — skips standing balance poses and
+    breathwork."""
+    sm = max(8, session_minutes)
+    pool = _flow_pool_from_seed(("warm", "floor", "cool"))
+    target_count = max(4, sm // 2)
+    selected = pool[:target_count]
+    for ex in selected:
+        ex["prescription_type"] = "stretch_hold"
+    return {
+        "day": "Stretch Session",
+        "focus": "Stretch",
+        "stimulus": "mobility",
+        "exercises": selected,
+    }
+
+
+def generate_foam_roll_session(session_minutes: int = 10) -> dict:
+    """Standalone foam-rolling session over tagged foam roller poses.
+    Each release ~60-90s/side; pack to fit duration."""
+    sm = max(5, session_minutes)
+    pool = _flow_pool_from_seed("foam_roll")
+    target_count = max(3, sm // 2)
+    selected = pool[:target_count]
+    for ex in selected:
+        ex["prescription_type"] = "mobility"
+    return {
+        "day": "Foam Roll",
+        "focus": "Foam Roll",
+        "stimulus": "recovery",
+        "exercises": selected,
+    }
 
 
 def generate_mobility_day(session_minutes: int = 45) -> dict:

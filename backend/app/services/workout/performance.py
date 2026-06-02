@@ -26,6 +26,8 @@ from datetime import date, timedelta
 import re
 from typing import Optional
 
+from sqlalchemy import func
+
 
 # How many days of history count as "recent". Longer windows drag stale
 # numbers into the present; shorter windows throw away still-valid data.
@@ -75,6 +77,27 @@ def _exercise_slug_fallback(name: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
 
 
+def _canonical_history_slug(
+    *,
+    canonical_slug: str | None,
+    snapshot_slug: str | None,
+    workout_name: str | None,
+) -> str:
+    if canonical_slug:
+        return canonical_slug.strip()
+    try:
+        from app.services.workout.exercise_metadata import resolve_seed_exercise_slug
+        resolved = resolve_seed_exercise_slug(workout_name, snapshot_slug)
+        if resolved:
+            return resolved
+        resolved = resolve_seed_exercise_slug(workout_name, None)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return (snapshot_slug or _exercise_slug_fallback(workout_name)).strip()
+
+
 def build_performance_profile(
     user_id: int,
     db_session,
@@ -121,6 +144,7 @@ def build_performance_profile(
         .where(ExerciseSet.completed == True)  # noqa: E712
         .where(ExerciseSet.actual_weight_lbs.is_not(None))
         .where(ExerciseSet.actual_reps.is_not(None))
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     )
     if only_slugs:
         from sqlalchemy import or_
@@ -136,7 +160,11 @@ def build_performance_profile(
     # by weight), total volume, session date set, and last-performed date.
     by_slug: dict[str, dict] = {}
     for canonical_slug, canonical_name, snapshot_slug, workout_name, workout_date, weight, reps in rows:
-        slug = (canonical_slug or snapshot_slug or _exercise_slug_fallback(workout_name)).strip()
+        slug = _canonical_history_slug(
+            canonical_slug=canonical_slug,
+            snapshot_slug=snapshot_slug,
+            workout_name=workout_name,
+        )
         name = canonical_name or workout_name or slug
         if not slug or weight is None or reps is None:
             continue
@@ -370,6 +398,7 @@ def detect_plateau(
         .where(ExerciseSet.completed == True)  # noqa: E712
         .where(ExerciseSet.actual_weight_lbs.is_not(None))
         .where(ExerciseSet.actual_reps.is_not(None))
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
         .order_by(WorkoutSession.workout_date.desc())
     ).all()
 

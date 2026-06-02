@@ -55,7 +55,8 @@ def _setup_client(captured: list[dict], *, subscription_tier: str = "pro") -> Te
     )
     app.dependency_overrides[get_current_user] = lambda: fake_user
     gear_mod.get_openai_api_key = lambda: "test-key-not-real"  # type: ignore
-    gear_mod.model_image = lambda: "gpt-5.4-mini"  # type: ignore
+    # Gear ID is coarse recognition, so it runs on the light vision model.
+    gear_mod.model_image_light = lambda: "gpt-4o-mini"  # type: ignore
     gear_mod._chat_create = fake_chat_create  # type: ignore
     return TestClient(app)
 
@@ -84,14 +85,14 @@ def test_gear_photo_identification_uses_configured_vision_model():
     assert body["confidence"] == "high"
 
     kwargs = captured[-1]
-    assert kwargs["model"] == "gpt-5.4-mini"
-    assert "max_completion_tokens" in kwargs, kwargs
-    assert "max_tokens" not in kwargs, kwargs
+    assert kwargs["model"] == "gpt-4o-mini"
+    assert "max_tokens" in kwargs, kwargs
+    assert "max_completion_tokens" not in kwargs, kwargs
     assert kwargs["messages"][1]["role"] == "user"
     content = kwargs["messages"][1]["content"]
     assert any(part.get("type") == "image_url" for part in content), content
     assert any(part.get("type") == "text" for part in content), content
-    print("  ✓ gear photo path uses model_image() and multipart vision input")
+    print("  ✓ gear photo path uses model_image_light() and multipart vision input")
 
 
 cases = [

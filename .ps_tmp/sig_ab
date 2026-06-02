@@ -1,0 +1,48 @@
+9679| }, [isProTier]);
+9681| useEffect(() => {
+9682| if (!isActive || tab !== 'health' || !isProTier || !showMealProgress) {
+9697| const raw = await AsyncStorage.getItem(`mealPlan_${k}`);
+9699| checksByDate[k] = await getMealChecks(k).catch(() => ({}));
+9727| }, [isActive, isProTier, nutritionPlan, showMealProgress, tab, userProfile.goal, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+9729| useEffect(() => {
+9730| if (!isActive || !isProTier || (tab !== 'today' && tab !== 'health')) return;
+9735| }, [isActive, isProTier, tab]);
+9737| useEffect(() => {
+9742| if (!isActive || (tab !== 'body' && tab !== 'today') || !isProTier || bodyScanHistoryLoadedRef.current) return;
+9754| await quarantineLegacyBodyScans(localOnly, 'bodyScanHistory local-only row ignored; DB is canonical');
+9758| await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(localSorted));
+9763| const { getBodyScanHistory } = await import('../services/api');
+9764| const remote = (await getBodyScanHistory(authToken))
+9771| await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(sorted));
+9778| }, [authToken, isActive, isProTier, tab]);
+9780| useEffect(() => {
+9787| }, [authToken, isActive, userProfile.goal, userProfile.goalDetails?.pace, userProfile.physicalStats?.weightLbs, userProfile.physicalStats?.age, userProfile.physicalStats?.gender, userProfile.daysPerWeek]);
+9789| useEffect(() => {
+9804| const enabled = await isAppleHealthEnabled();
+9809| const fresh = await readFreshProgressHealthSummary(age, true);
+9819| const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
+9820| await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
+9823| setSleepHistory(await loadProgressSleepHistory(authToken, fresh));
+9832| }, [authToken, isActive, isProTier, userProfile.physicalStats?.age]);
+9834| useEffect(() => {
+9846| }, [authToken, healthSummary?.sleepScore?.score, isActive, isProTier, sleepHistory.length]);
+9848| useEffect(() => {
+9878| }, [
+9888| useEffect(() => {
+9889| if (!isActive || tab !== 'today' || !authToken || !isProTier || !showWorkoutProgress) return;
+9917| }, [
+9927| useEffect(() => {
+9928| if (!isActive || tab !== 'health' || !isProTier || !showMealProgress) return;
+9933| const enabled = await isAppleHealthEnabled();
+9938| const snapshot = await refreshAppleNutritionSnapshot();
+9945| }, [isActive, isProTier, refreshAppleNutritionSnapshot, showMealProgress, tab]);
+9957| await deletePlanChange(change.id);
+9973| await onCancelScheduledPlanChange!(restored);
+9974| await removeEntry();
+9997| useEffect(() => {
+10012| const api = await import('../services/api');
+10013| const [averages, historyResp] = await Promise.all([
+10027| const [score, gut] = await Promise.all([
+10037| }, [authToken, isActive, isProTier, nutritionLogRefreshKey, showMealProgress]);
+10043| const uri = await ref.capture();
+10044| const Sharing = await import('expo-sharing');

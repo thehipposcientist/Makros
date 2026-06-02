@@ -19,8 +19,11 @@ import {
   type CycleTrainingAction,
   type PeriodSymptomLog,
 } from '../utils/cycleSupport';
+import { STORAGE_KEYS } from '../utils/storageKeys.ts';
 
-const STORAGE_KEY = 'periodSymptomLogs_v1';
+const LEGACY_STORAGE_KEY = STORAGE_KEYS.health.periodSymptomLogs;
+const CACHE_STORAGE_KEY = STORAGE_KEYS.health.periodSymptomLogCache;
+const QUARANTINE_STORAGE_KEY = STORAGE_KEYS.health.periodSymptomLogQuarantine;
 
 const PHASE_INFO: Record<CycleStatus['phase'], { label: string; color: string; icon: any }> = {
   menses: { label: 'Period', color: '#EF4444', icon: 'water-outline' },
@@ -49,20 +52,91 @@ interface Props {
   onUseLighterWorkout?: () => Promise<void> | void;
   onUseRecoveryDay?: () => Promise<void> | void;
   onAddHydration?: () => Promise<void> | void;
+  authToken?: string | null;
 }
 
-async function loadLogs(): Promise<PeriodSymptomLog[]> {
+function normalizeLog(raw: any): PeriodSymptomLog | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const date = String(raw.date ?? '').slice(0, 10);
+  const cycleStartDate = String(raw.cycleStartDate ?? raw.cycle_start_date ?? date).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{4}-\d{2}-\d{2}$/.test(cycleStartDate)) return null;
+  const phase = ['menses', 'follicular', 'ovulation', 'luteal', 'unknown'].includes(raw.phase) ? raw.phase : 'unknown';
+  const flow = ['unspecified', 'light', 'moderate', 'heavy'].includes(raw.flow) ? raw.flow : 'unspecified';
+  const cramps = ['none', 'mild', 'moderate', 'severe'].includes(raw.cramps) ? raw.cramps : 'mild';
+  const energy = ['low', 'normal', 'high'].includes(raw.energy) ? raw.energy : 'normal';
+  const action = ['keep', 'lighter', 'recovery'].includes(raw.action) ? raw.action : null;
+  return {
+    date,
+    cycleStartDate,
+    phase,
+    dayOfCycle: Number.isFinite(Number(raw.dayOfCycle)) ? Number(raw.dayOfCycle) : null,
+    cycleLengthDays: Number.isFinite(Number(raw.cycleLengthDays)) ? Number(raw.cycleLengthDays) : null,
+    flow,
+    cramps,
+    energy,
+    action,
+    updatedAt: String(raw.updatedAt ?? new Date().toISOString()),
+  } as PeriodSymptomLog;
+}
+
+async function readCachedLogs(): Promise<PeriodSymptomLog[]> {
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    const raw = await AsyncStorage.getItem(CACHE_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter(Boolean) as PeriodSymptomLog[] : [];
+    return Array.isArray(parsed)
+      ? parsed.map(normalizeLog).filter((log): log is PeriodSymptomLog => log != null)
+      : [];
   } catch {
     return [];
   }
 }
 
-async function saveLogs(logs: PeriodSymptomLog[]): Promise<void> {
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
+async function writeCachedLogs(logs: PeriodSymptomLog[]): Promise<void> {
+  await AsyncStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(logs));
+}
+
+async function quarantineLegacyLocalLogs(): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const logs = Array.isArray(parsed)
+      ? parsed.map(normalizeLog).filter((log): log is PeriodSymptomLog => log != null)
+      : [];
+    if (logs.length > 0) {
+      const quarantineRaw = await AsyncStorage.getItem(QUARANTINE_STORAGE_KEY);
+      const existing = quarantineRaw ? JSON.parse(quarantineRaw) : [];
+      await AsyncStorage.setItem(QUARANTINE_STORAGE_KEY, JSON.stringify([
+        ...(Array.isArray(existing) ? existing : []),
+        {
+          reason: 'Legacy periodSymptomLogs_v1 local-only data quarantined; DB is canonical for saved cycle logs',
+          quarantinedAt: new Date().toISOString(),
+          logs,
+        },
+      ].slice(-20)));
+    }
+    await AsyncStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // Do not submit legacy local logs during hydration.
+  }
+}
+
+async function loadLogs(authToken?: string | null): Promise<PeriodSymptomLog[]> {
+  await quarantineLegacyLocalLogs();
+  if (authToken) {
+    try {
+      const { listCycleSymptomLogs } = await import('../services/api');
+      const remote = (await listCycleSymptomLogs(authToken))
+        .map(normalizeLog)
+        .filter((log): log is PeriodSymptomLog => log != null);
+      const trimmed = trimPeriodSymptomLogs(remote, formatLocalDate(new Date()));
+      await writeCachedLogs(trimmed);
+      return trimmed;
+    } catch {
+      return readCachedLogs();
+    }
+  }
+  return readCachedLogs();
 }
 
 export default function CycleGuidanceCard({
@@ -73,6 +147,7 @@ export default function CycleGuidanceCard({
   onUseLighterWorkout,
   onUseRecoveryDay,
   onAddHydration,
+  authToken,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -92,7 +167,7 @@ export default function CycleGuidanceCard({
 
   useEffect(() => {
     let alive = true;
-    Promise.all([getCycleStatus().catch(() => null), loadLogs()]).then(([cycle, stored]) => {
+    Promise.all([getCycleStatus().catch(() => null), loadLogs(authToken)]).then(([cycle, stored]) => {
       if (!alive) return;
       setStatus(cycle);
       setLogs(stored);
@@ -107,7 +182,7 @@ export default function CycleGuidanceCard({
       setLoaded(true);
     });
     return () => { alive = false; };
-  }, [today]);
+  }, [authToken, today]);
 
   const cycleStart = useMemo(
     () => cycleStartDateForLog(today, status?.dayOfCycle ?? null),
@@ -130,6 +205,10 @@ export default function CycleGuidanceCard({
 
   const saveCheckin = useCallback(async (action?: CycleTrainingAction | null) => {
     if (!status || status.phase !== 'menses') return;
+    if (!authToken) {
+      Alert.alert('Sign in required', 'Cycle check-ins are saved to your account, not local device storage.');
+      return;
+    }
     setSaving(true);
     const nextLog: PeriodSymptomLog = {
       date: today,
@@ -143,15 +222,19 @@ export default function CycleGuidanceCard({
       action: action ?? logs.find(log => log.date === today)?.action ?? null,
       updatedAt: new Date().toISOString(),
     };
-    const nextLogs = trimPeriodSymptomLogs(upsertPeriodSymptomLog(logs, nextLog), today);
-    setLogs(nextLogs);
     try {
-      await saveLogs(nextLogs);
+      const { saveCycleSymptomLog } = await import('../services/api');
+      const saved = normalizeLog(await saveCycleSymptomLog(authToken, nextLog as any)) ?? nextLog;
+      const nextLogs = trimPeriodSymptomLogs(upsertPeriodSymptomLog(logs, saved), today);
+      setLogs(nextLogs);
+      await writeCachedLogs(nextLogs);
       setSavedTick(Date.now());
+    } catch (e: any) {
+      Alert.alert('Could not save check-in', e?.message ?? 'Please try again in a moment.');
     } finally {
       setSaving(false);
     }
-  }, [cramps, cycleStart, energy, flow, logs, status, today]);
+  }, [authToken, cramps, cycleStart, energy, flow, logs, status, today]);
 
   const runAction = useCallback((action: CycleTrainingAction, runner?: () => Promise<void> | void) => {
     if (!runner) return;
@@ -427,26 +510,39 @@ export default function CycleGuidanceCard({
           ))}
         </View>
         {onAddHydration && (
-          <TouchableOpacity
-            accessibilityRole="button"
-            disabled={pendingAction != null}
-            onPress={() => onAddHydration()}
-            style={{
-              alignSelf: 'flex-start',
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 6,
-              marginTop: 10,
-              paddingHorizontal: 10,
-              paddingVertical: 7,
-              borderRadius: 8,
-              backgroundColor: tc.surfaceRaised,
-              borderWidth: 1,
-              borderColor: tc.border,
-            }}>
-            <Ionicons name="water-outline" size={14} color={tc.primary} />
-            <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary }}>Add 16 oz water</Text>
-          </TouchableOpacity>
+          <View style={{ marginTop: 10 }}>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Log 16 oz of water for menstrual fluid loss"
+              disabled={pendingAction != null}
+              onPress={() => onAddHydration()}
+              style={{
+                alignSelf: 'flex-start',
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                paddingHorizontal: 10,
+                paddingVertical: 7,
+                borderRadius: 8,
+                backgroundColor: tc.surfaceRaised,
+                borderWidth: 1,
+                borderColor: tc.border,
+              }}>
+              <Ionicons name="water-outline" size={14} color={tc.primary} />
+              <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary }}>Add 16 oz water</Text>
+            </TouchableOpacity>
+            {/* "Why this number" explainer — mirrors the macro-adjustment
+                note pattern. Tapping logs +16 oz to today's hydration via
+                the same atomic-delta endpoint as the regular quick-add
+                buttons; the daily target itself is bodyweight-derived
+                and isn't auto-bumped during menses, so this is a
+                one-tap nudge rather than a target shift. */}
+            <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 14, marginTop: 6, maxWidth: 280 }}>
+              Menstruation typically costs ~16 oz of fluid through blood and
+              prostaglandin-driven losses. Tap to log it so today's water tally
+              reflects the extra need — your daily target stays unchanged.
+            </Text>
+          </View>
         )}
       </View>
 

@@ -10,6 +10,13 @@ from __future__ import annotations
 from app.seed_exercises_data import SEED_EXERCISES
 
 
+def _normalize_name(value: str | None) -> str:
+    if not value:
+        return ""
+    import re
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value).lower())).strip()
+
+
 def _enum_value(value) -> str | None:
     if value is None:
         return None
@@ -22,7 +29,7 @@ def _infer_exercise_category(exercise_name: str) -> str:
     name = (exercise_name or "").lower()
     if any(x in name for x in [
         "machine", "cable", "smith", "leg press", "pulldown", "lat pull",
-        "seated row machine", "pec deck", "leg extension", "leg curl machine",
+        "seated row machine", "pec deck", "leg extension", "leg curl",
         "hack squat machine", "chest press machine",
     ]):
         return "machine"
@@ -47,15 +54,22 @@ def _seed_exercise_row(exercise_name: str, exercise_slug: str | None) -> dict | 
         if row is not None:
             return row
     if exercise_name:
-        lname = exercise_name.strip().lower()
+        lname = _normalize_name(exercise_name)
         return next(
             (
                 ex for ex in SEED_EXERCISES
-                if (ex.get("name") or "").strip().lower() == lname
+                if _normalize_name(ex.get("name")) == lname
+                or any(_normalize_name(alias) == lname for alias in (ex.get("aliases") or []))
             ),
             None,
         )
     return None
+
+
+def resolve_seed_exercise_slug(exercise_name: str | None, exercise_slug: str | None = None) -> str | None:
+    row = _seed_exercise_row(exercise_name or "", exercise_slug)
+    slug = row.get("slug") if row else None
+    return str(slug) if slug else None
 
 
 def _primary_equipment_slug(seed_row: dict | None) -> str | None:
@@ -73,6 +87,91 @@ def _primary_equipment_slug(seed_row: dict | None) -> str | None:
         return str(primary.get("slug"))
     first = next((item for item in equipment if isinstance(item, dict)), None)
     return str(first.get("slug")) if first and first.get("slug") else None
+
+
+def _equipment_slugs(exercise: dict | None) -> list[str]:
+    equipment = (exercise or {}).get("equipment")
+    if not isinstance(equipment, list):
+        return []
+    slugs: list[str] = []
+    for item in equipment:
+        if isinstance(item, dict):
+            raw = item.get("slug") or item.get("name")
+        else:
+            raw = item
+        if raw:
+            slugs.append(str(raw).strip().lower().replace("-", "_").replace(" ", "_"))
+    return [slug for slug in slugs if slug]
+
+
+_NON_NUMERIC_EQUIPMENT = {
+    "bodyweight",
+    "body_weight",
+    "none",
+    "bw",
+    "resistance_bands",
+    "resistance_band",
+    "bands",
+    "band",
+    "mini_band",
+    "loop_band",
+}
+
+_NUMERIC_LOAD_EQUIPMENT_TOKENS = (
+    "barbell",
+    "dumbbell",
+    "kettlebell",
+    "cable",
+    "machine",
+    "plate",
+    "smith",
+    "landmine",
+    "trap_bar",
+    "ez_curl",
+    "lat_pulldown",
+    "pulldown",
+    "leg_press",
+)
+
+
+def uses_numeric_load(exercise: dict | None) -> bool:
+    """Whether pounds are a meaningful progression unit for this movement."""
+    if not isinstance(exercise, dict):
+        return True
+    explicit = str(exercise.get("load_semantics") or "").strip().lower()
+    if explicit in {"non_numeric", "band", "band_resistance", "bodyweight", "none"}:
+        return False
+    if explicit in {"resistance", "assistance", "counterweight"}:
+        return True
+
+    tracking_mode = str(
+        exercise.get("default_tracking_mode") or exercise.get("defaultTrackingMode") or ""
+    ).strip().lower()
+    if tracking_mode in {"time", "distance", "calories"}:
+        return False
+
+    bucket = str(exercise.get("equipment_bucket") or "").strip().lower()
+    if bucket in {"bodyweight", "none", "bw"}:
+        return False
+    if any(token in bucket for token in _NUMERIC_LOAD_EQUIPMENT_TOKENS):
+        return True
+
+    slugs = _equipment_slugs(exercise)
+    if slugs:
+        if any(any(token in slug for token in _NUMERIC_LOAD_EQUIPMENT_TOKENS) for slug in slugs):
+            return True
+        if all(slug in _NON_NUMERIC_EQUIPMENT for slug in slugs):
+            return False
+
+    text = " ".join(
+        str(exercise.get(key) or "")
+        for key in ("equipment", "equipment_bucket", "name", "slug")
+    ).strip().lower().replace("-", "_").replace(" ", "_")
+    if text and not any(token in text for token in _NUMERIC_LOAD_EQUIPMENT_TOKENS):
+        if any(token in text for token in ("resistance_band", "mini_band", "loop_band")):
+            return False
+
+    return True
 
 
 def equipment_bucket_for_set_programming(raw: str | None) -> str | None:
@@ -159,6 +258,9 @@ def set_programming_exercise_metadata(
         "name": exercise_name,
         "slug": exercise_slug or (seed_row or {}).get("slug") or getattr(db_row, "slug", None),
         "equipment_bucket": equipment_bucket,
+        "equipment": (seed_row or {}).get("equipment"),
+        "load_semantics": (seed_row or {}).get("load_semantics"),
+        "default_tracking_mode": (seed_row or {}).get("default_tracking_mode"),
         "is_compound": is_compound,
         "movement_pattern": movement_pattern,
         "primary_muscle": resolved_primary,

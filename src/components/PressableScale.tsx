@@ -8,7 +8,7 @@ import { SPRING_SNAPPY, useReducedMotion } from '../utils/motion';
 
 interface Props {
   children: React.ReactNode;
-  onPress: () => void;
+  onPress?: TouchableOpacityProps['onPress'];
   style?: StyleProp<ViewStyle>;
   scaleDown?: number;
   disabled?: boolean;

@@ -38,9 +38,11 @@ from typing import Any
 from sqlmodel import select
 
 from app.models import (
-    DailyHealthSnapshot, DailyNutritionMetrics,
+    DailyHealthSnapshot, DailyLifestyleLog, DailyNutritionMetrics,
     PlanDay, SleepLog, UserDayState, WorkoutCompletion,
 )
+from app.services.health.sleep_pressure import compute_sleep_pressure
+from app.services.nutrition.day_completeness import classify_nutrition_day
 
 
 # ── Pillar weights (must match the legacy client total) ─────────────
@@ -94,6 +96,15 @@ class ReadinessResult:
     signals_present: int = 0
     signals_total: int = 6
     computed_at_ms: int = 0   # ms-since-epoch — drives WC ordering
+    # Per-focus / per-muscle readiness surfaced from the fatigue engine so the
+    # client can show "generally ready, but not ready for heavy legs". These
+    # are additive — existing clients ignore unknown keys. All are 0-100
+    # readiness (100 = fresh), the inverse of the engine's internal fatigue.
+    focus_readiness: dict = field(default_factory=dict)   # {"lower": 48, "push": 82, ...}
+    muscle_readiness: dict = field(default_factory=dict)  # {"quads": 45, "chest": 90, ...}
+    top_fatigued: list = field(default_factory=list)      # [{"muscle": "quads", "readiness": 45}, ...]
+    recommendations: list = field(default_factory=list)   # [{"type": "avoid_heavy_lower", ...}]
+    explanations: list = field(default_factory=list)      # plain-language reason items
 
     def to_dict(self) -> dict:
         return {
@@ -108,6 +119,11 @@ class ReadinessResult:
             "signals_present": self.signals_present,
             "signals_total": self.signals_total,
             "computed_at_ms": self.computed_at_ms,
+            "focus_readiness": self.focus_readiness,
+            "muscle_readiness": self.muscle_readiness,
+            "top_fatigued": self.top_fatigued,
+            "recommendations": self.recommendations,
+            "explanations": self.explanations,
         }
 
 
@@ -200,6 +216,87 @@ def _factor_status(value: int) -> str:
     return "low"
 
 
+def _self_report_feedback(db: Any, user_id: int, today: date) -> dict | None:
+    """Build a fatigue-engine `readiness_feedback` item from today's daily
+    check-in (UserDayState soreness / joint pain). Returns None when nothing
+    was reported, so missing self-report stays neutral. The engine maps these
+    onto the relevant muscles and caps their local readiness — overall
+    readiness (the pillar blend) is unaffected unless the planned focus
+    overlaps the sore area."""
+    try:
+        from app.models import UserDayState
+        uds = db.exec(
+            select(UserDayState)
+            .where(UserDayState.user_id == user_id)
+            .where(UserDayState.day_key == today)
+        ).first()
+    except Exception:
+        return None
+    if uds is None:
+        return None
+    feedback: dict = {}
+    if getattr(uds, "soreness_body_part", None) and getattr(uds, "soreness_severity_0_10", None):
+        feedback["soreness"] = [{
+            "body_part": uds.soreness_body_part,
+            "severity": int(uds.soreness_severity_0_10),
+        }]
+    if getattr(uds, "pain_present", None) and getattr(uds, "pain_body_part", None):
+        feedback["joint_pain"] = [{
+            "body_part": uds.pain_body_part,
+            # Default a reported-but-unrated pain to the "act with caution"
+            # threshold so it still triggers the avoid-heavy recommendation.
+            "severity": int(uds.pain_severity_0_10) if uds.pain_severity_0_10 is not None else 5,
+        }]
+    return feedback or None
+
+
+def _empty_fatigue_surface() -> dict:
+    return {
+        "focus_readiness": {},
+        "muscle_readiness": {},
+        "top_fatigued": [],
+        "recommendations": [],
+        "explanations": [],
+    }
+
+
+def _fatigue_surface_from_snap(snap: Any) -> dict:
+    """Project the rich FatigueSnapshot onto bounded 0-100 readiness surfaces
+    for the client. Readiness = 100 - display_fatigue. The engine's own
+    overall-vs-local explanation is dropped here and re-added against the
+    card's headline score so the numbers the user sees stay consistent."""
+    if snap is None:
+        return _empty_fatigue_surface()
+    try:
+        from app.services.workout.activity_impact import LOCAL_MUSCLES
+
+        def _pct(fatigue_0_1: float) -> int:
+            return max(0, min(100, round((1.0 - float(fatigue_0_1)) * 100)))
+
+        muscle_readiness = {
+            m: _pct(snap.muscle_fatigue.get_display(m)) for m in LOCAL_MUSCLES
+        }
+        focus_readiness = {
+            f: max(0, min(100, round(float(v) * 100))) for f, v in snap.focus_readiness.items()
+        }
+        top_fatigued = [
+            {"muscle": m, "readiness": _pct(v)} for m, v in snap.top_fatigued
+        ]
+        explanations = [
+            e for e in snap.explanations
+            if e.get("type") != "overall_ready_local_not_ready"
+        ]
+        return {
+            "focus_readiness": focus_readiness,
+            "muscle_readiness": muscle_readiness,
+            "top_fatigued": top_fatigued,
+            "recommendations": list(snap.recommendations),
+            "explanations": explanations,
+        }
+    except Exception:
+        return _empty_fatigue_surface()
+
+
 # ── Pillar scoring (each returns 0..MAX or None when input missing) ──
 
 def _score_sleep(last_night_score: int | None) -> tuple[int | None, str | None]:
@@ -207,6 +304,17 @@ def _score_sleep(last_night_score: int | None) -> tuple[int | None, str | None]:
         return None, None
     pts = round((last_night_score / 100.0) * W_SLEEP)
     return pts, f"score {last_night_score}"
+
+
+def _format_sleep_pressure_hours(hours: float, is_capped: bool) -> str:
+    total_minutes = int(round(max(0.0, hours) * 60))
+    h, m = divmod(total_minutes, 60)
+    suffix = "+" if is_capped else ""
+    if h <= 0:
+        return f"{m}m{suffix}"
+    if m == 0:
+        return f"{h}h{suffix}"
+    return f"{h}h {m}m{suffix}"
 
 
 def _score_hrv(hrv_ms: float | None, hrv_history: list[float] | None) -> tuple[int | None, str | None]:
@@ -274,6 +382,41 @@ def _score_yesterday(yesterday_minutes: int | None) -> tuple[int | None, str | N
     if yesterday_minutes <= 75:
         return int(round(W_YESTERDAY * 0.65)), f"{yesterday_minutes}min yesterday"
     return int(round(W_YESTERDAY * 0.40)), f"{yesterday_minutes}min yesterday"
+
+
+def _pillar_value_100(pillar_scores: dict[str, tuple[int, int]], name: str) -> int | None:
+    score = pillar_scores.get(name)
+    if not score:
+        return None
+    got, max_points = score
+    if max_points <= 0:
+        return None
+    return int(round((got / max_points) * 100))
+
+
+def _overnight_recovery_cap(pillar_scores: dict[str, tuple[int, int]]) -> tuple[int | None, dict | None]:
+    sleep = _pillar_value_100(pillar_scores, "sleep")
+    hrv = _pillar_value_100(pillar_scores, "hrv")
+    rhr = _pillar_value_100(pillar_scores, "rhr")
+    if sleep is not None and hrv is not None and sleep < 55 and hrv < 50:
+        return 55, {
+            "type": "overnight_recovery_cap",
+            "severity": "high",
+            "message": "Sleep and HRV are both suppressed, so readiness is capped even if other signals look fine.",
+        }
+    if sleep is not None and sleep < 45:
+        return 60, {
+            "type": "overnight_recovery_cap",
+            "severity": "moderate",
+            "message": "Sleep was low enough to cap today's readiness. Keep intensity flexible.",
+        }
+    if hrv is not None and hrv < 45 and rhr is not None and rhr < 50:
+        return 60, {
+            "type": "overnight_recovery_cap",
+            "severity": "moderate",
+            "message": "HRV is low and resting heart rate is elevated, so readiness is capped today.",
+        }
+    return None, None
 
 
 def _has_any(text: str, needles: tuple[str, ...]) -> bool:
@@ -425,6 +568,166 @@ def _score_cycle_phase(
     return pts, detail
 
 
+def _lifestyle_level_logged(level: str | None) -> bool:
+    return str(level or "").strip().lower() not in {"", "none"}
+
+
+def _timing_is_late(timing: str | None) -> bool:
+    return str(timing or "").strip().lower() in {"evening", "late"}
+
+
+def _recent_lifestyle_rows(db: Any, user_id: int, today: date) -> "tuple[Any, Any]":
+    """Fetch today + yesterday DailyLifestyleLog rows ONCE so the three
+    readiness consumers (explanations, wellness cap, alcohol modifier) share a
+    single query instead of issuing three identical SELECTs per compute. Returns
+    (today_row, yesterday_row), either of which may be None."""
+    try:
+        rows = db.exec(
+            select(DailyLifestyleLog)
+            .where(DailyLifestyleLog.user_id == user_id)
+            .where(DailyLifestyleLog.local_date >= today - timedelta(days=1))
+            .where(DailyLifestyleLog.local_date <= today)
+            .order_by(DailyLifestyleLog.local_date.desc())
+        ).all()
+    except Exception:
+        return None, None
+    by_date = {row.local_date: row for row in rows}
+    return by_date.get(today), by_date.get(today - timedelta(days=1))
+
+
+def _readiness_lifestyle_explanations(today_row: Any, yesterday_row: Any) -> list[dict]:
+    explanations: list[dict] = []
+
+    alcohol_row = yesterday_row or today_row
+    if alcohol_row and (_lifestyle_level_logged(alcohol_row.alcohol_level) or (alcohol_row.alcohol_drinks or 0) > 0):
+        drinks = alcohol_row.alcohol_drinks
+        dose = f" ({drinks:g} drink{'s' if drinks != 1 else ''})" if drinks else ""
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": "moderate",
+            "message": (
+                f"Alcohol logged{dose} may be contributing to sleep quality, HRV/RHR changes, "
+                "or short-term scale weight from hydration and food choices."
+            ),
+        })
+
+    cannabis_row = yesterday_row or today_row
+    if cannabis_row and _lifestyle_level_logged(cannabis_row.cannabis_level):
+        timing = " later in the day" if _timing_is_late(cannabis_row.cannabis_timing) else ""
+        severity = "high" if cannabis_row.cannabis_level in {"heavy", "moderate"} else "low"
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": severity,
+            "message": (
+                f"Cannabis logged{timing} may be contributing to sleep timing, REM/HRV/RHR interpretation, "
+                "or appetite changes."
+            ),
+        })
+
+    caffeine_row = yesterday_row or today_row
+    if caffeine_row and (caffeine_row.late_caffeine or _timing_is_late(caffeine_row.caffeine_timing)):
+        amount = f" ({caffeine_row.caffeine_mg:g} mg)" if caffeine_row.caffeine_mg else ""
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": "moderate",
+            "message": f"Late caffeine{amount} may be contributing to longer sleep latency or lighter sleep.",
+        })
+
+    if today_row and today_row.stress_level == "high":
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": "moderate",
+            "message": "High stress logged today may be contributing to HRV/RHR changes and lower training readiness.",
+        })
+    if today_row and today_row.illness_state in {"rundown", "sick"}:
+        label = "Feeling sick" if today_row.illness_state == "sick" else "Feeling rundown"
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": "high" if today_row.illness_state == "sick" else "moderate",
+            "message": f"{label} may be contributing to lower readiness; keep training flexible today.",
+        })
+    if today_row and today_row.appetite == "high":
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": "low",
+            "message": "High appetite logged today may be contributing to adherence pressure or extra snack urges.",
+        })
+    if today_row and (
+        today_row.bowel_movement_count == 0
+        or today_row.bowel_consistency in {"loose", "hard", "mixed"}
+    ):
+        explanations.append({
+            "type": "lifestyle_context",
+            "severity": "low",
+            "message": "Bowel pattern logged today may be useful context for digestion and comfort.",
+        })
+    return explanations[:4]
+
+
+def _lifestyle_wellness_cap(today_row: Any, yesterday_row: Any) -> "SkipWellnessImpact | None":
+    """Turn a logged illness / high-stress / heavy-alcohol day into a readiness
+    cap so the headline number matches its caption. Mirrors the skipped-workout
+    ladder in `_classify_skip_wellness`, but sources from DailyLifestyleLog —
+    which the user can fill in without skipping a session, and which previously
+    only produced explanation text while leaving the score untouched."""
+    impacts: list[SkipWellnessImpact] = []
+    if today_row and today_row.illness_state == "sick":
+        impacts.append(SkipWellnessImpact(
+            value=12, cap=40, detail="sick (logged today)",
+            summary="You logged feeling sick today. Treat it as recovery-first and keep intensity easy until symptoms settle.",
+            counts_as_gate=True,
+        ))
+    elif today_row and today_row.illness_state == "rundown":
+        impacts.append(SkipWellnessImpact(
+            value=35, cap=60, detail="rundown (logged today)",
+            summary="You logged feeling rundown today. Favor a lighter session and prioritize sleep and food.",
+            counts_as_gate=True,
+        ))
+    if today_row and today_row.stress_level == "high":
+        impacts.append(SkipWellnessImpact(
+            value=60, cap=75, detail="high stress (logged today)",
+            summary="High stress logged today. Keep the plan flexible and stop short of grindy sets.",
+            counts_as_gate=False,
+        ))
+    alcohol_row = yesterday_row or today_row
+    if alcohol_row and (
+        str(alcohol_row.alcohol_level or "").strip().lower() in {"moderate", "heavy"}
+        or (alcohol_row.alcohol_drinks or 0) >= 4
+    ):
+        impacts.append(SkipWellnessImpact(
+            value=70, cap=80, detail="alcohol (recent)",
+            summary="Alcohol logged can blunt overnight HRV and sleep quality, so readiness is held back today.",
+            counts_as_gate=False,
+        ))
+    if not impacts:
+        return None
+    return sorted(impacts, key=lambda i: (i.cap if i.cap is not None else 100, i.value))[0]
+
+
+def _more_severe_wellness(
+    a: "SkipWellnessImpact | None", b: "SkipWellnessImpact | None"
+) -> "SkipWellnessImpact | None":
+    """Pick the more severe of two wellness impacts (lowest cap wins). The
+    survivor keeps its own `counts_as_gate`, so a gating illness signal still
+    lets the score publish even when watch pillars are absent."""
+    candidates = [c for c in (a, b) if c is not None]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda i: (i.cap if i.cap is not None else 100, i.value))[0]
+
+
+def _alcohol_high_recent(today_row: Any, yesterday_row: Any) -> bool:
+    """True when yesterday/today logged moderate+ alcohol — feeds the fatigue
+    engine's `nutrition.alcohol_high` modifier so the recovery pillar dips too."""
+    for row in (today_row, yesterday_row):
+        if row and (
+            str(row.alcohol_level or "").strip().lower() in {"moderate", "heavy"}
+            or (row.alcohol_drinks or 0) >= 4
+        ):
+            return True
+    return False
+
+
 # ── Top-level compute ─────────────────────────────────────────────
 
 def compute_readiness(
@@ -473,15 +776,18 @@ def compute_readiness(
     factors: list[ReadinessFactor] = []
     missing: list[str] = []
     pillar_scores: dict[str, tuple[int, int]] = {}  # name → (got, max)
+    sleep_pressure_explanations: list[dict] = []
+    today = date.today()
+    today_lifestyle, yesterday_lifestyle = _recent_lifestyle_rows(db, user_id, today)
+    lifestyle_explanations = _readiness_lifestyle_explanations(today_lifestyle, yesterday_lifestyle)
 
     # ── Sleep (W_SLEEP) ────────────────────────────────────────────
     sleep_score = last_night_sleep_score
     if sleep_score is None:
-        last_night = date.today() - timedelta(days=1)
         last = db.exec(
             select(SleepLog)
             .where(SleepLog.user_id == user_id)
-            .where(SleepLog.night_date == last_night)
+            .where(SleepLog.night_date == today)
         ).first()
         if last and last.score is not None:
             sleep_score = int(last.score)
@@ -501,10 +807,39 @@ def compute_readiness(
             sleep_score = 30
         else:
             sleep_score = 15
+    pressure_rows = db.exec(
+        select(SleepLog)
+        .where(SleepLog.user_id == user_id)
+        .where(SleepLog.night_date >= today - timedelta(days=30))
+        .where(SleepLog.night_date <= today)
+        .order_by(SleepLog.night_date.asc())
+    ).all()
+    sleep_pressure = compute_sleep_pressure(pressure_rows, as_of=today)
+    if (
+        sleep_score is not None
+        and sleep_pressure is not None
+        and sleep_pressure.sleep_score_penalty > 0
+    ):
+        sleep_score = max(0, int(round(sleep_score - sleep_pressure.sleep_score_penalty)))
+        if sleep_pressure.status in {"moderate", "high"}:
+            sleep_pressure_explanations.append({
+                "type": "sleep_pressure",
+                "severity": "high" if sleep_pressure.status == "high" else "moderate",
+                "message": (
+                    f"{sleep_pressure.headline}: "
+                    f"{_format_sleep_pressure_hours(sleep_pressure.display_hours, sleep_pressure.is_capped)} "
+                    f"over {sleep_pressure.window_days} days."
+                ),
+            })
     pts, detail = _score_sleep(sleep_score)
     if pts is not None:
         pillar_scores["sleep"] = (pts, W_SLEEP)
         v100 = int(round((pts / W_SLEEP) * 100))
+        if sleep_pressure is not None and sleep_pressure.status not in {"not_enough_data", "clear"}:
+            detail = (
+                f"{detail}, "
+                f"{_format_sleep_pressure_hours(sleep_pressure.display_hours, sleep_pressure.is_capped)} sleep gap"
+            )
         factors.append(ReadinessFactor(
             label="Sleep", value=v100, status=_factor_status(v100), detail=detail,
         ))
@@ -515,7 +850,6 @@ def compute_readiness(
     # Pull last ~14 days of HRV from DailyHealthSnapshot for the
     # baseline median, plus the current value (client signal preferred).
     hrv_history: list[float] = []
-    today = date.today()
     snaps = db.exec(
         select(DailyHealthSnapshot)
         .where(
@@ -551,6 +885,7 @@ def compute_readiness(
     # ── Fatigue (W_FATIGUE) ────────────────────────────────────────
     fatigue_readiness = None
     fatigue_detail = None
+    snap = None  # FatigueSnapshot — hoisted so the surface can be returned
     try:
         from app.services.workout.activity_impact import compute_rolling_fatigue
         from app.services.workout.focus_normalize import normalize_focus_to_family
@@ -558,7 +893,15 @@ def compute_readiness(
 
         completions = get_recent_completions_for_fatigue(user_id, db)
         if completions:
-            snap = compute_rolling_fatigue(completions)
+            # Feed today's self-reported soreness / joint pain so it caps the
+            # relevant muscles' local readiness (section-E feedback layer).
+            self_report = _self_report_feedback(db, user_id, today)
+            recovery_context: dict[str, Any] = {}
+            if self_report:
+                recovery_context["readiness_feedback"] = self_report
+            if _alcohol_high_recent(today_lifestyle, yesterday_lifestyle):
+                recovery_context["nutrition"] = {"alcohol_high": True}
+            snap = compute_rolling_fatigue(completions, recovery_context=recovery_context or None)
             focus_key = normalize_focus_to_family(planned_focus) if planned_focus else None
             focus_value = snap.focus_readiness.get(focus_key) if focus_key else None
             if focus_value is not None:
@@ -572,6 +915,8 @@ def compute_readiness(
         # as missing rather than crashing the readiness call.
         fatigue_readiness = None
         fatigue_detail = None
+        snap = None
+    fatigue_surface = _fatigue_surface_from_snap(snap)
     pts, detail = _score_fatigue(fatigue_readiness, fatigue_detail)
     if pts is not None:
         pillar_scores["fatigue"] = (pts, W_FATIGUE)
@@ -600,12 +945,19 @@ def compute_readiness(
             cals = (r.calories_total or 0)
             if cals <= 0:
                 continue
+            completeness = classify_nutrition_day(
+                db,
+                user_id,
+                r.metric_date,
+                logged_calories=float(cals),
+            )
             total += 1
-            # We don't have the user's calorie target loaded here; treat
-            # any logged day as 80% adherence (logging is the hard part)
-            # and let the actual target overlay land via UserCoachingState
-            # in a future refinement. Conservative default.
-            hits += 0.8
+            if completeness.status == "complete":
+                hits += 0.8
+            elif completeness.status == "rough_estimate":
+                hits += 0.65
+            elif completeness.status == "partial":
+                hits += 0.45
         if total > 0:
             nutrition_pct = (hits / total) * 100
     pts, detail = _score_nutrition(nutrition_pct)
@@ -667,7 +1019,10 @@ def compute_readiness(
     # A sick/injured/low-energy skip is not training load, so
     # yesterday's load can still be 5/5. It is still real readiness
     # context, though, and should cap the headline score.
-    skip_wellness = _recent_skip_wellness(db, user_id, today)
+    skip_wellness = _more_severe_wellness(
+        _recent_skip_wellness(db, user_id, today),
+        _lifestyle_wellness_cap(today_lifestyle, yesterday_lifestyle),
+    )
     if skip_wellness:
         pts = int(round((skip_wellness.value / 100.0) * W_WELLNESS))
         pillar_scores["wellness"] = (pts, W_WELLNESS)
@@ -714,6 +1069,11 @@ def compute_readiness(
             signals_present=len(pillar_scores),
             signals_total=7 if skip_wellness else 6,
             computed_at_ms=int(time.time() * 1000),
+            focus_readiness=fatigue_surface["focus_readiness"],
+            muscle_readiness=fatigue_surface["muscle_readiness"],
+            top_fatigued=fatigue_surface["top_fatigued"],
+            recommendations=fatigue_surface["recommendations"],
+            explanations=list(fatigue_surface["explanations"]) + sleep_pressure_explanations + lifestyle_explanations,
         )
         if use_cache:
             _readiness_cache[key] = (time.time(), result)
@@ -727,8 +1087,27 @@ def compute_readiness(
     max_possible = sum(_max for _got, _max in pillar_scores.values())
     score = int(round((raw / max_possible) * 100))
     score = max(0, min(100, score))
+    overnight_cap, overnight_cap_explanation = _overnight_recovery_cap(pillar_scores)
+    if overnight_cap is not None:
+        score = min(score, overnight_cap)
     if skip_wellness and skip_wellness.cap is not None:
         score = min(score, skip_wellness.cap)
+
+    # Re-add the overall-vs-local explanation against the card's HEADLINE
+    # score (not the engine's muscle-only score) so the two numbers the user
+    # sees are consistent: "generally ready, but legs aren't".
+    explanations = list(fatigue_surface["explanations"]) + sleep_pressure_explanations + lifestyle_explanations
+    if overnight_cap_explanation:
+        explanations.append(overnight_cap_explanation)
+    lower_pct = fatigue_surface["focus_readiness"].get(
+        "lower", fatigue_surface["focus_readiness"].get("legs", 100)
+    )
+    if score >= 65 and lower_pct < 60:
+        explanations.append({
+            "type": "overall_ready_local_not_ready",
+            "severity": "high",
+            "message": f"Overall readiness is {score}%, but lower-body readiness is {lower_pct}%.",
+        })
 
     result = ReadinessResult(
         score=score,
@@ -739,6 +1118,11 @@ def compute_readiness(
         signals_present=len(pillar_scores),
         signals_total=7 if skip_wellness else 6,
         computed_at_ms=int(time.time() * 1000),
+        focus_readiness=fatigue_surface["focus_readiness"],
+        muscle_readiness=fatigue_surface["muscle_readiness"],
+        top_fatigued=fatigue_surface["top_fatigued"],
+        recommendations=fatigue_surface["recommendations"],
+        explanations=explanations,
     )
     if use_cache:
         _readiness_cache[key] = (time.time(), result)

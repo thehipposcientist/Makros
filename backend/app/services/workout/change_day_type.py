@@ -153,6 +153,18 @@ def _is_high_lower_stress_payload(day: dict | None) -> bool:
     return stimulus in {"strength", "power"}
 
 
+def _wants_plus_cardio(focus: str) -> bool:
+    return "+ cardio" in normalize_focus(focus)
+
+
+def _is_plus_cardio_payload(day: dict | None) -> bool:
+    if not isinstance(day, dict):
+        return False
+    focus = normalize_focus(str(day.get("focus") or ""))
+    archetype = normalize_focus(str(day.get("archetype") or ""))
+    return "+ cardio" in focus or "plus_cardio" in archetype
+
+
 def pick_generated_lift_day_for_change(
     proposed_days: list[dict],
     generated_days: list[dict],
@@ -207,11 +219,14 @@ def pick_generated_lift_day_for_change(
         and has_lighter_lower_option
         and (existing_high_lower or lower_readiness_low)
     )
+    requested_plus_cardio = _wants_plus_cardio(proposed_focus)
 
-    def _score(item: tuple[int, dict]) -> tuple[int, int, int, int]:
+    def _score(item: tuple[int, dict]) -> tuple[int, int, int, int, int]:
         idx, day = item
         archetype = str(day.get("archetype") or "").lower().strip()
+        is_plus_cardio = _is_plus_cardio_payload(day)
         return (
+            0 if is_plus_cardio == requested_plus_cardio else 1,
             1 if prefer_lighter_lower and _is_high_lower_stress_payload(day) else 0,
             1 if idx in used_generated_indexes else 0,
             1 if archetype and archetype in same_family_archetypes else 0,

@@ -1,6 +1,6 @@
 # Backlog Review — Contradictions & Stale Notes
 
-Last reviewed: 2026-04-29
+Last reviewed: 2026-05-22
 
 Items where the old CLAUDE.md had conflicting or ambiguous information. Verify current code state before acting.
 
@@ -99,3 +99,20 @@ a fallback when no PlanWeek exists.
 legacy fallback, retire `get7DaySchedule` and the
 `POST /workouts/generate-day` API client. Ensure all Change Focus paths call
 `PATCH /plans/days/{day_date}/workout` instead of the legacy week regen path.
+
+---
+
+## 7. May 2026 review — removed / changed surfaces
+
+Recent changes; docs elsewhere should not reference these as live:
+
+- **Meal "Shuffle" removed** — swipe-action + `handleShuffleMeal` deleted from `NutritionCard.tsx`, `HomeScreen.tsx`, `HomeMealsPlanTab.tsx`. Meal rows keep Recipe / Duplicate / Move / Remove.
+- **"Nutrition Balance" radar removed** — Progress-tab `TrendsRadarCard` + detail modal + `nutritionRadar*` helpers deleted. `TrendsRadarCard` now powers Strength + Cardio only.
+- **Health Insights data coverage restored as a compact trust surface** — the old bulky "Data used for this read" panel remains gone; the Insights tab now opens with a compact data-confidence strip and has a separate Data Sources sheet for coverage/privacy details.
+- **RecoveryCard headline** — derived from the visible per-muscle bars, not the backend readiness score (which folds in hidden systemic/density load). "Highest load" only flags muscles below 60% recovery; the aggregate "Overall Load" bar was removed.
+- **Warmup note → info button** — the static "Warm-up: 2–3 ramp-up sets…" card was replaced by an (i) button on the Warm-up Sets panel header. Auto-populated warmup-set suggestions are compound-lifts-only; manual "Add" stays on every exercise.
+- **Sun Exposure card** — compact variant gained a small photo header + "UV EXPOSURE" eyebrow above the score.
+- **Manual / imported workouts** — estimated calories surface in the workout history list; manual cardio gets estimated HR zone minutes (cardio only, never strength) via `estimate_cardio_zone_minutes`; session RPE feeds `resolve_focus_fatigue` via `rpe_to_intensity_mult` / `session_rpe_from_details`.
+- **tibialis_raise demo** — startup migration `_clear_stale_tibialis_demo_id()` nulls a stale `demo_exercise_db_id` so it falls back to its curated YouTube video.
+- **Per-muscle fatigue no longer hard-capped at 1.0** — `resolve_exercise_fatigue` keeps raw "1.0+ very high load" values; readiness derivation bounds them downstream. `test_exercise_fatigue` updated to match.
+- **Test baseline** — the old "21 / 8 pre-existing failures" claims are retired; the suite has a few flaky/env-dependent failures instead (see `docs/engineering/test-suite.md`).

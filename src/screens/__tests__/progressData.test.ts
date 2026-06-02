@@ -3,28 +3,28 @@
 // `../progressData.ts` against representative API payloads to verify
 // what the Progress page would actually display.
 //
-// Why this matters: the Nutrition Trend card and the Nutrition & Gut
-// Facts card share a "Logged cal" label but used to disagree because
-// they pulled from different aggregation windows. These tests pin that
-// invariant + the macros-history bar denominator + sorting/slicing.
+// Why this matters: the Nutrition & Gut Facts card reuses the same
+// logged-meal data users see on the Meals tab. These tests pin the
+// macros-history bar denominator + sorting/slicing behavior.
 //
 // Pure functions only — no React, no AsyncStorage. Runs under the
 // repo's `--experimental-strip-types` Node runner.
 
 import {
   type MealAveragesShape,
-  type AdherenceTrendsShape,
   type MealHistoryEntryShape,
   aggregateDailyFromHistory,
-  calorieDeltaLabel,
+  buildHrZoneSourceBreakdown,
+  buildStrengthLoadBalance,
+  buildStrengthVolumeTrend,
   dailyBarDenominator,
-  headlineLoggedCalories,
+  hrZoneSourceLabel,
+  isCardioHrZoneSource,
   macrosHeadlineFromDailyRows,
   macrosHeadlineFromAverages,
   recentLoggedDays,
   selectDailyRows,
-  trendDirectionInfo,
-  trendFactsCalorieDiff,
+  strengthVolumeForWindow,
 } from '../progressData.ts';
 
 const sampleAverages: MealAveragesShape = {
@@ -47,22 +47,6 @@ const sampleAverages: MealAveragesShape = {
     { date: '2026-04-18', calories: 2300, protein_g: 170, carbs_g: 250, fat_g: 75, meal_count: 3 },
     { date: '2026-04-15', calories: 2500, protein_g: 200, carbs_g: 280, fat_g: 85, meal_count: 3 },
   ],
-};
-
-const sampleTrends: AdherenceTrendsShape = {
-  direction: 'improving',
-  recent: {
-    avg_calories: 1100,
-    avg_calories_when_logged: 2300,
-    tracking_rate_pct: 60,
-    protein_hit_pct: 70,
-  },
-  tracking_delta_pct: 15,
-  protein_hit_delta_pct: 12,
-  calorie_delta: 200,
-  calorie_delta_when_logged: 100,
-  current_logging_streak_days: 3,
-  current_protein_streak_days: 2,
 };
 
 describe('Progress data layer', () => {
@@ -135,82 +119,6 @@ describe('Progress data layer', () => {
     it('never returns 0 (avoids divide-by-zero in the screen)', () => {
       const denom = dailyBarDenominator(0, []);
       expect(denom).toBe(1);
-    });
-  });
-
-  describe('headlineLoggedCalories — Trend ↔ Facts agreement', () => {
-    it('returns the same number for both cards when averages is present', () => {
-      // The whole point of this helper: BOTH cards source from the same
-      // place. If the headline disagrees with itself, the test fails.
-      const factsHeadline = headlineLoggedCalories(sampleAverages, null);
-      const trendHeadline = headlineLoggedCalories(sampleAverages, sampleTrends);
-      expect(factsHeadline).toBe(trendHeadline);
-      expect(factsHeadline).toBe(2240);
-    });
-
-    it('falls back to recent.avg when averages is null (loading state)', () => {
-      const v = headlineLoggedCalories(null, sampleTrends);
-      expect(v).toBe(2300);
-    });
-
-    it('returns 0 when both inputs are missing', () => {
-      expect(headlineLoggedCalories(null, null)).toBe(0);
-    });
-  });
-
-  describe('trendFactsCalorieDiff (regression guard)', () => {
-    it('reports the gap that motivated the alignment fix', () => {
-      // averages.avg_cal_when_logged = 2240
-      // trends.recent.avg_cal_when_logged = 2300
-      // → diff = 60. The screen's Trend card now uses headline (2240),
-      // so the displayed value matches Facts even though `recent` is 2300.
-      const diff = trendFactsCalorieDiff(sampleAverages, sampleTrends);
-      expect(diff).toBe(60);
-    });
-
-    it('is zero when the two sources agree (e.g. all-logged-days window)', () => {
-      const aligned: AdherenceTrendsShape = {
-        ...sampleTrends,
-        recent: { ...sampleTrends.recent, avg_calories_when_logged: 2240 },
-      };
-      expect(trendFactsCalorieDiff(sampleAverages, aligned)).toBe(0);
-    });
-  });
-
-  describe('calorieDeltaLabel', () => {
-    it('formats positive deltas with a plus sign', () => {
-      expect(calorieDeltaLabel({ calorie_delta_when_logged: 250 })).toBe('+250');
-    });
-
-    it('formats negative deltas with the minus sign baked in', () => {
-      expect(calorieDeltaLabel({ calorie_delta_when_logged: -120 })).toBe('-120');
-    });
-
-    it('falls back to calorie_delta when the when_logged variant is missing', () => {
-      expect(calorieDeltaLabel({ calorie_delta: 80 })).toBe('+80');
-    });
-
-    it('rounds the delta to a whole number', () => {
-      expect(calorieDeltaLabel({ calorie_delta_when_logged: 12.7 })).toBe('+13');
-    });
-  });
-
-  describe('trendDirectionInfo', () => {
-    it('maps known directions to the right bucket', () => {
-      expect(trendDirectionInfo('improving').bucket).toBe('success');
-      expect(trendDirectionInfo('slipping').bucket).toBe('warning');
-      expect(trendDirectionInfo('steady').bucket).toBe('neutral');
-    });
-
-    it('treats unknown values as steady', () => {
-      expect(trendDirectionInfo(undefined).bucket).toBe('neutral');
-      expect(trendDirectionInfo('garbage').bucket).toBe('neutral');
-    });
-
-    it('returns a user-facing label', () => {
-      expect(trendDirectionInfo('improving').label).toBe('Improving');
-      expect(trendDirectionInfo('slipping').label).toBe('Slipping');
-      expect(trendDirectionInfo('steady').label).toBe('Steady');
     });
   });
 
@@ -329,6 +237,368 @@ describe('Progress data layer', () => {
         totals: { calories: 1000, protein_g: 50, carbs_g: 100, fat_g: 25 },
       }));
       expect(selectDailyRows(many, undefined, 3).length).toBe(3);
+    });
+  });
+
+  describe('isCardioHrZoneSource', () => {
+    it('accepts explicitly cardio completion rows', () => {
+      expect(isCardioHrZoneSource({
+        focus_label: 'Morning Run',
+        activity_category: 'cardio',
+      })).toBe(true);
+    });
+
+    it('rejects explicit non-cardio categories even when HR zones exist elsewhere on the row', () => {
+      expect(isCardioHrZoneSource({
+        focus_label: 'Upper + Cardio',
+        activity_category: 'strength',
+        cardio_style: 'steady',
+      })).toBe(false);
+      expect(isCardioHrZoneSource({
+        focus_label: 'Pickleball',
+        activity_category: 'sport',
+        activity_subtype: 'pickleball',
+      })).toBe(false);
+    });
+
+    it('keeps legacy rows without category metadata when the focus or metrics are clearly cardio', () => {
+      expect(isCardioHrZoneSource({ focus: 'Zone 2 Bike' })).toBe(true);
+      expect(isCardioHrZoneSource({ focus: 'Workout', distanceMiles: 3.2 })).toBe(true);
+      expect(isCardioHrZoneSource({ focus: 'Workout', routeCoords: [{ lat: 1, lon: 2 }] })).toBe(true);
+    });
+
+    it('rejects legacy strength-only focus rows', () => {
+      expect(isCardioHrZoneSource({ focus: 'Push Strength' })).toBe(false);
+      expect(isCardioHrZoneSource({ focus: 'Leg Day' })).toBe(false);
+    });
+  });
+
+  describe('buildHrZoneSourceBreakdown', () => {
+    const rows = [
+      {
+        id: 'planned-lift',
+        date: '2026-05-13T10:00:00.000Z',
+        focus: 'Upper Strength',
+        sourceContext: 'planned',
+        durationSeconds: 3600,
+        hrZoneMinutes: [5, 18, 11, 0, 0],
+      },
+      {
+        id: 'apple-run',
+        workout_date: '2026-05-15',
+        focus_label: 'Outdoor Run',
+        source_context: 'apple_health',
+        activity_category: 'cardio',
+        duration_seconds: 2400,
+        hr_summary: { zoneMinutes: [4, 30, 6, 0, 0] },
+      },
+      {
+        id: 'old-row',
+        workout_date: '2026-05-04',
+        focus_label: 'Old Row',
+        activity_category: 'cardio',
+        hr_summary: { zoneMinutes: [0, 99, 0, 0, 0] },
+      },
+    ];
+
+    it('totals HR zones for the week from all activity sources', () => {
+      const breakdown = buildHrZoneSourceBreakdown(rows, '2026-05-11', '2026-05-17');
+      expect(Math.round(breakdown.zoneMinutes[0])).toBe(9);
+      expect(Math.round(breakdown.zoneMinutes[1])).toBe(48);
+      expect(Math.round(breakdown.zoneMinutes[2])).toBe(17);
+      expect(breakdown.contributors[1].map(c => c.name)).toEqual(['Outdoor Run', 'Upper Strength']);
+      expect(breakdown.contributors[1][0].sourceLabel).toBe('Apple Health');
+      expect(breakdown.contributors[1][1].sourceLabel).toBe('Planned workout');
+    });
+
+    it('can still reproduce cardio-only zone rollups for cardio surfaces', () => {
+      const breakdown = buildHrZoneSourceBreakdown(rows, '2026-05-11', '2026-05-17', { cardioOnly: true });
+      expect(Math.round(breakdown.zoneMinutes[1])).toBe(30);
+      expect(breakdown.contributors[1].map(c => c.name)).toEqual(['Outdoor Run']);
+    });
+  });
+
+  describe('hrZoneSourceLabel', () => {
+    it('prefers import source labels when present', () => {
+      expect(hrZoneSourceLabel({ import_source: 'strava', source_context: 'manual_activity' })).toBe('Strava');
+    });
+  });
+
+  describe('strength volume trend', () => {
+    const session = (id: string, date: string, exercises: any[], extra: Record<string, any> = {}) => ({
+      id,
+      date: `${date}T12:00:00.000Z`,
+      completed: true,
+      exercises,
+      ...extra,
+    });
+    const exercise = (name: string, sets: Array<{ weightLbs: number; reps: number }>, extra: Record<string, any> = {}) => ({
+      name,
+      sets,
+      ...extra,
+    });
+
+    it('counts loaded strength tonnage and excludes cardio, mobility, skipped, and zero-load rows', () => {
+      const rows = [
+        session('lift-1', '2026-05-15', [
+          exercise('Bench Press', [
+            { weightLbs: 45, reps: 10, setType: 'warmup' },
+            { weightLbs: 100, reps: 10 },
+            { weightLbs: 100, reps: 8 },
+          ]),
+          exercise('Squat', [{ weightLbs: 200, reps: 5 }]),
+          exercise('Push-Up', [{ weightLbs: 0, reps: 20 }]),
+        ]),
+        session('run-1', '2026-05-15', [
+          exercise('Treadmill Run', [{ weightLbs: 50, reps: 10 }], { primary_muscle: 'cardio' }),
+        ]),
+        session('mobility-1', '2026-05-16', [
+          exercise('Yoga Flow', [{ weightLbs: 25, reps: 10 }], { prescription_type: 'mobility' }),
+        ]),
+        session('skipped-1', '2026-05-16', [
+          exercise('Deadlift', [{ weightLbs: 300, reps: 5 }]),
+        ], { skipped: true }),
+      ];
+
+      const volume = strengthVolumeForWindow(rows, '2026-05-11', '2026-05-17');
+      expect(volume.volumeLbs).toBe(2800);
+      expect(volume.loadedSets).toBe(3);
+      expect(volume.sessionCount).toBe(1);
+    });
+
+    it('aggregates fixed week buckets instead of last-session rows', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Bench Press', [{ weightLbs: 100, reps: 10 }, { weightLbs: 100, reps: 8 }]),
+        ]),
+        session('prior-tiny', '2026-05-10', [
+          exercise('Bench Press', [{ weightLbs: 20, reps: 5 }]),
+        ]),
+        session('older', '2026-05-03', [
+          exercise('Squat', [{ weightLbs: 100, reps: 5 }]),
+        ]),
+      ];
+
+      const trend = buildStrengthVolumeTrend(rows, { today: '2026-05-17' });
+      expect(trend.weeks.length).toBe(9);
+      expect(trend.bucketMode).toBe('fixed_week');
+      expect(trend.current.startDate).toBe('2026-05-11');
+      expect(trend.current.endDate).toBe('2026-05-17');
+      expect(trend.current.volumeLbs).toBe(1800);
+      expect(trend.previous?.startDate).toBe('2026-05-04');
+      expect(trend.previous?.endDate).toBe('2026-05-10');
+      expect(trend.previous?.volumeLbs).toBe(100);
+      expect(trend.deltaPct).toBe(null);
+      expect(trend.comparison).toBe('insufficient_previous');
+    });
+
+    it('compares current week-to-date against last week at the same point', () => {
+      const rows = [
+        session('current', '2026-05-19', [
+          exercise('Bench Press', Array.from({ length: 4 }, () => ({ weightLbs: 60, reps: 5 }))),
+        ]),
+        session('prior-comparable', '2026-05-12', [
+          exercise('Bench Press', Array.from({ length: 4 }, () => ({ weightLbs: 50, reps: 5 }))),
+        ]),
+        session('prior-after-comparable-point', '2026-05-16', [
+          exercise('Deadlift', Array.from({ length: 4 }, () => ({ weightLbs: 500, reps: 10 }))),
+        ]),
+      ];
+
+      const trend = buildStrengthVolumeTrend(rows, { today: '2026-05-19' });
+      expect(trend.current.startDate).toBe('2026-05-18');
+      expect(trend.current.endDate).toBe('2026-05-19');
+      expect(trend.elapsedDays).toBe(2);
+      expect(trend.previous?.startDate).toBe('2026-05-11');
+      expect(trend.previous?.endDate).toBe('2026-05-12');
+      expect(trend.current.volumeLbs).toBe(1200);
+      expect(trend.previous?.volumeLbs).toBe(1000);
+      expect(trend.weeks[1].endDate).toBe('2026-05-17');
+      expect(trend.weeks[1].volumeLbs).toBe(21000);
+      expect(trend.deltaPct).toBe(20);
+      expect(trend.comparison).toBe('percent');
+    });
+
+    it('returns a percent only when the prior week has a useful baseline', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Bench Press', Array.from({ length: 4 }, () => ({ weightLbs: 60, reps: 5 }))),
+        ]),
+        session('prior', '2026-05-09', [
+          exercise('Bench Press', Array.from({ length: 4 }, () => ({ weightLbs: 50, reps: 5 }))),
+        ]),
+      ];
+
+      const trend = buildStrengthVolumeTrend(rows, { today: '2026-05-17' });
+      expect(trend.current.volumeLbs).toBe(1200);
+      expect(trend.previous?.volumeLbs).toBe(1000);
+      expect(trend.deltaPct).toBe(20);
+      expect(trend.deltaLbs).toBe(200);
+      expect(trend.comparison).toBe('percent');
+    });
+
+    it('uses an absolute comparison instead of huge percent spikes', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Deadlift', Array.from({ length: 4 }, () => ({ weightLbs: 500, reps: 10 }))),
+        ]),
+        session('prior', '2026-05-09', [
+          exercise('Deadlift', Array.from({ length: 4 }, () => ({ weightLbs: 50, reps: 5 }))),
+        ]),
+      ];
+
+      const trend = buildStrengthVolumeTrend(rows, { today: '2026-05-17' });
+      expect(trend.current.volumeLbs).toBe(20000);
+      expect(trend.previous?.volumeLbs).toBe(1000);
+      expect(trend.deltaPct).toBe(null);
+      expect(trend.deltaLbs).toBe(19000);
+      expect(trend.comparison).toBe('absolute');
+    });
+  });
+
+  describe('strength load balance', () => {
+    const session = (id: string, date: string, exercises: any[], extra: Record<string, any> = {}) => ({
+      id,
+      date: `${date}T12:00:00.000Z`,
+      completed: true,
+      exercises,
+      ...extra,
+    });
+    const exercise = (name: string, sets: Array<Record<string, any>>, extra: Record<string, any> = {}) => ({
+      name,
+      sets,
+      ...extra,
+    });
+    const sets = (count: number, weightLbs = 100, reps = 10) => (
+      Array.from({ length: count }, () => ({ weightLbs, reps }))
+    );
+
+    it('credits primary muscles as 1 set and secondary muscles as 0.5 sets', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Bench Press', sets(8), {
+            primary_muscle: 'chest',
+            secondary_muscles: ['triceps', 'shoulders'],
+          }),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17' });
+      const chest = balance.muscles.find(row => row.muscle === 'chest');
+      const triceps = balance.muscles.find(row => row.muscle === 'triceps');
+      const shoulders = balance.muscles.find(row => row.muscle === 'shoulders');
+      expect(chest?.currentSets).toBe(8);
+      expect(chest?.status).toBe('balanced');
+      expect(triceps?.currentSets).toBe(4);
+      expect(shoulders?.currentSets).toBe(4);
+      expect(balance.activeMuscleCount).toBe(3);
+      expect(balance.status).toBe('low');
+      expect(balance.score).toBeGreaterThan(70);
+    });
+
+    it('counts bodyweight hard sets and infers biceps credit from pull movement names', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Chin-Up', [
+            { weightLbs: 0, reps: 8 },
+            { weightLbs: 0, reps: 7 },
+          ]),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17' });
+      const back = balance.muscles.find(row => row.muscle === 'back');
+      const biceps = balance.muscles.find(row => row.muscle === 'biceps');
+      expect(balance.current.loadedSets).toBe(2);
+      expect(balance.current.volumeLbs).toBe(0);
+      expect(back?.currentSets).toBe(2);
+      expect(biceps?.currentSets).toBe(1);
+      expect(biceps?.secondarySets).toBe(1);
+    });
+
+    it('accepts camel-case completed-set fields from reconciled imports', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Dumbbell Curl', [
+            { actualWeightLbs: 30, actualReps: 10, actualRir: 2 },
+            { actualWeightLbs: 30, actualReps: 9, actualRir: 2 },
+          ], { primary_muscle: 'biceps' }),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17' });
+      const biceps = balance.muscles.find(row => row.muscle === 'biceps');
+      expect(balance.current.loadedSets).toBe(2);
+      expect(balance.current.volumeLbs).toBe(570);
+      expect(biceps?.currentSets).toBe(2);
+    });
+
+    it('scales weekly muscle-volume ranges when the caller asks for a 30-day window', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Barbell Curl', sets(12), { primary_muscle: 'biceps' }),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17', windowDays: 30 });
+      const biceps = balance.muscles.find(row => row.muscle === 'biceps');
+      expect(balance.windowDays).toBe(30);
+      expect(biceps?.targetMin).toBe(26);
+      expect(biceps?.targetMax).toBe(60);
+      expect(biceps?.currentSets).toBe(12);
+      expect(biceps?.score).toBe(46);
+    });
+
+    it('uses prior windows to flag muscle-specific spikes', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Bench Press', sets(14), { primary_muscle: 'chest' }),
+        ]),
+        session('prior-1', '2026-05-09', [
+          exercise('Bench Press', sets(8), { primary_muscle: 'chest' }),
+        ]),
+        session('prior-2', '2026-05-02', [
+          exercise('Bench Press', sets(8), { primary_muscle: 'chest' }),
+        ]),
+        session('prior-3', '2026-04-25', [
+          exercise('Bench Press', sets(8), { primary_muscle: 'chest' }),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17' });
+      const chest = balance.muscles.find(row => row.muscle === 'chest');
+      expect(chest?.status).toBe('spike');
+      expect(chest?.spikeRatio).toBe(1.75);
+      expect(balance.status).toBe('spike');
+      expect(balance.detail).toContain('chest');
+    });
+
+    it('scores only muscles with current or baseline data instead of punishing unrelated empty muscles', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Barbell Curl', [{ weightLbs: 100, reps: 10 }], { primary_muscle: 'biceps' }),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17' });
+      expect(balance.activeMuscleCount).toBe(1);
+      expect(balance.muscles[0].muscle).toBe('biceps');
+      expect(balance.score).toBe(17);
+    });
+
+    it('excludes non-strength rows and easy RIR sets from the balance score', () => {
+      const rows = [
+        session('current', '2026-05-16', [
+          exercise('Treadmill Run', sets(10), { primary_muscle: 'cardio' }),
+          exercise('Bench Press', [{ weightLbs: 100, reps: 10, rir: 6 }], { primary_muscle: 'chest' }),
+          exercise('Bench Press', [{ weightLbs: 100, reps: 10, rir: 2 }], { primary_muscle: 'chest' }),
+        ]),
+      ];
+
+      const balance = buildStrengthLoadBalance(rows, { today: '2026-05-17' });
+      expect(balance.current.loadedSets).toBe(1);
+      expect(balance.current.volumeLbs).toBe(1000);
+      expect(balance.muscles[0].currentSets).toBe(1);
     });
   });
 });

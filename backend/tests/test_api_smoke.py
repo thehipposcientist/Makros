@@ -206,6 +206,10 @@ def test_07_pro_workout_analytics_work_for_beta_pro_then_gate_free():
     assert body.get("readiness_score") == 100, (
         f"fresh beta user should be at 100%% readiness, got {body.get('readiness_score')}"
     )
+    assert body.get("muscle_recovery_score") == 100, (
+        f"fresh beta user should be at 100%% muscle recovery, got {body.get('muscle_recovery_score')}"
+    )
+    assert body.get("muscle_recovery_label") == "Fresh"
 
     _set_subscription_tier("free")
     for path, label in (
@@ -227,6 +231,10 @@ def test_07_pro_workout_analytics_work_for_beta_pro_then_gate_free():
     assert body.get("readiness_score") == 100, (
         f"fresh user should be at 100%% readiness, got {body.get('readiness_score')}"
     )
+    assert body.get("muscle_recovery_score") == 100, (
+        f"fresh user should be at 100%% muscle recovery, got {body.get('muscle_recovery_score')}"
+    )
+    assert body.get("muscle_recovery_label") == "Fresh"
     assert isinstance(body.get("activities"), list), "activities should be a list"
 
 

@@ -58,6 +58,8 @@ class MacroSet:
     protein_g: int
     carbs_g: int
     fat_g: int
+    fat_floor_g: int | None = None
+    min_carbs_g: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -155,8 +157,15 @@ def redistribute_macros(
     elif shift < 0:
         shift = -min(-shift, cap)
 
-    # Never push carbs below 40 g (safety floor for training folks).
-    new_carbs = max(40, base.carbs_g + shift)
+    fat_floor = max(30, int(round(base.fat_floor_g or 30)))
+    carb_floor = max(40, int(round(base.min_carbs_g or 40)))
+
+    # Never push carbs below the floor. On carb-up days, reduce the shift if
+    # the matching fat decrease would push fat below its floor.
+    if shift > 0:
+        max_shift_from_fat = max(0, int((base.fat_g - fat_floor) * 9 / 4))
+        shift = min(shift, max_shift_from_fat)
+    new_carbs = max(carb_floor, base.carbs_g + shift)
     actual_delta = new_carbs - base.carbs_g
     # kcal delta from the carb shift (carbs = 4 kcal/g). Fat absorbs
     # the inverse so total calories stay the same.

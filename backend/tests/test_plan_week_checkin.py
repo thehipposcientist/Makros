@@ -401,6 +401,49 @@ def test_legacy_checkin_snapshot_backfills_recommendation_actions():
     assert _plan_week_review_snapshot_needs_backfill(snapshot)
 
 
+def test_recent_checkin_snapshot_refreshes_nutrition_fields():
+    """Recent recaps stay current when meals are logged after prompt creation."""
+    from app.routers.plan_weeks import _backfill_plan_week_checkin_review_snapshot
+
+    class FakeQuery:
+        def where(self, *args, **kwargs):
+            return self
+
+    checkin = FakePlanWeekCheckin(
+        submitted_at=datetime.now(timezone.utc),
+        review_snapshot_json={
+            "headline": "Saved recap",
+            "workout_adherence_pct": 80.0,
+            "nutrition_logging_pct": 50.0,
+            "avg_calories": 1400.0,
+            "avg_protein_g": 70.0,
+            "calorie_target_adherence_pct": None,
+            "protein_target_adherence_pct": None,
+            "nutrition_summary": "Old nutrition read.",
+            "nutrition_notes": [],
+            "recommendations": [],
+        },
+    )
+    db = FakeDB(checkin=checkin, plan_week=FakePlanWeek())
+    db._last_model = "PlanWeek"
+
+    refreshed_snapshot = {
+        **checkin.review_snapshot_json,
+        "nutrition_logging_pct": 85.7,
+        "avg_calories": 2200.0,
+        "avg_protein_g": 165.0,
+        "nutrition_summary": "Nutrition: 6/7 days logged.",
+    }
+    with patch("app.routers.plan_weeks.select", lambda model: FakeQuery()), \
+         patch("app.routers.plan_weeks._build_plan_week_review_snapshot", return_value=refreshed_snapshot):
+        result = _backfill_plan_week_checkin_review_snapshot(db, 1, checkin)
+
+    snap = result.review_snapshot_json
+    assert snap["avg_protein_g"] == 165.0
+    assert snap["nutrition_logging_pct"] == 85.7
+    assert db._committed
+
+
 def test_week_needs_renewal_for_expired_week():
     """week_needs_renewal returns True for a week whose end_date is in the past."""
     from app.services.workout.week_manager import week_needs_renewal
@@ -447,6 +490,7 @@ if __name__ == "__main__":
         test_recap_returns_saved_ai_message,
         test_legacy_checkin_snapshot_backfills_new_review_fields,
         test_legacy_checkin_snapshot_backfills_recommendation_actions,
+        test_recent_checkin_snapshot_refreshes_nutrition_fields,
         test_week_needs_renewal_for_expired_week,
         test_week_needs_renewal_false_for_active_week,
     ]

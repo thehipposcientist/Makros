@@ -30,7 +30,9 @@ from app.services.workout.week_manager import (
     patch_day_nutrition,
     adapt_remaining_days,
     regenerate_remaining_days,
+    repair_remaining_workouts_for_equipment,
     repair_remaining_workouts_for_injuries,
+    update_remaining_workouts_for_duration,
     lock_day_on_complete,
     week_needs_renewal,
     default_training_pattern,
@@ -49,6 +51,13 @@ router = APIRouter(prefix="/plans", tags=["plan-weeks"])
 # becomes a saved recap.
 CHECKIN_PROMPT_DAYS_AFTER_END = 1
 CHECKIN_RECAP_DAYS_AFTER_END = 7
+CHECKIN_SETTINGS_SPLITS = {
+    "full_body",
+    "upper_lower",
+    "ppl",
+    "ppl_upper_lower",
+    "bro",
+}
 
 
 # ─── Request / Response schemas ───────────────────────────────────────────────
@@ -156,7 +165,47 @@ class RegenerateRemainingRequest(BaseModel):
     reason: str = "settings_change"
 
 
+class UpdateSessionDurationRequest(BaseModel):
+    new_session_minutes: int | None = None
+
+
+class CheckinPlanSettingsRequest(BaseModel):
+    goal: str | None = None
+    days_per_week: int | None = None
+    preferred_split: str | None = None
+    session_minutes: int | None = None
+    apply_to_current_week: bool = False
+    reason: str = "weekly_checkin"
+
+
+class CheckinPlanSettingsResponse(BaseModel):
+    plan_week: PlanWeekResponse
+    changed_fields: dict
+    applied_to_current_week: bool
+    explanation: str
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _enrich_persisted_days(db: Session, days: list[PlanDay]) -> None:
+    """Patch image_url + demo_exercise_db_id onto persisted workout_json
+    snapshots before they go out the door. Snapshots taken before the
+    free-exercise-db migration have NULL demo ids in their JSON; this
+    fills them in at read time without rewriting the row.
+
+    Mutates each PlanDay.workout_json["exercises"] dict in-place. Safe
+    to call repeatedly — only fills missing fields."""
+    from app.services.workout.exercise_enrichment import enrich_exercises_with_demo_ids
+    exercise_lists: list[list[dict]] = []
+    for pd in days:
+        workout = pd.workout_json
+        if isinstance(workout, dict):
+            ex_list = workout.get("exercises")
+            if isinstance(ex_list, list):
+                exercise_lists.append(ex_list)
+    if exercise_lists:
+        enrich_exercises_with_demo_ids(db, exercise_lists)
 
 
 def _plan_day_to_response(pd: PlanDay) -> PlanDayResponse:
@@ -181,7 +230,11 @@ def _plan_day_to_response(pd: PlanDay) -> PlanDayResponse:
     )
 
 
-def _plan_week_to_response(pw: PlanWeek, days: list[PlanDay]) -> PlanWeekResponse:
+def _plan_week_to_response(pw: PlanWeek, days: list[PlanDay], db: Session | None = None) -> PlanWeekResponse:
+    # Backfill image_url + demo_exercise_db_id onto persisted snapshots
+    # so plans generated before those fields existed still render demos.
+    if db is not None:
+        _enrich_persisted_days(db, days)
     paused_until = getattr(pw, "paused_until", None)
     # Past pauses auto-expire — don't surface a stale paused_until that's
     # already in the rear-view mirror.
@@ -211,6 +264,32 @@ def _human_label(value: object, *, lower: bool = False) -> str:
     text = re.sub(r"[_\-]+", " ", text)
     text = " ".join(text.split())
     return text.lower() if lower else text.title()
+
+
+def _normalize_checkin_split(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text or text == "auto":
+        return None
+    if text not in CHECKIN_SETTINGS_SPLITS:
+        raise HTTPException(status_code=422, detail="Unsupported preferred_split")
+    return text
+
+
+def _goal_type_for_checkin_track(goal_track: str):
+    from app.enums import GoalType
+    from app.services.workout.goals import resolve_goal
+
+    bucket = resolve_goal(goal_track).bucket
+    value = {
+        "general_health": GoalType.MAINTAIN.value,
+        "hyrox": GoalType.ATHLETIC_PERFORMANCE.value,
+    }.get(bucket, bucket)
+    try:
+        return GoalType(value)
+    except Exception:
+        return GoalType.MAINTAIN
 
 
 def _checkin_prompt_active(pw: PlanWeek, *, today: date | None = None) -> bool:
@@ -425,7 +504,16 @@ def _backfill_plan_week_checkin_review_snapshot(
     user_id: int,
     checkin,
 ):
-    if not checkin or not _plan_week_review_snapshot_needs_backfill(checkin.review_snapshot_json):
+    if not checkin:
+        return checkin
+    refresh_recent_recap = (
+        checkin.week_end_date is not None
+        and _checkin_recap_active_for_dates(checkin.week_end_date)
+    )
+    if (
+        not refresh_recent_recap
+        and not _plan_week_review_snapshot_needs_backfill(checkin.review_snapshot_json)
+    ):
         return checkin
 
     pw = db.exec(
@@ -542,7 +630,7 @@ def get_active_plan_week(
     if not pw:
         return None
     days = _auto_skip_and_refresh_week_days(db, current_user.id, pw)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
 
 
 def _is_plan_paused(pw: PlanWeek) -> bool:
@@ -588,7 +676,7 @@ def pause_active_week(
     db.commit()
     db.refresh(pw)
     days = get_week_days(db, pw.id)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
 
 
 @router.post("/week/resume")
@@ -608,7 +696,7 @@ def resume_active_week(
     db.commit()
     db.refresh(pw)
     days = get_week_days(db, pw.id)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
 
 
 @router.post("/start-new-week")
@@ -626,6 +714,7 @@ def start_new_week(
     from app.models import UserProfile, UserPreferences, NutritionPlan, WorkoutPlan
     from app.services.workout.planner import generate_workout_plan
     from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
     from app.seed_exercises_data import SEED_EXERCISES
     import json
 
@@ -651,6 +740,8 @@ def start_new_week(
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
     preferred_split = getattr(prefs, "preferred_split", None) or getattr(profile, "preferred_split", None)
+    today = date.today()
+    week_start = today
 
     planner_ctx = build_planweek_planner_context(
         db,
@@ -665,8 +756,9 @@ def start_new_week(
         day_of_cycle=body.day_of_cycle,
     )
 
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
     plan = generate_workout_plan(
-        planner_ctx.inputs, SEED_EXERCISES,
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
         history_familiarity=planner_ctx.history_familiarity,
         perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
@@ -689,7 +781,6 @@ def start_new_week(
     except Exception:
         pass
 
-    today = date.today()
     # Anchor the FIRST plan week to the user's sign-up / start day rather
     # than a calendar Monday. Two reasons:
     #   1. UX — a user who signs up Friday wants their plan + check-in
@@ -700,7 +791,6 @@ def start_new_week(
     #      to be a high-intent day for them.
     # Auto-renewal uses prev.end_date + 1 so this anchor sticks across
     # week boundaries (Friday-Thursday cycle persists every week).
-    week_start = today
     from app.services.workout.week_manager import training_pattern_from_preferences
     training_pattern = training_pattern_from_preferences(prefs, days_per_week)
 
@@ -721,7 +811,7 @@ def start_new_week(
 
     days = get_week_days(db, pw.id)
     logger.info(f"[plan-week] started new week for user={current_user.id} start={week_start} (today={today}, weekday={today.weekday()})")
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
 
 
 @router.post("/week/auto-renew")
@@ -1357,7 +1447,7 @@ def review_and_apply(
                 logger.warning(f"[review-and-apply] action failed: {action_dict} — {e}")
 
     days = get_week_days(db, pw.id)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
 
 
 @router.patch("/days/{day_date}/workout")
@@ -1537,6 +1627,7 @@ def adapt_remaining(
     """
     from app.services.workout.planner import generate_workout_plan
     from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
     from app.seed_exercises_data import SEED_EXERCISES
     from app.models import UserProfile, UserPreferences, UserGoal
 
@@ -1572,8 +1663,9 @@ def adapt_remaining(
         preferred_split=pw.preferred_split,
     )
 
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
     plan = generate_workout_plan(
-        planner_ctx.inputs, SEED_EXERCISES,
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
         history_familiarity=planner_ctx.history_familiarity,
         perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
@@ -1582,7 +1674,7 @@ def adapt_remaining(
 
     adapt_remaining_days(db, pw, fresh_days)
     days = get_week_days(db, pw.id)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
 
 
 @router.post("/week/repair-injury-conflicts")
@@ -1599,6 +1691,7 @@ def repair_injury_conflicts(
     """
     from app.services.workout.planner import generate_workout_plan
     from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
     from app.seed_exercises_data import SEED_EXERCISES
     from app.models import UserProfile, UserPreferences, UserGoal
 
@@ -1638,8 +1731,9 @@ def repair_injury_conflicts(
         preferred_split=pw.preferred_split,
     )
 
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
     plan = generate_workout_plan(
-        planner_ctx.inputs, SEED_EXERCISES,
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
         history_familiarity=planner_ctx.history_familiarity,
         perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
@@ -1647,7 +1741,151 @@ def repair_injury_conflicts(
     fresh_days = plan.get("workout_plan", {}).get("days", [])
     repair_remaining_workouts_for_injuries(db, pw, fresh_days)
     days = get_week_days(db, pw.id)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
+
+
+@router.post("/week/repair-equipment-conflicts")
+def repair_equipment_conflicts(
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
+    db: Session = Depends(get_session),
+) -> PlanWeekResponse:
+    """Immediately repair active-week exercises that need removed equipment.
+
+    This preserves the PlanWeek's dated structure and only swaps exercises on
+    today/future unlocked workouts when the existing exercise is no longer
+    compatible with the user's saved equipment list.
+    """
+    from app.services.workout.equipment import resolve_owned_equipment_slugs
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.models import UserProfile, UserPreferences, UserGoal
+
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan week")
+
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    prefs = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=400, detail="No profile found")
+
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
+
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
+        goal=current_goal,
+        days_per_week=pw.days_per_week,
+        session_minutes=(
+            int(getattr(prefs, "workout_duration_minutes", None) or 0)
+            or getattr(pw, "session_minutes", None)
+            or 45
+        ),
+        preferred_split=pw.preferred_split,
+    )
+
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
+    plan = generate_workout_plan(
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
+        history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
+    )
+    fresh_days = plan.get("workout_plan", {}).get("days", [])
+    owned_slugs = resolve_owned_equipment_slugs(
+        list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
+    )
+    repair_remaining_workouts_for_equipment(
+        db,
+        pw,
+        fresh_days,
+        owned_slugs,
+        seed_exercises=exercise_catalog,
+    )
+    days = get_week_days(db, pw.id)
+    return _plan_week_to_response(pw, days, db)
+
+
+@router.post("/week/update-session-duration")
+def update_session_duration(
+    body: UpdateSessionDurationRequest,
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
+    db: Session = Depends(get_session),
+) -> PlanWeekResponse:
+    """Immediately rebuild unlocked workouts for a new session duration.
+
+    This is a narrow exception to the next-week settings rule: changing the
+    time budget does not change the active week's dates, rest/training days,
+    goal, or split. Completed/started days stay untouched.
+    """
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.models import UserProfile, UserPreferences
+
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan week")
+
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    prefs = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=400, detail="No profile found")
+
+    raw_minutes = body.new_session_minutes
+    if raw_minutes is None:
+        raw_minutes = (
+            getattr(prefs, "workout_duration_minutes", None)
+            or getattr(pw, "session_minutes", None)
+            or 45
+        )
+    try:
+        new_minutes = int(raw_minutes)
+    except Exception:
+        raise HTTPException(status_code=422, detail="new_session_minutes must be an integer")
+    new_minutes = max(20, min(120, new_minutes))
+
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
+        goal=pw.goal,
+        days_per_week=pw.days_per_week,
+        session_minutes=new_minutes,
+        preferred_split=pw.preferred_split,
+    )
+
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
+    plan = generate_workout_plan(
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
+        history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
+    )
+    fresh_days = plan.get("workout_plan", {}).get("days", [])
+    update_remaining_workouts_for_duration(db, pw, fresh_days, new_minutes)
+    days = get_week_days(db, pw.id)
+    return _plan_week_to_response(pw, days, db)
 
 
 @router.post("/week/regenerate-remaining")
@@ -1662,6 +1900,7 @@ def regenerate_remaining(
     """
     from app.services.workout.planner import generate_workout_plan
     from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
     from app.seed_exercises_data import SEED_EXERCISES
     from app.models import UserProfile, UserPreferences, UserGoal
 
@@ -1687,7 +1926,11 @@ def regenerate_remaining(
     current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
     new_dpw = body.new_days_per_week or pw.days_per_week
-    new_split = body.new_preferred_split or pw.preferred_split
+    new_split = (
+        _normalize_checkin_split(body.new_preferred_split)
+        if body.new_preferred_split is not None
+        else pw.preferred_split
+    )
 
     planner_ctx = build_planweek_planner_context(
         db,
@@ -1700,8 +1943,9 @@ def regenerate_remaining(
         preferred_split=new_split,
     )
 
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, current_user.id, SEED_EXERCISES)
     plan = generate_workout_plan(
-        planner_ctx.inputs, SEED_EXERCISES,
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
         history_familiarity=planner_ctx.history_familiarity,
         perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
@@ -1730,7 +1974,194 @@ def regenerate_remaining(
         db.commit()
 
     days = get_week_days(db, pw.id)
-    return _plan_week_to_response(pw, days)
+    return _plan_week_to_response(pw, days, db)
+
+
+@router.post("/week/checkin-settings")
+def apply_checkin_plan_settings(
+    body: CheckinPlanSettingsRequest,
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
+    db: Session = Depends(get_session),
+) -> CheckinPlanSettingsResponse:
+    """Save explicit setup changes from the weekly check-in.
+
+    Durable settings always update future generated weeks. When requested,
+    only unlocked current/future PlanDay rows are regenerated through the
+    deterministic remaining-week path; completed/skipped/started days stay
+    protected.
+    """
+    from app.enums import GoalPace
+    from app.models import UserGoal, UserPreferences, UserProfile
+
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan week")
+
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=400, detail="No profile found")
+
+    prefs = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    ).first()
+    if not prefs:
+        prefs = UserPreferences(user_id=current_user.id)
+        db.add(prefs)
+        db.flush()
+
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal_track = effective_goal_id(active_goal, fallback=pw.goal)
+    changed_fields: dict[str, dict[str, object]] = {}
+
+    requested_goal = (body.goal or "").strip().lower()
+    if requested_goal and requested_goal != current_goal_track:
+        new_goal_type = _goal_type_for_checkin_track(requested_goal)
+        for old_goal in db.exec(
+            select(UserGoal).where(
+                UserGoal.user_id == current_user.id,
+                UserGoal.is_active == True,
+            )
+        ).all():
+            old_goal.is_active = False
+            db.add(old_goal)
+        active_goal_type = getattr(active_goal, "goal_type", None) if active_goal else None
+        same_goal_type = (
+            active_goal is not None
+            and getattr(active_goal_type, "value", active_goal_type) == new_goal_type.value
+        )
+        new_goal = UserGoal(
+            user_id=current_user.id,
+            goal_type=new_goal_type,
+            goal_track=requested_goal,
+            pace=(active_goal.pace if active_goal and active_goal.pace else GoalPace.MODERATE),
+            target_weight_lbs=(
+                active_goal.target_weight_lbs
+                if same_goal_type and active_goal
+                else None
+            ),
+            timeline_weeks=(
+                active_goal.timeline_weeks
+                if same_goal_type and active_goal
+                else None
+            ),
+            start_weight_lbs=float(profile.weight_lbs) if profile.weight_lbs else None,
+        )
+        db.add(new_goal)
+        changed_fields["goal"] = {"from": current_goal_track, "to": requested_goal}
+
+    if body.days_per_week is not None:
+        try:
+            new_days = int(body.days_per_week)
+        except Exception:
+            raise HTTPException(status_code=422, detail="days_per_week must be an integer")
+        new_days = max(1, min(7, new_days))
+        old_days = int(getattr(prefs, "days_per_week", None) or pw.days_per_week or 3)
+        if new_days != old_days:
+            prefs.days_per_week = new_days
+            current_pattern = getattr(prefs, "training_day_pattern", None)
+            if not isinstance(current_pattern, list) or len(current_pattern) != new_days:
+                prefs.training_day_pattern = None
+            changed_fields["days_per_week"] = {"from": old_days, "to": new_days}
+
+    if body.preferred_split is not None:
+        new_split = _normalize_checkin_split(body.preferred_split)
+        old_split = _normalize_checkin_split(getattr(prefs, "preferred_split", None))
+        if new_split != old_split:
+            prefs.preferred_split = new_split
+            changed_fields["preferred_split"] = {"from": old_split or "auto", "to": new_split or "auto"}
+
+    if body.session_minutes is not None:
+        try:
+            new_minutes = int(body.session_minutes)
+        except Exception:
+            raise HTTPException(status_code=422, detail="session_minutes must be an integer")
+        new_minutes = max(20, min(120, new_minutes))
+        old_minutes = int(
+            getattr(prefs, "workout_duration_minutes", None)
+            or getattr(pw, "session_minutes", None)
+            or 45
+        )
+        if new_minutes != old_minutes:
+            prefs.workout_duration_minutes = new_minutes
+            changed_fields["session_minutes"] = {"from": old_minutes, "to": new_minutes}
+
+    if changed_fields:
+        prefs.updated_at = datetime.now(timezone.utc)
+        db.add(prefs)
+        db.commit()
+    else:
+        db.rollback()
+
+    applied_to_current = False
+    plan_response: PlanWeekResponse
+    if changed_fields and body.apply_to_current_week:
+        recipe_changed = any(k in changed_fields for k in ("goal", "days_per_week", "preferred_split"))
+        duration_changed = "session_minutes" in changed_fields
+        if recipe_changed:
+            plan_response = regenerate_remaining(
+                RegenerateRemainingRequest(
+                    new_days_per_week=int(
+                        getattr(prefs, "days_per_week", None)
+                        or pw.days_per_week
+                        or 3
+                    ),
+                    new_preferred_split=getattr(prefs, "preferred_split", None) or "auto",
+                    reason=body.reason or "weekly_checkin",
+                ),
+                current_user=current_user,
+                db=db,
+            )
+            if duration_changed:
+                refreshed = get_active_week(db, current_user.id)
+                if refreshed:
+                    refreshed.session_minutes = int(
+                        getattr(prefs, "workout_duration_minutes", None)
+                        or refreshed.session_minutes
+                        or 45
+                    )
+                    db.add(refreshed)
+                    db.commit()
+                    plan_response = _plan_week_to_response(refreshed, get_week_days(db, refreshed.id), db)
+            applied_to_current = True
+        elif duration_changed:
+            plan_response = update_session_duration(
+                UpdateSessionDurationRequest(
+                    new_session_minutes=int(
+                        getattr(prefs, "workout_duration_minutes", None) or 45
+                    )
+                ),
+                current_user=current_user,
+                db=db,
+            )
+            applied_to_current = True
+        else:
+            refreshed = get_active_week(db, current_user.id)
+            plan_response = _plan_week_to_response(refreshed, get_week_days(db, refreshed.id), db)
+    else:
+        refreshed = get_active_week(db, current_user.id)
+        days = get_week_days(db, refreshed.id)
+        plan_response = _plan_week_to_response(refreshed, days, db)
+
+    if not changed_fields:
+        explanation = "No plan setup changes were saved."
+    elif applied_to_current:
+        explanation = "Saved settings and rebuilt remaining unlocked days in your current week."
+    else:
+        explanation = "Saved settings for future generated weeks. Your current week stays unchanged."
+
+    return CheckinPlanSettingsResponse(
+        plan_week=plan_response,
+        changed_fields=changed_fields,
+        applied_to_current_week=applied_to_current,
+        explanation=explanation,
+    )
 
 
 # ── Weekly Coach Check-In ─────────────────────────────────────────────────────

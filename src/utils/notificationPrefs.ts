@@ -4,8 +4,10 @@
  *
  * Today this carries quiet hours — a do-not-disturb window during which
  * Thallo's local notifications are suppressed (workout reminder, meal log
- * reminder). Rest-timer notifications during an active workout are NOT
- * suppressed by quiet hours since they're explicitly user-initiated.
+ * reminder, hydration reminder, coaching nudges, readiness nudge, and
+ * morning sleep readiness notification). Rest-timer notifications during
+ * an active workout are NOT suppressed by quiet hours since they're
+ * explicitly user-initiated.
  *
  * Stored in AsyncStorage so any module can read settings without having to
  * round-trip through the backend or a profile prop.

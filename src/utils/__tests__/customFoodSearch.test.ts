@@ -2,6 +2,7 @@ import {
   buildUserFoodCategories,
   searchUserFoodCategories,
   badgeLabelForSource,
+  badgeToneForSource,
 } from '../customFoodSearch.ts';
 
 const seedCategories = [
@@ -197,6 +198,16 @@ describe('searchUserFoodCategories — source tagging', () => {
     expect(results[0].is_verified).toBe(true);
   });
 
+  it('preserves serving grams from local catalog foods', () => {
+    const cats = [{
+      key: 'protein',
+      label: 'Proteins',
+      foods: [{ name: 'Ground Beef Patty', unit: '1 patty', serving_grams: 113, calories: 170, protein: 23, carbs: 0, fat: 8 }],
+    }];
+    const results = searchUserFoodCategories(cats, 'ground beef');
+    expect(results[0].serving_grams).toBe(113);
+  });
+
   it('returns custom foods even when the seed pantry is empty (regression: search must surface custom)', () => {
     const cats = buildUserFoodCategories({
       metaCategories: [],
@@ -211,20 +222,35 @@ describe('searchUserFoodCategories — source tagging', () => {
 });
 
 describe('badgeLabelForSource', () => {
-  it('labels seed AND user as "THALLO"', () => {
-    expect(badgeLabelForSource('seed')).toBe('THALLO');
-    expect(badgeLabelForSource('user')).toBe('THALLO');
+  it('labels verified provider-backed rows without naming vendors', () => {
+    expect(badgeLabelForSource('seed')).toBe('Verified');
+    expect(badgeLabelForSource('usda')).toBe('Verified');
+    expect(badgeLabelForSource('fatsecret')).toBe('Verified');
   });
 
-  it('preserves external-source labels', () => {
-    expect(badgeLabelForSource('barcode')).toBe('BARCODE');
-    expect(badgeLabelForSource('usda')).toBe('USDA');
-    expect(badgeLabelForSource('ai')).toBe('AI');
+  it('labels label, custom, and estimate rows by trust level', () => {
+    expect(badgeLabelForSource('barcode')).toBe('Label');
+    expect(badgeLabelForSource('openfoodfacts')).toBe('Label');
+    expect(badgeLabelForSource('user')).toBe('Custom');
+    expect(badgeLabelForSource('ai')).toBe('Estimate');
+    expect(badgeLabelForSource('vision_estimate')).toBe('Estimate');
   });
 
-  it('falls back to upper-cased source for unknowns', () => {
-    expect(badgeLabelForSource('foo')).toBe('FOO');
+  it('hides unknown provider names', () => {
+    expect(badgeLabelForSource('foo')).toBe('');
     expect(badgeLabelForSource(null)).toBe('');
     expect(badgeLabelForSource(undefined)).toBe('');
+  });
+});
+
+describe('badgeToneForSource', () => {
+  it('returns stable tone keys for visible trust labels', () => {
+    expect(badgeToneForSource('seed')).toBe('verified');
+    expect(badgeToneForSource('usda')).toBe('verified');
+    expect(badgeToneForSource('fatsecret')).toBe('verified');
+    expect(badgeToneForSource('barcode')).toBe('label');
+    expect(badgeToneForSource('user')).toBe('custom');
+    expect(badgeToneForSource('ai')).toBe('estimate');
+    expect(badgeToneForSource('foo')).toBeNull();
   });
 });

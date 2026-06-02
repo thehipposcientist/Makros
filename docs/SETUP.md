@@ -26,7 +26,6 @@ npx expo run:ios              # Local native dev build when testing native modul
 docker compose build backend && docker compose up -d backend   # Rebuild after code changes
 docker compose restart backend                                  # Restart without rebuild
 docker logs thallo-backend --tail 50                            # View logs
-docker exec thallo-backend python enrich_food_micros.py         # Seed food micronutrients
 ```
 
 ## Environment Variables (backend/.env)
@@ -34,26 +33,37 @@ docker exec thallo-backend python enrich_food_micros.py         # Seed food micr
 ```
 SECRET_KEY=...
 OPENAI_API_KEY=sk-...
+USDA_FDC_API_KEY=...
+FATSECRET_CLIENT_ID=...
+FATSECRET_CLIENT_SECRET=...
+FATSECRET_SCOPE=basic
+FATSECRET_SEARCH_VERSION=v1
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_PLAN_UPDATE=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
+MODEL_TRANSCRIPTION=gpt-4o-mini-transcribe
 MODEL_CHAT=gpt-4o-mini
 MODEL_FOOD_ENRICHMENT=gpt-4o-mini
 MODEL_IMAGE=gpt-5.4-mini
 PLAN_REVIEW_ENABLED=0
 NUTRITION_REVIEW_ENABLED=0
-STARTUP_ENRICH_FOODS_ENABLED=0
-STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED=0
-STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED=0
-GUT_BACKFILL_ENABLED=0
-BETA_FULL_ACCESS_ENABLED=1
+BETA_FULL_ACCESS_ENABLED=0
+SIGNUP_TRIAL_DAYS=7
+REVENUECAT_PRO_ENTITLEMENT_ID=pro
+REVENUECAT_SECRET_API_KEY=...
+REVENUECAT_WEBHOOK_AUTH_TOKEN=...
 STARTUP_DATA_MAINTENANCE_ENABLED=0
+STARTUP_BACKFILLS_ENABLED=0
 ```
 
-Run `make maintenance` for explicit backend data backfills/seed refreshes, and
-`make maintenance-food-micros` when you intentionally want food micronutrient
-enrichment to call OpenAI. Startup should stay schema-only by default; enable
-the startup enrichment/backfill flags only for a deliberate maintenance deploy.
+Enable the RevenueCat beta UI in an Expo build with `EXPO_PUBLIC_BILLING_REVENUECAT=1`
+plus the platform public SDK keys (`EXPO_PUBLIC_REVENUECAT_IOS_API_KEY` and/or
+`EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY`). Leave it unset for builds where the
+server trial should work quietly without exposing store purchase buttons.
+
+Run `make maintenance` for explicit backend data refreshes and seed refreshes.
+Startup stays schema-only; deploy/restart paths do not run data backfills, AI
+enrichment, or historical classification jobs unless explicitly opted in.
 
 ## Expo Go / Native Build Notes
 
@@ -71,4 +81,4 @@ Expo Go is useful for quick UI iteration, but it does not include Thallo's custo
 - PostgreSQL 16 in Docker (`thallo-pg` container, port 5433)
 - Schema auto-created and idempotent `_ensure_*` migrations run on startup via `create_db_and_tables()`
 - Data backfills/seed refreshes are default-off at startup. Run `make maintenance` intentionally.
-- Micronutrient enrichment is default-off. Run `make maintenance-food-micros` intentionally.
+- AI micronutrient backfill scripts are removed; logged/requested foods rely on DB values plus live user-triggered classification where applicable.

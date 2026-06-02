@@ -64,6 +64,187 @@ _PLAN_CHANGE_INTENT_PATTERNS = (
     r"\b(?:sure|absolutely|done|got it|okay|ok|yes)[,!.\-\u2014 ]+ ?(?:i['\u2019]?(?:ll|ve)|i (?:can|will|have)|let['\u2019]?s|adding|swapping|updating|scheduling)\b",
 )
 
+_DIGESTIVE_SYMPTOM_PATTERNS = (
+    r"\b(?:fart|farts|farting|gassy|gas|flatulence)\b",
+    r"\b(?:bloat|bloated|bloating)\b",
+    r"\b(?:diarrhea|diarrhoea|constipation|constipated)\b",
+    r"\b(?:nausea|nauseous|reflux|heartburn|indigestion)\b",
+    r"\b(?:stomach|gut|bowel|stool|poop|digestive|digestion)\b",
+    r"\b(?:stomachache|stomach ache|stomach pain|stomach cramps?)\b",
+)
+
+
+def _is_digestive_symptom_question(text: str | None) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    return any(re.search(pattern, q) for pattern in _DIGESTIVE_SYMPTOM_PATTERNS)
+
+
+# Sleep / energy / fatigue / caffeine-and-alcohol questions. When any
+# of these patterns hit, we attach the `caffeine_alcohol_recent` block
+# so the coach can ground answers in actual last-48h intake instead of
+# generic "limit caffeine after 2pm" advice.
+_ENERGY_SLEEP_PATTERNS = (
+    r"\b(?:tired|exhausted|fatigued?|fatigue|drained|sluggish|lethargic)\b",
+    r"\b(?:sleep|sleepy|sleeping|insomnia|restless|wake up|woke up|wakeful)\b",
+    r"\b(?:energy|energetic|wired|jittery|crash|crashing|caffeine|coffee|espresso)\b",
+    r"\b(?:alcohol|drink(?:ing|s)?\b|hangover|hung over|wine|beer|cocktail)\b",
+)
+
+# Recovery / training-load questions — covered by HRV + cardio_load
+# blocks. We always include the small fast blocks (heart_rate_recovery,
+# sleep_last_night, cardio_load_recent) since they're tiny; this
+# classifier is only used to ALSO attach the verbose caffeine/alcohol
+# block for "Why am I tired?"-shaped questions.
+_RECOVERY_PATTERNS = (
+    r"\brecover(?:y|ing|ed)?\b",
+    r"\bsore(?:ness)?\b",
+    r"\bheart rate variability\b|\bhrv\b|\brhr\b|\bresting heart rate\b",
+    r"\boverreach(?:ing|ed)?\b|\bovertrain(?:ing|ed)?\b",
+)
+
+# Fueling questions — pre-workout meal sufficiency, post-workout window,
+# what to eat before training. Triggers a 48h meal-itemization block.
+_FUELING_PATTERNS = (
+    r"\bpre[- ]?workout\b|\bpre[- ]?training\b|\bbefore (?:my )?workout\b|\bbefore (?:the )?gym\b",
+    r"\bpost[- ]?workout\b|\bafter (?:my )?workout\b|\bafter (?:the )?gym\b",
+    r"\bwhat (?:should|to|do) (?:i )?eat (?:before|after)\b",
+    r"\bfuel(?:ing)?\b",
+)
+
+# Nutrient-amount questions — fiber spike, micros sufficiency, sodium,
+# vitamin D, omega-3. Triggers the 7-day micros aggregate block.
+_NUTRIENT_PATTERNS = (
+    r"\bfiber\b|\bfibre\b",
+    r"\bmicros?(?:nutrients?)?\b|\bvitamins?\b|\bminerals?\b",
+    r"\bsodium\b|\bpotassium\b|\bmagnesium\b|\bcalcium\b|\biron\b|\bzinc\b",
+    r"\bomega[- ]?3\b|\bdha\b|\bepa\b",
+    r"\bvitamin (?:a|c|d|e|k|b12|b6|b1|b2|b3)\b",
+    r"\bsugar\b|\badded sugar\b|\bsalt\b|\bsaturated fat\b",
+)
+
+
+def _matches_any(text: str | None, patterns: tuple[str, ...]) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    return any(re.search(p, q) for p in patterns)
+
+
+def _is_energy_or_sleep_question(text: str | None) -> bool:
+    return _matches_any(text, _ENERGY_SLEEP_PATTERNS) or _matches_any(text, _RECOVERY_PATTERNS)
+
+
+def _is_fueling_question(text: str | None) -> bool:
+    return _matches_any(text, _FUELING_PATTERNS)
+
+
+def _is_nutrient_question(text: str | None) -> bool:
+    return _matches_any(text, _NUTRIENT_PATTERNS)
+
+
+# Affirmative phrases that indicate the user has confirmed an injury
+# proposal made by the AI on the immediately preceding turn. Kept tight
+# on purpose — soft hedges ("maybe", "I guess") should NOT trigger a
+# silent injury save. Bare "save it" / "go ahead" are treated as
+# confirmations because the only thing the AI offers to save is the
+# injury record.
+_INJURY_CONFIRM_PATTERNS = (
+    r"\byes\b",
+    r"\byeah\b",
+    r"\byep\b",
+    r"\bsure\b",
+    r"\bok(?:ay)?\b",
+    r"\bplease\s+(?:do|save)\b",
+    r"\bsave\s+(?:it|that|this)\b",
+    r"\bgo\s+ahead\b",
+    r"\bsounds?\s+(?:good|right)\b",
+    r"\bdo\s+it\b",
+    r"\bconfirm(?:ed)?\b",
+    r"\badd\s+(?:it|that|the\s+injury)\b",
+)
+
+
+# Tokens that turn a near-affirmative into a non-confirmation. Checked
+# anywhere in the user's message because "I'm not sure" / "no thanks"
+# / "maybe later" should never trigger an injury save.
+_INJURY_NEGATION_PATTERNS = (
+    r"\bnot\s+sure\b",
+    r"\bnot\s+yet\b",
+    r"\bdon'?t\b",
+    r"\bdo\s+not\b",
+    r"\bno\b",
+    r"\bnope\b",
+    r"\bmaybe\b",
+    r"\bidk\b",
+    r"\bi\s+guess\b",
+    r"\bi'?m\s+not\b",
+)
+
+
+def _user_confirmed_injury(conversation: list[dict] | None) -> bool:
+    """Did the user explicitly confirm saving an injury on their last turn?
+
+    Walks the conversation back to the most recent user message and
+    checks for an affirmative phrase. Empty/missing conversations
+    return False so a brand-new chat that opens with "save my injury"
+    still requires a follow-up confirmation after the AI's assessment
+    — the assessment must come first.
+
+    A message that contains BOTH an affirmative and a negation/hedge
+    (e.g. "I'm not sure, maybe yes") returns False — better to ask
+    again than to silently save on ambiguous input.
+    """
+    if not conversation:
+        return False
+    for turn in reversed(conversation):
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "").lower()
+        if role != "user":
+            continue
+        content = str(turn.get("content") or "").lower().strip()
+        if not content:
+            return False
+        if any(re.search(p, content) for p in _INJURY_NEGATION_PATTERNS):
+            return False
+        return any(re.search(p, content) for p in _INJURY_CONFIRM_PATTERNS)
+    return False
+
+
+def _enforce_injury_confirmation_guard(
+    result: dict, *, conversation: list[dict] | None,
+) -> dict:
+    """Block silent injury writes — the user must explicitly confirm.
+
+    The AI prompt instructs the model to ask before populating
+    `updated_injuries`, but a model that ignores the instruction (or
+    that's reacting to mere soreness) would still mutate stored
+    injuries on the user's behalf. This guard strips
+    `updated_injuries` from any response where the user's last message
+    isn't an affirmative confirmation, and flips
+    `injury_clarification_needed=true` so the client UI keeps asking.
+
+    Once the user replies with "yes" / "save it" / etc, the guard
+    leaves the populated injury through and the client-side
+    apply-action path (existing) saves it.
+    """
+    if not isinstance(result, dict):
+        return result
+    proposed = result.get("updated_injuries")
+    if not (isinstance(proposed, list) and proposed):
+        return result
+    if _user_confirmed_injury(conversation):
+        return result
+    logger.info(
+        "[trainer-question] injury confirm guard: stripping unconfirmed updated_injuries (count=%s)",
+        len(proposed),
+    )
+    result["updated_injuries"] = None
+    result["injury_clarification_needed"] = True
+    return result
+
 
 def _enforce_trainer_plan_guardrails(result: dict, *, is_nutritionist: bool) -> dict:
     """Keep Home Trainer responses inside the app's real mutation surface."""
@@ -108,17 +289,17 @@ def _enforce_trainer_plan_guardrails(result: dict, *, is_nutritionist: bool) -> 
                 result["action_items"] = [
                     "Review the proposed setting change and tap Apply if it looks right",
                     "Meals > Plan: expand the day and edit a meal for today",
-                    "Meals > Foods: update Your Kitchen, allergies, meals per day, or targets",
+                    "Meals > Foods: update Your Kitchen, allergies, routines, or targets",
                 ]
             else:
                 result["answer"] = (
                     "I can't directly rewrite your generated meal plan from chat. "
                     "For today's meals, open Meals > Plan, expand the day, then edit the meal or use + Add. "
-                    "For durable food, allergy, meal-count, or target changes, use Meals > Foods; supplements live under Meals > Supps."
+                    "For durable food, allergy, routine, or target changes, use Meals > Foods; supplements live under Meals > Supps."
                 )
                 result["action_items"] = [
                     "Meals > Plan: expand the day and edit a meal for today",
-                    "Meals > Foods: update Your Kitchen, allergies, meals per day, or targets",
+                    "Meals > Foods: update Your Kitchen, allergies, routines, or targets",
                     "Meals > Supps: manage your supplement stack",
                 ]
         else:
@@ -352,9 +533,11 @@ def ask_trainer_question(
     # Simple questions get a lightweight code path that skips full context loading.
     # This cuts response time from 15-30s to 2-5s for general knowledge questions.
     _q_lower = q.lower()
+    is_digestive_symptom = _is_digestive_symptom_question(q)
     _is_simple_knowledge = (
         not body.conversation  # first message, not a follow-up
         and not body.image_base64
+        and not is_digestive_symptom
         and not any(kw in _q_lower for kw in (
             "swap", "replace", "change", "update", "modify", "switch",
             "my plan", "my workout", "my meal", "my diet", "my macro",
@@ -411,6 +594,7 @@ def ask_trainer_question(
                 fast_result = _extract_json(fast_raw)
                 if fast_result.get("answer"):
                     fast_result = _enforce_trainer_plan_guardrails(fast_result, is_nutritionist=is_nutritionist)
+                    fast_result = _enforce_injury_confirmation_guard(fast_result, conversation=body.conversation)
                     fast_result = _sanitize_trainer_setting_proposals(fast_result, body.profile if isinstance(body.profile, dict) else None)
                     _persist_trainer_setting_decision(db, current_user.id, fast_result, model=_fast_model)
                     logger.info(f"[trainer-question] FAST PATH success: {len(fast_result['answer'])} chars")
@@ -442,6 +626,8 @@ def ask_trainer_question(
                 dietary_preference=profile_slim.get("dietaryPreference"),
                 allergies=profile_slim.get("allergies"),
                 foods_available=foods_available,
+                db=db,
+                user_id=current_user.id,
             )
             context_blob["nutritionContext"] = format_for_prompt(_nctx)
             if foods_available:
@@ -470,12 +656,28 @@ def ask_trainer_question(
         context_blob["recentActivityLog"] = body.userContext[:800]
 
     # ── Server-side context enrichment ───────────────────────────────────────
-    # Injects readiness / weight_trend / active_flags / coach_memory /
-    # nutrition_signals / logged_today / timeline_progress. Defensive —
-    # failures per-block silently drop that block.
+    # Always-on: readiness / weight_trend / active_flags / coach_memory /
+    # nutrition_signals / logged_today / timeline_progress / heart_rate_recovery /
+    # sleep_last_night / cardio_load_recent. These are small + broadly useful
+    # so we don't intent-gate them — the LLM does better with more signal even
+    # when the question seems "general".
+    #
+    # Verbose blocks are intent-gated so we don't bloat every prompt:
+    #   * recent_meals (food-by-food 48h log)        → digestive / fueling questions
+    #   * caffeine_alcohol_recent (48h totals)        → energy / sleep / digestive
+    #   * fiber_micros_7d (7d nutrient averages)     → nutrient-specific questions
+    is_energy_or_sleep = _is_energy_or_sleep_question(q)
+    is_fueling = _is_fueling_question(q)
+    is_nutrient = _is_nutrient_question(q)
     try:
         from app.services.coach.trainer_context import enrich as _enrich_trainer
-        extra = _enrich_trainer(current_user.id, db)
+        extra = _enrich_trainer(
+            current_user.id,
+            db,
+            include_recent_meals=is_digestive_symptom or is_fueling,
+            include_caffeine_alcohol=is_digestive_symptom or is_energy_or_sleep,
+            include_fiber_micros=is_nutrient,
+        )
         if extra:
             context_blob["coachContext"] = extra
     except Exception as e:
@@ -483,7 +685,9 @@ def ask_trainer_question(
 
     # ── Auto-detect topic from question keywords for context trimming ────────
     topic = body.topic
-    if not topic or topic == 'general':
+    if is_digestive_symptom:
+        topic = 'digestive_symptom'
+    elif not topic or topic == 'general':
         _ql = q.lower()
         if any(k in _ql for k in ('swap', 'replace', 'change exercise', 'add exercise', 'remove exercise', 'modify workout', 'my workout')):
             topic = 'change_plan'
@@ -498,7 +702,12 @@ def ask_trainer_question(
     if topic:
         logger.info("[trainer-question] topic=%s trimming_context=true", topic)
         if is_nutritionist:
-            if topic == "change_meals":
+            if topic == "digestive_symptom":
+                context_blob.pop("workoutPlan", None)
+                context_blob.pop("scheduleMapping", None)
+                context_blob.pop("progress", None)
+                context_blob.pop("recentActivityLog", None)
+            elif topic == "change_meals":
                 # Keep nutritionPlan + profile, drop progress/activity
                 context_blob.pop("progress", None)
                 context_blob.pop("recentActivityLog", None)
@@ -515,7 +724,12 @@ def ask_trainer_question(
                 context_blob.pop("progress", None)
                 context_blob.pop("recentActivityLog", None)
         else:
-            if topic == "change_plan":
+            if topic == "digestive_symptom":
+                context_blob.pop("workoutPlan", None)
+                context_blob.pop("scheduleMapping", None)
+                context_blob.pop("progress", None)
+                context_blob.pop("recentActivityLog", None)
+            elif topic == "change_plan":
                 # Keep workoutPlan + scheduleMapping + recent progress
                 context_blob.pop("recentActivityLog", None)
             elif topic == "log_activity":
@@ -584,7 +798,7 @@ def ask_trainer_question(
         "planned workout, or replace generated meal templates from chat. Guide the user to Workout > Plan > "
         "Change Focus / Swap, or Meals > Plan > meal edit instead.\n"
         "• Body stats (weight, height, age) → 'You can update that from You > Body & Stats.'\n"
-        "• Food preferences or dietary restrictions → 'Use Meals > Foods to update Your Kitchen, allergies, meals per day, or targets.'\n"
+        "• Food preferences or dietary restrictions → 'Use Meals > Foods to update Your Kitchen, allergies, routines, or targets.'\n"
         "• Supplement CHANGES → 'Use Meals > Supps to manage your supplement stack.' "
         "If profile.supplementsAvailable lists what the user already takes, reference it in advice — never recommend what they already take.\n"
         "• Meal routines → 'Open Meals > Plan, expand the day, then tap + Pin on a meal or edit a pinned routine meal.'\n"
@@ -658,6 +872,9 @@ def ask_trainer_question(
         "recovery, cite the actual score and named gaps. Don't generalize.\n"
         "  - logged_today: actual logged cal/protein for today. If asking about what to eat, subtract this "
         "from targets to get what's LEFT today. Don't recommend 2000 cal if they've already eaten 1800.\n"
+        "  - recent_meals: itemized today/yesterday meal logs for digestive symptom questions. Use actual "
+        "foods and possible_gi_trigger_hints to form cautious hypotheses only; never claim a diagnosis or "
+        "certain causation from food logs.\n"
         "  - timeline_progress: {weeks_elapsed, pct_weight_delta_achieved}. If pct_timeline_elapsed is "
         "much bigger than pct_weight_delta_achieved, they're behind pace — say so plainly.\n"
         "Never invent values for coachContext fields. If a field is absent, it's unknown — don't guess.\n\n"
@@ -676,22 +893,33 @@ def ask_trainer_question(
         "Give specific guidance and direct them to Meals > Plan meal editing or Meals > Foods settings.\n"
         "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
         "INJURY HANDLING — IMPORTANT:\n"
-        "When a user reports pain or injury, follow this exact protocol:\n"
-        "1. Ask clarifying questions (where exactly, when it started, what triggers it, severity). "
-        "Set injury_clarification_needed=true. Do NOT create the injury yet.\n"
+        "When a user reports pain or discomfort, follow this exact protocol:\n"
+        "0. FIRST distinguish normal training soreness from an actual injury or limitation.\n"
+        "   • Soreness signals: 'sore', 'tired', 'fatigued', 'DOMS', 'tight', 'stiff after leg day', "
+        "'a little achy after my workout', symmetric/expected post-training. For these, do NOT propose "
+        "an injury entry; reassure, suggest recovery (mobility, sleep, hydration, deload), and stop.\n"
+        "   • Injury signals: 'sharp pain', 'pinching', 'pop', 'numbness', 'tingling', 'pain at rest', "
+        "'pain that's getting worse', 'can't do X without pain', specific event ('tweaked it deadlifting'), "
+        "asymmetric/persistent. Treat as a possible injury and continue.\n"
+        "1. Ask clarifying questions (where exactly, when it started, what triggers it, severity, "
+        "whether it persists at rest). Set injury_clarification_needed=true. Do NOT create the injury yet.\n"
         "2. Once you have enough info, ASSESS the injury and explain:\n"
         "   - What the injury likely is (in simple terms)\n"
         "   - What your assessment is (severity, affected muscles)\n"
         "   - What movements would be avoided (e.g., 'hinge movements like deadlifts')\n"
         "   - Estimated recovery timeline\n"
         "   - What to watch for (warning signs to see a doctor)\n"
-        "3. IMMEDIATELY populate updated_injuries with the structured data in the SAME response. "
-        "Do NOT ask the user to type 'yes' — the app renders an 'Add Injury' confirm button "
-        "when updated_injuries is present, and the user will tap that button to confirm. Your answer "
-        "text should explain the assessment, not ask for text confirmation.\n"
-        "4. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries — "
+        "3. ASK FOR CONFIRMATION before populating updated_injuries. End the assessment turn with an "
+        "explicit yes/no question, e.g., 'Do you want me to save this as an active <body part> "
+        "limitation and adjust future workouts?'. On THIS turn, keep injury_clarification_needed=true "
+        "and updated_injuries=null. Do NOT silently mutate stored injuries on the basis of the user "
+        "merely mentioning soreness or pain — the user must confirm.\n"
+        "4. Only populate updated_injuries on a SUBSEQUENT turn where the user's most recent message "
+        "is an affirmative confirmation ('yes', 'save it', 'go ahead', 'sounds right'). On that turn, "
+        "set injury_clarification_needed=false and emit the structured record(s).\n"
+        "5. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries — "
         "confirmed injuries affect future generated weeks; this week must be adjusted through Change Focus, Swap, or Skip.\n"
-        "5. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
+        "6. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
         "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
         "estimatedRecoveryDays (conservative: mild 5-10, moderate 14-28, severe 42-90+).\n"
         "WORKOUT LOGGING: If the user says they completed a workout, set logged_workouts with session data. "
@@ -803,6 +1031,7 @@ def ask_trainer_question(
         "report_injury": "The user may be reporting pain or injury.",
         "change_meals": "The user's question is about their meal plan.",
         "log_food": "The user wants to log food they ate.",
+        "digestive_symptom": "The user is asking about digestion or GI symptoms. Use recent_meals when present, stay cautious, and suggest medical help for severe or persistent symptoms.",
         "change_goal": "The user may want to change their fitness goal.",
         "general": "General fitness or nutrition question.",
     }
@@ -937,6 +1166,7 @@ def ask_trainer_question(
         )
 
         result = _enforce_trainer_plan_guardrails(result, is_nutritionist=is_nutritionist)
+        result = _enforce_injury_confirmation_guard(result, conversation=body.conversation)
         result = _sanitize_trainer_setting_proposals(result, body.profile if isinstance(body.profile, dict) else None)
         _persist_trainer_setting_decision(db, current_user.id, result, model=_m_fast)
 
@@ -1084,6 +1314,40 @@ def _workout_coach_server_context(
     return out
 
 
+def _asks_food_allergen_status_from_photo(question: str) -> bool:
+    q = question.lower()
+    asks_allergen = any(term in q for term in (
+        "gluten",
+        "gluten-free",
+        "gluten free",
+        "celiac",
+        "coeliac",
+        "allergen",
+        "allergy",
+        "allergic",
+        "dairy free",
+        "dairy-free",
+        "nut free",
+        "nut-free",
+    ))
+    asks_food = any(term in q for term in (
+        "food",
+        "meal",
+        "eat",
+        "edible",
+        "ingredient",
+        "label",
+        "sauce",
+        "bread",
+        "pasta",
+        "snack",
+        "this",
+    ))
+    return asks_allergen and asks_food
+
+
+# Deprecated compatibility route. Canonical path:
+# `POST /coach/workout-question`.
 @router.post("/workout-question")
 def ask_workout_question(
     body: WorkoutCoachQuestionRequest,
@@ -1108,6 +1372,19 @@ def ask_workout_question(
     q = body.question.strip()
     if len(q) < 4:
         raise HTTPException(status_code=400, detail="Question is too short")
+    if body.image_base64 and _asks_food_allergen_status_from_photo(q):
+        return {
+            "answer": (
+                "I can't confirm whether a food is gluten-free or allergen-safe from a photo. "
+                "Check the ingredients, allergen statement, and any certified gluten-free labeling before eating it."
+            ),
+            "quick_cues": [
+                "Use the meal label scanner for packaged foods.",
+                "When in doubt, skip it or ask the restaurant/manufacturer.",
+            ],
+            "adjustment": "",
+            "safety_note": "If you have celiac disease or a true allergy, do not rely on appearance alone.",
+        }
 
     context_blob = {
         "workout": body.workout,
@@ -1178,6 +1455,7 @@ def ask_workout_question(
                 "never recommend loading through pain or ignoring an active injury. "
                 "When a photo is attached, comment on what you can actually see — joint angles, "
                 "bar path, foot position — and avoid claiming form details the photo doesn't show. "
+                "Never certify whether food in a photo is gluten-free or allergen-safe from appearance. "
                 "Return JSON only."
             ),
         },

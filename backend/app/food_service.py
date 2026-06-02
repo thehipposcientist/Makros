@@ -11,6 +11,7 @@ the existing FastAPI dependency-injection pattern:
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select, col, or_
@@ -25,6 +26,7 @@ from app.seed_micronutrients_data import (
     get_micronutrients_for,
     split_into_columns_and_extras,
 )
+from app.services.nutrition.added_sugar import resolve_added_sugar_g
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -48,6 +50,20 @@ def _search_match_clauses(column, norm: str) -> list:
     if len(tokens) > 1:
         clauses.append(and_(*(col(column).contains(token) for token in tokens)))
     return clauses
+
+
+def _result_trust(source: str, is_verified: bool) -> tuple[str, str]:
+    if is_verified:
+        return "verified", "high"
+    if source == FoodSource.USDA.value:
+        return "verified", "high"
+    if source == FoodSource.BARCODE.value:
+        return "label", "medium"
+    if source == FoodSource.USER.value:
+        return "user", "medium"
+    if source == FoodSource.AI.value:
+        return "estimate", "low"
+    return "catalog", "medium"
 
 
 def _serving_grams_estimate(unit: str) -> float:
@@ -83,6 +99,9 @@ def _food_to_read(food: Food, nutrition: FoodNutrition | None, servings: list[Fo
         carbs=nutrition.carbs if nutrition else food.carbs,
         fat=nutrition.fat if nutrition else food.fat,
         fiber=nutrition.fiber if nutrition else food.fiber,
+        sugar=nutrition.sugar if nutrition else food.sugar,
+        added_sugar_g=nutrition.added_sugar_g if nutrition else None,
+        sodium_mg=nutrition.sodium_mg if nutrition else food.sodium_mg,
         reference_unit=nutrition.reference_unit if nutrition else food.unit,
         servings=[
             FoodServingRead(
@@ -109,6 +128,13 @@ def food_read_to_search_result(food: FoodRead, *, preferred_names: set[str] | No
     serving_label = serving.label if serving else (food.reference_unit or "100 g")
     serving_grams = serving.grams if serving else None
     source_value = food.source.value if hasattr(food.source, "value") else food.source
+    trust_badge, confidence = _result_trust(str(source_value), bool(food.is_verified))
+    added_sugar_g = resolve_added_sugar_g(
+        food.name,
+        reported_added_sugar_g=food.added_sugar_g,
+        sugar_g=food.sugar,
+        serving_grams=serving_grams,
+    )
     result = {
         "name": food.name,
         "serving": serving_label,
@@ -117,6 +143,10 @@ def food_read_to_search_result(food: FoodRead, *, preferred_names: set[str] | No
         "carbs": serving.carbs if serving else food.carbs,
         "fat": serving.fat if serving else food.fat,
         "fiber": food.fiber,
+        "sugar": food.sugar,
+        "sugar_g": food.sugar,
+        "added_sugar_g": added_sugar_g,
+        "sodium_mg": food.sodium_mg,
         "source": food.source,
         "food_id": food.id,
         "serving_id": serving.id if serving else None,
@@ -125,11 +155,96 @@ def food_read_to_search_result(food: FoodRead, *, preferred_names: set[str] | No
         "external_id": food.external_id,
         "brand": food.brand,
         "is_verified": food.is_verified,
+        "trust_badge": trust_badge,
+        "nutrition_confidence": confidence,
         "is_preferred": _normalize(food.name) in preferred_names,
     }
-    if food.fiber is not None:
-        result["micronutrients"] = {"fiber": food.fiber}
+    micros = {}
+    for key, value in (
+        ("fiber", food.fiber),
+        ("sugar", food.sugar),
+        ("added_sugar_g", added_sugar_g),
+        ("sodium", food.sodium_mg),
+    ):
+        if value is not None:
+            micros[key] = value
+    if micros:
+        result["micronutrients"] = micros
     return result
+
+
+_PROCESSING_BUCKETS = {"minimally_processed", "processed", "ultra_processed"}
+
+
+def _processing_bucket_from_item(item: dict) -> str | None:
+    for key in ("nova_bucket", "processing_bucket"):
+        bucket = str(item.get(key) or "").strip().lower()
+        if bucket in _PROCESSING_BUCKETS:
+            return bucket
+    return None
+
+
+def _food_quality_from_bucket(bucket: str | None) -> str:
+    if bucket == "minimally_processed":
+        return "whole"
+    if bucket in ("processed", "ultra_processed"):
+        return "processed"
+    return "unknown"
+
+
+def enrich_search_item_classification(
+    db: Session,
+    item: dict,
+    *,
+    allow_ai: bool = True,
+    require_processing_bucket: bool = False,
+    default_processing_bucket: str | None = None,
+) -> dict:
+    """Attach cached/persisted food metadata to a search/barcode item.
+
+    Search-time heuristic classification is useful for display, but barcode
+    and selected USDA rows need a persistent FoodMetadata row so an early
+    `unknown` does not leak into meal metrics forever.
+    """
+    name = str(item.get("name") or item.get("food_name") or "").strip()
+    if not name:
+        return item
+
+    source = str(item.get("source") or "").strip().lower()
+    barcode = str(item.get("barcode") or "").strip()
+    if default_processing_bucket is None and require_processing_bucket:
+        if barcode or source in {"barcode", "openfoodfacts"} or item.get("nutrition_source") == "openfoodfacts":
+            default_processing_bucket = "processed"
+
+    try:
+        from app.services.nutrition.ai_classify import get_or_create_metadata
+
+        meta = get_or_create_metadata(
+            name,
+            db=db,
+            allow_ai=allow_ai,
+            require_processing_bucket=require_processing_bucket,
+            processing_bucket_override=_processing_bucket_from_item(item),
+            default_processing_bucket=default_processing_bucket,
+        )
+    except Exception:
+        return item
+
+    item["protein_source"] = getattr(meta, "protein_source", "unknown")
+    item["fermented"] = bool(getattr(meta, "fermented_flag", False))
+    item["probiotic"] = bool(getattr(meta, "probiotic_flag", False))
+    item["omega3_rich"] = bool(getattr(meta, "omega3_flag", False))
+    item["plant_count"] = int(getattr(meta, "plant_count_value", 0) or 0)
+    item["seafood"] = bool(getattr(meta, "seafood_flag", False))
+    item["fruit"] = bool(getattr(meta, "fruit_flag", False))
+    item["vegetable"] = bool(getattr(meta, "vegetable_flag", False))
+    item["alcohol"] = bool(getattr(meta, "alcohol_flag", False))
+    item["processed_meat"] = bool(getattr(meta, "processed_meat_flag", False))
+    item["refined_grain"] = bool(getattr(meta, "refined_grain_flag", False))
+    bucket = _processing_bucket_from_item(item) or getattr(meta, "processing_bucket", "unknown")
+    item["processing_bucket"] = bucket
+    item["food_quality"] = _food_quality_from_bucket(bucket)
+    return item
 
 
 def merge_food_search_results(
@@ -148,6 +263,23 @@ def merge_food_search_results(
     preferred_names = preferred_names or set()
     merged: list[dict] = []
     seen: set[str] = set()
+    seen_names: set[str] = set()
+    seen_name_brands: set[str] = set()
+
+    def _dedupe_key(item: dict, name: str) -> str:
+        source = str(item.get("source") or "")
+        external = str(item.get("fdc_id") or item.get("external_id") or "").strip()
+        barcode = str(item.get("barcode") or "").strip()
+        food_id = item.get("food_id")
+        if food_id not in (None, ""):
+            return f"food:{food_id}"
+        if source == "usda" and external:
+            return f"usda:{external}"
+        if source in ("barcode", "openfoodfacts") and barcode:
+            return f"barcode:{barcode}"
+        brand = _normalize(str(item.get("brand") or ""))
+        base = _normalize(name)
+        return f"name:{base}:brand:{brand}" if brand else f"name:{base}"
 
     for group in (local_results, remote_results):
         for item in group:
@@ -155,10 +287,20 @@ def merge_food_search_results(
             if not name:
                 continue
             source = str(item.get("source") or "")
-            key = _normalize(name)
+            key = _dedupe_key(item, name)
+            name_norm = _normalize(name)
+            brand_norm = _normalize(str(item.get("brand") or ""))
+            name_brand_key = f"{name_norm}:{brand_norm}" if brand_norm else name_norm
             if key in seen:
                 continue
+            if brand_norm:
+                if name_brand_key in seen_name_brands:
+                    continue
+            elif name_norm in seen_names:
+                continue
             seen.add(key)
+            seen_names.add(name_norm)
+            seen_name_brands.add(name_brand_key)
             copy = dict(item)
             copy["source"] = source or "unknown"
             copy["is_preferred"] = copy.get("is_preferred", key in preferred_names)
@@ -166,6 +308,63 @@ def merge_food_search_results(
             if len(merged) >= limit:
                 return merged
     return merged
+
+
+def _fuzzy_food_ids(
+    db: Session,
+    norm: str,
+    *,
+    user_id: int | None,
+    candidate_limit: int,
+) -> list[int]:
+    if len(norm) < 4:
+        return []
+
+    tokens = [token for token in norm.split() if len(token) >= 3]
+    prefixes = {token[:3] for token in tokens}
+    if not prefixes:
+        return []
+
+    visibility_filter = (
+        Food.owner_user_id == None  # noqa: E711
+        if user_id is None
+        else or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
+    )
+    name_clauses = [col(Food.normalized_name).contains(prefix) for prefix in prefixes]
+    alias_clauses = [col(FoodAlias.alias_normalized).contains(prefix) for prefix in prefixes]
+
+    food_ids = set(db.exec(
+        select(Food.id).where(
+            Food.is_active == True,  # noqa: E712
+            visibility_filter,
+            or_(*name_clauses),
+        ).limit(candidate_limit)
+    ).all())
+    alias_ids = set(db.exec(
+        select(FoodAlias.food_id).where(or_(*alias_clauses)).limit(candidate_limit)
+    ).all())
+    food_ids |= alias_ids
+    if not food_ids:
+        return []
+
+    candidates = db.exec(
+        select(Food).where(col(Food.id).in_(list(food_ids)), visibility_filter)
+    ).all()
+
+    def _score(food: Food) -> float:
+        name = food.normalized_name or _normalize(food.name)
+        ratio = SequenceMatcher(None, norm, name).ratio()
+        token_hits = sum(
+            1 for token in tokens
+            if token in name or any(part.startswith(token[:3]) for part in name.split())
+        )
+        coverage = token_hits / max(len(tokens), 1)
+        return (ratio * 0.7) + (coverage * 0.3)
+
+    ranked = [(food.id, _score(food)) for food in candidates if food.id is not None]
+    ranked = [item for item in ranked if item[1] >= 0.62]
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return [food_id for food_id, _ in ranked[:candidate_limit]]
 
 
 # ─── Search ───────────────────────────────────────────────────────────────────
@@ -217,6 +416,13 @@ def search_foods(
     name_match_ids = set(name_matches)
     alias_match_ids = set(alias_matches)
     food_ids = list(name_match_ids | alias_match_ids)
+    if not food_ids:
+        food_ids = _fuzzy_food_ids(
+            db,
+            norm,
+            user_id=user_id,
+            candidate_limit=candidate_limit,
+        )
     if not food_ids:
         return []
 
@@ -285,6 +491,38 @@ def search_foods(
     ]
 
 
+def lookup_food_by_barcode(
+    db: Session,
+    barcode: str,
+    *,
+    user_id: int | None = None,
+) -> dict | None:
+    code = (barcode or "").strip()
+    if not code:
+        return None
+    visibility_filter = (
+        Food.owner_user_id == None  # noqa: E711
+        if user_id is None
+        else or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
+    )
+    food = db.exec(
+        select(Food).where(
+            Food.is_active == True,  # noqa: E712
+            visibility_filter,
+            Food.barcode == code,
+        )
+    ).first()
+    if not food or food.id is None:
+        return None
+    nutrition = db.exec(select(FoodNutrition).where(FoodNutrition.food_id == food.id)).first()
+    servings = db.exec(select(FoodServing).where(FoodServing.food_id == food.id)).all()
+    result = food_read_to_search_result(
+        _food_to_read(food, nutrition, servings),
+    )
+    result["barcode"] = code
+    return result
+
+
 # ─── Create / Upsert ─────────────────────────────────────────────────────────
 
 def create_food(
@@ -310,6 +548,7 @@ def create_food(
     is_verified: bool = False,
     aliases: list[str] | None = None,
     extra_servings: list[dict] | None = None,
+    classify_on_create: bool = True,
 ) -> Food:
     """
     Create a food with its nutrition row, default serving, and optional aliases.
@@ -361,6 +600,12 @@ def create_food(
             added_sugar_g = float(extras_json["added_sugar"])
         except Exception:
             pass
+    added_sugar_g = resolve_added_sugar_g(
+        name,
+        reported_added_sugar_g=added_sugar_g,
+        sugar_g=sugar,
+        serving_grams=serving_grams,
+    )
     db.add(FoodNutrition(
         food_id=food.id,
         reference_unit=unit,
@@ -407,15 +652,17 @@ def create_food(
     db.refresh(food)
 
     # Pre-classify processing_bucket for non-seed foods so the first meal
-    # log doesn't pay the classification cost. AI is only called for USER
-    # and BARCODE sources (explicit user-created foods); USDA gets the
-    # deterministic pass only since the name is already canonical.
-    if source != FoodSource.SEED:
+    # log doesn't pay the classification cost. Deterministic rules run first;
+    # AI only handles unresolved names, including selected USDA/barcode rows.
+    if classify_on_create and source != FoodSource.SEED:
         try:
             from app.services.nutrition.ai_classify import get_or_create_metadata
+            requires_bucket = bool(barcode) or source == FoodSource.BARCODE
             get_or_create_metadata(
                 name, db=db,
-                allow_ai=(source in (FoodSource.USER, FoodSource.BARCODE)),
+                allow_ai=(source in (FoodSource.USER, FoodSource.BARCODE, FoodSource.USDA, FoodSource.AI)),
+                require_processing_bucket=requires_bucket,
+                default_processing_bucket="processed" if requires_bucket else None,
             )
         except Exception:
             pass  # classification failure must never block food creation
@@ -456,10 +703,10 @@ def _grams_from_serving_label(label: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def _category_from_food_name(name: str) -> FoodCategory:
+def _category_from_food_name(name: str, db: Session) -> FoodCategory:
     try:
-        from app.services.nutrition.food_classifier import classify_food
-        cls = classify_food(name)
+        from app.services.nutrition.ai_classify import get_or_create_metadata
+        cls = get_or_create_metadata(name, db=db, allow_ai=True)
         lower = name.lower()
         if getattr(cls, "fruit_flag", False):
             return FoodCategory.FRUITS
@@ -480,24 +727,33 @@ def _category_from_food_name(name: str) -> FoodCategory:
     return FoodCategory.GRAINS_CARBS
 
 
+def infer_food_category(name: str, db: Session) -> FoodCategory:
+    return _category_from_food_name(name, db)
+
+
 def upsert_catalog_food_from_search_item(db: Session, item: dict, *, user_id: int | None = None) -> Food | None:
     """Persist a selected search result once it becomes part of a logged meal.
 
     Searching alone stays read-through. User-selected USDA foods become
-    verified global rows. User-selected AI foods become private, unverified
-    rows for that user so they are easy to reuse without leaking estimates into
-    the shared catalog.
+    verified global rows. User-selected AI and open barcode fallback foods
+    become private, unverified rows for that user so they are easy to reuse
+    without leaking estimates/crowdsourced label data into the shared catalog.
     """
     if not isinstance(item, dict):
         return None
     source = str(item.get("source") or "").lower()
+    if source == "openfoodfacts":
+        source = "barcode"
     fdc_id = str(item.get("fdc_id") or item.get("external_id") or "").strip()
-    if source not in {"usda", "ai", "user"}:
+    barcode = str(item.get("barcode") or "").strip()
+    if source not in {"usda", "ai", "user", "barcode"}:
         return None
     if source == "usda" and not fdc_id:
         return None
+    if source == "barcode" and not barcode:
+        barcode = fdc_id
 
-    name = str(item.get("name") or "").strip()
+    name = str(item.get("name") or item.get("food_name") or "").strip()
     if not name:
         return None
     norm = _normalize(name)
@@ -505,6 +761,19 @@ def upsert_catalog_food_from_search_item(db: Session, item: dict, *, user_id: in
     if source == "usda":
         existing = db.exec(
             select(Food).where(Food.external_id == fdc_id, Food.source == FoodSource.USDA)
+        ).first()
+        if existing:
+            return existing
+    elif source == "barcode":
+        if user_id is None:
+            return None
+        existing = db.exec(
+            select(Food).where(
+                Food.barcode == barcode,
+                Food.owner_user_id == user_id,
+                Food.source == FoodSource.BARCODE,
+                Food.is_active == True,  # noqa: E712
+            )
         ).first()
         if existing:
             return existing
@@ -539,9 +808,14 @@ def upsert_catalog_food_from_search_item(db: Session, item: dict, *, user_id: in
         return None
 
     fiber = _float_or_none(item.get("fiber")) or micro("fiber")
-    sugar = micro("sugar")
-    sodium_mg = micro("sodium_mg", "sodium")
-    added_sugar_g = micro("added_sugar_g", "added_sugar")
+    sugar = _float_or_none(item.get("sugar")) or micro("sugar")
+    sodium_mg = _float_or_none(item.get("sodium_mg")) or micro("sodium_mg", "sodium")
+    added_sugar_g = resolve_added_sugar_g(
+        name,
+        reported_added_sugar_g=_float_or_none(item.get("added_sugar_g")) or micro("added_sugar_g", "added_sugar"),
+        sugar_g=sugar,
+        serving_grams=serving_grams,
+    )
     extras = {}
     for k, raw in micros.items():
         if k in {"fiber", "sugar", "sodium", "sodium_mg", "added_sugar", "added_sugar_g"}:
@@ -554,13 +828,19 @@ def upsert_catalog_food_from_search_item(db: Session, item: dict, *, user_id: in
     food = Food(
         name=name,
         normalized_name=norm,
-        category=_category_from_food_name(name),
-        source=FoodSource.USDA if source == "usda" else FoodSource.AI if source == "ai" else FoodSource.USER,
+        category=_category_from_food_name(name, db),
+        source=(
+            FoodSource.USDA if source == "usda"
+            else FoodSource.BARCODE if source == "barcode"
+            else FoodSource.AI if source == "ai"
+            else FoodSource.USER
+        ),
         owner_user_id=None if source == "usda" else user_id,
-        external_id=fdc_id or None,
+        external_id=fdc_id or (barcode if source == "barcode" else None),
+        barcode=barcode or None,
         brand=item.get("brand"),
         is_verified=(source == "usda"),
-        is_custom=(source in {"ai", "user"}),
+        is_custom=(source in {"ai", "user", "barcode"}),
         unit=serving_label,
         serving_grams=serving_grams,
         calories=float(item.get("calories") or 0),

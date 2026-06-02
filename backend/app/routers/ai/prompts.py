@@ -1,78 +1,6 @@
 from __future__ import annotations
 
 from .models import PlanRequest
-from .utils import compute_tdee_and_targets
-
-
-
-def _meal_schema_and_targets(t: dict) -> tuple[str, str]:
-    """
-    Return (meal_target_summary, meal_json_schema_fragment) appropriate for
-    the number of meals in this plan.
-    """
-    meals = t["meals"]
-
-    def _meal_block(name: str, cal: int, prot: int, carb: int, fat_g: int) -> str:
-        # IMPORTANT: the canonical field is now `items` — a structured list
-        # where `name`, `quantity`, and `unit` are separate. Do NOT put the
-        # quantity inside the food name (wrong: "2 eggs"; right:
-        # {name: "eggs", quantity: 2, unit: "piece"}). The app edits each
-        # item's quantity and unit independently of the name.
-        return (
-            f'    "{name}": {{\n'
-            f'      "meal": "Short descriptive recipe name",\n'
-            f'      "items": [\n'
-            f'        {{"name": "plain food name, no quantity", "quantity": 1, "unit": "g|oz|lb|ml|fl_oz|cup|tbsp|tsp|piece|slice|scoop|serving", "calories": 0, "protein": 0, "carbs": 0, "fat": 0}}\n'
-            f'      ],\n'
-            f'      "calories": {cal},\n'
-            f'      "protein": {prot},\n'
-            f'      "carbs": {carb},\n'
-            f'      "fat": {fat_g},\n'
-            f'      "fiber": 0,\n'
-            f'      "micronutrients": {{"fiber": 0, "sugar": 0, "sodium": 0, "cholesterol": 0, "vitaminA": 0, "vitaminC": 0, "vitaminD": 0, "calcium": 0, "iron": 0, "potassium": 0}},\n'
-            f'      "estimated_alignment": "e.g. high protein, moderate carb",\n'
-            f'      "isRoutine": false\n'
-            f'    }}'
-        )
-
-    def _target_line(name: str, cal: int, prot: int, carb: int, fat_g: int) -> str:
-        return f"  {name.capitalize()}: ~{cal} cal / ~{prot}g protein / ~{carb}g carbs / ~{fat_g}g fat"
-
-    if meals == 2:
-        summary = "\n".join([
-            _target_line("lunch",  t["lunch_cal"],  t["lunch_prot"],  t["lunch_carbs"],  t["lunch_fat"]),
-            _target_line("dinner", t["dinner_cal"], t["dinner_prot"], t["dinner_carbs"], t["dinner_fat"]),
-        ])
-        schema = ",\n".join([
-            _meal_block("lunch",  t["lunch_cal"],  t["lunch_prot"],  t["lunch_carbs"],  t["lunch_fat"]),
-            _meal_block("dinner", t["dinner_cal"], t["dinner_prot"], t["dinner_carbs"], t["dinner_fat"]),
-        ])
-    elif meals == 4:
-        summary = "\n".join([
-            _target_line("breakfast", t["breakfast_cal"], t["breakfast_prot"], t["breakfast_carbs"], t["breakfast_fat"]),
-            _target_line("lunch",     t["lunch_cal"],     t["lunch_prot"],     t["lunch_carbs"],     t["lunch_fat"]),
-            _target_line("dinner",    t["dinner_cal"],    t["dinner_prot"],    t["dinner_carbs"],    t["dinner_fat"]),
-            _target_line("snack",     t["snack_cal"],     t["snack_prot"],     t["snack_carbs"],     t["snack_fat"]),
-        ])
-        schema = ",\n".join([
-            _meal_block("breakfast", t["breakfast_cal"], t["breakfast_prot"], t["breakfast_carbs"], t["breakfast_fat"]),
-            _meal_block("lunch",     t["lunch_cal"],     t["lunch_prot"],     t["lunch_carbs"],     t["lunch_fat"]),
-            _meal_block("dinner",    t["dinner_cal"],    t["dinner_prot"],    t["dinner_carbs"],    t["dinner_fat"]),
-            _meal_block("snack",     t["snack_cal"],     t["snack_prot"],     t["snack_carbs"],     t["snack_fat"]),
-        ])
-    else:  # 3
-        summary = "\n".join([
-            _target_line("breakfast", t["breakfast_cal"], t["breakfast_prot"], t["breakfast_carbs"], t["breakfast_fat"]),
-            _target_line("lunch",     t["lunch_cal"],     t["lunch_prot"],     t["lunch_carbs"],     t["lunch_fat"]),
-            _target_line("dinner",    t["dinner_cal"],    t["dinner_prot"],    t["dinner_carbs"],    t["dinner_fat"]),
-        ])
-        schema = ",\n".join([
-            _meal_block("breakfast", t["breakfast_cal"], t["breakfast_prot"], t["breakfast_carbs"], t["breakfast_fat"]),
-            _meal_block("lunch",     t["lunch_cal"],     t["lunch_prot"],     t["lunch_carbs"],     t["lunch_fat"]),
-            _meal_block("dinner",    t["dinner_cal"],    t["dinner_prot"],    t["dinner_carbs"],    t["dinner_fat"]),
-        ])
-
-    return summary, schema
 
 
 def _build_weekly_review_section(req: PlanRequest) -> str:
@@ -85,7 +13,7 @@ def _build_weekly_review_section(req: PlanRequest) -> str:
     notes = wr.get("notes", "")
     pending = wr.get("pendingChanges", [])
     adherence_labels = {1: "completed almost none", 2: "missed most sessions", 3: "did about half", 4: "completed most", 5: "completed all"}
-    energy_labels = {1: "burned out / overtrained", 2: "tired and sluggish", 3: "okay / average", 4: "good energy", 5: "great / fully recovered"}
+    energy_labels = {1: "burned out / very low recovery", 2: "tired and sluggish", 3: "okay / average", 4: "good energy", 5: "great / fully recovered"}
     lines = [
         "WEEKLY CHECK-IN (use this to adapt the next week's plan):",
         f"- Workout adherence: {adherence}/5 — {adherence_labels.get(adherence, 'unknown')}",
@@ -113,7 +41,6 @@ def _build_weekly_review_section(req: PlanRequest) -> str:
 def build_workout_prompt(req: PlanRequest) -> str:
     """Prompt for workout plan only — runs in parallel with nutrition prompt."""
     ps  = req.physicalStats
-    t   = compute_tdee_and_targets(req)
 
     height_str    = f"{ps.heightFeet}'{ps.heightInches}\""
     equipment_str = ", ".join(req.equipment) if req.equipment else "bodyweight only"
@@ -124,7 +51,7 @@ def build_workout_prompt(req: PlanRequest) -> str:
     has_barbell   = any(e in {"Barbell", "Squat rack", "Power rack", "Smith machine"} for e in req.equipment)
     has_dumbbells = any(e in {"Dumbbells", "Kettlebell"} for e in req.equipment)
     has_machines  = any(e in {
-        "Cable machine", "Leg press", "Lat pulldown",
+        "Cable machine", "Single cable station", "Dual cable station", "Leg press", "Lat pulldown",
         "Chest press machine", "Seated row machine", "Leg extension", "Leg curl",
     } for e in req.equipment)
     has_pullupbar = "Pull-up bar" in req.equipment or has_barbell or has_machines
@@ -298,9 +225,6 @@ def build_workout_prompt(req: PlanRequest) -> str:
         diet_lines.append(f"Budget: {req.budgetLevel}")
     diet_context = "\n".join(f"- {l}" for l in diet_lines) if diet_lines else "- No special dietary restrictions"
 
-    # ── Per-meal targets and JSON schema ────────────────────────────────────
-    meal_summary, meal_schema = _meal_schema_and_targets(t)
-
     # ── Workout prompt ────────────────────────────────────────────────────────
     return f"""You are an expert fitness coach.
 Generate a personalised {req.daysPerWeek}-day weekly workout plan for this user.
@@ -358,4 +282,3 @@ Return ONLY valid JSON matching this schema exactly:
 }}
 
 IMPORTANT: Each day must have exactly 5 exercises. No more, no fewer."""
-

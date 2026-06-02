@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Any
 
 import openai
 from openai import OpenAI
-from fastapi import HTTPException, Depends
+from fastapi import BackgroundTasks, HTTPException, Depends
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.database import get_session
@@ -38,29 +40,321 @@ from app.services.workout.recommendation import (
     recommend_starting_weight,
 )
 from app.services.workout.exercise_metadata import (
+    resolve_seed_exercise_slug,
     set_programming_exercise_metadata,
 )
+from app.services.workout.recommendation_ai_safety import prepare_ai_safety_review
 from app.seed_exercises_data import SEED_EXERCISES  # noqa: F401  (used inside handler)
 
 
 logger = logging.getLogger(__name__)
 
+LIVE_RECOMMENDATION_VERSION = "live_recommendation.v1"
+LIVE_RECOMMENDATION_ALGORITHM_SOURCE = "deterministic_progression"
+_MAX_LIVE_SET_SCHEME_ROWS = 12
 
-def _resolve_exercise_slug(db: Session, exercise_name: str, exercise_slug: str | None) -> str | None:
+
+def _safe_positive_int(value: Any, fallback: int, *, max_value: int = _MAX_LIVE_SET_SCHEME_ROWS) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if out < 1:
+        return fallback
+    return min(out, max_value)
+
+
+def _safe_target_reps(value: Any, fallback: str | None) -> str | None:
+    raw = fallback if value is None else value
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or len(text) > 40:
+        return fallback
+    return text
+
+
+def _recommendation_data_source(source: Any, *, has_session_sets: bool = False) -> str:
+    if has_session_sets:
+        return "session_state"
+    mapping = {
+        "exact_history": "exact_exercise_history",
+        "strength_anchor": "exact_exercise_history",
+        "last_session_best": "exact_exercise_history",
+        "all_time_best": "exact_exercise_history",
+        "substitution_group": "substitution_group",
+        "movement_pattern": "movement_pattern",
+        "muscle_bucket": "muscle_equipment_bucket",
+        "planned_target": "plan_snapshot",
+        "default": "default",
+        "bodyweight": "default",
+    }
+    return mapping.get(str(source or "").strip(), "default")
+
+
+def _with_recommendation_metadata(meta: dict | None, *, data_source: str | None = None) -> dict | None:
+    if meta is None:
+        return None
+    source = meta.get("source")
+    return {
+        **meta,
+        "algorithmSource": LIVE_RECOMMENDATION_ALGORITHM_SOURCE,
+        "dataSource": data_source or _recommendation_data_source(source),
+    }
+
+
+def _recent_history_rows_from_live_request(body: WeightRecommendRequest) -> list[dict]:
+    rows: list[dict] = []
+    if body.lastSessionBestWeightLbs and body.lastSessionBestWeightLbs > 0:
+        rows.append({
+            "weightLbs": float(body.lastSessionBestWeightLbs),
+            "reps": int(body.lastSessionBestReps or 0) or None,
+            "date": body.lastSessionBestDate,
+        })
+    if body.allTimeBestWeightLbs and body.allTimeBestWeightLbs > 0:
+        rows.append({
+            "weightLbs": float(body.allTimeBestWeightLbs),
+            "reps": int(body.allTimeBestReps or 0) or None,
+            "date": body.allTimeBestDate,
+        })
+    return rows
+
+
+def _ai_safety_payload_for_next_set(
+    *,
+    body: WeightRecommendRequest,
+    exercise_meta: dict,
+    numeric_load: bool,
+    recommended_weight_lbs: float,
+    recommended_reps: int | str,
+    data_source: str | None,
+    confidence: Any,
+    action: str | None,
+    reason_tags: list[str] | None = None,
+) -> dict:
+    return {
+        "kind": "next_set",
+        "exercise": {
+            "name": body.exerciseName,
+            "slug": body.exerciseSlug or exercise_meta.get("slug"),
+            "equipment": body.equipment or exercise_meta.get("equipment_bucket"),
+            "primaryMuscle": body.primaryMuscle or exercise_meta.get("primary_muscle"),
+            "loadSemantics": exercise_meta.get("load_semantics"),
+            "numericLoad": bool(numeric_load),
+        },
+        "recommendation": {
+            "weightLbs": recommended_weight_lbs,
+            "reps": str(recommended_reps),
+            "dataSource": data_source,
+            "confidence": confidence,
+            "action": action,
+        },
+        "plan": {
+            "targetWeightLbs": body.plannedTargetWeightLbs,
+            "targetReps": body.targetReps,
+        },
+        "currentSessionSets": [
+            {"weightLbs": s.weightLbs, "reps": s.reps, "rir": s.rir}
+            for s in (body.lastSets or [])[-4:]
+        ],
+        "lastSessionSets": _recent_history_rows_from_live_request(body),
+        "recentHistory": _recent_history_rows_from_live_request(body),
+        "reasonTags": reason_tags or [],
+    }
+
+
+def _ai_safety_payload_for_pre_set(
+    *,
+    body: PreSetRecommendRequest,
+    exercise_meta: dict,
+    numeric_load: bool,
+    recommended_weight_lbs: float | None,
+    recommended_reps: str,
+    data_source: str | None,
+    confidence: Any,
+    action: str | None,
+    planned_weight_lbs: float | None,
+    last_session_sets: list[dict] | None,
+    prior_sets: list[dict] | None,
+    reason_tags: list[str] | None = None,
+) -> dict:
+    return {
+        "kind": "pre_set",
+        "exercise": {
+            "name": body.exerciseName,
+            "slug": body.exerciseSlug or exercise_meta.get("slug"),
+            "equipment": body.equipment or exercise_meta.get("equipment_bucket"),
+            "primaryMuscle": body.primaryMuscle or exercise_meta.get("primary_muscle"),
+            "loadSemantics": exercise_meta.get("load_semantics"),
+            "numericLoad": bool(numeric_load),
+        },
+        "recommendation": {
+            "weightLbs": recommended_weight_lbs,
+            "reps": recommended_reps,
+            "dataSource": data_source,
+            "confidence": confidence,
+            "action": action,
+        },
+        "plan": {
+            "targetWeightLbs": planned_weight_lbs,
+            "targetReps": None,
+        },
+        "currentSessionSets": prior_sets or [],
+        "lastSessionSets": last_session_sets or [],
+        "recentHistory": last_session_sets or [],
+        "reasonTags": reason_tags or [],
+    }
+
+
+def _live_recommendation_trace(
+    *,
+    set_intent: Any = None,
+    previous_set_classification: Any = None,
+    target_rep_range: Any = None,
+    prior_weight: Any = None,
+    recommended_weight: Any = None,
+    recommended_reps: Any = None,
+    adjustment_reason: Any = None,
+    fatigue_applied: bool = False,
+    rir_used: Any = None,
+    fallback_used: bool = False,
+) -> dict:
+    return {
+        "recommendationVersion": LIVE_RECOMMENDATION_VERSION,
+        "setIntent": set_intent,
+        "previousSetClassification": previous_set_classification,
+        "targetRepRange": target_rep_range,
+        "priorWeight": prior_weight,
+        "recommendedWeight": recommended_weight,
+        "recommendedReps": recommended_reps,
+        "adjustmentReason": adjustment_reason,
+        "fatigueApplied": bool(fatigue_applied),
+        "rirUsed": rir_used,
+        "fallbackUsed": bool(fallback_used),
+    }
+
+
+def _reason_tags_for_live_response(
+    *,
+    action: str | None,
+    debug: dict | None,
+    suspicion_reasons: list[str] | None,
+    fatigue_applied: bool,
+) -> list[str]:
+    tags: list[str] = []
+    classification = (debug or {}).get("classification")
+    if classification == "underloaded_or_strong":
+        tags.append("progressive_overload")
+    elif classification == "too_heavy_or_fatigued":
+        tags.append("undershot_reps")
+    elif classification == "on_target":
+        tags.append("hit_range")
+    if action == "increase":
+        tags.append("progressive_overload")
+    elif action == "decrease":
+        tags.append("deload_trigger")
+    if fatigue_applied or (debug or {}).get("fatigue_drop_reps"):
+        tags.append("high_fatigue")
+    for reason in suspicion_reasons or []:
+        text = str(reason)
+        if "overshoot" in text:
+            tags.append("overshot_reps")
+        elif "undershoot" in text:
+            tags.append("undershot_reps")
+        elif "pain" in text:
+            tags.append("feel_pain")
+    seen: set[str] = set()
+    return [t for t in tags if not (t in seen or seen.add(t))]
+
+
+def _rep_adjust_legacy_anchor(
+    *,
+    raw_weight: float,
+    raw_reps: int | float | None,
+    target_reps: str | None,
+) -> float:
+    """Convert a "what the user lifted last time" anchor to a working
+    weight for today's prescribed rep range.
+
+    Without this transform, a heavy 225 × 5 last week becomes the
+    starting recommendation for a 10–15 rep volume session — rep-aware
+    %1RM scaling is the difference between "today felt right" and
+    "I bailed at rep 7."
+
+    Path:
+        anchor_weight × (1 + raw_reps/30)   → e1RM (Epley)
+        e1RM × _RPE_PCT[mid(target_reps)]   → today's working weight
+
+    When `raw_reps` is missing (legacy clients that only sent the raw
+    weight), we assume a moderate 8-rep working set so the conversion
+    still happens but the anchor confidence stays modest.
+    """
+    if raw_weight <= 0:
+        return 0.0
+    from app.services.workout.recommendation import _RPE_PCT, _mid_reps, _round_to_plate
+    perf_reps_raw = raw_reps if raw_reps is not None else 8
+    try:
+        perf_reps = max(1, min(15, int(perf_reps_raw)))
+    except (TypeError, ValueError):
+        perf_reps = 8
+    e1rm = raw_weight * (1 + perf_reps / 30.0)
+    target_mid = max(1, min(20, _mid_reps(target_reps)))
+    pct = _RPE_PCT.get(target_mid, 0.75)
+    return _round_to_plate(e1rm * pct, increment=2.5)
+
+
+def _history_row_performed_on(row: dict | None):
+    if not isinstance(row, dict):
+        return None
+    for key in (
+        "performedOn",
+        "performed_on",
+        "sessionDate",
+        "session_date",
+        "completedAt",
+        "completed_at",
+        "date",
+    ):
+        value = row.get(key)
+        if value:
+            return value
+    return None
+
+
+def _apply_reacclimation_if_stale(
+    weight_lbs: float,
+    performed_on,
+    *,
+    increment_lbs: float,
+) -> tuple[float, object | None]:
+    from app.services.workout.recency import recency_adjustment
+    from app.services.workout.set_programming import round_to_increment
+
+    adj = recency_adjustment(performed_on)
+    if not adj.is_stale or weight_lbs <= 0:
+        return weight_lbs, None
+    increment = increment_lbs if increment_lbs and increment_lbs > 0 else 2.5
+    return round_to_increment(weight_lbs * adj.load_multiplier, increment), adj
+
+
+def _resolve_exercise_slug(db: Session | None, exercise_name: str, exercise_slug: str | None) -> str | None:
     """Best-effort canonical slug resolution for the recommend-weight
     path. Prefers the client-provided slug, falls back to a
     case-insensitive `Exercise.name` lookup. Returns None when we can't
     find a seed match — downstream code falls back to legacy anchors."""
     if exercise_slug:
         return exercise_slug
-    if not exercise_name:
+    seed_slug = resolve_seed_exercise_slug(exercise_name, None)
+    if seed_slug:
+        return seed_slug
+    if not exercise_name or db is None:
         return None
     row = db.exec(select(Exercise).where(Exercise.name.ilike(exercise_name))).first()
     return row.slug if row else None
 
 
 def _primary_muscle_for(
-    db: Session, exercise_name: str, exercise_slug: str | None
+    db: Session | None, exercise_name: str, exercise_slug: str | None
 ) -> str | None:
     """Best-effort primary-muscle lookup for the fatigue overlay.
 
@@ -97,7 +391,7 @@ def _primary_muscle_for(
             "[recommend-weight] seed primary_muscle lookup failed (non-fatal)"
         )
 
-    if not exercise_name:
+    if not exercise_name or db is None:
         return None
     try:
         row = db.exec(select(Exercise).where(Exercise.name.ilike(exercise_name))).first()
@@ -131,7 +425,7 @@ def _target_reps_hint(raw: Any, fallback: str | None) -> str | None:
     if not isinstance(raw, dict):
         return fallback
     value = raw.get("targetReps") or raw.get("target_reps") or fallback
-    return str(value).strip() if value is not None and str(value).strip() else None
+    return _safe_target_reps(value, fallback)
 
 
 def _live_scheme_set_type(raw_type: Any, target_reps: str | None) -> SetType:
@@ -161,17 +455,33 @@ def _planned_sets_from_live_scheme(
     plan_rep_target: str | None,
     fallback_set_type: SetType,
 ) -> list[PlannedSet]:
-    rows = [row for row in (raw_scheme or []) if isinstance(row, dict)]
+    safe_count = _safe_positive_int(planned_set_count, 1)
+    rows = [
+        row for row in (raw_scheme if isinstance(raw_scheme, list) else [])
+        if isinstance(row, dict)
+    ][:_MAX_LIVE_SET_SCHEME_ROWS * 2]
     planned: list[PlannedSet] = []
-    for idx, row in enumerate(rows[:planned_set_count]):
+    seen_numbers: set[int] = set()
+    for idx, row in enumerate(rows):
+        fallback_number = min(idx + 1, safe_count)
+        set_number = _safe_positive_int(
+            row.get("setNumber") or row.get("set_number"),
+            fallback_number,
+            max_value=safe_count,
+        )
+        if set_number in seen_numbers:
+            continue
         target_reps = _target_reps_hint(row, plan_rep_target)
+        seen_numbers.add(set_number)
         planned.append(
             PlannedSet(
-                set_number=int(row.get("setNumber") or row.get("set_number") or idx + 1),
+                set_number=set_number,
                 set_type=_live_scheme_set_type(row.get("setType") or row.get("set_type"), target_reps),
                 target_reps_override=target_reps,
             )
         )
+        if len(planned) >= safe_count:
+            break
 
     if not planned:
         planned = [
@@ -180,11 +490,11 @@ def _planned_sets_from_live_scheme(
                 set_type=fallback_set_type,
                 target_reps_override=plan_rep_target,
             )
-            for idx in range(planned_set_count)
+            for idx in range(safe_count)
         ]
 
     existing_numbers = {p.set_number for p in planned}
-    for idx in range(planned_set_count):
+    for idx in range(safe_count):
         set_number = idx + 1
         if set_number in existing_numbers:
             continue
@@ -207,10 +517,88 @@ def _positive_float(value: Any) -> float | None:
     return out if out > 0 else None
 
 
+def _finite_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _equipment_label_for_recommendation(equipment: Any, exercise_meta: dict | None) -> str | None:
+    explicit = str(equipment or "").strip()
+    if explicit:
+        return explicit
+    if not isinstance(exercise_meta, dict):
+        return None
+    raw_equipment = exercise_meta.get("equipment")
+    if isinstance(raw_equipment, list):
+        slugs: list[str] = []
+        for item in raw_equipment:
+            if isinstance(item, dict):
+                value = item.get("slug") or item.get("name")
+            else:
+                value = item
+            if value:
+                slugs.append(str(value))
+        if slugs:
+            return ", ".join(slugs)
+    bucket = str(exercise_meta.get("equipment_bucket") or "").strip()
+    return bucket or None
+
+
+def _equipment_settings_for_user(db: Session | None, current_user: Any) -> dict | None:
+    user_id = getattr(current_user, "id", None)
+    if db is None or user_id is None:
+        return None
+    try:
+        from app.models import UserPreferences as _UserPreferences
+        prefs = db.exec(
+            select(_UserPreferences).where(_UserPreferences.user_id == user_id)
+        ).first()
+        return getattr(prefs, "equipment_settings", None) if prefs else None
+    except Exception:
+        return None
+
+
+def _format_load_lbs(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def _loadability_adjusted_text(original: float, snapped: float) -> str:
+    return (
+        f"Use {_format_load_lbs(snapped)} lb — adjusted from "
+        f"{_format_load_lbs(original)} lb to match what you can load."
+    )
+
+
+def _snap_recommendation_load(
+    weight_lbs: float | None,
+    *,
+    equipment_label: str | None,
+    equipment_settings: dict | None,
+    fallback_increment: float,
+) -> float | None:
+    if weight_lbs is None or weight_lbs <= 0:
+        return weight_lbs
+    try:
+        from app.services.workout.load_equipment import snap_load_lbs
+        snapped = snap_load_lbs(
+            weight_lbs,
+            equipment_label,
+            equipment_settings,
+            fallback_increment=fallback_increment,
+        )
+        return float(snapped) if snapped is not None else weight_lbs
+    except Exception:
+        return weight_lbs
+
+
 def _scheme_row_by_number(raw_scheme: list[dict] | None, set_number: int | None) -> dict | None:
     if set_number is None:
         return None
-    for idx, row in enumerate(raw_scheme or []):
+    rows = raw_scheme if isinstance(raw_scheme, list) else []
+    for idx, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
         raw_number = row.get("setNumber") or row.get("set_number") or idx + 1
@@ -228,6 +616,7 @@ def _planned_backoff_transition_weight(
     completed_set_number: int | None,
     next_set_number: int | None,
     completed_actual_weight_lbs: float | None = None,
+    increment_lbs: float | None = None,
 ) -> float | None:
     current = _scheme_row_by_number(raw_scheme, completed_set_number)
     upcoming = _scheme_row_by_number(raw_scheme, next_set_number)
@@ -243,6 +632,17 @@ def _planned_backoff_transition_weight(
     actual_weight = _positive_float(completed_actual_weight_lbs)
     if actual_weight is not None:
         current_target = _positive_float(current.get("targetWeightLbs") or current.get("target_weight_lbs"))
+        if upcoming_weight >= actual_weight:
+            ratio = 0.90
+            if current_target is not None and upcoming_weight < current_target:
+                ratio = upcoming_weight / current_target
+            ratio = min(0.90, max(0.75, ratio))
+            inc = _positive_float(increment_lbs) or 5.0
+            from app.services.workout.set_programming import round_to_increment
+            adjusted = round_to_increment(actual_weight * ratio, inc)
+            if adjusted >= actual_weight and inc > 0:
+                adjusted = round_to_increment(actual_weight - inc, inc)
+            return adjusted if adjusted > 0 and adjusted < actual_weight else None
         if current_target is not None:
             allowed_drift = max(15.0, current_target * 0.20)
             if abs(actual_weight - current_target) > allowed_drift:
@@ -252,11 +652,115 @@ def _planned_backoff_transition_weight(
     return upcoming_weight
 
 
+def _set_programming_set_type(raw_type: Any, target_reps: str | None) -> str:
+    text = str(raw_type or "").strip().lower()
+    if text in ("heavy_top", "top_set"):
+        return "heavy_top"
+    if text in ("backoff", "volume", "technique", "warmup"):
+        return text
+    if target_reps:
+        try:
+            hi = int(str(target_reps).split("-", 1)[-1].strip())
+            if hi <= 6:
+                return "heavy_top"
+        except (ValueError, TypeError):
+            pass
+    return "volume"
+
+
+def _set_programming_progression_mode(raw_mode: Any, set_type: str) -> str:
+    text = str(raw_mode or "").strip().lower()
+    if text in ("load_first", "reps_first", "fixed_skill"):
+        return text
+    if set_type == "heavy_top":
+        return "load_first"
+    if set_type in ("technique", "warmup"):
+        return "fixed_skill"
+    return "reps_first"
+
+
+def _review_planned_set_from_live_scheme(
+    raw_scheme: list[dict] | None,
+    *,
+    completed_set_number: int,
+    fallback_target_reps: str,
+    fallback_weight_lbs: float | None,
+):
+    from app.services.workout.set_programming import PlannedSet as SPPlannedSet
+
+    row = _scheme_row_by_number(raw_scheme, completed_set_number) or {}
+    target_reps = _target_reps_hint(row, fallback_target_reps) or fallback_target_reps
+    set_type = _set_programming_set_type(row.get("setType") or row.get("set_type"), target_reps)
+    progression_mode = _set_programming_progression_mode(
+        row.get("progressionMode") or row.get("progression_mode"),
+        set_type,
+    )
+    target_rir = _finite_float(row.get("targetRir") if "targetRir" in row else row.get("target_rir"))
+    if target_rir is None:
+        target_rir = 2.0
+    target_weight = _positive_float(
+        row.get("targetWeightLbs") if "targetWeightLbs" in row else row.get("target_weight_lbs")
+    )
+    if target_weight is not None and target_weight > 2000:
+        target_weight = None
+    if target_weight is None:
+        target_weight = fallback_weight_lbs
+
+    return SPPlannedSet(
+        set_number=completed_set_number,
+        set_type=set_type,
+        target_reps=target_reps,
+        target_rir=float(max(0.0, min(5.0, target_rir))),
+        target_weight_lbs=target_weight,
+        progression_mode=progression_mode,
+    )
+
+
+def _should_use_reviewed_load_increase(
+    *,
+    reviewed: Any,
+    planned_set: Any,
+    actual_reps: int,
+    actual_rir: float | None,
+    feel: str | None,
+) -> bool:
+    """Let the deterministic set-programming reviewer override the older
+    progression engine only when the just-logged set was meaningfully
+    underloaded. This keeps normal heavy-top → backoff transitions intact
+    while preventing high-RIR overshoots from being crushed by stale
+    planned backoff weights."""
+    if reviewed is None or reviewed.action != "increase_load":
+        return False
+    if reviewed.next_set_weight_lbs is None:
+        return False
+    if str(feel or "").strip().lower() in ("pain", "form_breakdown", "form breakdown"):
+        return False
+    if any("big overshoot" in str(r) for r in reviewed.suspicion_reasons):
+        return True
+    if actual_rir is None:
+        return False
+    try:
+        from app.services.workout.set_programming import parse_rep_range
+        rep_range = parse_rep_range(planned_set.target_reps)
+    except Exception:
+        rep_range = None
+    if rep_range is None:
+        return False
+    _lo, hi = rep_range
+    return (
+        actual_reps >= hi + 2
+        and actual_rir >= float(planned_set.target_rir) + 1.0
+    )
+
+
+# Deprecated compatibility route. Canonical path:
+# `POST /recommendations/next-set`.
 @router.post("/recommend-weight")
 def recommend_weight(
     body: WeightRecommendRequest,
-    current_user: User = Depends(require_pro_feature("AI weight recommendations")),
+    current_user: User = Depends(require_pro_feature("Advanced in-workout progression guidance")),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Deterministic next-set recommendation based on recent performance and feedback.
 
@@ -266,14 +770,13 @@ def recommend_weight(
         1. Current-session completed sets (handled by the progression
            engine below — if `body.lastSets` is non-empty, that's the
            authoritative anchor).
-        2. `plannedTargetWeightLbs` propagated by the deterministic
-           planner from this user's history + goal-specific progression.
-        3. Exact exercise performance profile (live query against the
+        2. Exact exercise performance profile (live query against the
            user's recent completed sessions in this DB).
-        4. Transferred estimate from a similar exercise
+        3. Transferred estimate from a similar exercise
            (substitution_group → movement_pattern → muscle_bucket).
-        5. `lastSessionBestWeightLbs` (client-provided fallback).
-        6. `allTimeBestWeightLbs` (client-provided fallback).
+        4. `lastSessionBestWeightLbs` (client-provided exact-history fallback).
+        5. `allTimeBestWeightLbs` (client-provided fallback).
+        6. `plannedTargetWeightLbs` from the plan snapshot.
         7. Category default.
 
     Each step past (1) also populates a `recommendation` field on the
@@ -298,14 +801,30 @@ def recommend_weight(
             (body.equipment or "").strip().lower() in ("bodyweight", "none", "bw")
             or metadata_increment_lbs <= 0
         ):
+            trace = _live_recommendation_trace(
+                set_intent="bodyweight",
+                target_rep_range=body.targetReps,
+                prior_weight=0.0,
+                recommended_weight=0.0,
+                recommended_reps=0,
+                adjustment_reason="bodyweight_no_load",
+            )
             return {
                 "weightLbs": 0.0, "reps": 0,
                 "tip": "", "action": "continue", "repRange": None,
                 "debug": {}, "recommendation": None, "awaitingFeel": False,
                 "source": "bodyweight", "suspicionReasons": [], "fatigue_override": False,
+                "algorithmSource": LIVE_RECOMMENDATION_ALGORITHM_SOURCE,
+                "dataSource": "default",
+                "confidence": None,
+                "reasonTags": [],
+                "trace": trace,
             }
 
-        planned_set_count = body.targetSets if body.targetSets and body.targetSets > 0 else max(1, body.nextSetNumber)
+        planned_set_count = _safe_positive_int(
+            body.targetSets if body.targetSets and body.targetSets > 0 else max(1, body.nextSetNumber),
+            max(1, body.nextSetNumber),
+        )
         # Forward the plan's per-exercise rep target onto every planned set
         # so the progression engine honors the plan's intent instead of
         # defaulting to goal-based ranges. Also promote heavy ranges to
@@ -345,22 +864,23 @@ def recommend_weight(
         # we just skip the override. The downstream in-workout path
         # already tolerates a None snapshot.
         muscle_fatigue_dict: dict | None = None
-        try:
-            from app.services.workout.history import (
-                get_recent_completions_for_fatigue,
-            )
-            from app.services.workout.activity_impact import (
-                compute_rolling_fatigue,
-            )
-            _completions = get_recent_completions_for_fatigue(current_user.id, db)
-            if _completions:
-                _snap = compute_rolling_fatigue(_completions)
-                muscle_fatigue_dict = _snap.muscle_fatigue.to_dict()
-        except Exception:
-            logger.exception(
-                "[recommend-weight] fatigue snapshot lookup failed (non-fatal)"
-            )
-            muscle_fatigue_dict = None
+        if db is not None:
+            try:
+                from app.services.workout.history import (
+                    get_recent_completions_for_fatigue,
+                )
+                from app.services.workout.activity_impact import (
+                    compute_rolling_fatigue,
+                )
+                _completions = get_recent_completions_for_fatigue(current_user.id, db)
+                if _completions:
+                    _snap = compute_rolling_fatigue(_completions)
+                    muscle_fatigue_dict = _snap.muscle_fatigue.to_dict()
+            except Exception:
+                logger.exception(
+                    "[recommend-weight] fatigue snapshot lookup failed (non-fatal)"
+                )
+                muscle_fatigue_dict = None
 
         goal_type  = map_goal_type(body.goal)
         profile    = UserTrainingProfile(
@@ -376,15 +896,8 @@ def recommend_weight(
             week_number=max(1, body.weekNumber or 1),
         )
         ex_category = infer_exercise_category(body.exerciseName)
-        equipment_settings: dict | None = None
-        try:
-            from app.models import UserPreferences as _UserPreferences
-            prefs = db.exec(
-                select(_UserPreferences).where(_UserPreferences.user_id == current_user.id)
-            ).first()
-            equipment_settings = getattr(prefs, "equipment_settings", None) if prefs else None
-        except Exception:
-            equipment_settings = None
+        equipment_settings = _equipment_settings_for_user(db, current_user)
+        equipment_label = _equipment_label_for_recommendation(body.equipment, exercise_meta)
         try:
             from app.services.workout.load_equipment import load_increment_lbs, snap_load_lbs
             fallback_increment = (
@@ -397,7 +910,7 @@ def recommend_weight(
                 )
             )
             effective_increment_lbs = load_increment_lbs(
-                body.equipment,
+                equipment_label,
                 equipment_settings,
                 fallback=fallback_increment,
             )
@@ -407,73 +920,121 @@ def recommend_weight(
         # Layered anchor pipeline for the first set of the session.
         # `recommendation_meta` carries the source + confidence + reason
         # back to the client so the UI can explain the pick.
+        #
+        # Priority change (2026-05-08): the rep-aware history estimator
+        # runs FIRST. Previously we trusted `plannedTargetWeightLbs`
+        # blindly — but that target is computed once when the plan is
+        # generated, against THAT WEEK's prescribed rep range. When the
+        # rep range shifts between sessions (heavy 3–5 → volume 10–15),
+        # last week's 225 lb planned target gets handed back to the user
+        # unchanged for the new range. The fix: convert through e1RM via
+        # `recommend_starting_weight`, which applies the right %1RM for
+        # the current target_reps. We fall back to `plannedTargetWeightLbs`
+        # only when there's no exact-history profile to anchor from.
         recommendation_meta: dict | None = None
         if last_weight is None:
-            # Tier 2 — planner-propagated target (already history-aware
-            # from the offline propagation step).
-            if body.plannedTargetWeightLbs and body.plannedTargetWeightLbs > 0:
-                last_weight = float(body.plannedTargetWeightLbs)
-                recommendation_meta = {
-                    "source": "planned_target",
-                    "confidence": 0.90,
-                    "reason": "Using the target your plan set for this session",
-                }
-            else:
-                # Tiers 3 + 4 — live query against the user's DB profile
-                # for this exact exercise; if no direct history, run the
-                # layered transfer pipeline to borrow an estimate from a
-                # similar exercise.
-                slug = _resolve_exercise_slug(db, body.exerciseName, body.exerciseSlug)
-                target_ex: dict | None = None
-                profiles: dict = {}
-                if slug is not None:
-                    by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
-                    target_ex = by_slug.get(slug)
+            # Build the user's exercise profile up-front so both tiers
+            # can read from it.
+            slug = _resolve_exercise_slug(db, body.exerciseName, body.exerciseSlug)
+            target_ex: dict | None = None
+            profiles: dict = {}
+            if slug is not None:
+                by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+                target_ex = by_slug.get(slug)
+                if db is not None:
                     try:
                         profiles = merge_strength_anchor_profiles(
                             current_user.id,
                             db,
-                            build_performance_profile(current_user.id, db),
+                            build_performance_profile(current_user.id, db, window_days=90),
                         )
                     except Exception as e:
                         print(f"[recommend-weight] profile build failed (non-fatal): {e}")
                         profiles = {}
+                else:
+                    profiles = {}
 
-                    if target_ex is not None:
-                        rec_anchor = recommend_starting_weight(
-                            target_ex,
-                            profiles=profiles,
-                            all_exercises_by_slug=by_slug,
-                            target_reps=body.targetReps,
-                            experience=(body.experienceLevel or "intermediate"),
-                        )
-                        # Only accept the recommendation if it comes from
-                        # real user data. `default` means we couldn't
-                        # find anything — fall through to the
-                        # client-provided anchors below.
-                        if rec_anchor.source != "default" and rec_anchor.weight_lbs > 0:
-                            last_weight = rec_anchor.weight_lbs
-                            recommendation_meta = {
-                                "source": rec_anchor.source,
-                                "confidence": rec_anchor.confidence,
-                                "reason": rec_anchor.reason,
-                            }
+                if target_ex is not None:
+                    rec_anchor = recommend_starting_weight(
+                        target_ex,
+                        profiles=profiles,
+                        all_exercises_by_slug=by_slug,
+                        target_reps=body.targetReps,
+                        experience=(body.experienceLevel or "intermediate"),
+                    )
+                    # Only accept the recommendation if it comes from
+                    # real user data. `default` means we couldn't
+                    # find anything — fall through to the
+                    # client-provided anchors below.
+                    if rec_anchor.source != "default" and rec_anchor.weight_lbs > 0:
+                        last_weight = rec_anchor.weight_lbs
+                        recommendation_meta = {
+                            "source": rec_anchor.source,
+                            "confidence": rec_anchor.confidence,
+                            "reason": rec_anchor.reason,
+                        }
 
-            # Tier 5 — client-provided last-session best (oldest code path).
+            # Tier 5 — client-provided last-session best. Apply the same
+            # rep-aware conversion: convert that weight back to an e1RM
+            # via the reps it was performed at, then forward to a
+            # working weight at the target reps. Without this, a 5-rep
+            # PR last session gets handed back unchanged for a 10–15
+            # rep target. This beats the plan snapshot because it is
+            # fresher exact-exercise history from the user's log.
             if last_weight is None and body.lastSessionBestWeightLbs and body.lastSessionBestWeightLbs > 0:
-                last_weight = float(body.lastSessionBestWeightLbs)
+                last_weight = _rep_adjust_legacy_anchor(
+                    raw_weight=float(body.lastSessionBestWeightLbs),
+                    raw_reps=getattr(body, "lastSessionBestReps", None),
+                    target_reps=body.targetReps,
+                )
+                last_weight, recency_adj = _apply_reacclimation_if_stale(
+                    last_weight,
+                    body.lastSessionBestDate,
+                    increment_lbs=effective_increment_lbs,
+                )
+                reason = "Based on your most recent session's top set, adjusted for today's rep range"
+                confidence = 0.60
+                if recency_adj is not None:
+                    from app.services.workout.recency import adjust_confidence_for_recency
+                    confidence = adjust_confidence_for_recency(confidence, recency_adj)
+                    reason = f"{reason}; {recency_adj.reason}"
                 recommendation_meta = {
                     "source": "last_session_best",
-                    "confidence": 0.60,
-                    "reason": "Based on your most recent session's top set",
+                    "confidence": confidence,
+                    "reason": reason,
                 }
-            # Tier 6 — all-time best.
+            # Tier 6 — all-time best, same rep-aware adjustment.
             if last_weight is None and body.allTimeBestWeightLbs and body.allTimeBestWeightLbs > 0:
-                last_weight = float(body.allTimeBestWeightLbs)
+                last_weight = _rep_adjust_legacy_anchor(
+                    raw_weight=float(body.allTimeBestWeightLbs),
+                    raw_reps=getattr(body, "allTimeBestReps", None),
+                    target_reps=body.targetReps,
+                )
+                last_weight, recency_adj = _apply_reacclimation_if_stale(
+                    last_weight,
+                    body.allTimeBestDate,
+                    increment_lbs=effective_increment_lbs,
+                )
+                reason = "Based on your all-time best set, adjusted for today's rep range"
+                confidence = 0.45
+                if recency_adj is not None:
+                    from app.services.workout.recency import adjust_confidence_for_recency
+                    confidence = adjust_confidence_for_recency(confidence, recency_adj)
+                    reason = f"{reason}; {recency_adj.reason}"
                 recommendation_meta = {
                     "source": "all_time_best",
-                    "confidence": 0.45,
-                    "reason": "Based on your all-time best set for this exercise",
+                    "confidence": confidence,
+                    "reason": reason,
+                }
+            # Planner-propagated target — used only when there's no
+            # exact-history anchor. Plan snapshots can be stale for a
+            # 7-day PlanWeek, so they must not override a completed set.
+            if last_weight is None and body.plannedTargetWeightLbs and body.plannedTargetWeightLbs > 0:
+                last_weight = float(body.plannedTargetWeightLbs)
+                recommendation_meta = {
+                    "source": "planned_target",
+                    "confidence": 0.55,
+                    "reason": "Using the target your plan set for this session",
                 }
             # Tier 7 — category default.
             if last_weight is None:
@@ -529,7 +1090,7 @@ def recommend_weight(
         if snap_load_lbs is not None and last_weight is not None and last_weight > 0:
             snapped_last = snap_load_lbs(
                 last_weight,
-                body.equipment,
+                equipment_label,
                 equipment_settings,
                 fallback_increment=effective_increment_lbs,
             )
@@ -561,6 +1122,24 @@ def recommend_weight(
         )
 
         if rec.action.value == "end_exercise":
+            trace = _live_recommendation_trace(
+                set_intent=(rec.debug or {}).get("current_set_type"),
+                previous_set_classification=(rec.debug or {}).get("classification"),
+                target_rep_range=body.targetReps,
+                prior_weight=float(last_weight or 0) or None,
+                recommended_weight=float(last_weight or 0),
+                recommended_reps=0,
+                adjustment_reason=rec.action.value,
+                fatigue_applied=fatigue_override_flag or bool((rec.debug or {}).get("fatigue_drop_reps")),
+                rir_used=body.lastSets[-1].rir if body.lastSets else None,
+            )
+            recommendation_meta = _with_recommendation_metadata(
+                recommendation_meta,
+                data_source=_recommendation_data_source(
+                    (recommendation_meta or {}).get("source"),
+                    has_session_sets=bool(sets_completed),
+                ),
+            )
             return {
                 "weightLbs": float(last_weight or 0),
                 "reps": 0,
@@ -569,6 +1148,16 @@ def recommend_weight(
                 "debug": rec.debug,
                 "recommendation": recommendation_meta,
                 "fatigue_override": fatigue_override_flag,
+                "algorithmSource": LIVE_RECOMMENDATION_ALGORITHM_SOURCE,
+                "dataSource": (recommendation_meta or {}).get("dataSource") or "session_state",
+                "confidence": (recommendation_meta or {}).get("confidence"),
+                "reasonTags": _reason_tags_for_live_response(
+                    action=rec.action.value,
+                    debug=rec.debug,
+                    suspicion_reasons=[],
+                    fatigue_applied=fatigue_override_flag,
+                ),
+                "trace": trace,
             }
 
         rec_weight = float(rec.recommended_weight_lbs or last_weight or 0)
@@ -582,26 +1171,18 @@ def recommend_weight(
         reviewed_source = "deterministic"
         reviewed_reasons: list[str] = []
         reviewed_action_override: str | None = None
+        reviewed_load_increase_override = False
         if last_logged is not None:
             try:
                 from app.services.workout.in_workout_review import (
                     reviewed_next_set_recommendation,
                 )
-                from app.services.workout.set_programming import (
-                    PlannedSet as SPPlannedSet,
-                )
-                # Build a minimal planned-set proxy for the reviewer.
-                # Heavy rep schemes should review as load-first rather
-                # than pretending every set is generic volume work.
-                reviewed_set_type = "heavy_top" if inferred_set_type == SetType.TOP_SET else "volume"
-                reviewed_progression_mode = "load_first" if inferred_set_type == SetType.TOP_SET else "reps_first"
-                spp = SPPlannedSet(
-                    set_number=int(last_logged.setNumber or 1),
-                    set_type=reviewed_set_type,
-                    target_reps=body.targetReps or f"{rep_min}-{rep_max}",
-                    target_rir=float(last_logged.rir if last_logged.rir is not None else 2.0),
-                    target_weight_lbs=float(last_weight or 0.0) or None,
-                    progression_mode=reviewed_progression_mode,
+                completed_set_number = int(last_logged.setNumber or 1)
+                spp = _review_planned_set_from_live_scheme(
+                    body.setScheme,
+                    completed_set_number=completed_set_number,
+                    fallback_target_reps=body.targetReps or f"{rep_min}-{rep_max}",
+                    fallback_weight_lbs=float(last_weight or 0.0) or None,
                 )
                 exercise_stub = {
                     **exercise_meta,
@@ -628,15 +1209,17 @@ def recommend_weight(
                 if reviewed is not None:
                     reviewed_source = reviewed.source
                     reviewed_reasons = reviewed.suspicion_reasons
-                    deterministic_rir_override = (
-                        reviewed.source == "deterministic"
-                        and reviewed.action == "increase_load"
-                        and any("big overshoot" in r for r in reviewed.suspicion_reasons)
-                        and str(last_logged_feel or "").strip().lower() not in ("pain", "form_breakdown", "form breakdown")
+                    reviewed_load_increase_override = _should_use_reviewed_load_increase(
+                        reviewed=reviewed,
+                        planned_set=spp,
+                        actual_reps=int(last_logged.reps or 0),
+                        actual_rir=float(last_logged.rir) if last_logged.rir is not None else None,
+                        feel=last_logged_feel,
                     )
-                    use_reviewed_payload = reviewed.source != "deterministic" or deterministic_rir_override
-                    # For large RIR-backed overshoots, the deterministic reviewer
-                    # can override the older one-increment progression engine.
+                    use_reviewed_payload = reviewed.source != "deterministic" or reviewed_load_increase_override
+                    # For meaningful RIR-backed overshoots, the deterministic
+                    # set-programming reviewer can override the older
+                    # progression engine and stale top-set/backoff targets.
                     if reviewed.next_set_weight_lbs is not None and use_reviewed_payload:
                         rec_weight = float(reviewed.next_set_weight_lbs)
                     if reviewed.next_set_rep_target and use_reviewed_payload:
@@ -677,10 +1260,14 @@ def recommend_weight(
             completed_set_number=last_logged.setNumber if last_logged else None,
             next_set_number=rec.next_set_number,
             completed_actual_weight_lbs=last_logged.weightLbs if last_logged else None,
+            increment_lbs=effective_increment_lbs,
         )
         skip_planned_backoff = (
             response_action == "increase"
-            and any("big overshoot" in r for r in reviewed_reasons)
+            and (
+                reviewed_load_increase_override
+                or any("big overshoot" in r for r in reviewed_reasons)
+            )
         )
         if planned_backoff_weight is not None and last_logged is not None and not skip_planned_backoff:
             rec_weight = float(planned_backoff_weight)
@@ -698,12 +1285,64 @@ def recommend_weight(
         if snap_load_lbs is not None and rec_weight > 0:
             snapped_rec = snap_load_lbs(
                 rec_weight,
-                body.equipment,
+                equipment_label,
                 equipment_settings,
                 fallback_increment=effective_increment_lbs,
             )
             if snapped_rec is not None:
+                original_rec_weight = rec_weight
                 rec_weight = float(snapped_rec)
+                if abs(rec_weight - original_rec_weight) > 0.01:
+                    tip = _loadability_adjusted_text(original_rec_weight, rec_weight)
+
+        recommendation_meta = _with_recommendation_metadata(
+            recommendation_meta,
+            data_source=_recommendation_data_source(
+                (recommendation_meta or {}).get("source"),
+                has_session_sets=bool(sets_completed),
+            ),
+        )
+        data_source = (recommendation_meta or {}).get("dataSource") or _recommendation_data_source(
+            None,
+            has_session_sets=bool(sets_completed),
+        )
+        confidence = (recommendation_meta or {}).get("confidence")
+        reason_tags = _reason_tags_for_live_response(
+            action=response_action,
+            debug=rec.debug,
+            suspicion_reasons=reviewed_reasons,
+            fatigue_applied=fatigue_override_flag,
+        )
+        trace = _live_recommendation_trace(
+            set_intent=(rec.debug or {}).get("next_set_type") or (rec.debug or {}).get("current_set_type"),
+            previous_set_classification=(rec.debug or {}).get("classification"),
+            target_rep_range=f"{rep_min}-{rep_max}",
+            prior_weight=(
+                float(last_logged.weightLbs or 0.0)
+                if last_logged is not None
+                else (float(last_weight or 0.0) if last_weight else None)
+            ),
+            recommended_weight=rec_weight,
+            recommended_reps=rec_reps,
+            adjustment_reason=response_action,
+            fatigue_applied=fatigue_override_flag or bool((rec.debug or {}).get("fatigue_drop_reps")),
+            rir_used=last_logged.rir if last_logged is not None else None,
+        )
+        ai_safety = prepare_ai_safety_review(
+            _ai_safety_payload_for_next_set(
+                body=body,
+                exercise_meta=exercise_meta,
+                numeric_load=metadata_increment_lbs > 0,
+                recommended_weight_lbs=rec_weight,
+                recommended_reps=rec_reps,
+                data_source=data_source,
+                confidence=confidence,
+                action=response_action,
+                reason_tags=reason_tags,
+            ),
+            user_id=getattr(current_user, "id", None),
+            background_tasks=background_tasks,
+        )
 
         return {
             "weightLbs": rec_weight,
@@ -724,6 +1363,12 @@ def recommend_weight(
             "awaitingFeel": False,
             "source": reviewed_source,
             "suspicionReasons": reviewed_reasons,
+            "algorithmSource": LIVE_RECOMMENDATION_ALGORITHM_SOURCE,
+            "dataSource": data_source,
+            "confidence": confidence,
+            "reasonTags": reason_tags,
+            "trace": trace,
+            "aiSafety": ai_safety,
             # Top-level flag so the UI can style the rec differently
             # (e.g. "recovering" badge) without parsing the reason
             # string. True iff the fatigue overlay downshifted the
@@ -752,7 +1397,13 @@ _ONE_RM_SHOWCASE_SLUGS: tuple[str, ...] = (
 )
 
 
-def _build_showcase_lifts(profiles: dict, sets_by_name: dict, showcase_slugs: tuple[str, ...] = _ONE_RM_SHOWCASE_SLUGS) -> list[dict]:
+def _build_showcase_lifts(
+    profiles: dict,
+    sets_by_name: dict,
+    showcase_slugs: tuple[str, ...] = _ONE_RM_SHOWCASE_SLUGS,
+    *,
+    strength_signals: dict | None = None,
+) -> list[dict]:
     """Pure helper: overlay rolling-e1RM on top of Epley `estimated_1rm_lbs`
     so the showcase tile matches the chart + PR cards.
 
@@ -762,6 +1413,12 @@ def _build_showcase_lifts(profiles: dict, sets_by_name: dict, showcase_slugs: tu
         from the user's logged sets. Empty dict is fine.
       showcase_slugs: ordered tuple of slugs to render. Defaults to the
         canonical showcase list.
+      strength_signals: optional ``{slug: StrengthSignal}`` from
+        ``build_strength_signal_profile``. When present, the lift dict
+        also carries trend / freshSetCount / dataQuality fields and the
+        ``oneRepMaxLbs`` prefers the fatigue-aware signal — falls back
+        to the rolling overlay when freshness data is sparse so an
+        early-career user still sees a number.
 
     Returns the list of lift dicts the route ships in ``{"lifts": [...]}``.
     Extracted from the route handler so the rolling overlay is directly
@@ -780,8 +1437,24 @@ def _build_showcase_lifts(profiles: dict, sets_by_name: dict, showcase_slugs: tu
             est = compute_rolling_e1rm(sets_for_lift, role="primary")
             if est is not None and est.e1rm_lbs > 0:
                 rolling_lbs = est.e1rm_lbs
-        display_1rm = rolling_lbs if rolling_lbs is not None else p.estimated_1rm_lbs
-        out.append({
+
+        # Prefer the freshness-aware signal when available + non-rough.
+        # Falls back to rolling, then to plain Epley. The "rough" tag
+        # is reserved for the explicit raw top-set fallback so the UI
+        # can show a "based on raw top sets" caveat when shown.
+        sig = (strength_signals or {}).get(slug)
+        signal_lbs: float | None = None
+        signal_quality = "rough"
+        if sig is not None and sig.estimated_one_rep_max > 0 and sig.data_quality != "missing":
+            signal_lbs = sig.estimated_one_rep_max
+            signal_quality = sig.data_quality
+
+        display_1rm = (
+            signal_lbs
+            if signal_lbs is not None
+            else (rolling_lbs if rolling_lbs is not None else p.estimated_1rm_lbs)
+        )
+        entry = {
             "slug": p.slug,
             "name": p.name,
             "oneRepMaxLbs": round(display_1rm, 1),
@@ -790,7 +1463,16 @@ def _build_showcase_lifts(profiles: dict, sets_by_name: dict, showcase_slugs: tu
             "sessionCount": int(p.session_count),
             "confidence": round(p.confidence, 2),
             "lastPerformedOn": p.last_performed_on.isoformat() if p.last_performed_on else None,
-        })
+            # Always-present new fields. When no signal is available
+            # they describe the fallback ("rough") so the UI can still
+            # render a caveat instead of the fields being absent.
+            "trend28dPct": sig.trend_28d_pct if sig else None,
+            "trend56dPct": sig.trend_56d_pct if sig else None,
+            "freshSetCount": int(sig.fresh_set_count) if sig else 0,
+            "signalConfidence": sig.confidence if sig else "low",
+            "dataQuality": signal_quality,
+        }
+        out.append(entry)
     return out
 
 
@@ -861,7 +1543,21 @@ def one_rep_max_showcase(
             set_type=es.set_type,
         ))
 
-    return {"lifts": _build_showcase_lifts(profiles, sets_by_name)}
+    # Fatigue-aware Fresh Strength Signal. When a user logs RIR + the
+    # showcase lift sits early in the session, this is the honest
+    # number. When the data is sparse / always-late, the helper
+    # returns `data_quality='partial'` and `_build_showcase_lifts`
+    # falls back to the rolling overlay so the tile still renders.
+    try:
+        from app.services.workout.strength_signal import build_strength_signal_profile
+        strength_signals = build_strength_signal_profile(
+            current_user.id, db, only_slugs=_ONE_RM_SHOWCASE_SLUGS,
+        )
+    except Exception as e:
+        print(f"[one-rep-max] strength signal build failed (non-fatal): {e}")
+        strength_signals = {}
+
+    return {"lifts": _build_showcase_lifts(profiles, sets_by_name, strength_signals=strength_signals)}
 
 
 @router.get("/fitness/composite-score")
@@ -887,10 +1583,21 @@ def fitness_composite_score(
       - `build_performance_profile` for Strength pillar (Epley 1RMs)
       - `WorkoutCompletion` last 14 days for Cardio + Consistency
 
+    `total` is a 28-day moving average of the daily score (smoothed
+    headline). `rawTotal` is today's instant score, and `pillars` are
+    today's instant subscores — the breakdown reflects current state
+    while the headline trends. A new user with N<28 days of snapshots
+    is averaged over the N they have (`sampleCount`). Pillar targets
+    also adapt: a user whose first workout was <14/28 days ago is
+    scored against a pro-rated window, not a full one.
+
     Returns:
         {
-          "total": 70.1,
-          "rating": "Strong",
+          "total": 70.1,          # 28-day moving average (headline)
+          "rawTotal": 72.5,       # today's instant score
+          "rating": "Strong",     # band of `total`
+          "windowDays": 28,
+          "sampleCount": 12,      # daily snapshots inside the window
           "pillars": [
             {"name": "Strength", "score": 97.9, "reason": "...", "dataQuality": "full"},
             {"name": "Cardio", "score": 19.0, "reason": "...", "dataQuality": "full"},
@@ -899,14 +1606,16 @@ def fitness_composite_score(
           ]
         }
     """
-    from datetime import datetime, timedelta
-    from app.services.workout.fitness_score import compute_fitness_score
+    from datetime import datetime, timedelta, date
+    from app.services.workout.fitness_score import compute_fitness_score, _rating_for
     from app.models import (
         WorkoutCompletion,
         WorkoutSession,
         WorkoutExercise,
         ExerciseSet,
         Exercise as SeedExercise,
+        FitnessScoreSnapshot,
+        DailyHealthSnapshot,
     )
 
     try:
@@ -922,6 +1631,7 @@ def fitness_composite_score(
     # WorkoutCompletion.completed_at. Replaces deprecated datetime.utcnow().
     from datetime import timezone as _tz
     _now_naive = datetime.now(_tz.utc).replace(tzinfo=None)
+    today = _now_naive.date()
     cutoff_14d = _now_naive - timedelta(days=14)
     cutoff_28d = _now_naive - timedelta(days=28)
     cutoff_56d = _now_naive - timedelta(days=56)
@@ -936,15 +1646,51 @@ def fitness_composite_score(
         print(f"[fitness-score] recent completions query failed: {e}")
         rows = []
 
-    recent_completions = [
-        {
+    def _completion_to_dict(r: WorkoutCompletion) -> dict:
+        return {
             "focus": r.focus_label,
             "duration_seconds": r.duration_seconds,
             "workout_date": r.workout_date.isoformat() if r.workout_date else None,
+            "activity_category": r.activity_category,
+            "activity_subtype": r.activity_subtype,
+            "cardio_style": r.cardio_style,
+            "distance_miles": r.distance_miles,
+            "hr_summary": r.hr_summary,
+            "cardio_load": r.cardio_load,
         }
-        for r in rows
-    ]
+
+    recent_completions = [_completion_to_dict(r) for r in rows]
     session_count_14d = len(rows)
+
+    # Prior-window completions (days 15–28 ago) feed the cardio
+    # progression sub-pillar. Best-effort; failure just skips the signal.
+    prior_window_completions: list[dict] | None = None
+    try:
+        prior_rows = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.completed_at >= cutoff_28d)
+            .where(WorkoutCompletion.completed_at < cutoff_14d)
+            .order_by(WorkoutCompletion.completed_at.desc())
+        ).all()
+        prior_window_completions = [_completion_to_dict(r) for r in prior_rows]
+    except Exception as e:
+        print(f"[fitness-score] prior-window completions query failed (non-fatal): {e}")
+        prior_window_completions = None
+
+    vo2_max: float | None = None
+    try:
+        latest_vo2 = db.exec(
+            select(DailyHealthSnapshot.vo2_max)
+            .where(DailyHealthSnapshot.user_id == current_user.id)
+            .where(DailyHealthSnapshot.vo2_max != None)  # noqa: E711
+            .order_by(DailyHealthSnapshot.snapshot_date.desc())
+        ).first()
+        if latest_vo2 is not None:
+            vo2_max = float(latest_vo2)
+    except Exception as e:
+        print(f"[fitness-score] VO2 lookup failed (non-fatal): {e}")
+        vo2_max = None
 
     # ── Strength pillar inputs ────────────────────────────────────
     # Walk the structured WorkoutSession + WorkoutExercise + ExerciseSet
@@ -1079,6 +1825,51 @@ def fitness_composite_score(
     except Exception:
         user_age = None
 
+    # Build the fatigue-aware Fresh Strength Signal so the Strength
+    # pillar's compound-base sub-score reflects clean strength, not
+    # late-session top sets. Falls back per-slug to the raw profile
+    # eRM when fresh data is sparse (see _score_strength_compound_base).
+    try:
+        from app.services.workout.strength_signal import build_strength_signal_profile
+        strength_signals = build_strength_signal_profile(current_user.id, db)
+    except Exception as e:
+        print(f"[fitness-score] strength signal build failed (non-fatal): {e}")
+        strength_signals = {}
+
+    # ── Adaptive-window input ─────────────────────────────────────
+    # Days since the user's first logged workout. When shorter than a
+    # pillar's 14-/28-day window the pillar target scales down so a
+    # newer user with a strong first week isn't measured against a
+    # full-window bar. Looks at both WorkoutCompletion (front-page
+    # completions) and WorkoutSession (structured logs) and takes the
+    # earlier of the two. None → compute_fitness_score uses full windows.
+    history_days: int | None = None
+    try:
+        first_dates: list[date] = []
+        earliest_completion = db.exec(
+            select(WorkoutCompletion.completed_at)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .order_by(WorkoutCompletion.completed_at.asc())
+        ).first()
+        if earliest_completion is not None:
+            first_dates.append(
+                earliest_completion.date()
+                if hasattr(earliest_completion, "date")
+                else earliest_completion
+            )
+        earliest_session = db.exec(
+            select(WorkoutSession.workout_date)
+            .where(WorkoutSession.user_id == current_user.id)
+            .order_by(WorkoutSession.workout_date.asc())
+        ).first()
+        if earliest_session is not None:
+            first_dates.append(earliest_session)
+        if first_dates:
+            history_days = max(1, (today - min(first_dates)).days + 1)
+    except Exception as e:
+        print(f"[fitness-score] history_days lookup failed (non-fatal): {e}")
+        history_days = None
+
     score = compute_fitness_score(
         profiles=profiles,
         bodyweight_lbs=bodyweight_lbs,
@@ -1092,8 +1883,66 @@ def fitness_composite_score(
         distinct_exercises=len(distinct_exercise_names),
         progression_ratio=progression_ratio,
         user_age=user_age,
+        vo2_max=vo2_max,
+        history_days=history_days,
+        strength_signals=strength_signals,
+        prior_window_completions=prior_window_completions,
     )
-    return score.to_dict()
+
+    # ── Persist today's reading + return the 28-day moving average ──
+    # The headline `total` the client shows is the average of the
+    # daily snapshots over the last 28 days — or however many exist,
+    # so a brand-new user just sees today's value (sampleCount 1).
+    # `rawTotal` carries today's instant score so the smoothing stays
+    # inspectable. Snapshots are sampled on each call (one row per day,
+    # upserted), not by a cron — a user who opens the app rarely gets
+    # fewer samples in the window, which is the intended behavior.
+    result = score.to_dict()
+    raw_total = result["total"]
+    result["rawTotal"] = raw_total
+    result["windowDays"] = 28
+    result["sampleCount"] = 1
+    try:
+        pillar_by_name = {p.name: round(p.score, 2) for p in score.pillars}
+        existing = db.exec(
+            select(FitnessScoreSnapshot)
+            .where(FitnessScoreSnapshot.user_id == current_user.id)
+            .where(FitnessScoreSnapshot.snapshot_date == today)
+        ).first()
+        if existing is not None:
+            existing.total = raw_total
+            existing.strength = pillar_by_name.get("Strength", 0.0)
+            existing.cardio = pillar_by_name.get("Cardio", 0.0)
+            existing.consistency = pillar_by_name.get("Consistency", 0.0)
+            existing.recovery = pillar_by_name.get("Recovery", 0.0)
+            db.add(existing)
+        else:
+            db.add(FitnessScoreSnapshot(
+                user_id=current_user.id,
+                snapshot_date=today,
+                total=raw_total,
+                strength=pillar_by_name.get("Strength", 0.0),
+                cardio=pillar_by_name.get("Cardio", 0.0),
+                consistency=pillar_by_name.get("Consistency", 0.0),
+                recovery=pillar_by_name.get("Recovery", 0.0),
+            ))
+        db.commit()
+
+        window_start = today - timedelta(days=27)  # 28-day inclusive window
+        snaps = db.exec(
+            select(FitnessScoreSnapshot.total)
+            .where(FitnessScoreSnapshot.user_id == current_user.id)
+            .where(FitnessScoreSnapshot.snapshot_date >= window_start)
+        ).all()
+        if snaps:
+            smoothed = sum(snaps) / len(snaps)
+            result["total"] = round(smoothed, 1)
+            result["rating"] = _rating_for(smoothed)
+            result["sampleCount"] = len(snaps)
+    except Exception as e:
+        print(f"[fitness-score] snapshot / moving-average failed (non-fatal): {e}")
+        db.rollback()
+    return result
 
 
 # ── MET classification for calorie estimation ────────────────────────
@@ -1252,6 +2101,7 @@ def generate_workout_summary(
                 .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
                 .where(WorkoutExercise.session_id == prior.id)
                 .where(ExerciseSet.completed == True)  # noqa: E712
+                .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
                 .order_by(WorkoutExercise.order_index, ExerciseSet.set_number)
             ).all()
             per_ex: dict[str, list[str]] = {}
@@ -1577,15 +2427,19 @@ def generate_warmup(
 # Shown in the active-workout card BEFORE the user logs a set, so the
 # user can see recommended weight + reps + set intent (heavy/backoff/
 # volume/technique) + a one-sentence rationale. Zero AI cost.
+# Deprecated compatibility route. Canonical path:
+# `POST /recommendations/pre-set`.
 @router.post("/pre-set-recommendation")
 def pre_set_recommendation(
     body: PreSetRecommendRequest,
     current_user: User = Depends(require_pro_feature("In-workout set review")),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     from app.services.workout.set_programming import (
         PlannedSet as PS,
         NextSetRecommendation,
+        load_increment_for,
         parse_rep_range,
         recommend_next_set,
     )
@@ -1593,17 +2447,29 @@ def pre_set_recommendation(
         enrich_to_set_recommendation,
     )
 
-    # 1. Resolve the planned set we're about to do.
-    if body.plannedSetNumber < 1 or body.plannedSetNumber > max(1, len(body.plannedSets)):
-        raise HTTPException(status_code=400, detail="plannedSetNumber out of range")
-    raw = body.plannedSets[body.plannedSetNumber - 1]
+    # 1. Resolve the planned set we're about to do. Client plan snapshots are
+    # treated as advisory execution context: stale/missing/malformed rows fall
+    # back to a safe deterministic working set instead of crashing the workout.
+    planned_set_number = _safe_positive_int(body.plannedSetNumber, 1)
+    raw = _scheme_row_by_number(body.plannedSets, planned_set_number) or {}
+    fallback_weight = _positive_float(body.weightLbs)
+    if fallback_weight is not None and fallback_weight > 2000:
+        fallback_weight = None
+    row_target_weight = _positive_float(raw.get("targetWeightLbs") if "targetWeightLbs" in raw else raw.get("target_weight_lbs"))
+    if row_target_weight is not None and row_target_weight > 2000:
+        row_target_weight = None
+    target_reps_hint = _target_reps_hint(raw, "8-12") or "8-12"
+    set_type_hint = _set_programming_set_type(raw.get("setType") or raw.get("set_type"), target_reps_hint)
     planned = PS(
-        set_number=int(raw.get("setNumber") or body.plannedSetNumber),
-        set_type=raw.get("setType") or "working",
-        target_reps=str(raw.get("targetReps") or "8-12"),
-        target_rir=float(raw.get("targetRir") or 2.0),
-        target_weight_lbs=(float(raw["targetWeightLbs"]) if raw.get("targetWeightLbs") else None),
-        progression_mode=raw.get("progressionMode") or "load_first",
+        set_number=planned_set_number,
+        set_type=set_type_hint,
+        target_reps=target_reps_hint,
+        target_rir=float(max(0.0, min(5.0, _finite_float(raw.get("targetRir") if "targetRir" in raw else raw.get("target_rir")) or 2.0))),
+        target_weight_lbs=row_target_weight or fallback_weight,
+        progression_mode=_set_programming_progression_mode(
+            raw.get("progressionMode") or raw.get("progression_mode"),
+            set_type_hint,
+        ),
     )
 
     # 2. Build a minimal exercise dict for the increment helper.
@@ -1614,16 +2480,35 @@ def pre_set_recommendation(
         body.equipment,
         body.primaryMuscle,
     )
+    from app.services.workout.exercise_metadata import uses_numeric_load
+    numeric_load = uses_numeric_load(exercise)
+    equipment_label = _equipment_label_for_recommendation(body.equipment, exercise)
+    equipment_settings = _equipment_settings_for_user(db, current_user)
+    fallback_increment = load_increment_for(exercise)
+    if fallback_increment <= 0:
+        fallback_increment = 2.5 if "dumbbell" in (equipment_label or "").lower() else 5.0
+    try:
+        from app.services.workout.load_equipment import load_increment_lbs
+        effective_increment_lbs = load_increment_lbs(
+            equipment_label,
+            equipment_settings,
+            fallback=fallback_increment,
+        )
+    except Exception:
+        effective_increment_lbs = fallback_increment
 
     prior = body.priorSetsThisSession or []
     last_session = body.lastSessionSets or []
+    if not numeric_load:
+        planned.target_weight_lbs = None
+        last_session = []
 
     # DB-side fallback: the client's name-based `lastSessionSets` lookup
     # misses when the generated plan exercise name differs from the logged
     # history name (e.g. "Back Squat" vs "Barbell Back Squat"). Ask the DB
     # directly via slug; this is what the /recommend-weight endpoint does and
     # keeps the two endpoints consistent.
-    if not last_session:
+    if numeric_load and not last_session and db is not None:
         try:
             from app.services.workout.history import db_history_lookup
             slug = _resolve_exercise_slug(db, body.exerciseName, body.exerciseSlug)
@@ -1631,7 +2516,19 @@ def pre_set_recommendation(
                 hist = db_history_lookup(current_user.id, db)(slug)
                 if hist:
                     last_session = [
-                        {"reps": int(s.reps or 0), "weightLbs": float(s.weight_lbs or 0.0)}
+                        {
+                            "reps": int(s.reps or 0),
+                            "weightLbs": float(s.weight_lbs or 0.0),
+                            # Forward RIR so the first-set-of-session
+                            # decision below can route through the
+                            # under-rep regression path instead of
+                            # silently holding the same weight.
+                            "rir": getattr(s, "rir", None),
+                            "date": (
+                                s.performed_on.isoformat()
+                                if getattr(s, "performed_on", None) else None
+                            ),
+                        }
                         for s in hist
                         if (s.weight_lbs or 0) > 0
                     ]
@@ -1646,6 +2543,7 @@ def pre_set_recommendation(
     #      (so Set 3 knows what happened on Set 2)
     #    - Else if last session data exists → use that as the anchor
     #    - Else → fall back to planner's target_weight_lbs
+    data_source = "default"
     if prior:
         last = prior[-1]
         det = recommend_next_set(
@@ -1656,6 +2554,111 @@ def pre_set_recommendation(
             actual_rir=last.get("rir"),
             rep_range=parse_rep_range(planned.target_reps),
         )
+        data_source = "session_state"
+    elif numeric_load and last_session:
+        # Infer a plausible opening weight from the best comparable
+        # last-session set. Exact recent history beats the plan snapshot:
+        # PlanWeek targets can be several days old, while this is what the
+        # user actually lifted last time.
+        best = max(
+            last_session,
+            key=lambda s: float(s.get("weightLbs") or s.get("weight_lbs") or 0)
+            * max(1, int(s.get("reps") or s.get("actual_reps") or 1)),
+        )
+        raw_weight = float(best.get("weightLbs") or best.get("weight_lbs") or 0)
+        raw_reps = best.get("reps") or best.get("actual_reps")
+        # Did the user consistently MISS the target rep range last time?
+        # If the entire last session under-repped the bottom of the
+        # prescribed range (e.g. target 8-10, every set hit 4-6), opening
+        # at the same weight will reproduce the failure. Compute this
+        # BEFORE the rep-aware rescale so the explanation can call out
+        # the reason for the drop.
+        target_lo: int | None = None
+        try:
+            from app.services.workout.set_programming import parse_rep_range as _parse_rr
+            rr = _parse_rr(planned.target_reps)
+            target_lo = rr[0] if rr else None
+        except Exception:
+            target_lo = None
+
+        def _set_reps(s: dict) -> int:
+            try:
+                return int(s.get("reps") or s.get("actual_reps") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        majority_missed = False
+        if target_lo and target_lo > 0:
+            graded_sets = [s for s in last_session if _set_reps(s) > 0]
+            if graded_sets:
+                missed = sum(1 for s in graded_sets if _set_reps(s) < target_lo)
+                # "Majority" = strictly more than half of recorded sets
+                # were below the lo end of the rep range.
+                majority_missed = missed * 2 > len(graded_sets)
+
+        weight = _rep_adjust_legacy_anchor(
+            raw_weight=raw_weight,
+            raw_reps=raw_reps,
+            target_reps=planned.target_reps,
+        ) or raw_weight
+        weight, recency_adj = _apply_reacclimation_if_stale(
+            weight,
+            _history_row_performed_on(best),
+            increment_lbs=effective_increment_lbs,
+        )
+        # Build the action + explanation. The historic code path always
+        # said "hold_load" even when the rescaled weight was meaningfully
+        # lower — the frontend treated that as "no change" and showed the
+        # original weight, so a user who under-repped 4 reps under target
+        # saw the same recommendation week after week. Now we surface a
+        # real `reduce_load` action when either:
+        #   (a) the rescaled weight came in lower than what she lifted, or
+        #   (b) she missed the rep target on a majority of last session's
+        #       sets (most direct signal — covers the case where the
+        #       Epley rescale happens to round to the same plate)
+        weight_dropped = (
+            raw_weight > 0
+            and weight > 0
+            and weight < raw_weight - 0.5
+        )
+        action: str = "hold_load"
+        if majority_missed or weight_dropped:
+            action = "reduce_load"
+            # Clamp the recommendation when majority_missed but the rescale
+            # rounded equal — force at least one increment down so the
+            # next set is actually different.
+            if majority_missed and not weight_dropped and raw_weight > 0:
+                step = effective_increment_lbs if effective_increment_lbs and effective_increment_lbs > 0 else 5.0
+                from app.services.workout.set_programming import round_to_increment
+                weight = max(step, round_to_increment(raw_weight - step, step))
+                weight_dropped = True
+
+        if recency_adj is not None:
+            explanation = (
+                f"Opening at {int(weight)} lb — {recency_adj.reason} for "
+                f"{body.exerciseName}."
+            )
+        elif action == "reduce_load":
+            # Tell the user WHY we dropped — vague "use lighter weight"
+            # messages train users to ignore the suggestion.
+            range_label = planned.target_reps or "the target range"
+            explanation = (
+                f"Opening at {int(weight)} lb — last session you missed the "
+                f"{range_label}-rep target on most sets, so we're dropping "
+                f"the working weight to get clean reps before going heavy again."
+            )
+        else:
+            explanation = (
+                f"Opening at {int(weight)} lb — same as your best working set last "
+                f"{body.exerciseName} session."
+            ) if weight > 0 else "Opening at the planned weight."
+        det = NextSetRecommendation(
+            next_set_weight_lbs=weight if weight > 0 else planned.target_weight_lbs,
+            next_set_rep_target=planned.target_reps,
+            action=action,
+            explanation=explanation,
+        )
+        data_source = "exact_exercise_history"
     elif planned.target_weight_lbs and planned.target_weight_lbs > 0:
         det = NextSetRecommendation(
             next_set_weight_lbs=planned.target_weight_lbs,
@@ -1666,19 +2669,7 @@ def pre_set_recommendation(
                 "target your plan set for today."
             ),
         )
-    elif last_session:
-        # Infer a plausible opening weight from the best comparable last-session set.
-        best = max(last_session, key=lambda s: float(s.get("weightLbs") or 0))
-        weight = float(best.get("weightLbs") or 0)
-        det = NextSetRecommendation(
-            next_set_weight_lbs=weight if weight > 0 else planned.target_weight_lbs,
-            next_set_rep_target=planned.target_reps,
-            action="hold_load",
-            explanation=(
-                f"Opening at {int(weight)} lb — same as your best working set last "
-                f"{body.exerciseName} session."
-            ) if weight > 0 else "Opening at the planned weight.",
-        )
+        data_source = "plan_snapshot"
     else:
         # First-ever session on this exercise — use the planner's
         # deterministic target/default and calibrate from the user's first set.
@@ -1693,6 +2684,19 @@ def pre_set_recommendation(
             ),
         )
 
+    if numeric_load and det.next_set_weight_lbs is not None and det.next_set_weight_lbs > 0:
+        original_weight = float(det.next_set_weight_lbs)
+        snapped_weight = _snap_recommendation_load(
+            original_weight,
+            equipment_label=equipment_label,
+            equipment_settings=equipment_settings,
+            fallback_increment=effective_increment_lbs,
+        )
+        if snapped_weight is not None:
+            det.next_set_weight_lbs = float(snapped_weight)
+            if abs(float(snapped_weight) - original_weight) > 0.01:
+                det.explanation = _loadability_adjusted_text(original_weight, float(snapped_weight))
+
     rec = enrich_to_set_recommendation(
         det=det,
         planned=planned,
@@ -1703,8 +2707,31 @@ def pre_set_recommendation(
         is_first_set=is_first_set,
         rep_range=parse_rep_range(planned.target_reps),
         source="deterministic",
+        data_source=(
+            "session_state" if prior
+            else data_source
+        ),
     )
-    return rec.to_dict()
+    out = rec.to_dict()
+    out["aiSafety"] = prepare_ai_safety_review(
+        _ai_safety_payload_for_pre_set(
+            body=body,
+            exercise_meta=exercise,
+            numeric_load=numeric_load,
+            recommended_weight_lbs=rec.recommended_weight_lbs,
+            recommended_reps=rec.recommended_reps,
+            data_source=rec.data_source,
+            confidence=rec.confidence,
+            action=rec.change_direction,
+            planned_weight_lbs=row_target_weight or fallback_weight,
+            last_session_sets=last_session,
+            prior_sets=prior,
+            reason_tags=rec.reason_tags,
+        ),
+        user_id=getattr(current_user, "id", None),
+        background_tasks=background_tasks,
+    )
+    return out
 
 
 # ── Custom-food macro + micro validation ────────────────────────────
@@ -1742,179 +2769,10 @@ _FOOD_VALIDATION_SCHEMA = {
 }
 
 
-@router.post("/enrich-food-db")
-def enrich_food_db(
-    limit: int = 0,
-    current_user: User = Depends(require_pro_feature("AI food enrichment")),
-    db: Session = Depends(get_session),
-):
-    """Bootstrap endpoint — seed every `food_nutrition` row that's
-    missing Layer 2 micronutrients with AI-generated USDA values.
-
-    Pass `?limit=N` to process a test batch. Omit for a full pass.
-    Writes directly to `FoodNutrition.extra_nutrients` (legacy fiber/
-    sugar/sodium columns are also backfilled). Idempotent — skips rows
-    already enriched.
-
-    Returns counts so the client can render a progress/result toast.
-    Cost: ~$0.0005 per food enriched, batched at 10 per AI call."""
-    from app.models import Food, FoodNutrition
-
-    try:
-        from openai import OpenAI
-        api_key = get_openai_api_key()
-        if not api_key:
-            raise HTTPException(status_code=503, detail="OpenAI not configured")
-        client = OpenAI(api_key=api_key)
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"OpenAI init failed: {e}")
-
-    REQUIRED = (
-        "fiber", "sugar", "sodium", "cholesterol",
-        "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
-        "omega_3", "omega_6",
-        "potassium", "calcium", "iron", "magnesium",
-        "vitamin_c", "vitamin_d", "vitamin_b12",
-    )
-    BATCH = 10
-
-    def _needs(nut: FoodNutrition) -> bool:
-        present = 0
-        for k in REQUIRED:
-            if k in ("fiber", "sugar"):
-                val = getattr(nut, k, None)
-            elif k == "sodium":
-                val = getattr(nut, "sodium_mg", None)
-            else:
-                val = (getattr(nut, "extra_nutrients", None) or {}).get(k)
-            if val is not None and float(val or 0) > 0:
-                present += 1
-        return present < 10
-
-    nut_rows = db.exec(select(FoodNutrition)).all()
-    candidates = [n for n in nut_rows if _needs(n)]
-    if limit > 0:
-        candidates = candidates[:limit]
-
-    print(f"[enrich-food-db] {len(candidates)} rows need enrichment (of {len(nut_rows)})")
-    if not candidates:
-        return {"total": len(nut_rows), "enriched": 0, "skipped": len(nut_rows), "errors": 0}
-
-    food_ids = [n.food_id for n in candidates]
-    foods_by_id: dict[int, Food] = {
-        f.id: f for f in db.exec(select(Food).where(Food.id.in_(food_ids))).all()
-    }
-
-    enriched_count = 0
-    error_count = 0
-
-    for start in range(0, len(candidates), BATCH):
-        batch = candidates[start : start + BATCH]
-        pairs = [(foods_by_id[n.food_id], n) for n in batch if n.food_id in foods_by_id]
-        if not pairs:
-            continue
-        items_payload = [{"food_id": f.id, "name": f.name, "reference_unit": "100g"} for f, _ in pairs]
-        prompt = (
-            "Return USDA per-100g micronutrient values for each food. Use snake_case "
-            "keys exactly as shown. Be accurate — USDA reference data only.\n"
-            "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat/"
-            "omega_3/omega_6 in g; sodium/cholesterol/potassium/calcium/iron/magnesium/"
-            "vitamin_c in mg; vitamin_d and vitamin_b12 in mcg.\n\n"
-            f"Foods:\n{json.dumps(items_payload, indent=2)}\n\n"
-            "Return JSON:\n"
-            '{"foods": [{"food_id": int, "name": str, "micros": {"fiber": 0, "sugar": 0, '
-            '"sodium": 0, "cholesterol": 0, "saturated_fat": 0, "monounsaturated_fat": 0, '
-            '"polyunsaturated_fat": 0, "omega_3": 0, "omega_6": 0, "potassium": 0, '
-            '"calcium": 0, "iron": 0, "magnesium": 0, "vitamin_c": 0, "vitamin_d": 0, '
-            '"vitamin_b12": 0}}]}'
-        )
-        try:
-            resp = client.chat.completions.create(
-                model=os.getenv("MODEL_FOOD_ENRICHMENT") or "gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are a USDA nutrition database. Return accurate per-100g micronutrient values. JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                max_tokens=2500,
-                timeout=30,
-            )
-            data = json.loads(resp.choices[0].message.content or "{}")
-        except Exception as e:
-            print(f"[enrich-food-db] batch AI failed: {e}")
-            error_count += len(pairs)
-            continue
-
-        results: dict[int, dict[str, float]] = {}
-        for entry in data.get("foods") or []:
-            if not isinstance(entry, dict):
-                continue
-            fid = entry.get("food_id")
-            micros = entry.get("micros") or {}
-            if not isinstance(fid, int) or not isinstance(micros, dict):
-                continue
-            clean: dict[str, float] = {}
-            for k, v in micros.items():
-                if k not in REQUIRED:
-                    continue
-                try:
-                    clean[k] = float(v)
-                except (TypeError, ValueError):
-                    continue
-            if clean:
-                results[fid] = clean
-
-        for food, nut in pairs:
-            micros = results.get(food.id)
-            if not micros:
-                error_count += 1
-                continue
-            extras = dict(getattr(nut, "extra_nutrients", None) or {})
-            for k, v in micros.items():
-                if k == "fiber":
-                    nut.fiber = v
-                elif k == "sugar":
-                    nut.sugar = v
-                elif k == "sodium":
-                    nut.sodium_mg = v
-                else:
-                    extras[k] = v
-            nut.extra_nutrients = extras
-            db.add(nut)
-            enriched_count += 1
-        db.commit()
-
-    # Also pick up any custom foods stored per-user if the table exists.
-    print(f"[enrich-food-db] done — enriched={enriched_count} errors={error_count}")
-    return {
-        "total": len(nut_rows),
-        "candidates": len(candidates),
-        "enriched": enriched_count,
-        "errors": error_count,
-        "remaining": max(0, len(candidates) - enriched_count - error_count),
-    }
-
-
-@router.post("/backfill-food-processing")
-def backfill_food_processing(
-    limit: int = 0,
-    current_user: User = Depends(require_pro_feature("Nutrition insights")),
-):
-    """Classify processing_bucket for every Food row that lacks a FoodMetadata
-    entry at the current classifier version. Covers seeded, USDA-imported, and
-    custom foods. AI is called only for genuinely ambiguous names.
-
-    Pass ?limit=N to process a test batch. Omit for a full run.
-    Idempotent — already-classified rows are skipped."""
-    from app.services.nutrition.gut_backfill import backfill_all_food_rows
-    max_rows = limit if limit > 0 else None
-    return backfill_all_food_rows(allow_ai=True, max_rows=max_rows)
-
-
 @router.post("/validate-food-macros")
 def validate_food_macros(
     body: ValidateFoodMacrosRequest,
-    current_user: User = Depends(require_pro_feature("AI food enrichment")),
+    current_user: User = Depends(require_pro_feature("Food macro validation")),
 ):
     """Validate one custom food's macros + micros against USDA reference.
 

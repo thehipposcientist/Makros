@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -16,8 +17,10 @@ from app.routers.ai.utils import (
     _build_chat_kwargs,
     check_public_ai_rate_limit,
     model_image,
+    model_image_light,
 )
-from app.services.coach.checkin_ai import _redacted_payload_for_openai
+from app.services.coach.checkin_ai import _configured_checkin_model, _redacted_payload_for_openai
+from app.services.coach.week_evaluator import _configured_week_evaluator_model
 
 
 def _ok(label: str) -> None:
@@ -26,7 +29,10 @@ def _ok(label: str) -> None:
 
 def test_image_model_default_matches_policy() -> None:
     assert model_image() == "gpt-5.4-mini"
-    _ok("image model fallback is the policy default")
+    # Coarse-recognition tasks (gym machine / equipment / gear ID) run on
+    # the cheaper light model — see model-selection policy in ai/utils.py.
+    assert model_image_light() == "gpt-4o-mini"
+    _ok("image model fallbacks match the policy defaults")
 
 
 def test_checkin_payload_redacts_direct_identity_fields() -> None:
@@ -81,6 +87,48 @@ def test_chat_kwargs_carry_internal_accounting_metadata() -> None:
     assert kwargs["ai_budget_bucket"] == "coach_chat"
     assert kwargs["ai_image_count"] == 1
     _ok("shared chat kwargs preserve accounting metadata")
+
+
+def test_gpt5_chat_kwargs_avoid_legacy_chat_params() -> None:
+    kwargs = _build_chat_kwargs(
+        "gpt-5-mini",
+        [{"role": "user", "content": "Return JSON."}],
+        max_tokens=200,
+        timeout_secs=12,
+    )
+
+    assert kwargs["max_completion_tokens"] == 200
+    assert kwargs["reasoning_effort"] == "minimal"
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert "top_p" not in kwargs
+    assert "response_format" not in kwargs
+    _ok("gpt-5 chat kwargs avoid legacy chat-completions params")
+
+
+def test_weekly_checkin_model_alias_is_honored() -> None:
+    keys = ("MODEL_CHECKIN", "MODEL_WEEK_EVALUATE", "MODEL_WEEKLY_CHECKIN")
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ.pop(key, None)
+        os.environ["MODEL_WEEKLY_CHECKIN"] = "gpt-5-mini"
+
+        assert _configured_checkin_model() == "gpt-5-mini"
+        assert _configured_week_evaluator_model() == "gpt-5-mini"
+
+        os.environ["MODEL_CHECKIN"] = "gpt-4o-mini"
+        os.environ["MODEL_WEEK_EVALUATE"] = "gpt-5.4-mini"
+        assert _configured_checkin_model() == "gpt-4o-mini"
+        assert _configured_week_evaluator_model() == "gpt-5.4-mini"
+        assert _configured_checkin_model("explicit-model") == "explicit-model"
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    _ok("weekly check-in model alias is honored behind explicit env vars")
 
 
 def test_home_trainer_prompt_output_eval_cases() -> None:
@@ -154,6 +202,8 @@ cases = [
     test_checkin_payload_redacts_direct_identity_fields,
     test_public_ai_rate_limit_falls_back_after_limit,
     test_chat_kwargs_carry_internal_accounting_metadata,
+    test_gpt5_chat_kwargs_avoid_legacy_chat_params,
+    test_weekly_checkin_model_alias_is_honored,
     test_home_trainer_prompt_output_eval_cases,
     test_home_trainer_setting_proposals_persist_as_unaccepted_decisions,
 ]

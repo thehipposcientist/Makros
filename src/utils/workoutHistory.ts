@@ -1,23 +1,38 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion, WorkoutDay, SavedWorkoutTemplate } from '../types';
-import { migrateNutritionPlanShape } from './mealItems';
 import {
   deleteWorkoutTemplateFromStorage,
   loadWorkoutTemplatesFromStorage,
   saveWorkoutTemplatesToStorage,
   upsertWorkoutTemplateInStorage,
 } from './workoutTemplates';
-import { sanitizeWorkoutHistorySession } from './workoutCompletion';
+import { sanitizeWorkoutHistorySession, workoutSessionCountsForPlan } from './workoutCompletion';
 import { isTrackableStrengthExercise, loadedStrengthSets } from './workoutProgressFilters';
+import {
+  exerciseHistoryEntriesMatch,
+  type ExerciseHistoryMatchInput,
+} from './exerciseHistoryMatch';
+import { STORAGE_KEYS } from './storageKeys.ts';
+export {
+  exerciseHistoryEntriesMatch,
+  exerciseHistoryNamesMatch,
+  normalizeExerciseHistoryName,
+  type ExerciseHistoryMatchInput,
+} from './exerciseHistoryMatch';
 
-const HISTORY_KEY        = 'workoutHistory';
-const SKIPPED_KEY        = 'skippedWorkouts';
-const SUMMARIES_KEY      = 'workoutSummaries';
-const GOAL_HIST_KEY      = 'goalHistory';
-const PLAN_CHANGES_KEY   = 'planChangeHistory';
-const MEAL_ROUTINES_KEY  = 'mealRoutines';
-const PRESERVED_WORKOUTS_KEY = 'preservedCompletedWorkouts';
-const MANUAL_WORKOUT_OVERRIDES_KEY = 'manualWorkoutOverrides';
+// CachedFetchedEntity: workout sessions/summaries mirror backend
+// WorkoutCompletion/WorkoutSession rows and can be rebuilt from API reads.
+// LocalDraftEntity: manual overrides and active-session data are crash/UI
+// recovery only and must become saved rows through explicit DB mutations.
+const HISTORY_KEY        = STORAGE_KEYS.workouts.history;
+const SKIPPED_KEY        = STORAGE_KEYS.workouts.skipped;
+const SUMMARIES_KEY      = STORAGE_KEYS.workouts.summaries;
+const GOAL_HIST_KEY      = STORAGE_KEYS.workouts.goalHistory;
+const PLAN_CHANGES_KEY   = STORAGE_KEYS.workouts.planChangeHistory;
+const PRESERVED_WORKOUTS_KEY = STORAGE_KEYS.workouts.preservedCompleted;
+const MANUAL_WORKOUT_OVERRIDES_KEY = STORAGE_KEYS.workouts.manualOverrides;
+const WORKOUT_TEMPLATE_DELETED_IDS_KEY = STORAGE_KEYS.workouts.templateDeletedIds;
+let mealRoutineMemory: MealRoutineEntry[] = [];
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -32,7 +47,10 @@ export function todayKey(): string {
 
 // ── Workout sessions ──────────────────────────────────────────────────────────
 
-export async function saveWorkoutSession(session: WorkoutSession): Promise<void> {
+export async function saveWorkoutSession(
+  session: WorkoutSession,
+  options: { skipHealthMirror?: boolean } = {},
+): Promise<void> {
   const cleanSession = sanitizeWorkoutHistorySession(session);
   const history = await loadWorkoutHistory();
   const idx = history.findIndex(s => s.id === cleanSession.id);
@@ -42,6 +60,7 @@ export async function saveWorkoutSession(session: WorkoutSession): Promise<void>
     history.unshift(cleanSession);
   }
   await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 100)));
+  if (options.skipHealthMirror) return;
 
   // Mirror to Apple Health for any session that wasn't already
   // sourced FROM Apple Health (no infinite-loop on import) and that
@@ -64,6 +83,9 @@ export async function saveWorkoutSession(session: WorkoutSession): Promise<void>
       activityTag: tag,
       caloriesBurned: cleanSession.manualActivity?.caloriesBurned ?? null,
       distanceMiles: cleanSession.manualActivity?.distanceMiles ?? null,
+      // Route plumbed through so HKWorkoutRouteBuilder can attach the
+      // GPS trail to the Apple Fitness workout entry.
+      routeCoords: cleanSession.manualActivity?.routeCoords ?? null,
     });
   } catch { /* non-fatal — session is already in local history */ }
 }
@@ -110,44 +132,20 @@ export async function loadWorkoutHistory(): Promise<WorkoutSession[]> {
   try {
     const raw = await AsyncStorage.getItem(HISTORY_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.map(sanitizeWorkoutHistorySession) : [];
+    return Array.isArray(parsed)
+      ? parsed.map(sanitizeWorkoutHistorySession).filter(session => !session.skipped)
+      : [];
   } catch {
     return [];
   }
 }
 
-export function normalizeExerciseHistoryName(raw: string): string {
-  return String(raw ?? '')
-    .toLowerCase()
-    .replace(/[_-]+/g, ' ')
-    .replace(/[^a-z0-9 ]+/g, ' ')
-    .replace(/\b(?:barbell|dumbbell|dumbbells|machine|cable|smith|bodyweight|weighted)\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-export function exerciseHistoryNamesMatch(a: string, b: string): boolean {
-  const exactA = String(a ?? '').trim().toLowerCase();
-  const exactB = String(b ?? '').trim().toLowerCase();
-  if (!exactA || !exactB) return false;
-  if (exactA === exactB) return true;
-
-  const normA = normalizeExerciseHistoryName(a);
-  const normB = normalizeExerciseHistoryName(b);
-  if (!normA || !normB) return false;
-  if (normA === normB) return true;
-
-  const shorter = normA.length <= normB.length ? normA : normB;
-  const longer = normA.length > normB.length ? normA : normB;
-  return shorter.split(' ').length >= 2 && longer.includes(shorter);
-}
-
-export async function getLastSetsForExercise(exerciseName: string): Promise<CompletedSet[] | null> {
+export async function getLastSetsForExercise(exercise: ExerciseHistoryMatchInput): Promise<CompletedSet[] | null> {
   const history = await loadWorkoutHistory();
   for (const session of history) {
-    const ex = session.exercises.find(e => exerciseHistoryNamesMatch(e.name, exerciseName));
+    const ex = session.exercises.find(e => exerciseHistoryEntriesMatch(e, exercise));
     if (ex && ex.sets.length > 0) {
-      return ex.sets;
+      return ex.sets.map(set => ({ ...set, sessionDate: session.date }));
     }
   }
   return null;
@@ -157,7 +155,7 @@ export async function getLastSetsForExercise(exerciseName: string): Promise<Comp
 export async function isTodayWorkoutDone(): Promise<boolean> {
   const today = todayKey();
   const history = await loadWorkoutHistory();
-  return history.some(s => s.date.startsWith(today) && s.completed);
+  return history.some(s => s.date.startsWith(today) && workoutSessionCountsForPlan(s));
 }
 
 // ── Preserved completed workouts ──────────────────────────────────────────────
@@ -218,6 +216,74 @@ export async function loadManualWorkoutOverrides(): Promise<ManualWorkoutOverrid
 }
 
 // ── Workout templates ────────────────────────────────────────────────────────
+//
+// The backend table `workout_templates` is now the source of truth (see
+// backend/app/routers/workout_templates.py). AsyncStorage is a hot cache
+// so the home screen renders instantly + works offline. Writes are
+// server-first; the local cache is updated from the server response so
+// the new shareCode/timesImported fields stay accurate. Reads return
+// the cache; callers should call `syncWorkoutTemplatesFromBackend(token)`
+// at sign-in / app foreground to refresh.
+
+async function _readToken(): Promise<string | null> {
+  try {
+    const { loadAuthToken } = await import('./authTokenStorage');
+    return await loadAuthToken();
+  }
+  catch { return null; }
+}
+
+function _toLocal(r: import('../services/api').WorkoutTemplateRecord): SavedWorkoutTemplate {
+  return {
+    id: r.id,
+    name: r.name,
+    workout: r.workout,
+    notes: r.notes ?? null,
+    shareCode: r.shareCode,
+    timesImported: r.timesImported,
+    sourceShareCode: r.sourceShareCode,
+    sourceOwnerUsername: r.sourceOwnerUsername,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
+}
+
+function _isNotFoundTemplateError(err: unknown): boolean {
+  const message = String(err instanceof Error ? err.message : (err as any)?.message ?? err).toLowerCase();
+  return message.includes('http 404') || message.includes('not found');
+}
+
+async function _loadPendingTemplateDeleteIds(): Promise<Set<string>> {
+  try {
+    const raw = await AsyncStorage.getItem(WORKOUT_TEMPLATE_DELETED_IDS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter(id => typeof id === 'string' && id.trim()) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+async function _savePendingTemplateDeleteIds(ids: Set<string>): Promise<void> {
+  try {
+    const arr = Array.from(ids);
+    if (arr.length === 0) await AsyncStorage.removeItem(WORKOUT_TEMPLATE_DELETED_IDS_KEY);
+    else await AsyncStorage.setItem(WORKOUT_TEMPLATE_DELETED_IDS_KEY, JSON.stringify(arr));
+  } catch {}
+}
+
+async function _markTemplateDeletePending(templateId: string): Promise<void> {
+  if (!templateId) return;
+  const ids = await _loadPendingTemplateDeleteIds();
+  ids.add(templateId);
+  await _savePendingTemplateDeleteIds(ids);
+}
+
+async function _clearTemplateDeletePending(templateId: string): Promise<void> {
+  if (!templateId) return;
+  const ids = await _loadPendingTemplateDeleteIds();
+  if (!ids.delete(templateId)) return;
+  await _savePendingTemplateDeleteIds(ids);
+}
 
 export async function loadWorkoutTemplates(): Promise<SavedWorkoutTemplate[]> {
   return loadWorkoutTemplatesFromStorage(AsyncStorage);
@@ -229,23 +295,165 @@ export async function saveWorkoutTemplates(templates: SavedWorkoutTemplate[]): P
   } catch {}
 }
 
+/** Push the saved-templates list to the watch so the Strength picker
+ *  on the wrist stays in sync with the phone. Best-effort — bridge
+ *  unavailability or watch unreachable both no-op. Fires after every
+ *  upsert / delete / sync so the watch sees changes immediately. */
+async function _pushTemplatesToWatchBestEffort(templates: SavedWorkoutTemplate[]): Promise<void> {
+  try {
+    const { pushTemplatesToWatch } = await import('./watchSync');
+    await pushTemplatesToWatch(templates, { force: false });
+  } catch { /* watch sync optional */ }
+}
+
+/** Pull authoritative templates from the backend, replace local cache.
+ *  Also performs a one-time migration: any local-only template (id not
+ *  on the server) is pushed back up. Safe to call repeatedly — POSTs
+ *  are idempotent on (user, client_id), so re-syncing is a no-op once
+ *  caches agree. Best-effort; failure leaves the local cache untouched. */
+export async function syncWorkoutTemplatesFromBackend(tokenArg?: string | null): Promise<SavedWorkoutTemplate[]> {
+  const token = tokenArg ?? await _readToken();
+  if (!token) return loadWorkoutTemplates();
+  try {
+    const api = await import('../services/api');
+    const remote = await api.listWorkoutTemplates(token);
+    const pendingDeletes = await _loadPendingTemplateDeleteIds();
+    if (pendingDeletes.size > 0) {
+      const remaining = new Set(pendingDeletes);
+      const remoteIdsBeforeDelete = new Set(remote.map(r => r.id));
+      for (const id of pendingDeletes) {
+        if (!remoteIdsBeforeDelete.has(id)) {
+          remaining.delete(id);
+          continue;
+        }
+        try {
+          await api.deleteWorkoutTemplate(token, id);
+          remaining.delete(id);
+        } catch (err) {
+          if (_isNotFoundTemplateError(err)) remaining.delete(id);
+          else console.warn('[workoutTemplates] pending delete sync failed', id, err);
+        }
+      }
+      await _savePendingTemplateDeleteIds(remaining);
+    }
+    const remoteAfterDeletes = pendingDeletes.size > 0
+      ? remote.filter(r => !pendingDeletes.has(r.id))
+      : remote;
+    const remoteIds = new Set(remoteAfterDeletes.map(r => r.id));
+    const local = await loadWorkoutTemplatesFromStorage(AsyncStorage);
+    const localOnly = local.filter(t => t.id && !remoteIds.has(t.id) && !pendingDeletes.has(t.id));
+    if (localOnly.length > 0) {
+      // Push local-only rows. Cap-rejected pushes are swallowed — that
+      // user must already be over-cap by some other means (manual DB
+      // edit, beta tier downgrade), and we'd rather sync the rest than
+      // abort the migration entirely.
+      for (const t of localOnly) {
+        try {
+          const created = await api.upsertWorkoutTemplate(token, {
+            id: t.id, name: t.name, workout: t.workout, notes: t.notes ?? null,
+          });
+          remoteAfterDeletes.push(created);
+        } catch {}
+      }
+    }
+    const merged = remoteAfterDeletes.map(_toLocal);
+    await saveWorkoutTemplatesToStorage(AsyncStorage, merged);
+    void _pushTemplatesToWatchBestEffort(merged);
+    return merged;
+  } catch {
+    return loadWorkoutTemplates();
+  }
+}
+
 export async function deleteWorkoutTemplate(templateId: string): Promise<void> {
-  await deleteWorkoutTemplateFromStorage(AsyncStorage, templateId);
+  await _markTemplateDeletePending(templateId);
+  // Snapshot the pre-delete cache so we can roll back if the backend
+  // rejects the delete. Without rollback the row reappears on the next
+  // syncWorkoutTemplatesFromBackend (remote still has it, local doesn't,
+  // sync merges remote back in) — which is the "ghost template" bug.
+  const before = await loadWorkoutTemplatesFromStorage(AsyncStorage);
+  const next = await deleteWorkoutTemplateFromStorage(AsyncStorage, templateId);
+  void _pushTemplatesToWatchBestEffort(next);
+
+  const token = await _readToken();
+  if (!token) return;
+
+  try {
+    const { deleteWorkoutTemplate: apiDelete } = await import('../services/api');
+    await apiDelete(token, templateId);
+    // A background sync can briefly rehydrate the remote row while the
+    // DELETE is in flight. Re-apply the local delete after the server
+    // confirms so the cache and UI settle on the user's intent.
+    const confirmedNext = await deleteWorkoutTemplateFromStorage(AsyncStorage, templateId);
+    void _pushTemplatesToWatchBestEffort(confirmedNext);
+    await _clearTemplateDeletePending(templateId);
+  } catch (err) {
+    // 404 means the row was never on the server (created offline, or
+    // already deleted from another device). Delete is idempotent: local
+    // is already cleared, end state matches the user's intent, return
+    // success. Without this branch, the catch below rolls back the
+    // local delete and the template visibly reappears.
+    if (_isNotFoundTemplateError(err)) {
+      const confirmedNext = await deleteWorkoutTemplateFromStorage(AsyncStorage, templateId);
+      void _pushTemplatesToWatchBestEffort(confirmedNext);
+      await _clearTemplateDeletePending(templateId);
+      return;
+    }
+    console.warn('[workoutTemplates] backend delete failed, restoring local cache', err);
+    await _clearTemplateDeletePending(templateId);
+    await saveWorkoutTemplatesToStorage(AsyncStorage, before);
+    void _pushTemplatesToWatchBestEffort(before);
+    throw err;
+  }
 }
 
 /**
- * Insert or update a saved template. When the row is genuinely new
- * (not an existing-id update) we enforce the free-tier cap as
- * defense-in-depth — UI-level gates exist at every call site, but
- * having the storage helper itself respect the cap means a bug or new
- * code path can't silently bypass it.
+ * Insert or update a saved template. Server-first: the backend is the
+ * source of truth for cap enforcement and authoritative timestamps.
+ * Local cache is updated from the server response so shareCode and
+ * other server-managed fields stay accurate.
  *
- * Reads `userProfile` from AsyncStorage to determine the user's tier;
- * Pro users get unlimited templates so the check short-circuits.
- * Throws when the cap is hit so callers can surface a typed error
- * instead of silently no-op'ing.
+ * On HTTP error (cap rejection, validation), re-throws so the caller
+ * can surface a typed alert. On network error (offline / backend
+ * unreachable), falls back to local-only persistence — the next sync
+ * call will reconcile.
  */
 export async function upsertWorkoutTemplate(template: SavedWorkoutTemplate): Promise<SavedWorkoutTemplate[]> {
+  const token = await _readToken();
+  if (token) {
+    try {
+      const api = await import('../services/api');
+      const saved = await api.upsertWorkoutTemplate(token, {
+        id: template.id,
+        name: template.name,
+        workout: template.workout,
+        notes: template.notes ?? null,
+      });
+      // Merge into local cache, preserving order of unrelated rows.
+      const existing = await loadWorkoutTemplatesFromStorage(AsyncStorage);
+      const next = existing.some(t => t.id === saved.id)
+        ? existing.map(t => t.id === saved.id ? _toLocal(saved) : t)
+        : [_toLocal(saved), ...existing];
+      await saveWorkoutTemplatesToStorage(AsyncStorage, next);
+      void _pushTemplatesToWatchBestEffort(next);
+      return next;
+    } catch (e: any) {
+      // Only fall through to local-only persistence on TRUE network
+      // failures (offline, DNS, abort). Anything that reached the
+      // backend and got a response must be surfaced — silently
+      // degrading to local-only is what caused "Template not found"
+      // when assigning a template the server never received.
+      const msg = String(e?.message ?? '').toLowerCase();
+      const isOffline = msg.includes('network request failed')
+        || msg.includes('aborted')
+        || msg.includes('timeout')
+        || e?.name === 'AbortError';
+      if (!isOffline) throw e;
+    }
+  }
+
+  // Offline path — persist locally with the same client-side cap check
+  // we had before the server became authoritative.
   try {
     const { canCreateWorkoutTemplate, FREE_WORKOUT_TEMPLATE_LIMIT } = await import('./subscription');
     return upsertWorkoutTemplateInStorage(template, {
@@ -258,9 +466,6 @@ export async function upsertWorkoutTemplate(template: SavedWorkoutTemplate): Pro
       freeWorkoutTemplateLimit: FREE_WORKOUT_TEMPLATE_LIMIT,
     });
   } catch (e: any) {
-    // Re-throw the cap error so the caller can show a typed alert. If
-    // subscription gating fails to import in a dev/offline harness, fall
-    // back to persistence only, matching the previous best-effort behavior.
     if (typeof e?.message === 'string' && e.message.includes('templates')) throw e;
     return upsertWorkoutTemplateInStorage(template, { storage: AsyncStorage });
   }
@@ -277,7 +482,38 @@ export interface SkippedDay {
 export async function getSkippedDays(): Promise<SkippedDay[]> {
   try {
     const raw = await AsyncStorage.getItem(SKIPPED_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const parsed = raw ? JSON.parse(raw) : [];
+    const days: SkippedDay[] = Array.isArray(parsed) ? parsed : [];
+    const legacyRaw = await AsyncStorage.getItem(HISTORY_KEY);
+    const legacy = legacyRaw ? JSON.parse(legacyRaw) : [];
+    let changed = false;
+    let prunedLegacy: unknown[] | null = null;
+    if (Array.isArray(legacy)) {
+      prunedLegacy = [];
+      for (const row of legacy) {
+        const session = sanitizeWorkoutHistorySession(row);
+        if (!session.skipped) {
+          prunedLegacy.push(row);
+          continue;
+        }
+        changed = true;
+        if (!session.date) continue;
+        const date = session.date.slice(0, 10);
+        if (!date || days.some(d => d.date === date)) continue;
+        days.push({
+          date,
+          focus: session.focus || 'Workout',
+          ...(session.skipReason ? { reason: session.skipReason } : {}),
+        });
+      }
+    }
+    if (changed) {
+      await AsyncStorage.setItem(SKIPPED_KEY, JSON.stringify(days.slice(0, 365)));
+      if (prunedLegacy) {
+        await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(prunedLegacy.slice(0, 100)));
+      }
+    }
+    return days;
   } catch {
     return [];
   }
@@ -295,31 +531,9 @@ export async function addSkippedDay(date: string, focus: string, reason?: string
   await AsyncStorage.setItem(SKIPPED_KEY, JSON.stringify(days.slice(0, 365)));
 }
 
-/**
- * Saves a skipped day as a WorkoutSession entry in the main history so it
- * appears in the unified timeline visible to the AI trainer.
- */
+/** @deprecated Use addSkippedDay. Skips are plan state, not activity history. */
 export async function saveSkipToHistory(date: string, focus: string, reason?: string): Promise<void> {
-  const history = await loadWorkoutHistory();
-  // Don't duplicate — upsert by id
-  const id = `skip_${date}`;
-  const entry: import('../types').WorkoutSession = {
-    id,
-    date,
-    focus,
-    durationSeconds: 0,
-    exercises: [],
-    completed: false,
-    skipped: true,
-    ...(reason ? { skipReason: reason } : {}),
-  };
-  const idx = history.findIndex(s => s.id === id);
-  if (idx >= 0) {
-    history[idx] = entry;
-  } else {
-    history.unshift(entry);
-  }
-  await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 100)));
+  await addSkippedDay(date, focus, reason);
 }
 
 export async function removeSkippedDay(date: string): Promise<void> {
@@ -429,177 +643,24 @@ export async function recordGoalChange(
 // ── Meal routines ─────────────────────────────────────────────────────────────
 
 export async function loadMealRoutines(): Promise<MealRoutineEntry[]> {
-  try {
-    const raw = await AsyncStorage.getItem(MEAL_ROUTINES_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+  return mealRoutineMemory.map(r => ({ ...r }));
 }
 
 export async function saveMealRoutines(routines: MealRoutineEntry[]): Promise<void> {
-  try {
-    await AsyncStorage.setItem(MEAL_ROUTINES_KEY, JSON.stringify(routines));
-  } catch {}
+  mealRoutineMemory = routines.map(r => ({ ...r }));
 }
 
 // ── Routine application (derive-don't-persist) ──────────────────────────────
-//
-// Routines are the source of truth for "this meal repeats every day". We
-// never stamp `isRoutine: true` into the per-day nutrition plans — instead,
-// every code path that writes a DailyNutritionPlan into state should pass it
-// through `applyRoutines()` first. That way:
-//   - AI plan regeneration can't wipe out routines
-//   - Toggling a routine is O(days) of in-memory work, no storage races
-//   - Future days generated on-the-fly get routines for free
-
-/** Build a MealSuggestion from a MealRoutineEntry. Prefers the structured
- *  `items[]` snapshot when available (new routines) and falls back to the
- *  legacy foods[]/amounts[] shape for routines saved before items existed. */
-function mealFromRoutine(routine: MealRoutineEntry, fallback?: MealSuggestion): MealSuggestion {
-  const hasItems = routine.items && routine.items.length > 0;
-  const foods = hasItems ? routine.items!.map(i => i.name) : routine.foods.map(f => f.name);
-  const amounts = hasItems
-    ? routine.items!.map(i => (i.unit === 'piece' ? String(i.quantity) : `${i.quantity} ${i.unit}`))
-    : routine.foods.map(f => f.quantity ?? '');
-  // If we have structured items, recompute totals from them so routine and
-  // plan stay in sync. Otherwise trust the snapshot or fall through.
-  const totals = hasItems
-    ? routine.items!.reduce(
-        (acc, it) => ({
-          calories: acc.calories + (it.calories ?? 0),
-          protein:  acc.protein  + (it.protein  ?? 0),
-          carbs:    acc.carbs    + (it.carbs    ?? 0),
-          fat:      acc.fat      + (it.fat      ?? 0),
-        }),
-        { calories: 0, protein: 0, carbs: 0, fat: 0 },
-      )
-    : {
-        calories: routine.calories ?? fallback?.calories ?? 0,
-        protein:  routine.protein  ?? fallback?.protein  ?? 0,
-        carbs:    routine.carbs    ?? fallback?.carbs    ?? 0,
-        fat:      routine.fat      ?? fallback?.fat      ?? 0,
-      };
-  const micros: Record<string, number> = {};
-  if (hasItems) {
-    for (const it of routine.items!) {
-      for (const [k, v] of Object.entries(it.micronutrients ?? {})) {
-        if (typeof v === 'number') micros[k] = (micros[k] ?? 0) + v;
-      }
-    }
-  }
-  return {
-    meal:     routine.name,
-    items:    hasItems ? routine.items : undefined,
-    foods,
-    amounts,
-    calories: totals.calories,
-    protein:  totals.protein,
-    carbs:    totals.carbs,
-    fat:      totals.fat,
-    isRoutine: true,
-    estimated_alignment: fallback?.estimated_alignment ?? '',
-    ...(Object.keys(micros).length > 0 ? { micronutrients: micros } : {}),
-  } as MealSuggestion;
-}
-
-/** Apply routines to a plan.
- *
- *  All routines are now equal — there are no breakfast/lunch/dinner slots
- *  anymore. Every routine becomes one entry in `plan.meals[]`, tagged with
- *  `_routineId`. Existing routine-backed entries are replaced (so content
- *  edits to the routine propagate); stale routine ids get demoted to
- *  one-off entries so unpinning a routine doesn't make the meal vanish.
- *
- *  Pure function — returns a new plan object, doesn't mutate input. */
-export function applyRoutines(
-  plan: DailyNutritionPlan,
-  routines: MealRoutineEntry[],
-): DailyNutritionPlan {
-  const incoming = migrateNutritionPlanShape(plan) as DailyNutritionPlan;
-  const existingMeals = (incoming.meals ?? []).slice();
-
-  const activeRoutines = routines.filter(r => r && r.id);
-  const routinesById = new Map(activeRoutines.map(r => [r.id, r]));
-  const activeRoutineSignatures = new Map(
-    activeRoutines.map(r => [`${r.name}__${Math.round(r.calories ?? 0)}`, r]),
-  );
-
-  // Walk current meals and UPDATE IN PLACE so array index positions are
-  // preserved. Drop-and-reappend (the old behavior) shifted indices,
-  // which broke check-state keyed by `meal_<idx>` — a user who checked
-  // Meal 3 on Thursday saw Meal 5 appear pre-checked after a routine
-  // edit.
-  //
-  // Rules (now in-place):
-  //   (1) routine-backed meal whose routine is still active → refresh
-  //       macros/foods from the latest routine snapshot, keep position.
-  //   (2) routine-backed meal whose routine was removed → demote to
-  //       one-off (strip _routineId), keep position.
-  //   (3) untagged meal matching an active routine by name+cals →
-  //       upgrade in-place (add _routineId), keep position. Marks the
-  //       routine as "placed" so we don't re-append it later.
-  //   (4) any other meal → keep as-is.
-  const placedRoutineIds = new Set<string>();
-  const inplace: MealSuggestion[] = [];
-  for (const m of existingMeals) {
-    if (!m || typeof m !== 'object') continue;
-    const rid = (m as any)._routineId as string | undefined;
-    const sig = `${m.meal}__${Math.round(m.calories ?? 0)}`;
-
-    if (rid && routinesById.has(rid)) {
-      // case (1): refresh macros + foods from the live routine snapshot.
-      const routine = routinesById.get(rid)!;
-      const refreshed = mealFromRoutine(routine);
-      inplace.push({ ...refreshed, _routineId: rid } as MealSuggestion);
-      placedRoutineIds.add(rid);
-      continue;
-    }
-    if (rid) {
-      // case (2): routine was removed; demote.
-      const { _routineId: _drop, ...rest } = m as any;
-      inplace.push({ ...rest, isRoutine: false } as MealSuggestion);
-      continue;
-    }
-
-    const matchingRoutine = activeRoutineSignatures.get(sig);
-    if (matchingRoutine && !placedRoutineIds.has(matchingRoutine.id)) {
-      // case (3): upgrade the untagged meal to a routine-backed one
-      // without moving its position.
-      const refreshed = mealFromRoutine(matchingRoutine);
-      inplace.push({ ...refreshed, _routineId: matchingRoutine.id } as MealSuggestion);
-      placedRoutineIds.add(matchingRoutine.id);
-      continue;
-    }
-
-    inplace.push({ ...m, isRoutine: false });
-  }
-
-  // Place any routines that weren't already in the plan ahead of generated
-  // meals. Routines are the user's repeat-eating template, so when they are
-  // inserted into a new day they should occupy the first slots rather than
-  // trailing after generated filler.
-  const inserted: MealSuggestion[] = activeRoutines
-    .filter(r => !placedRoutineIds.has(r.id))
-    .map(r => ({ ...mealFromRoutine(r), _routineId: r.id }) as MealSuggestion);
-
-  return {
-    ...incoming,
-    meals: [...inserted, ...inplace],
-  };
-}
-
-/** Apply routines to a whole map of plans. Returns a new map. */
-export function applyRoutinesToAll(
-  plansByDate: Record<string, DailyNutritionPlan>,
-  routines: MealRoutineEntry[],
-): Record<string, DailyNutritionPlan> {
-  const out: Record<string, DailyNutritionPlan> = {};
-  for (const [k, p] of Object.entries(plansByDate)) {
-    out[k] = applyRoutines(p, routines);
-  }
-  return out;
-}
+// The pure routine→plan merge logic moved to ./mealRoutineApply (no
+// AsyncStorage dep, unit-tested). Re-exported here so existing importers are
+// unaffected, while the logic itself is now testable in isolation.
+export {
+  mealFromRoutine,
+  applyRoutines,
+  applyRoutinesToAll,
+  applyRoutinesWithShift,
+  applyRoutinesToAllWithChecks,
+} from './mealRoutineApply';
 
 // ── Plan change history ───────────────────────────────────────────────────────
 
@@ -660,13 +721,12 @@ export interface ExerciseBests {
 /** Best set per session (by weight × reps) for a given exercise, plus
  *  the all-time best and the most-recent session best. Derived from
  *  workout history — no separate storage needed. */
-export async function getExerciseBests(exerciseName: string): Promise<ExerciseBests> {
+export async function getExerciseBests(exercise: ExerciseHistoryMatchInput): Promise<ExerciseBests> {
   const history = await loadWorkoutHistory();
-  const key = exerciseName.trim().toLowerCase();
   const sessions: ExerciseSessionBest[] = [];
   for (const session of history) {
     for (const ex of session.exercises) {
-      if (ex.name.trim().toLowerCase() !== key) continue;
+      if (!exerciseHistoryEntriesMatch(ex, exercise)) continue;
       let top: ExerciseSessionBest | null = null;
       for (const set of ex.sets) {
         if (!set || !set.weightLbs) continue;
@@ -727,9 +787,9 @@ export async function getPersonalRecords(): Promise<PR[]> {
 
 // ── Apple Health data persistence ────────────────────────────────────────────
 
-const HEALTH_SUMMARY_KEY = 'healthSummary';
-const HEALTH_SCORE_KEY = 'healthScoreResult';
-const APPLE_HEALTH_ENABLED_KEY = 'appleHealthEnabled';
+const HEALTH_SUMMARY_KEY = STORAGE_KEYS.health.summary;
+const HEALTH_SCORE_KEY = STORAGE_KEYS.health.score;
+const APPLE_HEALTH_ENABLED_KEY = STORAGE_KEYS.health.appleHealthEnabled;
 
 export async function saveHealthSummary(summary: import('../types').HealthSummary): Promise<void> {
   await AsyncStorage.setItem(HEALTH_SUMMARY_KEY, JSON.stringify(summary));

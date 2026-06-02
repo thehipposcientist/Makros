@@ -18,6 +18,8 @@ from app.services.workout.goals import effective_goal_id
 
 AUTO_SKIP_UNLOGGED_REASON = "No workout logged"
 AUTO_SKIP_UNRESOLVED_STATUSES = {"planned", "started", "edited"}
+_NUTRITION_RETARGET_CALORIE_TOLERANCE = 25
+_NUTRITION_RETARGET_MACRO_TOLERANCE = 5
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -99,6 +101,75 @@ def _preferred_split_for_next_week(
     )
 
 
+def create_empty_manual_plan_week(
+    db: Session,
+    user_id: int,
+    *,
+    start_date: date,
+    goal: str | None,
+    days_per_week: int | None,
+    preferred_split: str | None,
+    planner_version: str,
+    goal_pace: str | None = None,
+    session_minutes: int | None = None,
+) -> PlanWeek:
+    """Create a 7-day PlanWeek where every day is `status="unassigned"` —
+    used when the user has flipped on workout_manual_mode and the regular
+    auto-renew should NOT run the planner. The user assembles each day
+    by calling /plan-weeks/{id}/days/{idx}/use-template (or mark-rest).
+    """
+    _abandon_active_week(db, user_id)
+    set_plan_cadence_anchor_if_unset(db, user_id, start_date)
+
+    existing = db.exec(
+        select(PlanWeek).where(
+            PlanWeek.user_id == user_id,
+            PlanWeek.start_date == start_date,
+        )
+    ).all()
+    for old_pw in existing:
+        for od in db.exec(select(PlanDay).where(PlanDay.plan_week_id == old_pw.id)).all():
+            db.delete(od)
+        db.delete(old_pw)
+    if existing:
+        db.flush()
+
+    end_date = start_date + timedelta(days=6)
+    pw = PlanWeek(
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        planner_version=planner_version,
+        goal=goal or "general_fitness",
+        days_per_week=days_per_week or 0,
+        preferred_split=preferred_split,
+        goal_pace=goal_pace,
+        session_minutes=session_minutes,
+        status="active",
+    )
+    db.add(pw)
+    db.flush()
+
+    for i in range(7):
+        d = start_date + timedelta(days=i)
+        db.add(PlanDay(
+            plan_week_id=pw.id,
+            user_id=user_id,
+            day_date=d,
+            day_index=i,
+            status="unassigned",
+            is_rest=False,
+            workout_json=None,
+            nutrition_json=None,
+            locked=False,
+            generation_source="manual",
+        ))
+
+    db.commit()
+    db.refresh(pw)
+    return pw
+
+
 def create_plan_week(
     db: Session,
     user_id: int,
@@ -164,6 +235,11 @@ def create_plan_week(
     db.add(pw)
     db.flush()
 
+    week_nutrition_targets = _current_week_nutrition_targets(
+        db,
+        user_id,
+        as_of=start_date,
+    )
     training_dows = set(training_day_pattern)
     workout_idx = 0
     for i in range(7):
@@ -182,6 +258,7 @@ def create_plan_week(
                 nutrition_templates[i % len(nutrition_templates)],
                 workout_payload=workout_payload,
                 goal=goal,
+                base_targets=week_nutrition_targets,
             )
 
         pd = PlanDay(
@@ -208,12 +285,174 @@ def _nutrition_payload_for_day(
     *,
     workout_payload: dict | None,
     goal: str | None,
+    base_targets: dict[str, int] | None = None,
 ) -> dict | None:
+    if base_targets:
+        template = _retarget_nutrition_template(template, base_targets)
     return adapt_template_targets_for_day(
         template,
         workout_payload=workout_payload,
         goal_bucket=goal,
     )
+
+
+def _current_week_nutrition_targets(
+    db: Session,
+    user_id: int,
+    *,
+    as_of: date,
+) -> dict[str, int] | None:
+    """Resolve the current goal's neutral daily targets for new weeks.
+
+    Active NutritionPlan rows are templates: the foods can carry forward, but
+    their target numbers must not stay pinned to a previous goal or pace.
+    """
+    try:
+        from app.services.nutrition.targets import resolve_targets_for_user
+
+        targets = resolve_targets_for_user(
+            db,
+            user_id,
+            as_of=as_of,
+            # New-week templates should be stable at creation time. Same-day
+            # workout/NEAT refuel is layered by /meals/adjusted-daily-target.
+            health_activity_as_of=as_of - timedelta(days=1),
+        )
+    except Exception:
+        return None
+    if not targets:
+        return None
+    return {
+        "calories": int(targets.calories),
+        "protein": int(targets.protein_g),
+        "carbs": int(targets.carbs_g),
+        "fat": int(targets.fat_g),
+    }
+
+
+def _template_target_value(targets: dict, *keys: str) -> int | None:
+    for key in keys:
+        value = targets.get(key)
+        if value is None:
+            continue
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _template_targets_match(template_targets: dict, base_targets: dict[str, int]) -> bool:
+    checks = (
+        ("calories", ("calories",), _NUTRITION_RETARGET_CALORIE_TOLERANCE),
+        ("protein", ("protein", "protein_g"), _NUTRITION_RETARGET_MACRO_TOLERANCE),
+        ("carbs", ("carbs", "carbs_g"), _NUTRITION_RETARGET_MACRO_TOLERANCE),
+        ("fat", ("fat", "fat_g"), _NUTRITION_RETARGET_MACRO_TOLERANCE),
+    )
+    for base_key, lookup_keys, tolerance in checks:
+        current = _template_target_value(template_targets, *lookup_keys)
+        if current is None:
+            return False
+        if abs(current - int(base_targets[base_key])) > tolerance:
+            return False
+    return True
+
+
+def _iter_nutrition_meals(plan: dict) -> list[dict]:
+    meals = plan.get("meals")
+    if isinstance(meals, list):
+        return [m for m in meals if isinstance(m, dict)]
+    out: list[dict] = []
+    for key in ("breakfast", "lunch", "dinner", "snack"):
+        meal = plan.get(key)
+        if isinstance(meal, dict):
+            out.append(meal)
+    return out
+
+
+def _sum_nutrition_calories(plan: dict) -> int:
+    total = 0.0
+    for meal in _iter_nutrition_meals(plan):
+        try:
+            total += float(meal.get("calories", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    return int(round(total))
+
+
+def _scale_value(value, factor: float, *, integer: bool = False):
+    if value is None:
+        return value
+    try:
+        scaled = float(value) * factor
+    except (TypeError, ValueError):
+        return value
+    return int(round(scaled)) if integer else round(scaled, 1)
+
+
+def _scale_nutrition_meals(plan: dict, factor: float) -> None:
+    for meal in _iter_nutrition_meals(plan):
+        meal["calories"] = _scale_value(meal.get("calories"), factor, integer=True)
+        meal["protein"] = _scale_value(meal.get("protein"), factor)
+        meal["carbs"] = _scale_value(meal.get("carbs"), factor)
+        meal["fat"] = _scale_value(meal.get("fat"), factor)
+        if meal.get("fiber") is not None:
+            meal["fiber"] = _scale_value(meal.get("fiber"), factor)
+        micros = meal.get("micronutrients")
+        if isinstance(micros, dict):
+            for key, value in list(micros.items()):
+                micros[key] = _scale_value(value, factor)
+
+        items = meal.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item["calories"] = _scale_value(item.get("calories"), factor, integer=True)
+            item["protein"] = _scale_value(item.get("protein"), factor)
+            item["carbs"] = _scale_value(item.get("carbs"), factor)
+            item["fat"] = _scale_value(item.get("fat"), factor)
+            quantity = item.get("quantity")
+            if isinstance(quantity, (int, float)):
+                item["quantity"] = round(float(quantity) * factor, 2)
+            item_micros = item.get("micronutrients")
+            if isinstance(item_micros, dict):
+                for key, value in list(item_micros.items()):
+                    item_micros[key] = _scale_value(value, factor)
+
+
+def _retarget_nutrition_template(
+    template: dict | None,
+    base_targets: dict[str, int],
+) -> dict | None:
+    if not isinstance(template, dict):
+        return template
+    out = deepcopy(template)
+    template_targets = out.get("targets")
+    if not isinstance(template_targets, dict):
+        out["targets"] = dict(base_targets)
+        return out
+    if _template_targets_match(template_targets, base_targets):
+        return out
+
+    previous_targets = dict(template_targets)
+    actual_calories = _sum_nutrition_calories(out)
+    target_calories = int(base_targets["calories"])
+    scale = 1.0
+    if actual_calories > 0 and target_calories > 0:
+        scale = target_calories / actual_calories
+        if 0.2 <= scale <= 5.0 and abs(scale - 1.0) >= 0.01:
+            _scale_nutrition_meals(out, scale)
+
+    out["targets"] = dict(base_targets)
+    out["_targetRetargeting"] = {
+        "source": "current_goal_targets",
+        "previous": previous_targets,
+        "base": dict(base_targets),
+        "meal_scale": round(scale, 4),
+    }
+    return out
 
 
 def lock_day(
@@ -642,6 +881,237 @@ def _pick_repair_candidate(
     return None, None
 
 
+def _planned_exercise_key(exercise: dict | None) -> str | None:
+    if not isinstance(exercise, dict):
+        return None
+    slug = str(exercise.get("_slug") or exercise.get("slug") or "").strip().lower()
+    if slug:
+        return f"slug:{slug}"
+    name = str(exercise.get("name") or "").strip().lower()
+    return f"name:{name}" if name else None
+
+
+def _equipment_label_parts(value: object) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts = [
+        p.strip()
+        for chunk in text.replace("/", ",").replace("|", ",").split(",")
+        for p in chunk.split(";")
+    ]
+    return [p for p in parts if p]
+
+
+def _planned_exercise_equipment_satisfied(
+    exercise: dict | None,
+    owned_equipment_slugs: set[str],
+    seed_by_slug: dict[str, dict],
+) -> bool:
+    if not isinstance(exercise, dict):
+        return True
+
+    slug = str(exercise.get("_slug") or exercise.get("slug") or "").strip()
+    seed = seed_by_slug.get(slug)
+    if seed:
+        from app.services.workout.planner import _equipment_satisfied
+        return _equipment_satisfied(seed, set(owned_equipment_slugs))
+
+    label = str(exercise.get("equipment") or "").strip()
+    if not label:
+        return True
+    if label.lower() in {"bodyweight", "bodyweight only", "none", "no equipment"}:
+        return True
+
+    from app.services.workout.equipment import (
+        expand_owned_equipment_aliases,
+        resolve_owned_equipment_slugs,
+    )
+
+    required = resolve_owned_equipment_slugs(_equipment_label_parts(label))
+    required.discard("bodyweight")
+    if not required:
+        return True
+    owned = expand_owned_equipment_aliases(set(owned_equipment_slugs))
+    return required.issubset(owned)
+
+
+def _equipment_replacement_score(original: dict, candidate: dict) -> int:
+    score = 0
+    if original.get("_slot") and original.get("_slot") == candidate.get("_slot"):
+        score += 100
+    if original.get("_role") and original.get("_role") == candidate.get("_role"):
+        score += 50
+    if original.get("_primary_muscle") and original.get("_primary_muscle") == candidate.get("_primary_muscle"):
+        score += 30
+    original_secondaries = set(original.get("_secondary_muscles") or [])
+    candidate_secondaries = set(candidate.get("_secondary_muscles") or [])
+    score += min(15, len(original_secondaries & candidate_secondaries) * 5)
+    return score
+
+
+def _pick_equipment_replacement(
+    original: dict,
+    candidate_exercises: list[dict],
+    owned_equipment_slugs: set[str],
+    seed_by_slug: dict[str, dict],
+    used_keys: set[str],
+) -> dict | None:
+    best: tuple[int, int, dict] | None = None
+    for idx, candidate in enumerate(candidate_exercises):
+        if not isinstance(candidate, dict):
+            continue
+        key = _planned_exercise_key(candidate)
+        if key and key in used_keys:
+            continue
+        if not _planned_exercise_equipment_satisfied(candidate, owned_equipment_slugs, seed_by_slug):
+            continue
+        score = _equipment_replacement_score(original, candidate)
+        if best is None or (score, -idx) > (best[0], best[1]):
+            best = (score, -idx, candidate)
+    return deepcopy(best[2]) if best is not None else None
+
+
+def _repair_equipment_day_workout(
+    original: dict,
+    candidate: dict | None,
+    owned_equipment_slugs: set[str],
+    seed_by_slug: dict[str, dict],
+) -> tuple[dict, bool]:
+    original_exercises = original.get("exercises") or []
+    if not isinstance(original_exercises, list) or not original_exercises:
+        return original, False
+
+    candidate_exercises = []
+    if isinstance(candidate, dict) and isinstance(candidate.get("exercises"), list):
+        candidate_exercises = [ex for ex in candidate.get("exercises") or [] if isinstance(ex, dict)]
+
+    repaired_exercises: list[dict] = []
+    used_keys: set[str] = set()
+    changed = False
+    missing_replacement = False
+
+    for exercise in original_exercises:
+        if not isinstance(exercise, dict):
+            repaired_exercises.append(exercise)
+            continue
+        if _planned_exercise_equipment_satisfied(exercise, owned_equipment_slugs, seed_by_slug):
+            kept = deepcopy(exercise)
+            repaired_exercises.append(kept)
+            key = _planned_exercise_key(kept)
+            if key:
+                used_keys.add(key)
+            continue
+
+        replacement = _pick_equipment_replacement(
+            exercise,
+            candidate_exercises,
+            owned_equipment_slugs,
+            seed_by_slug,
+            used_keys,
+        )
+        if replacement is None:
+            missing_replacement = True
+            changed = True
+            continue
+
+        repaired_exercises.append(replacement)
+        key = _planned_exercise_key(replacement)
+        if key:
+            used_keys.add(key)
+        changed = True
+
+    if missing_replacement and candidate_exercises:
+        fallback = deepcopy(candidate)
+        if original.get("day"):
+            fallback["day"] = original.get("day")
+        if original.get("focus"):
+            fallback["focus"] = original.get("focus")
+        return fallback, True
+
+    if not changed:
+        return original, False
+
+    repaired = deepcopy(original)
+    repaired["exercises"] = repaired_exercises
+    return repaired, True
+
+
+def repair_remaining_workouts_for_equipment(
+    db: Session,
+    plan_week: PlanWeek,
+    fresh_workout_days: list[dict],
+    owned_equipment_slugs: set[str],
+    *,
+    seed_exercises: list[dict] | None = None,
+) -> list[PlanDay]:
+    """Swap only now-unavailable equipment exercises on current/future days.
+
+    The dated week, training/rest pattern, focus labels, completed days, and
+    compatible exercises stay intact. This is the equipment counterpart to
+    injury repair: a user who removes a barbell should not wait for the next
+    PlanWeek just to stop seeing barbell work.
+    """
+    if not fresh_workout_days:
+        return []
+
+    seed_by_slug = {
+        str(ex.get("slug")): ex
+        for ex in (seed_exercises or [])
+        if isinstance(ex, dict) and ex.get("slug")
+    }
+    today = date.today()
+    days = get_week_days(db, plan_week.id)
+    now = datetime.now(timezone.utc)
+    used_indexes: set[int] = set()
+    updated: list[PlanDay] = []
+
+    for plan_day in days:
+        if plan_day.locked or plan_day.day_date < today or plan_day.is_rest:
+            continue
+        original = plan_day.workout_json
+        if not isinstance(original, dict) or not original.get("exercises"):
+            continue
+
+        exercises = [ex for ex in original.get("exercises") or [] if isinstance(ex, dict)]
+        has_conflict = any(
+            not _planned_exercise_equipment_satisfied(ex, owned_equipment_slugs, seed_by_slug)
+            for ex in exercises
+        )
+        if not has_conflict:
+            continue
+
+        picked_idx, candidate = _pick_repair_candidate(original, fresh_workout_days, used_indexes)
+        if picked_idx is not None:
+            used_indexes.add(picked_idx)
+
+        repaired, changed = _repair_equipment_day_workout(
+            original,
+            candidate,
+            owned_equipment_slugs,
+            seed_by_slug,
+        )
+        if not changed:
+            continue
+        if original.get("day"):
+            repaired["day"] = original.get("day")
+        if original.get("focus"):
+            repaired["focus"] = original.get("focus")
+
+        plan_day.workout_json = repaired
+        plan_day.generation_source = "equipment_repair"
+        plan_day.status = "planned"
+        plan_day.updated_at = now
+        db.add(plan_day)
+        updated.append(plan_day)
+
+    if updated:
+        db.commit()
+        for plan_day in updated:
+            db.refresh(plan_day)
+    return updated
+
+
 def repair_remaining_workouts_for_injuries(
     db: Session,
     plan_week: PlanWeek,
@@ -690,6 +1160,62 @@ def repair_remaining_workouts_for_injuries(
     db.commit()
     for plan_day in updated:
         db.refresh(plan_day)
+    return updated
+
+
+def update_remaining_workouts_for_duration(
+    db: Session,
+    plan_week: PlanWeek,
+    fresh_workout_days: list[dict],
+    new_session_minutes: int,
+) -> list[PlanDay]:
+    """Rebuild unlocked current/future workouts for a new session budget.
+
+    Duration changes do not alter the week calendar, rest/training pattern, or
+    completed/started days. They only replace upcoming workout payloads with
+    freshly generated versions that fit the new minute budget.
+    """
+    today = date.today()
+    days = get_week_days(db, plan_week.id)
+    now = datetime.now(timezone.utc)
+    used_indexes: set[int] = set()
+    updated: list[PlanDay] = []
+
+    for plan_day in days:
+        if plan_day.locked or plan_day.day_date < today or plan_day.is_rest:
+            continue
+        original = plan_day.workout_json
+        if not isinstance(original, dict) or not original.get("exercises"):
+            continue
+
+        picked_idx, candidate = _pick_repair_candidate(original, fresh_workout_days, used_indexes)
+        if picked_idx is not None:
+            used_indexes.add(picked_idx)
+        if not isinstance(candidate, dict) or not candidate.get("exercises"):
+            continue
+
+        rebuilt = deepcopy(candidate)
+        if original.get("day"):
+            rebuilt["day"] = original.get("day")
+        if original.get("focus"):
+            rebuilt["focus"] = original.get("focus")
+
+        plan_day.workout_json = rebuilt
+        plan_day.generation_source = "duration_update"
+        plan_day.status = "planned"
+        plan_day.updated_at = now
+        db.add(plan_day)
+        updated.append(plan_day)
+
+    plan_week.session_minutes = new_session_minutes
+    db.add(plan_week)
+    db.commit()
+    for plan_day in updated:
+        db.refresh(plan_day)
+    try:
+        db.refresh(plan_week)
+    except Exception:
+        pass
     return updated
 
 
@@ -942,6 +1468,7 @@ def auto_renew_week(
     from app.models import UserProfile, UserPreferences, NutritionPlan
     from app.services.workout.planner import generate_workout_plan
     from app.services.workout.planner_context import build_planweek_planner_context
+    from app.services.workout.custom_catalog import planner_catalog_for_user, with_custom_catalog_inputs
     from app.services.workout.weekly_recipe import PLANNER_VERSION
     from app.seed_exercises_data import SEED_EXERCISES
     import json
@@ -951,6 +1478,46 @@ def auto_renew_week(
     # active now (user may have changed goal mid-week).
     expiring_pw = get_active_week(db, user_id)
     expiring_goal = expiring_pw.goal if expiring_pw else None
+
+    # Manual-mode short-circuit: when the user has opted out of
+    # auto-generation, skip the planner entirely and spawn a fresh empty
+    # week so they can assemble it from saved templates. Coaching
+    # adjustments (deload, calorie deltas) are intentionally bypassed —
+    # those mutate UserPreferences/CoachingState assuming a generated
+    # plan is about to be built; in manual mode they'd silently change
+    # state with no plan to apply them to. Re-enable when the user flips
+    # workout_manual_mode back off.
+    prefs_pre = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == user_id)
+    ).first()
+    if prefs_pre and getattr(prefs_pre, "workout_manual_mode", False):
+        today = date.today()
+        anchor = get_plan_cadence_anchor(db, user_id)
+        if anchor is None:
+            anchor = expiring_pw.start_date if expiring_pw else today
+            set_plan_cadence_anchor_if_unset(db, user_id, anchor)
+        week_start = next_plan_week_start(anchor, today)
+        manual_goal = expiring_pw.goal if expiring_pw else None
+        manual_days = expiring_pw.days_per_week if expiring_pw else None
+        manual_split = expiring_pw.preferred_split if expiring_pw else None
+        pw = create_empty_manual_plan_week(
+            db, user_id,
+            start_date=week_start,
+            goal=manual_goal,
+            days_per_week=manual_days,
+            preferred_split=manual_split,
+            planner_version=PLANNER_VERSION,
+            goal_pace=expiring_pw.goal_pace if expiring_pw else None,
+            session_minutes=expiring_pw.session_minutes if expiring_pw else None,
+        )
+        return {
+            "plan_week_id": pw.id,
+            "review_headline": "Manual mode — assemble your week from saved templates.",
+            "auto_applied": [],
+            "needs_review": [],
+            "explanation": "Auto-generation is paused. Tap each day to assign a template or mark it as rest.",
+            "manual_mode": True,
+        }
 
     # Step 1: Compute the weekly review
     review = compute_weekly_review(
@@ -963,8 +1530,8 @@ def auto_renew_week(
         goal_override=expiring_goal,
     )
 
-    # Step 2a: Readiness-based auto-deload — if readiness is Fatigued or
-    # Overtrained (< 40), immediately reduce volume for the new week so
+    # Step 2a: Readiness-based auto-deload — if readiness is low (< 40),
+    # immediately reduce volume for the new week so
     # the planner reads a lower adjustment before generating the plan.
     if apply_coach_adjustments and readiness_score is not None and readiness_score < 40:
         from app.models import UserCoachingState
@@ -1021,6 +1588,13 @@ def auto_renew_week(
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
     preferred_split = _preferred_split_for_next_week(prefs, profile, expiring_pw)
+    today = date.today()
+    anchor = get_plan_cadence_anchor(db, user_id)
+    if anchor is None:
+        anchor = expiring_pw.start_date if expiring_pw else today
+        # Stamp the user so subsequent renewals stay on this rhythm.
+        set_plan_cadence_anchor_if_unset(db, user_id, anchor)
+    week_start = next_plan_week_start(anchor, today)
 
     planner_ctx = build_planweek_planner_context(
         db,
@@ -1036,8 +1610,9 @@ def auto_renew_week(
         day_of_cycle=day_of_cycle,
     )
 
+    exercise_catalog, custom_owned_slugs = planner_catalog_for_user(db, user_id, SEED_EXERCISES)
     plan = generate_workout_plan(
-        planner_ctx.inputs, SEED_EXERCISES,
+        with_custom_catalog_inputs(planner_ctx.inputs, custom_owned_slugs), exercise_catalog,
         history_familiarity=planner_ctx.history_familiarity,
         perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
@@ -1060,20 +1635,6 @@ def auto_renew_week(
     except Exception:
         pass
 
-    # Cadence: pure function of (User.plan_cadence_anchor, today). The
-    # anchor is stamped at first PlanWeek creation and never moves, so
-    # the user's sign-up-day rhythm sticks across renewals, reinstalls,
-    # PlanWeek wipes, and long absences. Falls back to chaining off the
-    # expiring week (or `today` for first-ever creation) only when the
-    # anchor is missing — which should only happen for very old users
-    # whose backfill failed silently.
-    today = date.today()
-    anchor = get_plan_cadence_anchor(db, user_id)
-    if anchor is None:
-        anchor = expiring_pw.start_date if expiring_pw else today
-        # Stamp the user so subsequent renewals stay on this rhythm.
-        set_plan_cadence_anchor_if_unset(db, user_id, anchor)
-    week_start = next_plan_week_start(anchor, today)
     training_pattern = training_pattern_from_preferences(prefs, days_per_week)
 
     pw = create_plan_week(

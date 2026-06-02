@@ -14,6 +14,8 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.enums import Gender, GoalPace, GoalType
 from app.models import (
+    DailyHealthSnapshot,
+    CycleLog,
     GoalUpsert,
     OnboardingSync,
     PreferencesUpsert,
@@ -32,6 +34,9 @@ from app.routers import profile as profile_router
 
 def _ok(label: str) -> None:
     print(f"  ✓ {label}")
+
+
+_UNSET = object()
 
 
 def _make_engine():
@@ -106,7 +111,26 @@ def _onboarding_body(
     strength_baselines: dict | None = None,
     cardio_baseline: dict | None = None,
     training_day_pattern: list[int] | None = None,
+    workout_manual_mode: bool | None = None,
+    meal_manual_mode: bool | None = None,
+    custom_macros: dict | None | object = _UNSET,
 ) -> OnboardingSync:
+    preferences = {
+        "days_per_week": 4,
+        "workout_duration_minutes": 60,
+        "preferred_split": preferred_split,
+        "equipment": ["Dumbbells"],
+        "training_day_pattern": training_day_pattern,
+        "foods_available": ["chicken breast"],
+        "injuries": injuries or [],
+        "experience_level": experience_level,
+        "strength_baselines": strength_baselines,
+        "cardio_baseline": cardio_baseline,
+        "workout_manual_mode": workout_manual_mode,
+        "meal_manual_mode": meal_manual_mode,
+    }
+    if custom_macros is not _UNSET:
+        preferences["custom_macros"] = custom_macros
     return OnboardingSync(
         profile=ProfileUpsert(
             weight_lbs=weight_lbs,
@@ -122,18 +146,7 @@ def _onboarding_body(
             target_weight_lbs=None,
             timeline_weeks=None,
         ),
-        preferences=PreferencesUpsert(
-            days_per_week=4,
-            workout_duration_minutes=60,
-            preferred_split=preferred_split,
-            equipment=["Dumbbells"],
-            training_day_pattern=training_day_pattern,
-            foods_available=["chicken breast"],
-            injuries=injuries or [],
-            experience_level=experience_level,
-            strength_baselines=strength_baselines,
-            cardio_baseline=cardio_baseline,
-        ),
+        preferences=PreferencesUpsert(**preferences),
     )
 
 
@@ -273,6 +286,69 @@ def test_onboarding_sync_updates_planner_preferences():
         assert prefs.cardio_baseline == cardio_baseline
         assert prefs.training_day_pattern == [1, 3, 5, 6]
     _ok("onboarding sync persists planner-visible split, injuries, baselines, and weekdays")
+
+
+def test_onboarding_sync_persists_and_clears_custom_macros():
+    """Custom macro targets belong in user_preferences, not AsyncStorage."""
+    print("\n[test] profile/onboarding: custom macros persist and clear")
+    eng = _make_engine()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=171, weight_lbs=180.0)
+        macros = {"calories": 2400, "protein": 180, "carbs": 250, "fat": 70}
+
+        profile_router.sync_onboarding(
+            _onboarding_body(custom_macros=macros),
+            current_user=user,
+            session=session,
+        )
+        prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 171)).first()
+        payload = profile_router.get_my_profile(current_user=user, session=session)
+        assert prefs is not None
+        assert prefs.custom_macros == macros
+        assert payload["preferences"]["custom_macros"] == macros
+
+        profile_router.sync_onboarding(
+            _onboarding_body(custom_macros=None),
+            current_user=user,
+            session=session,
+        )
+        session.refresh(prefs)
+        cleared_payload = profile_router.get_my_profile(current_user=user, session=session)
+        assert prefs.custom_macros is None
+        assert cleared_payload["preferences"]["custom_macros"] is None
+    _ok("custom macro targets are durable profile preferences and can be cleared")
+
+
+def test_onboarding_sync_manual_mode_respects_tier():
+    """Onboarding can seed Pro manual mode without bypassing Free gates."""
+    print("\n[test] profile/onboarding: manual mode follows subscription tier")
+    eng = _make_engine()
+    with Session(eng) as session:
+        free_user = _seed_user_profile(session, user_id=18, weight_lbs=180.0)
+        profile_router.sync_onboarding(
+            _onboarding_body(workout_manual_mode=True, meal_manual_mode=True),
+            current_user=free_user,
+            session=session,
+        )
+        free_prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 18)).first()
+        assert free_prefs is not None
+        assert free_prefs.workout_manual_mode is False
+        assert free_prefs.meal_manual_mode is False
+
+        pro_user = _seed_user_profile(session, user_id=19, weight_lbs=181.0)
+        pro_user.subscription_tier = "pro"
+        session.add(pro_user)
+        session.commit()
+        profile_router.sync_onboarding(
+            _onboarding_body(workout_manual_mode=True, meal_manual_mode=True),
+            current_user=pro_user,
+            session=session,
+        )
+        pro_prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 19)).first()
+        assert pro_prefs is not None
+        assert pro_prefs.workout_manual_mode is True
+        assert pro_prefs.meal_manual_mode is True
+    _ok("onboarding sync stores manual mode only for Pro users")
 
 
 def test_user_state_backfills_missing_preferred_split():
@@ -512,6 +588,127 @@ def test_weight_entry_clear_removes_all_rows_without_readding_cache_payloads():
     _ok("clear removes all DB weight entries and leaves profile weight alone")
 
 
+def test_weight_entry_list_defaults_to_bounded_recent_window():
+    """Progress should not hydrate years of weight rows on every entry."""
+    print("\n[test] profile/weight-entries: list defaults to bounded recent rows")
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=55, weight_lbs=180.0)
+        for i in range(735):
+            entry_date = today - timedelta(days=i)
+            session.add(WeightEntry(
+                user_id=55,
+                entry_date=entry_date,
+                weight_lbs=180.0 - (i * 0.01),
+                source="manual",
+                logged_at=datetime.combine(entry_date, datetime.min.time(), tzinfo=timezone.utc),
+            ))
+        session.commit()
+
+        rows = profile_router.list_weight_entries(
+            limit=730,
+            since=None,
+            before=None,
+            current_user=user,
+            db=session,
+        )
+        window = profile_router.list_weight_entries(
+            limit=10,
+            since=today - timedelta(days=4),
+            before=today - timedelta(days=2),
+            current_user=user,
+            db=session,
+        )
+
+    assert len(rows) == 730
+    assert rows[0]["date"] == (today - timedelta(days=729)).isoformat()
+    assert rows[-1]["date"] == today.isoformat()
+    assert [r["date"] for r in window] == [
+        (today - timedelta(days=4)).isoformat(),
+        (today - timedelta(days=3)).isoformat(),
+        (today - timedelta(days=2)).isoformat(),
+    ]
+    _ok("default limit returns recent chronological rows; since/before narrows window")
+
+
+def test_cycle_symptom_logs_upsert_by_owner_and_log_date():
+    """Period symptom check-ins are DB-canonical and idempotent per user/day."""
+    print("\n[test] profile/cycle-logs: upsert is user-scoped and duplicate-safe")
+    eng = _make_engine()
+    with Session(eng) as session:
+        user_one = _seed_user_profile(session, user_id=56, weight_lbs=180.0)
+        user_two = _seed_user_profile(session, user_id=57, weight_lbs=150.0)
+        log_date = date(2026, 5, 23)
+
+        first = profile_router.save_cycle_symptom_log(
+            profile_router.CycleSymptomLogBody(
+                date=log_date.isoformat(),
+                cycleStartDate="2026-05-21",
+                phase="menses",
+                dayOfCycle=3,
+                cycleLengthDays=28,
+                flow="moderate",
+                cramps="mild",
+                energy="normal",
+                action="keep",
+                updatedAt=datetime(2026, 5, 23, 9, 0, tzinfo=timezone.utc),
+            ),
+            current_user=user_one,
+            db=session,
+        )
+        second = profile_router.save_cycle_symptom_log(
+            profile_router.CycleSymptomLogBody(
+                date=log_date.isoformat(),
+                cycleStartDate="2026-05-21",
+                phase="menses",
+                dayOfCycle=3,
+                cycleLengthDays=28,
+                flow="heavy",
+                cramps="moderate",
+                energy="low",
+                action="lighter",
+                updatedAt=datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
+            ),
+            current_user=user_one,
+            db=session,
+        )
+        other = profile_router.save_cycle_symptom_log(
+            profile_router.CycleSymptomLogBody(
+                date=log_date.isoformat(),
+                cycleStartDate="2026-05-23",
+                phase="menses",
+                dayOfCycle=1,
+                cycleLengthDays=30,
+                flow="light",
+                cramps="none",
+                energy="high",
+                action="keep",
+            ),
+            current_user=user_two,
+            db=session,
+        )
+
+        user_one_rows = session.exec(select(CycleLog).where(CycleLog.user_id == user_one.id)).all()
+        user_two_rows = session.exec(select(CycleLog).where(CycleLog.user_id == user_two.id)).all()
+        listed = profile_router.list_cycle_symptom_logs(
+            limit=120,
+            since=None,
+            before=None,
+            current_user=user_one,
+            db=session,
+        )
+
+        assert first["id"] == second["id"]
+        assert other["id"] != second["id"]
+        assert len(user_one_rows) == 1
+        assert len(user_two_rows) == 1
+        assert user_one_rows[0].flow_level == "heavy"
+        assert user_one_rows[0].training_action == "lighter"
+        assert listed == [second]
+    _ok("cycle logs update in place per user/date and do not leak across users")
+
+
 def test_calorie_ranges_use_latest_weight_and_session_duration():
     """Cut/maintain/bulk card should reflect the newest weigh-in and saved duration."""
     print("\n[test] profile/calorie-ranges: latest weight + session duration")
@@ -567,12 +764,54 @@ def test_calorie_ranges_use_latest_weight_and_session_duration():
     _ok("calorie ranges use latest WeightEntry and persisted workout duration")
 
 
+def test_calorie_ranges_use_apple_total_energy_maintenance():
+    """Reference ranges should match live targets when Apple has basal + active energy."""
+    print("\n[test] profile/calorie-ranges: Apple total energy blends into maintenance")
+
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=53, weight_lbs=180.0)
+        prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 53)).first()
+        assert prefs is not None
+        prefs.days_per_week = 7
+        session.add(prefs)
+        for i in range(1, 8):
+            session.add(DailyHealthSnapshot(
+                user_id=53,
+                snapshot_date=today - timedelta(days=i),
+                basal_energy_kcal=2065,
+                active_energy_kcal=717,
+                source="apple_health",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            ))
+        session.commit()
+
+        payload = profile_router.get_calorie_ranges(current_user=user, session=session)
+
+    assert payload["formula_maintenance_calories"] > 3000
+    assert payload["maintenance_calories"] == 2958
+    assert payload["source_tdee_kind"] == "apple_health_blend"
+    assert payload["source_tdee_kcal"] == 2782
+    assert payload["apple_tdee_kcal"] == 2782
+    assert payload["apple_valid_days"] == 7
+    assert payload["maintenance_blend"]["apple_weight"] == 0.4
+    assert payload["maintenance_blend"]["applied_delta_kcal"] == -118
+    assert payload["health_energy_adjustment_kcal"] < 0
+    assert payload["bulk_calories"] - payload["maintenance_calories"] == payload["bulk_adjustment_kcal"]
+    assert payload["maintenance_calories"] - payload["cut_calories"] == abs(payload["cut_adjustment_kcal"])
+    _ok("calorie ranges blend Apple basal + active total instead of replacing formula")
+
+
 cases = [
     test_profile_me_returns_dumped_profile_payload,
     test_profile_me_promotes_latest_weight_entry_before_payload,
     test_onboarding_sync_keeps_unchanged_goal_idempotent,
     test_onboarding_sync_records_goal_history_only_on_change,
     test_onboarding_sync_updates_planner_preferences,
+    test_onboarding_sync_persists_and_clears_custom_macros,
+    test_onboarding_sync_manual_mode_respects_tier,
     test_user_state_backfills_missing_preferred_split,
     test_measurement_checkin_does_not_update_profile_weight_when_flag_false,
     test_checkin_defaults_to_updating_profile_weight,
@@ -581,7 +820,10 @@ cases = [
     test_weight_entry_sync_promotes_newest_entry_only,
     test_weight_entry_delete_removes_db_row_and_promotes_remaining_latest,
     test_weight_entry_clear_removes_all_rows_without_readding_cache_payloads,
+    test_weight_entry_list_defaults_to_bounded_recent_window,
+    test_cycle_symptom_logs_upsert_by_owner_and_log_date,
     test_calorie_ranges_use_latest_weight_and_session_duration,
+    test_calorie_ranges_use_apple_total_energy_maintenance,
 ]
 
 

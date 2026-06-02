@@ -1,9 +1,10 @@
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { HealthSummary, SleepScore, SleepStages } from '../types';
+import type { HealthSummary, SleepScore, SleepStages, SleepStageTimeline, SleepStageType } from '../types';
 import { scoreSleep, minutesFromMidnight } from './sleepScore';
 import { recordTelemetryEvent, type HRZone } from './api';
 import { loadAuthToken } from '../utils/authTokenStorage';
+import { summarizeCardioWorkoutZones } from '../utils/cardioWorkoutClassification';
 import { zoneForHeartRate } from '../utils/hrZones';
 
 let _module: any = null;
@@ -30,32 +31,44 @@ const READ_TYPES = [
   'SleepAnalysis',
   'ActiveEnergyBurned',
   'Workout',
+  'WorkoutRoute',
   'Weight',
   'HeartRateVariabilitySDNN',
   'VO2Max',
   'RespiratoryRate',
   'OxygenSaturation',
+  'AppleSleepingWristTemperature',
+  'AppleSleepingBreathingDisturbances',
   'StandHour',
   'MindfulSession',
+  'TimeInDaylight',
   'BasalEnergyBurned',
   'MenstrualFlow',
+  'DietaryEnergyConsumed',
+  'DietaryProtein',
+  'DietaryCarbohydrates',
+  'DietaryFatTotal',
 ];
 
 export const APPLE_HEALTH_PERMISSION_ITEMS = [
   { label: 'Heart rate', why: 'Shows live workout heart rate and builds heart-rate zone summaries.' },
   { label: 'Resting heart rate', why: 'Adds recovery context to readiness and weekly check-ins.' },
   { label: 'Heart rate variability', why: 'Helps estimate recovery and compare today with your recent baseline.' },
-  { label: 'Sleep', why: 'Powers sleep scores, readiness, recovery insights, and check-ins.' },
+  { label: 'Sleep', why: 'Powers sleep scores, readiness, recovery insights, optional morning notifications, and check-ins.' },
   { label: 'Steps', why: 'Helps estimate daily activity and training-day energy needs.' },
   { label: 'Active energy', why: 'Improves calorie and recovery estimates when Apple Health has it.' },
   { label: 'Basal energy', why: 'Displays Apple Health energy context alongside activity trends.' },
+  { label: 'Nutrition summaries', why: 'Reads calories, protein, carbs, and fat from apps that write meal summaries to Apple Health.' },
   { label: 'Workouts', why: 'Imports runs, rides, classes, and other sessions you tracked elsewhere.' },
   { label: 'Body weight', why: 'Keeps weight trends current without manual entry.' },
   { label: 'VO2 max', why: 'Supports cardio fitness trends and heart-rate zone estimates.' },
   { label: 'Respiratory rate', why: 'Adds overnight recovery context when your device records it.' },
   { label: 'Blood oxygen', why: 'Adds optional sleep and recovery context when available.' },
+  { label: 'Sleeping wrist temperature', why: 'Adds optional overnight recovery and hormone-support context when available.' },
+  { label: 'Sleeping breathing disturbances', why: 'Adds optional sleep-breathing context for recovery and hormone-support estimates when available.' },
   { label: 'Standing hours', why: 'Displays movement consistency from Apple Health.' },
   { label: 'Mindful minutes', why: 'Displays recovery habits logged in Apple Health.' },
+  { label: 'Time in daylight', why: 'Powers optional sun exposure estimates when Apple Health records daylight time.' },
   { label: 'Menstrual flow', why: 'Enables optional cycle-aware training and recovery guidance.' },
 ] as const;
 
@@ -71,8 +84,10 @@ export const APPLE_HEALTH_PERMISSION_COPY = {
   title: 'Connect Apple Health?',
   body:
     'Apple Health is optional.\n\n' +
-    'If you connect it, Thallo asks only for Apple Health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and menstrual-flow data.\n\n' +
-    'This helps personalize readiness, recovery insights, weekly check-ins, and training or nutrition recommendations. Daily summaries may sync to your account so trends work across devices; raw HealthKit samples stay on your phone.\n\n' +
+    'If you connect it, Thallo asks only for Apple Health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, sleeping wrist temperature, sleeping breathing disturbances, standing hours, mindful minutes, time in daylight, and menstrual-flow data.\n\n' +
+    'Thallo can also read nutrition summaries, like calories, protein, carbs, and fat, when apps such as MyFitnessPal write them to Apple Health.\n\n' +
+    'Some categories only appear when your iPhone, Apple Watch, or another source app records them; Thallo hides missing categories instead of showing empty metrics.\n\n' +
+    'This helps personalize readiness, recovery insights, optional morning sleep readiness notifications, weekly check-ins, and training or nutrition recommendations. Daily summaries may sync to your account so trends work across devices; raw HealthKit samples stay on your phone.\n\n' +
     'Thallo can also write completed workouts, workout energy, and workout distance back to Apple Health.',
   denied:
     'Apple Health stays optional. You can keep using Thallo normally and enable or disable categories later in iPhone Settings -> Privacy & Security -> Health -> Thallo.',
@@ -92,6 +107,11 @@ export function isHealthKitNativeBindingsMissing(): boolean {
 
 export function getLastHealthKitError(): string | null { return _lastHealthKitError; }
 
+function finitePositiveNumber(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 export async function diagnoseHealthKit(): Promise<string> {
   const lines: string[] = [];
   lines.push(`platform=${Platform.OS}`);
@@ -107,6 +127,58 @@ export async function diagnoseHealthKit(): Promise<string> {
   lines.push(`auth_ok=${ok}`);
   if (!ok && _lastHealthKitError) lines.push(`auth_error=${_lastHealthKitError}`);
   return lines.join('\n');
+}
+
+/** Fetch raw Apple Health workouts in a time window. Public wrapper
+ *  around the native `getWorkouts` so callers (bulk import, etc.) don't
+ *  have to reach into the private module ref. Returns [] when HK is
+ *  unavailable or the call fails — callers should treat empty as "nothing
+ *  to do" rather than an error. */
+export async function getAppleHealthWorkouts(
+  startMs: number,
+  endMs: number,
+): Promise<any[]> {
+  const mod = getModule();
+  if (!mod || typeof mod.getWorkouts !== 'function') return [];
+  try {
+    const list = await mod.getWorkouts(startMs, endMs);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export interface AppleHealthWorkoutRoute {
+  routeCoords: Array<{
+    lat: number;
+    lon: number;
+    t_ms: number;
+    acc_m?: number | null;
+    alt_m?: number | null;
+    v_acc_m?: number | null;
+  }>;
+  elevationGainFt?: number | null;
+}
+
+export async function getAppleHealthWorkoutRoute(
+  startMs: number,
+  endMs: number,
+): Promise<AppleHealthWorkoutRoute | null> {
+  const mod = getModule();
+  if (!mod || typeof mod.getWorkoutRoute !== 'function') return null;
+  try {
+    const result = await mod.getWorkoutRoute(startMs, endMs);
+    if (!result || typeof result !== 'object') return null;
+    const routeCoords = Array.isArray(result.routeCoords) ? result.routeCoords : [];
+    if (routeCoords.length === 0) return null;
+    const elevationGainFt = Number(result.elevationGainFt);
+    return {
+      routeCoords,
+      elevationGainFt: Number.isFinite(elevationGainFt) && elevationGainFt >= 0 ? elevationGainFt : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function requestHealthPermissions(): Promise<boolean> {
@@ -145,6 +217,36 @@ export interface ReadHealthOptions {
   age?: number | null;
 }
 
+export interface AppleHealthDaylightSample {
+  value: number;
+  startDate: string;
+  endDate: string;
+  maximumLightIntensityLux?: number | null;
+}
+
+export async function getAppleHealthTimeInDaylight(
+  startMs: number,
+  endMs: number,
+  limit = 200,
+): Promise<AppleHealthDaylightSample[]> {
+  const mod = getModule();
+  if (!mod || typeof mod.getTimeInDaylight !== 'function') return [];
+  try {
+    const samples = await mod.getTimeInDaylight(startMs, endMs, limit);
+    if (!Array.isArray(samples)) return [];
+    return samples
+      .map((sample: any) => ({
+        value: Number(sample?.value ?? 0),
+        startDate: String(sample?.startDate ?? ''),
+        endDate: String(sample?.endDate ?? ''),
+        maximumLightIntensityLux: finitePositiveNumber(sample?.maximumLightIntensityLux),
+      }))
+      .filter((sample) => sample.value > 0 && sample.startDate && sample.endDate);
+  } catch {
+    return [];
+  }
+}
+
 export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<HealthSummary | null> {
   const mod = getModule();
   if (!mod) return null;
@@ -160,11 +262,13 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
   const startMs = sevenDaysAgo.getTime();
   const historyStartMs = thirtyDaysAgo.getTime();
   const endMs = now.getTime();
+  const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const lastNightMs = lastNightStart.getTime();
   const lastNightEndMs = Math.min(endMs, lastNightEnd.getTime());
 
   const [
     restingHR, steps, sleepSamples, energySamples,
+    todayStepsSamples, todayEnergySamples,
     hrvSamples, vo2Samples, respSamples, spo2Samples,
     standSamples, mindfulSamples, basalSamples,
     lastNightSleep, lastNightHRV, lastNightRHR, lastNightResp, lastNightSpo2,
@@ -177,6 +281,8 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     mod.getDailySteps(startMs, endMs).catch(() => []),
     mod.getSleepSamples(startMs, endMs).catch(() => []),
     mod.getActiveEnergyBurned(startMs, endMs).catch(() => []),
+    mod.getDailySteps(todayStartMs, endMs).catch(() => []),
+    mod.getActiveEnergyBurned(todayStartMs, endMs).catch(() => []),
     mod.getHRV(startMs, endMs, 30).catch((e: any) => { console.warn('[hk] getHRV failed:', e?.message ?? e); return []; }),
     mod.getVO2Max(startMs, endMs, 1).catch(() => []),
     mod.getRespiratoryRate(startMs, endMs, 14).catch(() => []),
@@ -213,12 +319,13 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     historyResp as any[],
     historySpo2 as any[],
   );
-  persistSleepHistory(history).catch(() => null);
 
   // Compute last-night inBedMinutes for efficiency.
   const lastNightStages = calcSleepStages(lastNightSleep as SleepSample[]);
   const lastNightInBedMinutes = calcLastNightInBedMinutes(lastNightSleep as SleepSample[]);
-  const lastNightRhrAvg = avgValue(lastNightRHR) ?? avgValue(restingHR);
+  const lastNightBedtimeMinutes = calcBedtimeMinutes(lastNightSleep as SleepSample[]);
+  const lastNightSleepTimeline = buildSleepStageTimeline(lastNightSleep as SleepSample[]);
+  const lastNightRhrAvg = avgValue(lastNightRHR);
   const lastNightRespAvg = avgValue1(lastNightResp);
   const lastNightSpo2Avg = avgValue1(lastNightSpo2);
 
@@ -230,8 +337,18 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     respRate: lastNightRespAvg,
     spo2: lastNightSpo2Avg,
     age: opts.age ?? null,
+    bedtimeMinutes: lastNightBedtimeMinutes,
     history,
   });
+  const historyWithLatestScore = sleepScore && history.length > 0
+    ? history.map((night, idx) => idx === history.length - 1 ? {
+        ...night,
+        score: sleepScore.score,
+        rating: sleepScore.rating,
+        mode: sleepScore.mode,
+      } : night)
+    : history;
+  persistSleepHistory(historyWithLatestScore).catch(() => null);
 
   // Mirror last night to the backend so history survives device wipes
   // and feeds personalized score on a new device. Fire-and-forget —
@@ -258,12 +375,24 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     ? Math.round(energyDays.reduce((sum: number, s: any) => sum + s.value, 0) / energyDays.length)
     : null;
 
+  // Basal energy: same shape as active — `getBasalEnergyBurned` returns
+  // one sample per day via the iOS `statisticsPerDay` aggregation, so we
+  // average the daily totals. The previous version summed every sample
+  // and reported a 7-day total (~13.5k kcal at a ~1.9k BMR), which read
+  // as a clearly wrong-looking number on the vitals card.
+  const basalDays = (basalSamples ?? []).filter((s: any) => s.value > 0);
+  const avgBasalEnergy = basalDays.length > 0
+    ? Math.round(basalDays.reduce((sum: number, s: any) => sum + s.value, 0) / basalDays.length)
+    : null;
+
   return {
     restingHeartRate: avgValue(restingHR),
+    stepsToday: totalValueInWindow(todayStepsSamples, todayStartMs, endMs),
     avgSteps7d: avgValue(steps),
     workouts7d: null,
     avgSleepHours7d: calcAvgSleep(sleepSamples),
     lastNightSleepHours: calcLastNightSleep(lastNightSleep as SleepSample[]),
+    activeEnergyToday: totalValueInWindow(todayEnergySamples, todayStartMs, endMs),
     activeEnergy7d: avgActiveEnergy,
     hrvAvg: avgValue(hrvSamples),
     vo2Max: vo2Samples?.[0]?.value ?? null,
@@ -271,8 +400,9 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     oxygenSaturation: avgValue(spo2Samples),
     standingHours7d: stoodCount,
     mindfulMinutes7d: totalMinutes(mindfulSamples),
-    basalEnergy7d: totalValue(basalSamples),
+    basalEnergy7d: avgBasalEnergy,
     sleepScore,
+    sleepTimeline: lastNightSleepTimeline,
     workoutDetails: Array.isArray(recentWorkouts) ? recentWorkouts : [],
     fetchedAt: now.toISOString(),
   };
@@ -289,13 +419,27 @@ export interface DailySnapshot {
   dateISO: string;
   steps: number | null;
   activeEnergyKcal: number | null;
+  basalEnergyKcal: number | null;
   workoutMinutes: number | null;
   cardioMinutes: number | null;
   zone2Minutes: number | null;
   restingHr: number | null;
   hrv: number | null;
   vo2Max: number | null;
+  respiratoryRate: number | null;
+  oxygenSaturation: number | null;
+  wristTemperatureC: number | null;
+  sleepBreathingDisturbances: number | null;
+  sleepBreathingDisturbancesElevated: boolean | null;
   weightLbs: number | null;
+}
+
+export interface DailyNutritionSnapshot {
+  dateISO: string;
+  calories: number | null;
+  proteinG: number | null;
+  carbsG: number | null;
+  fatG: number | null;
 }
 
 export interface WorkoutZone2Summary {
@@ -307,10 +451,6 @@ export interface WorkoutZone2Summary {
   reason?: string;
   source: 'heart_rate' | 'heuristic' | 'none';
 }
-
-const _CARDIO_ACTIVITY_RX = /run|walk|hike|bik|cycl|row|swim|ellipt|spin|stair|cross[\s-]?train|\bcardio\b|aerobic|jog|treadmill|dance|tennis|pickleball|paddle|soccer|basketball|box|kickbox|martial|hiit|interval|tabata|sprint/i;
-const _NON_STEADY_RX = /hiit|interval|tabata|sprint/i;
-const _NON_CARDIO_RX = /yoga|pilates|stretch|flex|core|strength|weight|lift/i;
 
 function _workoutName(w: any): string {
   return String(w?.activityName ?? w?.name ?? 'Workout');
@@ -326,14 +466,11 @@ function _workoutWindow(w: any): { startMs: number; endMs: number } | null {
   return startMs > 0 && endMs > startMs ? { startMs, endMs } : null;
 }
 
-function _positiveZoneMinutes(zones: unknown): boolean {
-  return Array.isArray(zones) && zones.some((x) => typeof x === 'number' && x > 0);
-}
-
 /** Summarize an Apple Health workout for cardio + Zone 2 rollups.
  *  Prefer real HR samples when present. Fallback uses activity name +
  *  duration, so users without Watch HR still get sensible Z2 credit
- *  for steady cardio. */
+ *  for steady cardio. HR zones from strength, mobility, and other
+ *  non-cardio workouts are intentionally excluded from cardio totals. */
 export async function summarizeWorkoutZone2(
   workout: any,
   age: number | null = null,
@@ -342,74 +479,19 @@ export async function summarizeWorkoutZone2(
   if (durationMin <= 0) return null;
 
   const name = _workoutName(workout);
-  const isNonCardio = _NON_CARDIO_RX.test(name);
-  const isCardio = _CARDIO_ACTIVITY_RX.test(name) && !isNonCardio;
   const window = _workoutWindow(workout);
 
-  if (!isNonCardio && window) {
+  if (window) {
     const hr = await getWorkoutHrSummary(window.startMs, window.endMs, age).catch(() => null);
-    const zones = hr?.zoneMinutes;
-    if (_positiveZoneMinutes(zones)) {
-      const actualZ2 = Math.max(0, Math.min(durationMin, Number(zones?.[1] ?? 0) || 0));
-      const zoneTotal = (zones ?? []).reduce((sum, z) => sum + (Number(z) || 0), 0);
-      const cardioMinutes = isCardio ? durationMin : Math.min(durationMin, zoneTotal || durationMin);
-      return {
-        name,
-        durationMin,
-        cardioMinutes,
-        zone2Minutes: Math.round(actualZ2 * 10) / 10,
-        counted: actualZ2 > 0,
-        reason: actualZ2 > 0 ? 'HR zone data' : 'no Z2 HR time',
-        source: 'heart_rate',
-      };
-    }
-  }
-
-  if (!isCardio) {
-    return {
+    const withHr = summarizeCardioWorkoutZones({
       name,
       durationMin,
-      cardioMinutes: 0,
-      zone2Minutes: 0,
-      counted: false,
-      reason: isNonCardio ? 'not steady cardio' : 'not cardio',
-      source: 'none',
-    };
+      zoneMinutes: hr?.zoneMinutes,
+    });
+    if (withHr?.source === 'heart_rate') return withHr;
   }
 
-  if (_NON_STEADY_RX.test(name)) {
-    return {
-      name,
-      durationMin,
-      cardioMinutes: durationMin,
-      zone2Minutes: 0,
-      counted: false,
-      reason: 'high-intensity / excluded',
-      source: 'heuristic',
-    };
-  }
-
-  if (durationMin < 20) {
-    return {
-      name,
-      durationMin,
-      cardioMinutes: durationMin,
-      zone2Minutes: 0,
-      counted: false,
-      reason: 'under 20 min',
-      source: 'heuristic',
-    };
-  }
-
-  return {
-    name,
-    durationMin,
-    cardioMinutes: durationMin,
-    zone2Minutes: durationMin,
-    counted: true,
-    reason: 'steady cardio >= 20 min',
-    source: 'heuristic',
-  };
+  return summarizeCardioWorkoutZones({ name, durationMin });
 }
 
 function _sumSamplesInWindow(samples: any[], startMs: number, endMs: number): number {
@@ -420,6 +502,11 @@ function _sumSamplesInWindow(samples: any[], startMs: number, endMs: number): nu
     if (t >= startMs && t < endMs) total += Number(s.value) || 0;
   }
   return total;
+}
+
+function totalValueInWindow(samples: any[], startMs: number, endMs: number): number | null {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  return Math.round(_sumSamplesInWindow(samples, startMs, endMs));
 }
 
 function _avgSamplesInWindow(samples: any[], startMs: number, endMs: number): number | null {
@@ -441,21 +528,30 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
   const mod = getModule();
   if (!mod) return null;
   try {
+    const nightStartMs = dayStartMs - 6 * 60 * 60 * 1000;
+    const nightEndMs = Math.min(dayEndMs, dayStartMs + 12 * 60 * 60 * 1000);
     const [
-      stepsSamples, energySamples, workouts,
+      stepsSamples, energySamples, basalSamples, workouts,
       hrvSamples, rhrSamples, vo2Samples, weightSamples,
+      respSamples, spo2Samples, wristTempSamples, breathingSamples,
     ] = await Promise.all([
       typeof mod.getDailySteps === 'function' ? mod.getDailySteps(dayStartMs, dayEndMs).catch(() => []) : [],
       typeof mod.getActiveEnergyBurned === 'function' ? mod.getActiveEnergyBurned(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getBasalEnergyBurned === 'function' ? mod.getBasalEnergyBurned(dayStartMs, dayEndMs).catch(() => []) : [],
       typeof mod.getWorkouts === 'function' ? mod.getWorkouts(dayStartMs, dayEndMs).catch(() => []) : [],
       typeof mod.getHRV === 'function' ? mod.getHRV(dayStartMs, dayEndMs, 50).catch(() => []) : [],
       typeof mod.getRestingHeartRate === 'function' ? mod.getRestingHeartRate(dayStartMs, dayEndMs, 5).catch(() => []) : [],
       typeof mod.getVO2Max === 'function' ? mod.getVO2Max(dayStartMs, dayEndMs, 1).catch(() => []) : [],
       typeof mod.getWeight === 'function' ? mod.getWeight(dayStartMs, dayEndMs, 5).catch(() => []) : [],
+      typeof mod.getRespiratoryRate === 'function' ? mod.getRespiratoryRate(nightStartMs, nightEndMs, 30).catch(() => []) : [],
+      typeof mod.getOxygenSaturation === 'function' ? mod.getOxygenSaturation(nightStartMs, nightEndMs, 30).catch(() => []) : [],
+      typeof mod.getSleepingWristTemperature === 'function' ? mod.getSleepingWristTemperature(nightStartMs, nightEndMs, 10).catch(() => []) : [],
+      typeof mod.getSleepingBreathingDisturbances === 'function' ? mod.getSleepingBreathingDisturbances(nightStartMs, nightEndMs, 10).catch(() => []) : [],
     ]);
 
     const steps = _sumSamplesInWindow(stepsSamples, dayStartMs, dayEndMs);
     const activeEnergy = _sumSamplesInWindow(energySamples, dayStartMs, dayEndMs);
+    const basalEnergy = _sumSamplesInWindow(basalSamples, dayStartMs, dayEndMs);
 
     let workoutMinutes = 0;
     let cardioMinutes = 0;
@@ -476,18 +572,65 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
     }
 
     const dateISO = new Date(dayStartMs).toISOString().slice(0, 10);
+    const breathingValues = Array.isArray(breathingSamples)
+      ? breathingSamples.map((s: any) => Number(s?.value)).filter((v: number) => Number.isFinite(v) && v >= 0)
+      : [];
+    const breathingElevated = Array.isArray(breathingSamples) && breathingSamples.length > 0
+      ? breathingSamples.some((s: any) => String(s?.classification ?? '').toLowerCase() === 'elevated')
+      : null;
     return {
       dateISO,
       steps: steps > 0 ? Math.round(steps) : null,
       activeEnergyKcal: activeEnergy > 0 ? Math.round(activeEnergy) : null,
+      basalEnergyKcal: basalEnergy > 0 ? Math.round(basalEnergy) : null,
       workoutMinutes: workoutMinutes > 0 ? Math.round(workoutMinutes) : null,
       cardioMinutes: cardioMinutes > 0 ? Math.round(cardioMinutes) : null,
       zone2Minutes: zone2Minutes > 0 ? Math.round(zone2Minutes) : null,
       restingHr: _avgSamplesInWindow(rhrSamples, dayStartMs, dayEndMs),
       hrv: _avgSamplesInWindow(hrvSamples, dayStartMs, dayEndMs),
       vo2Max: Array.isArray(vo2Samples) && vo2Samples.length > 0 ? Number(vo2Samples[0]?.value) || null : null,
+      respiratoryRate: _avgSamplesInWindow(respSamples, nightStartMs, nightEndMs),
+      oxygenSaturation: _avgSamplesInWindow(spo2Samples, nightStartMs, nightEndMs),
+      wristTemperatureC: _avgSamplesInWindow(wristTempSamples, nightStartMs, nightEndMs),
+      sleepBreathingDisturbances: breathingValues.length > 0
+        ? breathingValues.reduce((sum: number, value: number) => sum + value, 0) / breathingValues.length
+        : null,
+      sleepBreathingDisturbancesElevated: breathingElevated,
       weightLbs: _avgSamplesInWindow(weightSamples, dayStartMs, dayEndMs),
     };
+  } catch {
+    return null;
+  }
+}
+
+export async function readDailyNutritionSnapshot(dayStartMs: number, dayEndMs: number): Promise<DailyNutritionSnapshot | null> {
+  const mod = getModule();
+  if (!mod) return null;
+  try {
+    const [
+      calorieSamples, proteinSamples, carbSamples, fatSamples,
+    ] = await Promise.all([
+      typeof mod.getDietaryEnergyConsumed === 'function' ? mod.getDietaryEnergyConsumed(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getDietaryProtein === 'function' ? mod.getDietaryProtein(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getDietaryCarbohydrates === 'function' ? mod.getDietaryCarbohydrates(dayStartMs, dayEndMs).catch(() => []) : [],
+      typeof mod.getDietaryFatTotal === 'function' ? mod.getDietaryFatTotal(dayStartMs, dayEndMs).catch(() => []) : [],
+    ]);
+
+    const calories = _sumSamplesInWindow(calorieSamples, dayStartMs, dayEndMs);
+    const protein = _sumSamplesInWindow(proteinSamples, dayStartMs, dayEndMs);
+    const carbs = _sumSamplesInWindow(carbSamples, dayStartMs, dayEndMs);
+    const fat = _sumSamplesInWindow(fatSamples, dayStartMs, dayEndMs);
+    const hasAny = calories > 0 || protein > 0 || carbs > 0 || fat > 0;
+    const dateISO = new Date(dayStartMs).toISOString().slice(0, 10);
+    return hasAny
+      ? {
+          dateISO,
+          calories: calories > 0 ? Math.round(calories) : null,
+          proteinG: protein > 0 ? Math.round(protein) : null,
+          carbsG: carbs > 0 ? Math.round(carbs) : null,
+          fatG: fat > 0 ? Math.round(fat) : null,
+        }
+      : { dateISO, calories: null, proteinG: null, carbsG: null, fatG: null };
   } catch {
     return null;
   }
@@ -517,6 +660,10 @@ export async function saveWorkoutToHealth(opts: {
   activityTag: string;
   caloriesBurned?: number | null;
   distanceMiles?: number | null;
+  /** Optional GPS route. When present, the native bridge writes the
+   *  trail via HKWorkoutRouteBuilder so the saved workout shows the
+   *  route on the Apple Fitness map. Indoor + lifting omit. */
+  routeCoords?: Array<{ lat: number; lon: number; t_ms?: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }> | null;
 }): Promise<boolean> {
   if (!isHealthKitAvailable()) return false;
   const mod = getModule();
@@ -528,6 +675,7 @@ export async function saveWorkoutToHealth(opts: {
       opts.activityTag,
       opts.caloriesBurned ?? null,
       opts.distanceMiles ?? null,
+      opts.routeCoords && opts.routeCoords.length > 0 ? opts.routeCoords : null,
     );
   } catch (e) {
     console.warn('[appleHealth] saveWorkoutToHealth failed:', e);
@@ -555,6 +703,35 @@ export async function getLatestHeartRate(): Promise<number | null> {
   }
 }
 
+export type HeartRateSample = {
+  value: number;
+  startDate: string;
+  endDate?: string;
+};
+
+export async function readHeartRateSamples(
+  startMs: number,
+  endMs: number,
+  limit = 240,
+): Promise<HeartRateSample[]> {
+  const mod = getModule();
+  if (!mod || typeof mod.getHeartRate !== 'function') return [];
+  try {
+    const samples = await mod.getHeartRate(startMs, endMs, limit);
+    if (!Array.isArray(samples)) return [];
+    return samples
+      .map((sample: any) => ({
+        value: Number(sample?.value),
+        startDate: String(sample?.startDate ?? ''),
+        endDate: sample?.endDate ? String(sample.endDate) : undefined,
+      }))
+      .filter((sample) => sample.value > 0 && Number.isFinite(new Date(sample.startDate).getTime()))
+      .sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+  } catch {
+    return [];
+  }
+}
+
 // Pulls raw HR samples for a workout window and summarizes them into avg, max,
 // and minutes-in-zone. Prefer the exact server-computed zone boundaries already
 // used for live phone/watch display; fallback mirrors the backend's HRR default.
@@ -565,42 +742,31 @@ export async function getLatestHeartRate(): Promise<number | null> {
  *  matches passive HK's typical sampling cadence during exercise. */
 const MAX_HR_SAMPLE_GAP_MINUTES = 2;
 
-/** Estimated max HR. Uses the Tanaka formula `208 - 0.7 * age` (more
- *  accurate than `220 - age` across age ranges). 190 fallback when no
- *  age is available — equivalent to a ~26 year-old default. */
-function estimateMaxHr(age: number | null): number {
-  return age && age > 0 ? Math.round(208 - 0.7 * age) : 190;
-}
+// Local fallback delegates to the canonical hrZones module so the
+// phone, the watch, and the backend all share one definition. The
+// only reason this fallback exists is to handle the rare race where
+// the workout finishes before `/workouts/hr-zones` has responded —
+// when that happens we still want a reasonable zone breakdown
+// instead of dropping the whole HR summary.
 
-/** Resolves the max HR to use for zone math. A user-provided override
- *  (future profile/settings field) wins over the age-based estimate so
- *  athletes whose true MHR diverges from population means aren't
- *  forced into the wrong zones. Override is read defensively from any
- *  shape the future field might land in. */
-function resolveMaxHr(age: number | null, override: number | null | undefined): number {
-  const ov = Number(override);
-  if (Number.isFinite(ov) && ov > 0) return Math.round(ov);
-  return estimateMaxHr(age);
-}
-
-function fallbackHrZones(maxHR: number, restingHeartRate: number | null): HRZone[] {
-  const rhr = restingHeartRate && restingHeartRate > 0 && restingHeartRate < maxHR
-    ? restingHeartRate
-    : 60;
-  const hrrPct = (pct: number) => Math.round(rhr + (maxHR - rhr) * pct);
-  return [
-    { zone: 1, label: 'Recovery', low: hrrPct(0.50), high: hrrPct(0.60) },
-    { zone: 2, label: 'Aerobic', low: hrrPct(0.60), high: hrrPct(0.70) },
-    { zone: 3, label: 'Tempo', low: hrrPct(0.70), high: hrrPct(0.80) },
-    { zone: 4, label: 'Threshold', low: hrrPct(0.80), high: hrrPct(0.90) },
-    { zone: 5, label: 'VO2 Max', low: hrrPct(0.90), high: maxHR },
-  ];
+function fallbackHrZones(
+  age: number | null,
+  restingHeartRate: number | null,
+  userMaxHR: number | null,
+): HRZone[] {
+  const { computeHrZones } = require('../utils/hrZones') as typeof import('../utils/hrZones');
+  return computeHrZones({
+    age,
+    userMaxHR: userMaxHR ?? null,
+    rhr7d: restingHeartRate ?? null,
+  }).zones;
 }
 
 function workoutHrZones(
   explicitZones: HRZone[] | null | undefined,
-  maxHR: number,
+  age: number | null,
   restingHeartRate: number | null,
+  userMaxHR: number | null,
 ): HRZone[] {
   const zones = Array.isArray(explicitZones)
     ? explicitZones.filter(z =>
@@ -608,7 +774,7 @@ function workoutHrZones(
       Number.isFinite(Number(z.low)) &&
       Number.isFinite(Number(z.high)))
     : [];
-  return zones.length > 0 ? zones : fallbackHrZones(maxHR, restingHeartRate);
+  return zones.length > 0 ? zones : fallbackHrZones(age, restingHeartRate, userMaxHR);
 }
 
 export type HrConfidence = 'high' | 'medium' | 'low';
@@ -646,12 +812,21 @@ export async function getWorkoutHrSummary(
     const samples = await mod.getHeartRate(startMs, endMs, 500);
     if (!Array.isArray(samples) || samples.length === 0) return null;
     const maxHrOverride = profile?.maxHeartRate ?? profile?.max_heart_rate ?? null;
-    const maxHrUsed = resolveMaxHr(age, maxHrOverride);
-    const zoneDefinitions = workoutHrZones(explicitZones, maxHrUsed, restingHeartRate);
+    const zoneDefinitions = workoutHrZones(explicitZones, age, restingHeartRate, maxHrOverride);
+    // Pull the actual MHR used out of the resolved zone band so the
+    // returned summary reports the same number that drove the zones.
+    const { computeHrZones } = require('../utils/hrZones') as typeof import('../utils/hrZones');
+    const maxHrUsed = computeHrZones({ age, userMaxHR: maxHrOverride, rhr7d: restingHeartRate }).maxHR;
 
     let sum = 0;
     let max = 0;
     let coveredMinutes = 0;
+    // Five-tuple kept for storage backwards compat: index 0 = Z1
+    // through index 4 = Z5. Z0 minutes (rare — only fires below the
+    // user's resting HR or for very-low-effort warmups) fold into the
+    // Z1 slot. New consumers reading the live zone array see all six
+    // bands; only the persisted `hr_summary.zoneMinutes` payload
+    // collapses Z0 → Z1 to avoid breaking historical schemas.
     const zones: [number, number, number, number, number] = [0, 0, 0, 0, 0];
     const sorted = samples
       .map((s: any) => ({ v: Number(s.value), t: new Date(s.startDate).getTime() }))
@@ -670,7 +845,11 @@ export async function getWorkoutHrSummary(
       const rawGapMinutes = Math.max(0, (nextT - t) / 60000);
       const minutes = Math.min(rawGapMinutes, MAX_HR_SAMPLE_GAP_MINUTES);
       const zone = zoneForHeartRate(v, zoneDefinitions);
-      const zIdx = Math.max(0, Math.min(4, Math.round(Number(zone?.zone ?? 1)) - 1));
+      // Map zone numbers 0..5 → indices 0..4. Z0 collapses into the
+      // Z1 slot so the persisted 5-tuple stays compatible with prior
+      // workout records.
+      const zNum = Math.max(0, Math.min(5, Math.round(Number(zone?.zone ?? 1))));
+      const zIdx = Math.max(0, zNum - 1);
       zones[zIdx] += minutes;
       coveredMinutes += minutes;
     }
@@ -850,6 +1029,19 @@ const STAGE_PRIORITY: Record<string, number> = {
 
 type SleepSample = { value: string; startDate: string; endDate: string };
 
+function sleepStageType(value: string): SleepStageType | null {
+  switch (value) {
+    case 'AWAKE': return 'awake';
+    case 'REM': return 'rem';
+    case 'DEEP': return 'deep';
+    case 'CORE':
+    case 'ASLEEP':
+      return 'core';
+    default:
+      return null;
+  }
+}
+
 function deduplicateSleepMinutes(samples: SleepSample[]): Map<number, string> {
   const minuteMap = new Map<number, string>();
   for (const s of samples) {
@@ -904,6 +1096,65 @@ function calcSleepStages(samples: SleepSample[]): SleepStages | null {
   return { core, deep, rem, awake, total };
 }
 
+function buildSleepStageTimeline(samples: SleepSample[]): SleepStageTimeline | null {
+  if (!samples?.length) return null;
+
+  const nightMap = new Map<string, SleepSample[]>();
+  for (const s of samples) {
+    if (!sleepStageType(s.value)) continue;
+    const key = s.endDate?.slice(0, 10);
+    if (!key) continue;
+    if (!nightMap.has(key)) nightMap.set(key, []);
+    nightMap.get(key)!.push(s);
+  }
+  if (!nightMap.size) return null;
+
+  const lastNight = [...nightMap.keys()].sort().pop()!;
+  const deduped = [...deduplicateSleepMinutes(nightMap.get(lastNight)!).entries()]
+    .map(([minute, value]) => ({ minute, stage: sleepStageType(value) }))
+    .filter((entry): entry is { minute: number; stage: SleepStageType } => entry.stage != null)
+    .sort((a, b) => a.minute - b.minute);
+  if (!deduped.length) return null;
+
+  const firstMinute = deduped[0].minute;
+  const lastMinuteExclusive = deduped[deduped.length - 1].minute + 1;
+  const durationMinutes = lastMinuteExclusive - firstMinute;
+  if (durationMinutes < 30 || durationMinutes > 18 * 60) return null;
+
+  const segments: SleepStageTimeline['segments'] = [];
+  let segmentStart = deduped[0].minute;
+  let previousMinute = deduped[0].minute;
+  let currentStage = deduped[0].stage;
+
+  const pushSegment = (endMinuteExclusive: number) => {
+    segments.push({
+      stage: currentStage,
+      startDate: new Date(segmentStart * 60000).toISOString(),
+      endDate: new Date(endMinuteExclusive * 60000).toISOString(),
+      startOffsetMinutes: segmentStart - firstMinute,
+      durationMinutes: endMinuteExclusive - segmentStart,
+    });
+  };
+
+  for (let i = 1; i < deduped.length; i++) {
+    const entry = deduped[i];
+    if (entry.stage !== currentStage || entry.minute !== previousMinute + 1) {
+      pushSegment(previousMinute + 1);
+      segmentStart = entry.minute;
+      currentStage = entry.stage;
+    }
+    previousMinute = entry.minute;
+  }
+  pushSegment(previousMinute + 1);
+
+  return {
+    startDate: new Date(firstMinute * 60000).toISOString(),
+    endDate: new Date(lastMinuteExclusive * 60000).toISOString(),
+    durationMinutes,
+    segments,
+  };
+}
+
 // Total in-bed minutes for the last night (includes all stages + INBED).
 function calcLastNightInBedMinutes(samples: SleepSample[]): number | null {
   if (!samples?.length) return null;
@@ -921,6 +1172,17 @@ function calcLastNightInBedMinutes(samples: SleepSample[]): number | null {
   return deduped.size > 0 ? deduped.size : null;
 }
 
+function calcBedtimeMinutes(samples: SleepSample[]): number | null {
+  let firstAsleepMs: number | null = null;
+  for (const s of samples ?? []) {
+    if (s.value === 'INBED' || s.value === 'AWAKE' || !s.startDate) continue;
+    const t = new Date(s.startDate).getTime();
+    if (!Number.isFinite(t)) continue;
+    if (firstAsleepMs == null || t < firstAsleepMs) firstAsleepMs = t;
+  }
+  return firstAsleepMs != null ? minutesFromMidnight(new Date(firstAsleepMs)) : null;
+}
+
 // ── Sleep Score entry point ──────────────────────────────────────────────────
 
 interface BuildScoreArgs {
@@ -931,6 +1193,7 @@ interface BuildScoreArgs {
   respRate: number | null;
   spo2: number | null;
   age: number | null;
+  bedtimeMinutes: number | null;
   history: NightRecord[];
 }
 
@@ -956,6 +1219,7 @@ function buildSleepScore(a: BuildScoreArgs): SleepScore | null {
     respiratoryRate: a.respRate,
     age: a.age,
     stages: a.stages,
+    bedtimeMinutes: a.bedtimeMinutes,
     hrvHistory,
     rhrHistory,
     respiratoryRateHistory,
@@ -973,7 +1237,15 @@ export interface NightRecord {
   respiratoryRate?: number | null;
   spo2Percent?: number | null;
   sleepHours: number | null;
+  inBedMinutes?: number | null;
+  deepHours?: number | null;
+  remHours?: number | null;
+  coreHours?: number | null;
+  awakeMinutes?: number | null;
   bedtimeMinutes: number | null; // minutes from midnight, local time
+  score?: number | null;
+  rating?: SleepScore['rating'] | null;
+  mode?: SleepScore['mode'] | null;
 }
 
 function buildNightlyHistory(
@@ -996,6 +1268,10 @@ function buildNightlyHistory(
   for (const [night, samples] of nights) {
     const deduped = deduplicateSleepMinutes(samples);
     let asleepMin = 0;
+    let coreMin = 0;
+    let deepMin = 0;
+    let remMin = 0;
+    let awakeMin = 0;
     let firstAsleepMs: number | null = null;
     // Find earliest asleep minute to use as bedtime / onset.
     for (const s of samples) {
@@ -1004,10 +1280,28 @@ function buildNightlyHistory(
       if (firstAsleepMs == null || t < firstAsleepMs) firstAsleepMs = t;
     }
     for (const stage of deduped.values()) {
-      if (stage === 'DEEP' || stage === 'REM' || stage === 'CORE' || stage === 'ASLEEP') asleepMin++;
+      switch (stage) {
+        case 'DEEP':
+          deepMin++;
+          asleepMin++;
+          break;
+        case 'REM':
+          remMin++;
+          asleepMin++;
+          break;
+        case 'CORE':
+        case 'ASLEEP':
+          coreMin++;
+          asleepMin++;
+          break;
+        case 'AWAKE':
+          awakeMin++;
+          break;
+      }
     }
     const sleepHours = asleepMin > 0 ? round1(asleepMin / 60) : null;
     const bedtimeMinutes = firstAsleepMs != null ? minutesFromMidnight(new Date(firstAsleepMs)) : null;
+    const inBedMinutes = deduped.size > 0 ? deduped.size : null;
 
     // Nightly recovery markers: average samples in the sleep window.
     // Resting HR can be a daily HealthKit summary, so the helper falls
@@ -1034,6 +1328,11 @@ function buildNightlyHistory(
         respiratoryRate: nightResp,
         spo2Percent: nightSpo2,
         sleepHours,
+        inBedMinutes,
+        deepHours: round1(deepMin / 60),
+        remHours: round1(remMin / 60),
+        coreHours: round1(coreMin / 60),
+        awakeMinutes: awakeMin,
         bedtimeMinutes,
       });
     }
@@ -1080,20 +1379,36 @@ function sleepHistoryPayloadFromNight(night: NightRecord): import('./api').Sleep
   if (!night?.night) return null;
   const totalHours = typeof night.sleepHours === 'number' && night.sleepHours > 0 ? night.sleepHours : null;
   const hasAnyValue = totalHours != null
+    || night.inBedMinutes != null
+    || night.deepHours != null
+    || night.remHours != null
+    || night.coreHours != null
+    || night.awakeMinutes != null
     || night.hrv != null
     || night.restingHr != null
     || night.respiratoryRate != null
     || night.spo2Percent != null
-    || night.bedtimeMinutes != null;
+    || night.bedtimeMinutes != null
+    || night.score != null
+    || night.rating != null
+    || night.mode != null;
   if (!hasAnyValue) return null;
   return {
     night_date: night.night,
     total_hours: totalHours,
+    in_bed_minutes: night.inBedMinutes ?? null,
+    deep_hours: night.deepHours ?? null,
+    rem_hours: night.remHours ?? null,
+    core_hours: night.coreHours ?? null,
+    awake_minutes: night.awakeMinutes ?? null,
     hrv_ms: night.hrv ?? null,
     resting_hr: night.restingHr ?? null,
     respiratory_rate: night.respiratoryRate ?? null,
     spo2_percent: night.spo2Percent ?? null,
     bedtime_minutes_from_midnight: night.bedtimeMinutes ?? null,
+    score: night.score ?? null,
+    rating: night.rating ?? null,
+    mode: night.mode ?? null,
     source: 'apple_health',
   };
 }
@@ -1116,7 +1431,7 @@ async function pushSleepHistoryToBackend(nights: NightRecord[]): Promise<void> {
 
 /** Mirror last night's sleep snapshot to the backend (fire-and-forget).
  *  Keyed on the waking date so today's score uses today's row. Auth
- *  token is read fresh from AsyncStorage so callers don't need to pass it. */
+ *  token is read fresh from SecureStore so callers don't need to pass it. */
 async function pushNightlySleepToBackend(input: {
   stages: SleepStages | null;
   inBedMinutes: number | null;
@@ -1133,14 +1448,7 @@ async function pushNightlySleepToBackend(input: {
     // Waking date — use today's local date if we have any sleep total.
     if (!input.stages || (input.stages.total ?? 0) <= 0) return;
     const nightDate = new Date().toISOString().slice(0, 10);
-    // Bedtime: take the EARLIEST start across last-night samples.
-    let bedtimeMin: number | null = null;
-    for (const s of input.lastNightSleep) {
-      if (!s?.startDate) continue;
-      const d = new Date(s.startDate);
-      const m = minutesFromMidnight(d);
-      if (bedtimeMin == null || m < bedtimeMin) bedtimeMin = m;
-    }
+    const bedtimeMin = calcBedtimeMinutes(input.lastNightSleep);
     const { upsertNightlySleep } = await import('./api');
     await upsertNightlySleep(token, {
       night_date: nightDate,
@@ -1171,7 +1479,27 @@ async function persistSleepHistory(nights: NightRecord[]): Promise<void> {
     const existing = await loadSleepHistory();
     const byNight = new Map<string, NightRecord>();
     for (const n of existing) byNight.set(n.night, n);
-    for (const n of nights) byNight.set(n.night, n); // fresh data wins
+    for (const n of nights) {
+      const prev = byNight.get(n.night);
+      byNight.set(n.night, prev ? {
+        ...prev,
+        ...n,
+        hrv: n.hrv ?? prev.hrv ?? null,
+        restingHr: n.restingHr ?? prev.restingHr ?? null,
+        respiratoryRate: n.respiratoryRate ?? prev.respiratoryRate ?? null,
+        spo2Percent: n.spo2Percent ?? prev.spo2Percent ?? null,
+        sleepHours: n.sleepHours ?? prev.sleepHours ?? null,
+        inBedMinutes: n.inBedMinutes ?? prev.inBedMinutes ?? null,
+        deepHours: n.deepHours ?? prev.deepHours ?? null,
+        remHours: n.remHours ?? prev.remHours ?? null,
+        coreHours: n.coreHours ?? prev.coreHours ?? null,
+        awakeMinutes: n.awakeMinutes ?? prev.awakeMinutes ?? null,
+        bedtimeMinutes: n.bedtimeMinutes ?? prev.bedtimeMinutes ?? null,
+        score: n.score ?? prev.score ?? null,
+        rating: n.rating ?? prev.rating ?? null,
+        mode: n.mode ?? prev.mode ?? null,
+      } : n);
+    }
     const merged = [...byNight.values()].sort((a, b) => a.night.localeCompare(b.night)).slice(-MAX_HISTORY_NIGHTS);
     await AsyncStorage.setItem(SLEEP_HISTORY_KEY, JSON.stringify(merged));
     pushSleepHistoryToBackend(merged).catch(() => {});

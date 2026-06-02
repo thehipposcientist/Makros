@@ -1,0 +1,391 @@
+
+        const proteinInsights = proteinTimingInsights(plansByDate[todayKey] ?? null);
+        const proteinFlag = proteinInsights[0] ? { tier: proteinInsights[0].tier, detail: proteinInsights[0].detail } : null;
+
+        if (cancelled) return;
+        setGutInsights({
+          plantCount: diversity.distinctCount,
+          plantTier: diversity.tier,
+          plantMessage: diversity.message,
+          fiberToday: { grams: fiber.grams, target: fiber.target, pct: fiber.pct, message: fiber.message },
+          proteinFlag,
+        });
+      } catch (e) {
+        console.warn('[Progress] gut insights failed:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isActive, isProTier, nutritionPlan, showMealProgress, tab, userProfile.goal, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+
+  useEffect(() => {
+    if (!isActive || !isProTier || (tab !== 'today' && tab !== 'health')) return;
+    // Cheap cached values are okay on mount; live HealthKit refresh kicks
+    // off as soon as Progress is active so sleep is ready on Today too.
+    loadHealthSummary().then(setHealthSummary);
+    loadHealthScore().then(setHealthScore);
+  }, [isActive, isProTier, tab]);
+
+  useEffect(() => {
+    // Also load body scans on the Today tab — the goal-execution card lives
+    // there and depends on bodyScanHistory; without this, the card would
+    // render empty body scans first and then "switch" to correct numbers once
+    // the user visited the Body tab.
+    if (!isActive || (tab !== 'body' && tab !== 'today') || !isProTier || bodyScanHistoryLoadedRef.current) return;
+    bodyScanHistoryLoadedRef.current = true;
+    let cancelled = false;
+    AsyncStorage.getItem(BODY_SCAN_CACHE_KEY).then(async raw => {
+      const RECENT_CAP = 20;
+      const parsed = raw ? JSON.parse(raw) : [];
+      const localRows = Array.isArray(parsed) ? parsed : [];
+      const local: BodyScanEntry[] = localRows
+        .map(normalizeBodyScanEntry)
+        .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
+      const localOnly = local.filter(entry => !bodyScanHasServerId(entry));
+      if (localOnly.length > 0) {
+        await quarantineLegacyBodyScans(localOnly, 'bodyScanHistory local-only row ignored; DB is canonical');
+      }
+      const localSorted = onlyServerBackedBodyScans(local).sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
+      if (localOnly.length > 0) {
+        await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(localSorted));
+      }
+      if (!cancelled && localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
+      if (authToken) {
+        try {
+          const { getBodyScanHistory } = await import('../services/api');
+          const remote = (await getBodyScanHistory(authToken))
+            .map(normalizeBodyScanEntry)
+            .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
+          if (cancelled) return;
+          const sorted = onlyServerBackedBodyScans(remote)
+            .sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
+          setBodyScanHistory(sorted.slice(0, RECENT_CAP));
+          await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(sorted));
+        } catch { /* non-fatal */ }
+      }
+    })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setBodyScanLoaded(true); });
+    return () => { cancelled = true; };
+  }, [authToken, isActive, isProTier, tab]);
+
+  useEffect(() => {
+    if (!authToken || !isActive) return;
+    let cancelled = false;
+    getCalorieRanges(authToken)
+      .then(r => { if (!cancelled) setCalorieRanges(r); })
+      .catch(() => { if (!cancelled) setCalorieRanges(null); });
+    return () => { cancelled = true; };
+  }, [authToken, isActive, userProfile.goal, userProfile.goalDetails?.pace, userProfile.physicalStats?.weightLbs, userProfile.physicalStats?.age, userProfile.physicalStats?.gender, userProfile.daysPerWeek]);
+
+  useEffect(() => {
+    if (!isActive || !isProTier) return;
+    // Only short-circuit when we've successfully loaded today's data
+    // already. Pre-fix this ref flipped to true on every entry to the
+    // tab — including when the underlying fetch failed or produced no
+    // summary — so a user landing on a stale cache would never see a
+    // refresh. Now we re-attempt whenever there's no fresh summary.
+    if (healthLiveLoadedRef.current) return;
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return;
+      setHealthReading(true);
+      void (async () => {
+        try {
+          if (!isHealthKitAvailable()) return;
+          const enabled = await isAppleHealthEnabled();
+          if (cancelled) return;
+          setHealthEnabled(enabled);
+          if (!enabled) return;
+          const age = userProfile.physicalStats?.age ?? null;
+          const fresh = await readFreshProgressHealthSummary(age, true);
+          if (cancelled || !fresh) return;
+          // Mark the cache hot only after a successful read. A failed or
+          // empty read leaves the ref unset so the next active refresh retries
+          // — which is what the user expected when iOS Settings shows
+          // HealthKit as authorized but the app shows no data.
+          healthLiveLoadedRef.current = true;
+          setHealthSummary(fresh);
+          saveHealthSummary(fresh).catch(() => null);
+          try {
+            const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
+            await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
+          } catch { /* watch may be unavailable */ }
+          try {
+            setSleepHistory(await loadProgressSleepHistory(authToken, fresh));
+          } catch {}
+        } catch {
+        } finally {
+          if (!cancelled) setHealthReading(false);
+        }
+      })();
+    });
+    return () => { cancelled = true; task.cancel?.(); setHealthReading(false); };
+  }, [authToken, isActive, isProTier, userProfile.physicalStats?.age]);
+
+  useEffect(() => {
+    if (!authToken || !isActive || !isProTier) {
+      setSleepPressure(null);
+      return;
+    }
+    let cancelled = false;
+    import('../services/api').then(({ getSleepPressure }) => {
+      getSleepPressure(authToken, 14)
+        .then(result => { if (!cancelled) setSleepPressure(result); })
+        .catch(() => { if (!cancelled) setSleepPressure(null); });
+    }).catch(() => { if (!cancelled) setSleepPressure(null); });
+    return () => { cancelled = true; };
+  }, [authToken, healthSummary?.sleepScore?.score, isActive, isProTier, sleepHistory.length]);
+
+  useEffect(() => {
+    if (!biometricHistoryOpen || !selectedBiometric || !authToken || !isProTier) return;
+    if (selectedBiometric === 'sleep') return;
+    if (dailyHealthHistory && dailyHealthHistoryDays >= biometricHistoryWindow) return;
+    let cancelled = false;
+    setDailyHealthHistoryLoading(true);
+    import('../services/api').then(({ getDailyHealthHistory }) => {
+      getDailyHealthHistory(authToken, biometricHistoryWindow)
+        .then(rows => {
+          if (cancelled) return;
+          setDailyHealthHistory(Array.isArray(rows) ? rows : []);
+          setDailyHealthHistoryDays(biometricHistoryWindow);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDailyHealthHistory([]);
+            setDailyHealthHistoryDays(biometricHistoryWindow);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDailyHealthHistoryLoading(false);
+        });
+    }).catch(() => {
+      if (!cancelled) {
+        setDailyHealthHistory([]);
+        setDailyHealthHistoryDays(biometricHistoryWindow);
+        setDailyHealthHistoryLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    biometricHistoryOpen,
+    biometricHistoryWindow,
+    dailyHealthHistory,
+    dailyHealthHistoryDays,
+    isProTier,
+    selectedBiometric,
+  ]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'today' || !authToken || !isProTier || !showWorkoutProgress) return;
+    if (dailyHealthHistory && dailyHealthHistoryDays >= GOAL_EXECUTION_BLOCK_DAYS) return;
+    let cancelled = false;
+    setDailyHealthHistoryLoading(true);
+    import('../services/api').then(({ getDailyHealthHistory }) => {
+      getDailyHealthHistory(authToken, GOAL_EXECUTION_BLOCK_DAYS)
+        .then(rows => {
+          if (cancelled) return;
+          setDailyHealthHistory(Array.isArray(rows) ? rows : []);
+          setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDailyHealthHistory([]);
+            setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDailyHealthHistoryLoading(false);
+        });
+    }).catch(() => {
+      if (!cancelled) {
+        setDailyHealthHistory([]);
+        setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+        setDailyHealthHistoryLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    dailyHealthHistory,
+    dailyHealthHistoryDays,
+    isActive,
+    isProTier,
+    showWorkoutProgress,
+    tab,
+  ]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'health' || !isProTier || !showMealProgress) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!isHealthKitAvailable()) return;
+        const enabled = await isAppleHealthEnabled();
+        if (cancelled || !enabled) {
+          if (!cancelled) setAppleNutritionSnapshot(null);
+          return;
+        }
+        const snapshot = await refreshAppleNutritionSnapshot();
+        if (!cancelled) setAppleNutritionSnapshot(snapshot);
+      } catch {
+        if (!cancelled) setAppleNutritionSnapshot(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isActive, isProTier, refreshAppleNutritionSnapshot, showMealProgress, tab]);
+
+  const handleDeletePlanChange = (change: PlanChangeEntry) => {
+    if (!change.id) return;
+    const scheduled = planChangeIsScheduled(change);
+    const canCancel = scheduled
+      && !!change.previousProfile
+      && !!change.nextProfile
+      && !!onCancelScheduledPlanChange
+      && planScopeMatches(userProfile, change.nextProfile, change.scope);
+
+    const removeEntry = async () => {
+      await deletePlanChange(change.id);
+      setPlanChanges(prev => prev.filter(x => x.id !== change.id));
+    };
+
+    if (canCancel) {
+      Alert.alert(
+        'Cancel this request?',
+        'This restores your previous settings for the upcoming plan and removes the scheduled request. Your current week stays unchanged.',
+        [
+          { text: 'Keep', style: 'cancel' },
+          {
+            text: 'Cancel Request',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                const restored = restorePlanScope(userProfile, change.previousProfile!, change.scope);
+                await onCancelScheduledPlanChange!(restored);
+                await removeEntry();
+              } catch (e: any) {
+                Alert.alert('Could not cancel', e?.message ?? 'Try again in a moment.');
+              }
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    Alert.alert(
+      scheduled ? 'Remove this request?' : 'Delete this entry?',
+      scheduled
+        ? 'This removes the row from your history. It cannot safely restore settings because newer profile edits may have superseded it.'
+        : 'Removes this plan change from your history. The plan itself stays unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: removeEntry },
+      ],
+    );
+  };
+
+  useEffect(() => {
+    if (!isActive) return;
+    if (nutritionRefreshSeenRef.current === nutritionLogRefreshKey) return;
+    nutritionRefreshSeenRef.current = nutritionLogRefreshKey;
+    if (!showMealProgress) {
+      setMealAverages(null);
+      setMealHistory(null);
+      setNutritionScoreWeekly(null);
+      setGutHealthWindow(null);
+      return;
+    }
+    if (!authToken) return;
+
+    let cancelled = false;
+    (async () => {
+      const api = await import('../services/api');
+      const [averages, historyResp] = await Promise.all([
+        api.getMealAverages(authToken, 14).catch(() => undefined),
+        api.getMealHistory(authToken, 14).catch(() => undefined),
+      ]);
+      if (cancelled) return;
+      if (averages) setMealAverages(averages);
+      if (historyResp) setMealHistory(historyResp.meals ?? []);
+
+      if (!isProTier) {
+        setNutritionScoreWeekly(null);
+        setGutHealthWindow(null);
+        return;
+      }
+
+      const [score, gut] = await Promise.all([
+        api.getNutritionScore(authToken, 14).catch(() => undefined),
+        api.getGutHealth(authToken, 14).catch(() => undefined),
+      ]);
+      if (cancelled) return;
+      if (score) setNutritionScoreWeekly(score.weekly ?? null);
+      if (gut) setGutHealthWindow(gut.window);
+    })().catch(() => {});
+
+    return () => { cancelled = true; };
+  }, [authToken, isActive, isProTier, nutritionLogRefreshKey, showMealProgress]);
+
+  const handleShareBodyScan = async () => {
+    try {
+      const ref = bodyScanShareRef.current as any;
+      if (!ref?.capture) return;
+      const uri = await ref.capture();
+      const Sharing = await import('expo-sharing');
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Body Scan' });
+      } else {
+        Alert.alert('Saved', 'Screenshot saved to your device.');
+      }
+    } catch {
+      Alert.alert('Error', 'Could not share the body scan.');
+    }
+  };
+
+  const handleDeleteBodyScan = (entry: BodyScanEntry) => {
+    const targetKey = bodyScanMergeKey(entry);
+    Alert.alert(
+      'Delete this scan?',
+      'Removes this body scan from your history. Your weight, measurements, and workout data stay unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (!bodyScanHasServerId(entry)) {
+                await quarantineLegacyBodyScans([entry], 'bodyScanHistory local-only delete ignored by DB');
+              } else {
+                if (!authToken) throw new Error('Sign in required to delete body scans.');
+                const { deleteBodyScan } = await import('../services/api');
+                await deleteBodyScan(authToken, entry.id);
+              }
+              const updated = bodyScanHistory.filter(e =>
+                bodyScanMergeKey(e) !== targetKey && String(e.id) !== String(entry.id)
+              );
+              setBodyScanHistory(updated);
+              await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(onlyServerBackedBodyScans(updated)));
+              if (String(bodyScanResult?.id ?? '') === String(entry.id)) {
+                setBodyScanResult(null);
+              }
+              import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+            } catch (e: any) {
+              Alert.alert('Could not delete scan', String(e?.message ?? e));
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const [sharingScore, setSharingScore] = useState(false);
+  const handleShareFitnessScore = async () => {
+    try {
+      setShareLoading(true);
+      setSharingScore(true);
+      await new Promise(r => setTimeout(r, 100)); // let logo render
+      const ref = fitnessScoreRef.current as any;
+      if (!ref?.capture) return;

@@ -1,6 +1,8 @@
-"""AI-assisted starting-weight recommendation for first-time exercises.
+"""Legacy AI-assisted starting-weight helper for first-time exercises.
 
-Fired by the `/ai/recommend-weight` endpoint when:
+This helper is not part of live next-set/pre-set recommendation routing.
+Those endpoints are deterministic. If re-enabled by a future caller, it
+should only be used for a first-time starting-weight estimate when:
   1. The user has NO direct logged history for the target exercise.
   2. The layered transfer pipeline (substitution_group → movement_pattern
      → muscle_bucket) couldn't find a usable anchor either.

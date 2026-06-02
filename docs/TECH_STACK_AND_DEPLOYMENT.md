@@ -97,7 +97,7 @@ eas submit --platform ios --latest
 
 **App Store requirements:**
 - App icon, screenshots (6.7" and 5.5" at minimum)
-- Privacy policy, terms of service
+- Hosted privacy policy and terms of service URLs (source drafts: `docs/legal/`)
 - App description, keywords, category (Health & Fitness)
 - HealthKit usage descriptions (already in app.json)
 - Camera usage description (for barcode scanning)
@@ -167,6 +167,7 @@ USDA_FDC_API_KEY=<your key from fdc.nal.usda.gov>
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_CHAT=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
+MODEL_TRANSCRIPTION=gpt-4o-mini-transcribe
 MODEL_IMAGE=gpt-5.4-mini
 
 PLAN_REVIEW_ENABLED=0
@@ -182,7 +183,7 @@ NUTRITION_REVIEW_ENABLED=0
       "buildNumber": "1",
       "supportsTablet": false,
       "infoPlist": {
-        "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes and take food photos for nutrition tracking.",
+        "NSCameraUsageDescription": "Thallo uses the camera for barcode scans and optional food, supplement, equipment, form, body, and lab report photos you choose to capture.",
         "NSHealthShareUsageDescription": "...",
         "NSHealthUpdateUsageDescription": "..."
       }
@@ -260,7 +261,7 @@ In practice, 95% of your updates will be OTA — only new native dependencies ne
 - [ ] Design splash screen (1284x2778)
 - [ ] Create Apple Developer account ($99/year)
 - [ ] Set up App Store Connect
-- [ ] Write privacy policy
+- [ ] Founder/legal-review and host `docs/legal/privacy-policy.md` and `docs/legal/terms-of-service.md`
 - [ ] Add Sentry error monitoring
 - [ ] Create `eas.json`
 - [ ] Run `eas build:configure`

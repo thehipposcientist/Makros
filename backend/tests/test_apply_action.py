@@ -344,6 +344,208 @@ def test_add_zone2_session_at_seven_days_is_descriptive_only():
     assert any("already at 7" in (m.summary or "") for m in mem)
 
 
+# ── future-week training adjustments ───────────────────────────────
+
+def test_muscle_volume_action_updates_coaching_state():
+    print("\n[test] reduce_muscle_volume: writes future-week muscle adjustment")
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserCoachingState
+    from sqlmodel import select
+    _, s, u = _setup()
+    res = apply_action(
+        s,
+        u.id,
+        {"type": "reduce_muscle_volume", "muscle": "chest", "pct": 15},
+        rec_key="reduce_volume_chest",
+    )
+    assert res.applied
+    assert res.needs_regen
+    assert not res.descriptive_only
+    state = s.exec(select(UserCoachingState).where(UserCoachingState.user_id == u.id)).first()
+    assert state.muscle_volume_adjustments["chest"]["pct"] == -15
+    assert state.muscle_volume_adjustments["chest"]["mode"] == "reduce"
+
+
+def test_add_muscle_volume_action_sets_positive_focus_adjustment():
+    print("\n[test] add_muscle_volume: writes positive muscle adjustment")
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserCoachingState
+    from sqlmodel import select
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "add_muscle_volume", "muscle": "glutes", "sets": 3})
+    assert res.applied
+    assert res.needs_regen
+    state = s.exec(select(UserCoachingState).where(UserCoachingState.user_id == u.id)).first()
+    assert state.muscle_volume_adjustments["glutes"]["pct"] > 0
+    assert state.muscle_volume_adjustments["glutes"]["mode"] == "add"
+
+
+def test_reduce_intensity_updates_coaching_state():
+    print("\n[test] reduce_intensity: writes future-week intensity adjustment")
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserCoachingState
+    from sqlmodel import select
+    _, s, u = _setup()
+    res = apply_action(s, u.id, {"type": "reduce_intensity", "pct": 10})
+    assert res.applied
+    assert res.needs_regen
+    state = s.exec(select(UserCoachingState).where(UserCoachingState.user_id == u.id)).first()
+    assert state.intensity_adjustment_pct == -10
+
+
+def test_shorten_workout_accepts_target_minutes_delta():
+    print("\n[test] shorten_workout: target_minutes_delta mutates duration")
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserPreferences
+    from sqlmodel import select
+    _, s, u = _setup()
+    prefs = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
+    prefs.workout_duration_minutes = 60
+    s.add(prefs); s.commit()
+    res = apply_action(s, u.id, {"type": "shorten_workout", "target_minutes_delta": -15})
+    assert res.applied
+    assert res.needs_regen
+    prefs = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
+    assert prefs.workout_duration_minutes == 45
+    assert res.changed_fields["workout_duration_minutes"]["to"] == 45
+
+
+def test_planweek_context_reads_future_week_adjustments():
+    print("\n[test] planner_context reads coach volume/intensity adjustments")
+    from app.enums import Gender
+    from app.models import UserCoachingState, UserProfile, UserPreferences
+    from app.services.workout.planner_context import build_planweek_planner_context
+    from sqlmodel import select
+    _, s, u = _setup()
+    s.add(UserProfile(
+        user_id=u.id,
+        weight_lbs=180,
+        height_feet=5,
+        height_inches=10,
+        age=32,
+        gender=Gender.MALE,
+    ))
+    state = UserCoachingState(
+        user_id=u.id,
+        volume_adjustment_pct=-20,
+        muscle_volume_adjustments={"glutes": {"pct": 15, "mode": "add"}},
+        intensity_adjustment_pct=-10,
+    )
+    s.add(state); s.commit()
+    prefs = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
+    profile = s.exec(select(UserProfile).where(UserProfile.user_id == u.id)).first()
+    ctx = build_planweek_planner_context(
+        s,
+        u.id,
+        profile,
+        prefs,
+        goal="muscle_gain",
+        days_per_week=4,
+        preferred_split="upper_lower",
+        session_minutes=60,
+    )
+    assert ctx.inputs.volume_adjustment_pct == -20
+    assert ctx.inputs.muscle_volume_adjustments["glutes"]["pct"] == 15
+    assert ctx.inputs.intensity_adjustment_pct == -10
+    assert ctx.inputs.focused_muscle == "glutes"
+
+
+def test_prescription_uses_future_week_adjustments():
+    print("\n[test] prescriptions consume coach volume/intensity inputs")
+    from app.services.workout.archetypes import DayArchetype
+    from app.services.workout.planner import PlannerInputs
+    from app.services.workout.prescriptions import prescribe_for_slot
+    from app.services.workout.slots import Slot
+
+    slot = Slot("Primary Press", "horizontal_push", "chest", "primary")
+    exercise = {
+        "name": "Bench Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps"],
+        "is_compound": True,
+        "movement_pattern": "horizontal_push",
+    }
+    base = prescribe_for_slot(
+        DayArchetype.LIFT_PUSH,
+        slot,
+        exercise,
+        PlannerInputs(goal="muscle_gain", days_per_week=4, experience="intermediate"),
+    )
+    adjusted = prescribe_for_slot(
+        DayArchetype.LIFT_PUSH,
+        slot,
+        exercise,
+        PlannerInputs(
+            goal="muscle_gain",
+            days_per_week=4,
+            experience="intermediate",
+            volume_adjustment_pct=-20,
+            muscle_volume_adjustments={"chest": {"pct": -20}},
+            intensity_adjustment_pct=-10,
+        ),
+    )
+    assert adjusted.sets < base.sets
+    assert adjusted.rir_target > base.rir_target
+
+
+def test_positive_volume_adjustment_respects_60_min_budget():
+    print("\n[test] prescriptions: positive volume does not add sets at 60 min")
+    from app.services.workout.archetypes import DayArchetype
+    from app.services.workout.planner import PlannerInputs
+    from app.services.workout.prescriptions import prescribe_for_slot
+    from app.services.workout.slots import Slot
+
+    slot = Slot("Squat Pattern", "squat", "quads", "primary")
+    exercise = {
+        "name": "Barbell Squat",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "hamstrings"],
+        "is_compound": True,
+        "movement_pattern": "squat",
+    }
+
+    base_60 = prescribe_for_slot(
+        DayArchetype.LIFT_LEGS,
+        slot,
+        exercise,
+        PlannerInputs(goal="muscle_gain", days_per_week=5, session_minutes=60, experience="intermediate"),
+    )
+    adjusted_60 = prescribe_for_slot(
+        DayArchetype.LIFT_LEGS,
+        slot,
+        exercise,
+        PlannerInputs(
+            goal="muscle_gain",
+            days_per_week=5,
+            session_minutes=60,
+            experience="intermediate",
+            muscle_volume_adjustments={"glutes": {"pct": 15, "mode": "add"}},
+        ),
+    )
+    base_75 = prescribe_for_slot(
+        DayArchetype.LIFT_LEGS,
+        slot,
+        exercise,
+        PlannerInputs(goal="muscle_gain", days_per_week=5, session_minutes=75, experience="intermediate"),
+    )
+    adjusted_75 = prescribe_for_slot(
+        DayArchetype.LIFT_LEGS,
+        slot,
+        exercise,
+        PlannerInputs(
+            goal="muscle_gain",
+            days_per_week=5,
+            session_minutes=75,
+            experience="intermediate",
+            muscle_volume_adjustments={"glutes": {"pct": 15, "mode": "add"}},
+        ),
+    )
+
+    assert base_60.sets == 4
+    assert adjusted_60.sets == base_60.sets
+    assert adjusted_75.sets > base_75.sets
+
+
 # ── descriptive-only actions ───────────────────────────────────────
 
 def test_descriptive_actions_write_memory_no_state_mutation():
@@ -354,10 +556,9 @@ def test_descriptive_actions_write_memory_no_state_mutation():
     from app.models import UserPreferences, UserCoachingState, CoachMemory
     from sqlmodel import select
     descriptive_types = (
-        "reduce_muscle_volume", "add_muscle_volume", "hold_muscle_volume",
         "add_cardio_session", "add_zone2_session", "reduce_cardio",
         "schedule_deload", "set_core_frequency", "shorten_workout",
-        "reduce_intensity", "carb_bump_today", "raise_protein_target",
+        "carb_bump_today", "raise_protein_target",
         "raise_fiber_target", "rebalance_week", "strength_preservation",
         "swap_to_recovery_or_reduce",
     )
@@ -378,7 +579,7 @@ def test_descriptive_actions_write_memory_no_state_mutation():
 
 
 def test_descriptive_muscle_action_names_target_in_summary():
-    print("\n[test] descriptive muscle action names muscle and set count")
+    print("\n[test] muscle action names target in summary")
     from app.services.coach.apply_action import apply_action
     from app.models import CoachMemory
     from sqlmodel import select
@@ -390,7 +591,7 @@ def test_descriptive_muscle_action_names_target_in_summary():
         rec_key="add_volume_chest",
     )
     assert res.applied
-    assert res.descriptive_only
+    assert not res.descriptive_only
     assert "chest" in res.summary.lower()
     assert "3" in res.summary
     mem = s.exec(select(CoachMemory).where(CoachMemory.user_id == u.id)).all()

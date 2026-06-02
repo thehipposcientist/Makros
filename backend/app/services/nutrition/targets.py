@@ -28,6 +28,8 @@ from app.services.nutrition.calorie_calculator import (
     CalorieTargets,
     CustomMacroOverrides,
     compute_targets,
+    step_6_calculate_fat_g,
+    step_7_calculate_carbs_g,
     step_8_apply_custom_overrides,
 )
 from app.services.nutrition.goal_params import get_bucket_for_goal
@@ -44,6 +46,15 @@ class HealthActivitySignal:
     expected_active_energy_kcal: int | None
     expected_steps: int | None
     source: str
+
+
+@dataclass(frozen=True)
+class HealthEnergySignal:
+    days_with_data: int
+    avg_basal_energy_kcal: int
+    avg_active_energy_kcal: int
+    avg_total_energy_kcal: int
+    source: str = "apple_health_total_energy"
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,27 @@ class ResolvedNutritionTargets:
     days_per_week: int
     session_minutes: int
     health_signal: HealthActivitySignal | None = None
+    source_bmr_kind: str = "formula"
+    source_bmr_kcal: int | None = None
+    source_tdee_kind: str = "formula"
+    source_tdee_kcal: int | None = None
+    health_basal_adjustment_kcal: int = 0
+    health_energy_adjustment_kcal: int = 0
+    health_energy_signal: HealthEnergySignal | None = None
+    formula_tdee_kcal: int | None = None
+    apple_tdee_kcal: int | None = None
+    apple_valid_days: int = 0
+    maintenance_source: str = "formula"
+    maintenance_blend: dict[str, Any] | None = None
+    goal_adjustment_pct: float | None = None
+    goal_pace_label: str | None = None
+    protein_basis_lbs: float | None = None
+    protein_basis_kind: str | None = None
+    protein_factor: float | None = None
+    fat_percent: float | None = None
+    fat_floor_g: int | None = None
+    min_carbs_g: int | None = None
+    warnings: list[str] | None = None
     calculated_calories: int | None = None
     calculated_protein_g: int | None = None
     calculated_carbs_g: int | None = None
@@ -91,12 +123,57 @@ def _enum_value(value: Any, default: str | None = None) -> str | None:
     return str(value)
 
 
+def _custom_macro_overrides_from_raw(raw: Any) -> CustomMacroOverrides | None:
+    if not raw:
+        return None
+
+    def _get(key: str) -> Any:
+        if isinstance(raw, dict):
+            return raw.get(key)
+        return getattr(raw, key, None)
+
+    def _clean(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            n = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    overrides = CustomMacroOverrides(
+        calories=_clean(_get("calories")),
+        protein=_clean(_get("protein")),
+        carbs=_clean(_get("carbs")),
+        fat=_clean(_get("fat")),
+    )
+    if not any((overrides.calories, overrides.protein, overrides.carbs, overrides.fat)):
+        return None
+    return overrides
+
+
 def _round_to_25(value: float) -> int:
     return int(round(value / 25.0) * 25)
 
 
 def _gender_floor(gender: str | None) -> int:
     return 1500 if (gender or "").lower() == "male" else 1200
+
+
+def _apple_tdee_blend_weight(valid_days: int) -> float:
+    """Trust Apple total energy gradually.
+
+    Planned activity already lives in formula TDEE. Apple basal+active becomes
+    a stronger maintenance signal only after repeated full days; this prevents
+    a few partial HealthKit rows from replacing the formula estimate.
+    """
+    if valid_days <= 2:
+        return 0.0
+    if valid_days <= 6:
+        return 0.20
+    if valid_days <= 13:
+        return 0.40
+    return 0.60
 
 
 def _active_energy_adjustment(
@@ -236,6 +313,222 @@ def _health_activity_signal(
     )
 
 
+def _recent_basal_energy_kcal(
+    db: Session,
+    user_id: int,
+    *,
+    as_of: date,
+) -> int | None:
+    """Return a recent Apple basal-energy average when enough full days exist."""
+    usable_as_of = min(as_of, date.today() - timedelta(days=1)) if as_of >= date.today() else as_of
+    since = usable_as_of - timedelta(days=13)
+    rows = db.exec(
+        select(DailyHealthSnapshot)
+        .where(DailyHealthSnapshot.user_id == user_id)
+        .where(DailyHealthSnapshot.snapshot_date >= since)
+        .where(DailyHealthSnapshot.snapshot_date <= usable_as_of)
+    ).all()
+    vals = [
+        float(r.basal_energy_kcal)
+        for r in rows
+        if r.basal_energy_kcal is not None and 900 <= float(r.basal_energy_kcal) <= 3200
+    ]
+    if len(vals) < 3:
+        return None
+    return int(round(sum(vals) / len(vals)))
+
+
+def _recent_total_energy_signal(
+    db: Session,
+    user_id: int,
+    *,
+    as_of: date,
+) -> HealthEnergySignal | None:
+    """Return recent Apple total energy when basal and active are both present.
+
+    Apple active energy is already the movement side of the equation, so when
+    both signals exist we should use basal + active directly as maintenance
+    evidence instead of multiplying basal by a generic activity bucket.
+    """
+    usable_as_of = min(as_of, date.today() - timedelta(days=1)) if as_of >= date.today() else as_of
+    since = usable_as_of - timedelta(days=13)
+    rows = db.exec(
+        select(DailyHealthSnapshot)
+        .where(DailyHealthSnapshot.user_id == user_id)
+        .where(DailyHealthSnapshot.snapshot_date >= since)
+        .where(DailyHealthSnapshot.snapshot_date <= usable_as_of)
+    ).all()
+    vals: list[tuple[float, float]] = []
+    for row in rows:
+        if row.basal_energy_kcal is None or row.active_energy_kcal is None:
+            continue
+        basal = float(row.basal_energy_kcal)
+        active = float(row.active_energy_kcal)
+        if 900 <= basal <= 3200 and 0 <= active <= 3000:
+            vals.append((basal, active))
+    if len(vals) < 3:
+        return None
+
+    avg_basal = sum(v[0] for v in vals) / len(vals)
+    avg_active = sum(v[1] for v in vals) / len(vals)
+    avg_total = avg_basal + avg_active
+    return HealthEnergySignal(
+        days_with_data=len(vals),
+        avg_basal_energy_kcal=int(round(avg_basal)),
+        avg_active_energy_kcal=int(round(avg_active)),
+        avg_total_energy_kcal=int(round(avg_total)),
+    )
+
+
+def _apply_basal_energy_to_targets(
+    targets: CalorieTargets,
+    *,
+    basal_energy_kcal: int | None,
+    weight_lbs: float,
+    gender: str | None,
+    pace: str | None,
+) -> tuple[CalorieTargets, int]:
+    if basal_energy_kcal is None:
+        return targets, 0
+
+    # Apple basal energy can be more user-specific than Mifflin-St Jeor, but
+    # it is still an estimate and can be partial if HealthKit has sparse data.
+    # Use the recent average, bounded, so one bad day cannot swing the plan.
+    delta_bmr = int(basal_energy_kcal) - int(targets.bmr)
+    bounded_delta = max(-250, min(250, delta_bmr))
+    if bounded_delta == 0:
+        return targets, 0
+
+    adjusted_bmr = int(targets.bmr + bounded_delta)
+    adjusted_tdee = int(round(adjusted_bmr * targets.activity_multiplier))
+    adjusted_calories = max(_gender_floor(gender), adjusted_tdee + targets.goal_adjustment_kcal)
+
+    bucket = get_bucket_for_goal(targets.bucket_name)
+    fat_g = step_6_calculate_fat_g(
+        adjusted_calories,
+        weight_lbs,
+        bucket,
+        pace=pace,
+        protein_basis_lbs=targets.protein_basis_lbs,
+    )
+    carbs_g, fat_g = step_7_calculate_carbs_g(
+        adjusted_calories,
+        targets.protein_g,
+        fat_g,
+        weight_lbs,
+        bucket,
+        protein_basis_lbs=targets.protein_basis_lbs,
+    )
+    return CalorieTargets(
+        calories=int(adjusted_calories),
+        protein_g=int(targets.protein_g),
+        carbs_g=int(carbs_g),
+        fat_g=int(fat_g),
+        bmr=adjusted_bmr,
+        activity_multiplier=targets.activity_multiplier,
+        tdee=adjusted_tdee,
+        goal_adjustment_kcal=targets.goal_adjustment_kcal,
+        bucket_name=targets.bucket_name,
+        rate_summary=targets.rate_summary,
+        override_applied=targets.override_applied,
+        min_calories_enforced=(
+            targets.min_calories_enforced
+            or adjusted_calories != adjusted_tdee + targets.goal_adjustment_kcal
+        ),
+        goal_adjustment_pct=targets.goal_adjustment_pct,
+        goal_pace_label=targets.goal_pace_label,
+        protein_basis_lbs=targets.protein_basis_lbs,
+        protein_basis_kind=targets.protein_basis_kind,
+        protein_factor=targets.protein_factor,
+        fat_percent=targets.fat_percent,
+        fat_floor_g=targets.fat_floor_g,
+        min_carbs_g=targets.min_carbs_g,
+        warnings=list(targets.warnings),
+        consistency_kcal_delta=0,
+        calculated_calories=targets.calculated_calories,
+        calculated_protein_g=targets.calculated_protein_g,
+        calculated_carbs_g=targets.calculated_carbs_g,
+        calculated_fat_g=targets.calculated_fat_g,
+    ), bounded_delta
+
+
+def _apply_total_energy_to_targets(
+    targets: CalorieTargets,
+    *,
+    signal: HealthEnergySignal,
+    weight_lbs: float,
+    gender: str | None,
+    pace: str | None,
+) -> tuple[CalorieTargets, int, int]:
+    """Blend Apple basal + active energy into measured maintenance.
+
+    The correction is bounded because wearable energy estimates are still
+    estimates. Apple never fully replaces the formula from a few days of data;
+    the blend weight ramps from 20% to 60% as full-day coverage improves.
+    """
+    blend_weight = _apple_tdee_blend_weight(signal.days_with_data)
+    if blend_weight <= 0:
+        return targets, 0, 0
+
+    basal_delta = int(round((int(signal.avg_basal_energy_kcal) - int(targets.bmr)) * blend_weight))
+    basal_delta = max(-250, min(250, basal_delta))
+    adjusted_bmr = int(targets.bmr + basal_delta)
+
+    raw_tdee_delta = (int(signal.avg_total_energy_kcal) - int(targets.tdee)) * blend_weight
+    tdee_delta = max(-400, min(400, raw_tdee_delta))
+    adjusted_tdee = int(round(targets.tdee + tdee_delta))
+    adjusted_calories = max(_gender_floor(gender), adjusted_tdee + targets.goal_adjustment_kcal)
+
+    bucket = get_bucket_for_goal(targets.bucket_name)
+    fat_g = step_6_calculate_fat_g(
+        adjusted_calories,
+        weight_lbs,
+        bucket,
+        pace=pace,
+        protein_basis_lbs=targets.protein_basis_lbs,
+    )
+    carbs_g, fat_g = step_7_calculate_carbs_g(
+        adjusted_calories,
+        targets.protein_g,
+        fat_g,
+        weight_lbs,
+        bucket,
+        protein_basis_lbs=targets.protein_basis_lbs,
+    )
+    activity_multiplier = round(adjusted_tdee / adjusted_bmr, 3) if adjusted_bmr > 0 else targets.activity_multiplier
+    return CalorieTargets(
+        calories=int(adjusted_calories),
+        protein_g=int(targets.protein_g),
+        carbs_g=int(carbs_g),
+        fat_g=int(fat_g),
+        bmr=adjusted_bmr,
+        activity_multiplier=activity_multiplier,
+        tdee=adjusted_tdee,
+        goal_adjustment_kcal=targets.goal_adjustment_kcal,
+        bucket_name=targets.bucket_name,
+        rate_summary=targets.rate_summary,
+        override_applied=targets.override_applied,
+        min_calories_enforced=(
+            targets.min_calories_enforced
+            or adjusted_calories != adjusted_tdee + targets.goal_adjustment_kcal
+        ),
+        goal_adjustment_pct=targets.goal_adjustment_pct,
+        goal_pace_label=targets.goal_pace_label,
+        protein_basis_lbs=targets.protein_basis_lbs,
+        protein_basis_kind=targets.protein_basis_kind,
+        protein_factor=targets.protein_factor,
+        fat_percent=targets.fat_percent,
+        fat_floor_g=targets.fat_floor_g,
+        min_carbs_g=targets.min_carbs_g,
+        warnings=list(targets.warnings),
+        consistency_kcal_delta=0,
+        calculated_calories=targets.calculated_calories,
+        calculated_protein_g=targets.calculated_protein_g,
+        calculated_carbs_g=targets.calculated_carbs_g,
+        calculated_fat_g=targets.calculated_fat_g,
+    ), basal_delta, int(round(tdee_delta))
+
+
 def _latest_weight_lbs(
     db: Session,
     user_id: int,
@@ -289,6 +582,8 @@ def _apply_delta_to_targets(
         base_fat_g=targets.fat_g,
         adjusted_calories=adjusted_calories,
         base_calories=targets.calories,
+        fat_floor_g=targets.fat_floor_g or 30,
+        min_carbs_g=targets.min_carbs_g or 40,
     )
     return CalorieTargets(
         calories=int(adjusted_macros["calories"]),
@@ -303,6 +598,15 @@ def _apply_delta_to_targets(
         rate_summary=targets.rate_summary,
         override_applied=targets.override_applied,
         min_calories_enforced=targets.min_calories_enforced or adjusted_calories != targets.calories + delta_kcal,
+        goal_adjustment_pct=targets.goal_adjustment_pct,
+        goal_pace_label=targets.goal_pace_label,
+        protein_basis_lbs=targets.protein_basis_lbs,
+        protein_basis_kind=targets.protein_basis_kind,
+        protein_factor=targets.protein_factor,
+        fat_percent=targets.fat_percent,
+        fat_floor_g=targets.fat_floor_g,
+        min_carbs_g=targets.min_carbs_g,
+        warnings=list(targets.warnings),
         consistency_kcal_delta=0,
         calculated_calories=targets.calculated_calories,
         calculated_protein_g=targets.calculated_protein_g,
@@ -328,12 +632,57 @@ def _resolve_from_inputs(
         gender=inputs.gender,
         training_days_per_week=inputs.training_days_per_week,
         session_minutes=inputs.session_minutes,
+        lifestyle_activity=getattr(inputs, "lifestyle_activity", None),
         goal_id=inputs.goal_id,
         pace=inputs.pace,
         target_weight_lbs=inputs.target_weight_lbs,
         timeline_weeks=inputs.timeline_weeks,
+        body_fat_pct=inputs.body_fat_pct,
         custom_overrides=None,
     ))
+
+    formula_tdee_kcal = int(base.tdee)
+    source_bmr_kind = "formula"
+    source_bmr_kcal: int | None = None
+    source_tdee_kind = "formula"
+    source_tdee_kcal: int | None = None
+    health_basal_adjustment = 0
+    health_energy_signal = None
+    health_energy_adjustment = 0
+    if include_health and db is not None and user_id is not None:
+        health_energy_signal = _recent_total_energy_signal(
+            db,
+            user_id,
+            as_of=health_activity_as_of or as_of,
+        )
+        if health_energy_signal is not None:
+            source_bmr_kcal = health_energy_signal.avg_basal_energy_kcal
+            source_tdee_kcal = health_energy_signal.avg_total_energy_kcal
+            base, health_basal_adjustment, health_energy_adjustment = _apply_total_energy_to_targets(
+                base,
+                signal=health_energy_signal,
+                weight_lbs=float(inputs.weight_lbs),
+                gender=inputs.gender,
+                pace=inputs.pace,
+            )
+            source_tdee_kind = "apple_health_blend"
+            if health_basal_adjustment != 0:
+                source_bmr_kind = "apple_health"
+        else:
+            source_bmr_kcal = _recent_basal_energy_kcal(
+                db,
+                user_id,
+                as_of=health_activity_as_of or as_of,
+            )
+            base, health_basal_adjustment = _apply_basal_energy_to_targets(
+                base,
+                basal_energy_kcal=source_bmr_kcal,
+                weight_lbs=float(inputs.weight_lbs),
+                gender=inputs.gender,
+                pace=inputs.pace,
+            )
+            if source_bmr_kcal is not None and health_basal_adjustment != 0:
+                source_bmr_kind = "apple_health"
 
     coaching_delta = 0
     if db is not None and user_id is not None:
@@ -345,16 +694,28 @@ def _resolve_from_inputs(
     health_signal = None
     health_delta = 0
     if include_health and db is not None and user_id is not None:
-        health_signal = _health_activity_signal(
-            db,
-            user_id,
-            as_of=health_activity_as_of or as_of,
-            bmr=base.bmr,
-            tdee=base.tdee,
-            planned_training_days=int(inputs.training_days_per_week or 0),
-            goal_bucket=base.bucket_name,
-        )
-        health_delta = int(health_signal.adjustment_kcal)
+        if health_energy_signal is not None:
+            health_signal = HealthActivitySignal(
+                adjustment_kcal=0,
+                days_with_data=health_energy_signal.days_with_data,
+                avg_active_energy_kcal=health_energy_signal.avg_active_energy_kcal,
+                avg_steps=None,
+                completed_workouts_7d=0,
+                expected_active_energy_kcal=health_energy_signal.avg_active_energy_kcal,
+                expected_steps=None,
+                source="apple_health_total_energy",
+            )
+        else:
+            health_signal = _health_activity_signal(
+                db,
+                user_id,
+                as_of=health_activity_as_of or as_of,
+                bmr=base.bmr,
+                tdee=base.tdee,
+                planned_training_days=int(inputs.training_days_per_week or 0),
+                goal_bucket=base.bucket_name,
+            )
+            health_delta = int(health_signal.adjustment_kcal)
 
     adjusted = _apply_delta_to_targets(
         base,
@@ -368,6 +729,8 @@ def _resolve_from_inputs(
             inputs.custom_overrides,
             bucket=get_bucket_for_goal(inputs.goal_id),
             weight_lbs=inputs.weight_lbs,
+            pace=inputs.pace,
+            protein_basis_lbs=adjusted.protein_basis_lbs,
         )
 
     return ResolvedNutritionTargets(
@@ -392,6 +755,37 @@ def _resolve_from_inputs(
         days_per_week=int(inputs.training_days_per_week or 0),
         session_minutes=int(inputs.session_minutes or 0),
         health_signal=health_signal,
+        source_bmr_kind=source_bmr_kind,
+        source_bmr_kcal=source_bmr_kcal,
+        source_tdee_kind=source_tdee_kind,
+        source_tdee_kcal=source_tdee_kcal,
+        health_basal_adjustment_kcal=health_basal_adjustment,
+        health_energy_adjustment_kcal=health_energy_adjustment,
+        health_energy_signal=health_energy_signal,
+        formula_tdee_kcal=formula_tdee_kcal,
+        apple_tdee_kcal=health_energy_signal.avg_total_energy_kcal if health_energy_signal else None,
+        apple_valid_days=health_energy_signal.days_with_data if health_energy_signal else 0,
+        maintenance_source=source_tdee_kind,
+        maintenance_blend=(
+            {
+                "formula_tdee": formula_tdee_kcal,
+                "apple_tdee": health_energy_signal.avg_total_energy_kcal,
+                "apple_valid_days": health_energy_signal.days_with_data,
+                "apple_weight": _apple_tdee_blend_weight(health_energy_signal.days_with_data),
+                "guardrail_kcal": 400,
+                "applied_delta_kcal": health_energy_adjustment,
+            }
+            if health_energy_signal else None
+        ),
+        goal_adjustment_pct=adjusted.goal_adjustment_pct,
+        goal_pace_label=adjusted.goal_pace_label,
+        protein_basis_lbs=adjusted.protein_basis_lbs,
+        protein_basis_kind=adjusted.protein_basis_kind,
+        protein_factor=adjusted.protein_factor,
+        fat_percent=adjusted.fat_percent,
+        fat_floor_g=adjusted.fat_floor_g,
+        min_carbs_g=adjusted.min_carbs_g,
+        warnings=list(adjusted.warnings),
         calculated_calories=adjusted.calculated_calories,
         calculated_protein_g=adjusted.calculated_protein_g,
         calculated_carbs_g=adjusted.calculated_carbs_g,
@@ -428,6 +822,9 @@ def resolve_targets_for_user(
     goal_id = _enum_value(goal.goal_type if goal else None, "body_recomp") or "body_recomp"
     pace = _enum_value(goal.pace if goal else None, "moderate") or "moderate"
     gender = _enum_value(profile.gender, "male") or "male"
+    resolved_overrides = custom_overrides or _custom_macro_overrides_from_raw(
+        getattr(prefs, "custom_macros", None) if prefs else None
+    )
     inputs = CalorieInputs(
         weight_lbs=weight_lbs,
         height_feet=int(profile.height_feet or 5),
@@ -436,11 +833,12 @@ def resolve_targets_for_user(
         gender=gender,
         training_days_per_week=int(prefs.days_per_week if prefs else 3),
         session_minutes=int((prefs.workout_duration_minutes if prefs else None) or 60),
+        lifestyle_activity=getattr(prefs, "lifestyle_activity", None) if prefs else None,
         goal_id=goal_id,
         pace=pace,
         target_weight_lbs=goal.target_weight_lbs if goal else None,
         timeline_weeks=goal.timeline_weeks if goal else None,
-        custom_overrides=custom_overrides,
+        custom_overrides=resolved_overrides,
     )
     resolved = _resolve_from_inputs(
         db,
@@ -481,14 +879,11 @@ def resolve_targets_for_request(
             fallback_weight_lbs=weight_lbs,
         )
 
-    overrides = None
-    if getattr(req, "customMacros", None):
-        cm = req.customMacros
-        overrides = CustomMacroOverrides(
-            calories=cm.calories,
-            protein=cm.protein,
-            carbs=cm.carbs,
-            fat=cm.fat,
+    overrides = _custom_macro_overrides_from_raw(getattr(req, "customMacros", None))
+    if overrides is None and db is not None and user_id is not None:
+        prefs = db.exec(select(UserPreferences).where(UserPreferences.user_id == user_id)).first()
+        overrides = _custom_macro_overrides_from_raw(
+            getattr(prefs, "custom_macros", None) if prefs else None
         )
 
     inputs = CalorieInputs(
@@ -499,6 +894,10 @@ def resolve_targets_for_request(
         gender=str(ps.gender or "male"),
         training_days_per_week=int(getattr(req, "daysPerWeek", 3) or 3),
         session_minutes=int(getattr(req, "workoutDurationMinutes", 60) or 60),
+        # Onboarding hard-codes None until the user answers the new
+        # question; the EditProfile/onboarding payload starts populating
+        # this once the field lands on the client.
+        lifestyle_activity=getattr(req, "lifestyleActivity", None) or getattr(req, "lifestyle_activity", None),
         goal_id=str(getattr(req, "goal", None) or "body_recomp"),
         pace=str(req.goalDetails.pace or "moderate"),
         target_weight_lbs=req.goalDetails.targetWeightLbs,

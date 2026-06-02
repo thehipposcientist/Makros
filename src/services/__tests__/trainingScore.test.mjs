@@ -187,6 +187,7 @@ console.log('\n[trainingScore]\n');
   assert(archetypeFromWorkout('Zone 2 Run', 'conditioning') === 'zone2_cardio', 'derive zone2_cardio');
   assert(archetypeFromWorkout('HIIT Sprints', 'conditioning') === 'interval_cardio', 'derive interval_cardio');
   assert(archetypeFromWorkout('Mobility Flow', 'mobility') === 'mobility_recovery', 'derive mobility_recovery');
+  assert(archetypeFromWorkout('Pilates', 'mobility') === 'mobility_recovery', 'derive pilates mobility_recovery');
   assert(archetypeFromWorkout('Push + Cardio', 'mixed') === 'mixed_lift', 'derive mixed_lift');
 }
 
@@ -226,6 +227,162 @@ console.log('\n[trainingScore]\n');
          `got ${halfDone.score} (${halfDone.rating})`);
   assert(halfDone.rating === 'Light' || halfDone.rating === 'Below',
          `half-completed rating is Light/Below (got ${halfDone.rating})`);
+}
+
+// ─── Refinement spec: stricter Crushed + reweighted scoring ──────────────────
+//
+// New rules baked in by the algorithm refresh (see trainingScore.ts):
+//   - Crushed threshold raised to 90 (was 85).
+//   - Z2 weighted compliance — Z2 drives, Z1 partial, Z3+ subtracts.
+//   - Duration capped at ~0.90 × pillar_max so it can't carry a score.
+//   - Missing-signal pillars collapse to 0 + redistribute weight (no
+//     fake 0.6×max neutral).
+//   - Partial progression credit via loadGainRatio / repGainRatio /
+//     setsGain / rirImprovement; legacy boolean path still works.
+
+// Hypertrophy 18/20 sets, 6/6 exercises, target load hit, no progression PR.
+// Should be a clearly "great" session — but not 90+ since the user didn't
+// actually progress vs last time.
+{
+  const ts = computeTrainingScore({
+    archetype: 'hypertrophy_lift',
+    actualDurationSec: 60 * 60,
+    estimatedDurationSec: 55 * 60,
+    setsCompleted: 18,
+    setsPlanned: 20,
+    exercisesCompleted: 6,
+    exercisesPlanned: 6,
+    hitTargetLoad: true,
+    progressionAchieved: false,
+  });
+  assert(ts.score >= 75, 'hypertrophy with no PR scores ≥75 (still a strong session)',
+         `got ${ts.score} (${ts.rating})`);
+  assert(ts.score < 90, 'hypertrophy with no PR does NOT crack Crushed',
+         `got ${ts.score} (${ts.rating}) — Crushed should require either full completion + PR, or detailed progression signals`);
+}
+
+// Same hypertrophy session, but the user actually progressed (added load
+// + slight rep gain). Detailed progression signals push it into Crushed.
+{
+  const ts = computeTrainingScore({
+    archetype: 'hypertrophy_lift',
+    actualDurationSec: 60 * 60,
+    estimatedDurationSec: 55 * 60,
+    setsCompleted: 20,
+    setsPlanned: 20,
+    exercisesCompleted: 6,
+    exercisesPlanned: 6,
+    hitTargetLoad: true,
+    loadGainRatio: 0.025,   // +2.5% load
+    repGainRatio: 0.05,     // +5% reps
+  });
+  assert(ts.score >= 90, 'hypertrophy with full completion + real PR earns Crushed',
+         `got ${ts.score} (${ts.rating})`);
+  assert(ts.rating === 'Crushed', `rating is Crushed (got ${ts.rating})`);
+}
+
+// Z2 mostly Z1 — leisure walk being labeled as Zone 2. Should NOT score
+// like a clean Z2 base ride. Compares against the clean Z2 baseline from
+// earlier in the file.
+{
+  const mostlyZ1 = computeTrainingScore({
+    archetype: 'zone2_cardio',
+    actualDurationSec: 40 * 60,
+    estimatedDurationSec: 40 * 60,
+    hrZoneMinutes: [35, 5, 0, 0, 0],   // 87% Z1, 13% Z2
+    setsCompleted: 1,
+    setsPlanned: 1,
+    exercisesCompleted: 1,
+    exercisesPlanned: 1,
+  });
+  const cleanZ2 = computeTrainingScore({
+    archetype: 'zone2_cardio',
+    actualDurationSec: 40 * 60,
+    estimatedDurationSec: 40 * 60,
+    hrZoneMinutes: [5, 35, 0, 0, 0],   // 87% Z2, 13% Z1
+    setsCompleted: 1,
+    setsPlanned: 1,
+    exercisesCompleted: 1,
+    exercisesPlanned: 1,
+  });
+  assert(mostlyZ1.score < cleanZ2.score - 10,
+         'mostly-Z1 session scores meaningfully lower than clean Z2',
+         `mostlyZ1=${mostlyZ1.score} vs cleanZ2=${cleanZ2.score}`);
+  assert(mostlyZ1.rating !== 'Crushed', `mostly-Z1 cannot be Crushed (got ${mostlyZ1.rating})`);
+}
+
+// HIIT with high Z3+ + completed intervals — should score well (Crushed
+// or near-Crushed).
+{
+  const hardHiit = computeTrainingScore({
+    archetype: 'interval_cardio',
+    actualDurationSec: 30 * 60,
+    estimatedDurationSec: 30 * 60,
+    hrZoneMinutes: [3, 5, 10, 8, 4],   // ~73% in Z3+
+    intervalsCompleted: 10,
+    intervalsPlanned: 10,
+    exercisesCompleted: 1,
+    exercisesPlanned: 1,
+  });
+  assert(hardHiit.score >= 85, 'hard HIIT with completed intervals scores ≥85',
+         `got ${hardHiit.score} (${hardHiit.rating})`);
+}
+
+// Strength workout WITHOUT HR — should not be punished. Missing-pillar
+// redistribution carries the load.
+{
+  const strengthNoHr = computeTrainingScore({
+    archetype: 'strength_lift',
+    actualDurationSec: 50 * 60,
+    estimatedDurationSec: 50 * 60,
+    setsCompleted: 15,
+    setsPlanned: 15,
+    exercisesCompleted: 4,
+    exercisesPlanned: 4,
+    hitTargetLoad: true,
+    progressionAchieved: true,
+    // no hrZoneMinutes / hrAvg — HR pillar is absent
+  });
+  assert(strengthNoHr.score >= 85,
+         'strength lift without HR is not punished — completion + progression carries it',
+         `got ${strengthNoHr.score} (${strengthNoHr.rating})`);
+}
+
+// Mobility workout WITHOUT HR — duration + movement completion drive it.
+// Should easily land in Solid territory.
+{
+  const mobilityNoHr = computeTrainingScore({
+    archetype: 'mobility_recovery',
+    actualDurationSec: 20 * 60,
+    estimatedDurationSec: 20 * 60,
+    exercisesCompleted: 8,
+    exercisesPlanned: 8,
+    setsCompleted: 8,
+    setsPlanned: 8,
+    // no hrZoneMinutes — Low-Intensity Compliance pillar is absent
+  });
+  assert(mobilityNoHr.score >= 80,
+         'mobility without HR scores well — duration + completion carry it',
+         `got ${mobilityNoHr.score} (${mobilityNoHr.rating})`);
+}
+
+// Duration alone can't carry a mediocre workout — half-skipped lift that
+// happened to last the full estimated duration shouldn't score great.
+{
+  const longButSkipped = computeTrainingScore({
+    archetype: 'hypertrophy_lift',
+    actualDurationSec: 60 * 60,
+    estimatedDurationSec: 60 * 60,   // perfect duration ratio
+    setsCompleted: 8,
+    setsPlanned: 18,                 // less than half
+    exercisesCompleted: 3,
+    exercisesPlanned: 6,
+    hitTargetLoad: false,
+    progressionAchieved: false,
+  });
+  assert(longButSkipped.score < 65,
+         'full-duration but half-skipped lift is not Solid (duration cannot carry it)',
+         `got ${longButSkipped.score} (${longButSkipped.rating})`);
 }
 
 console.log(`\ntrainingScore: ${passed} passed, ${failed} failed`);

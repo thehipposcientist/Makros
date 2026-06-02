@@ -11,9 +11,11 @@
 
 export type WeightUnit = 'lbs' | 'kg';
 export type DistanceUnit = 'mi' | 'km';
+export type HeightUnit = 'in' | 'cm';
 
 const LBS_PER_KG = 2.2046226218;
 const MI_PER_KM = 0.6213711922;
+const CM_PER_IN = 2.54;
 
 // ─── Weight ──────────────────────────────────────────────────────────────────
 
@@ -99,4 +101,48 @@ export function resolveWeightUnit(profile: { weightUnit?: WeightUnit | null } | 
 
 export function resolveDistanceUnit(profile: { distanceUnit?: DistanceUnit | null } | null | undefined): DistanceUnit {
   return profile?.distanceUnit ?? 'mi';
+}
+
+export function resolveHeightUnit(profile: { heightUnit?: HeightUnit | null } | null | undefined): HeightUnit {
+  return profile?.heightUnit ?? 'in';
+}
+
+// ─── Height ──────────────────────────────────────────────────────────────────
+// Canonical storage stays as `heightFeet` + `heightInches` on the profile.
+// These helpers convert at input/output time only — the metric user types cm,
+// we store ft+in; later the same ft+in renders back as cm for display.
+
+export function feetInchesToCm(feet: number, inches: number): number {
+  const ft = Number.isFinite(feet) ? feet : 0;
+  const inch = Number.isFinite(inches) ? inches : 0;
+  return (ft * 12 + inch) * CM_PER_IN;
+}
+
+export function cmToFeetInches(cm: number): { feet: number; inches: number } {
+  if (!Number.isFinite(cm) || cm <= 0) return { feet: 0, inches: 0 };
+  const totalIn = cm / CM_PER_IN;
+  const feet = Math.floor(totalIn / 12);
+  const inches = Math.round(totalIn - feet * 12);
+  // Rounding can push inches to 12 — fold into the next foot so a metric
+  // input never round-trips back as e.g. `5'12"`.
+  if (inches === 12) return { feet: feet + 1, inches: 0 };
+  return { feet, inches };
+}
+
+/** Render canonical feet+inches in the user's chosen height unit.
+ *  Imperial: `5'10"`. Metric: `178 cm`. */
+export function formatHeight(
+  feet: number | null | undefined,
+  inches: number | null | undefined,
+  unit: HeightUnit = 'in',
+  opts?: { suffix?: boolean },
+): string {
+  const ft = Number.isFinite(feet) ? Number(feet) : 0;
+  const inch = Number.isFinite(inches) ? Number(inches) : 0;
+  if (ft <= 0 && inch <= 0) return '—';
+  if (unit === 'cm') {
+    const cm = Math.round(feetInchesToCm(ft, inch));
+    return opts?.suffix === false ? `${cm}` : `${cm} cm`;
+  }
+  return `${ft}'${inch}"`;
 }

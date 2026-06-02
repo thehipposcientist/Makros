@@ -1,6 +1,6 @@
 # Roadmap + Next Improvements
 
-Last updated: 2026-05-07
+Last updated: 2026-05-24
 
 > See `docs/product/backlog-review.md` for items whose shipped status is ambiguous.
 
@@ -8,6 +8,13 @@ Last updated: 2026-05-07
 
 ## Recently Shipped
 
+- **Outdoor cardio GPS route capture (May 2026)** — phone-side live/custom cardio tracking now uses `expo-location` only for outdoor run/walk/ride/hike sessions, capturing distance, pace, route coordinates, and altitude when available. Indoor cardio avoids GPS and uses manual/device distance. ActiveWorkout and LiveActivityTracker can pass `routeCoords` through workout completion; backend stores them on `WorkoutCompletion.route_coords`; HealthKit writes can include the route so Apple Fitness gets the workout path when present. Privacy docs must treat Location as collected for workout-scoped fitness use.
+- **Fine-grained muscle emphasis tagging (May 11, 2026)** — new `Exercise.emphasis: list[str]` JSONB column with display-only fine-grained tags (front_delt / side_delt / rear_delt, upper/mid/lower chest, lats / upper_back / traps / lower_back, brachialis, gastroc / soleus, obliques / abs / lower_abs, adductors / abductors). Inference helper (`services/workout/emphasis_inference.py`) uses 108-entry override table + name-token rules. Always-re-infer backfill on startup so rule edits propagate without manual flush. 155/451 seed exercises tagged at ship; rest are correctly empty (cardio, full-body, already-specific primaries). Critical invariant: planner/fatigue model unchanged — still reads `primary_muscle` + `secondary_muscles` only. 25 pure-function tests pass. HomeScreen library detail card surfaces tags as a third meta row under primary/secondary. Drive-by fix: `plateau_detection._weekly_peaks_for_user` now threads `today` through (was using `date.today()` regardless of test-passed value — pre-existing flake that surfaced when calendar moved past test fixture dates).
+- **Import UI shipped (May 10, 2026)** — Settings → IMPORT → "Import from another app" opens `ImportScreen` (multi-source picker, per-source step-by-step instructions, `expo-document-picker` for CSV/ZIP uploads, `WebBrowser.openAuthSessionAsync` for Strava OAuth, 2s status polling, history list with per-batch rollback). `src/services/imports.ts` is the typed API client. Auth-gated, theme-aware, ~360 lines of self-contained screen code; no new TS errors against baseline.
+- **MFP / Strong / Strava import pipelines (May 10, 2026)** — full backend stack for all three sources. Schema: `ImportBatch` + `IntegrationCredential` tables, `Meal.import_*` + `WorkoutCompletion.import_*` columns with partial-unique-index idempotency. Parsers: `mfp_parser` (CSV + GDPR ZIP), `strong_parser` (workout CSV w/ kg→lbs normalization, multi-format duration), `strava_mapper` (activity dict → `WorkoutCompletion`). Matchers: token-set fuzzy match for foods + exercises against seeded `Food`/`Exercise` tables. Pipelines wire parse → match → idempotent insert + `ImportBatch` counter updates. Router endpoints: `/imports/{myfitnesspal,strong}/upload`, `/imports/strava/{authorize,callback,backfill}`, `/imports/{id}/status`, `/imports/` list, `DELETE /imports/{id}` rollback (dispatches per `data_type`). 53 pure-function tests across 4 new test modules; all pass. Strava endpoints stub when `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` are unset (clean 503 with config hint).
+- **Pending-imports schema (May 10, 2026)** — `UserPreferences.pending_imports` added as JSONB (idempotent migration `_ensure_user_preferences_pending_imports_column`) with matching `PreferencesUpsert` pydantic field and preserve-on-empty upsert semantics. First piece of the MFP/Strong/Strava import awareness flow. Each entry is `{source, requested_at, notified_at?, completed_at?, dismissed_at?}` and drives the upcoming onboarding step + HomeScreen banner + 3d/7d local-notification reminders. All backend tests pass. See `docs/architecture/data-import.md` § Recommended Phased Sequence.
+- **Apple Health 180-day backfill on first connect (May 10, 2026)** — `backfillSnapshotsToBackend` default raised from 30 → 180 days at both call sites (Onboarding "Connect Apple Health" success, Progress-tab connect flow). Implementation chunks into two sequential 90-day batches (backend `/health/snapshot/batch` caps at 90) with the most recent window pushing first so body-check / readiness / weekly-review surfaces populate immediately for switchers from Watch / WHOOP / Oura. Per-chunk failures don't abort the rest. See `docs/architecture/healthkit.md` § Backend Persistence.
+- **Bundled local form demos (May 10, 2026)** — replaced GitHub raw hot-linking with bundled `assets/exercise-demos/<id>/{0,1}.jpg` frames (~21 MB ipa add, 174 ids). Hot-links worked in Expo Go but failed silently in TestFlight prod due to ATS + New Architecture image handling. Added `scripts/sync-exercise-demos.sh` to regenerate the static `exerciseDemoAssets.ts` require() map after seed edits. Also fixed dead `demoExerciseDbId` prop on `FormVideoModal` (it now actually renders the 2-frame demo card at the top per its JSDoc), and corrected aspect-ratio mismatches (4:3 containers wrapping 3:2 source photos = letterbox/zoom artifacts on detail surfaces). See `docs/architecture/workout-system.md` § Form Demo Asset Pipeline.
 - **PlanWeek migration (Apr 28, 2026)** — front-page schedule moved from
   the legacy rolling-from-today cycling-array model to a fixed 7-day
   PlanWeek with dated `PlanDay` rows. Daily fresh-day regen on app open
@@ -21,11 +28,41 @@ Last updated: 2026-05-07
 
 ---
 
+## Recommended Next Stack — May 18, 2026
+
+These are the best next moves by leverage. They deliberately favor activation, speed, and trust over broad new feature surface.
+
+### Performance
+
+- **Split HomeScreen by product domain.** `src/screens/HomeScreen.tsx` is now ~20.8k lines with 164 `useState` occurrences. Extract Workout Plan, Meals, Friends, You/Settings, trainer chat, saved meals, imports, custom activity/GPS tracker handoff, and library/detail modal surfaces into focused containers and hooks.
+- **Virtualize Progress history surfaces.** `src/screens/ProgressScreen.tsx` is ~13.1k lines with map-heavy `ScrollView` sections. Convert workout history, PR lists, imported activity history, body-scan history, health-insight lists, and plateau lists to `FlatList` / `SectionList`.
+- **Centralize Active Workout timers.** `src/screens/ActiveWorkoutScreen.tsx` is ~13.3k lines with 4 `setInterval` references and 27 `setTimeout` references. Move rest/render ticks, autosave, Watch sync debounce, sidecar queue drains, GPS lifecycle, and modal handoffs into one owned timer/side-effect layer.
+- **Measure before and after the split.** Add client marks for Home first paint, PlanWeek paint, workout-start-ready, and import-screen ready; add backend route timing for `/plans/week/active`, `/meals/score`, `/workouts/weekly-review`, `/imports/*/status`, and `/ai/*`.
+
+### UI / UX
+
+- **Finish the Settings hub.** `SettingsScreen` is now present for notifications, units, HealthKit, app settings, and account actions. Route Import, Data & Privacy, Watch/Health status, Gear, Theme, and Legal through the same stable Settings surface and retire duplicated Home/You modal controls.
+- **Add pending-import activation UI.** The schema and ImportScreen exist; add Home/You banner, local 3-day/7-day reminders, and a post-import success recap.
+- **Make effort/readiness surfaces actionable.** Show in-workout e1RM and deterministic next-set load suggestions from captured RIR; route plateau/readiness suggestions into the existing apply-action/check-in flow instead of ending in "Got it."
+- **Show cache/offline state.** When Home paints from AsyncStorage because the backend is unreachable, display a small non-blocking cached/offline pill.
+- **Do the beta accessibility sweep.** Icon-only buttons need labels, color-coded chips need text fallbacks, and workout/meal/Settings flows need Dynamic Type checks.
+
+### Features
+
+- **Finish import activation before adding the next parser.** Manual review for unmatched MFP foods plus pending-import reminders will convert more switchers than another long-tail source right now.
+- **Make detected/imported workouts editable.** Any future Watch auto-detected cardio prompt, motion-assisted strength log, Apple Health import, or Strava import needs a review/edit path so users can correct activity type, duration, distance, sets/reps/weight, and notes before bad data becomes trusted progress history.
+- **Make meal logging faster.** One-tap recent/favorite/routine meals, "save as favorite" after repeats, and grocery check-off improvements should be the next nutrition work.
+- **Add optional coarse weather context for hydration/recovery.** Hydration already adapts to body size, age/sex, planned/completed workouts, active energy, protein, alcohol, sodium, and supplements. The pure function supports heat, but no weather source is wired. Add an opt-in setting that uses city/ZIP or OS approximate location to fetch weather facts (`temp_f`, `humidity_pct`, `heat_index_f`, `altitude_m`, `observed_at`) and stores those facts instead of raw coordinates. Use it for heat/humidity hydration add-ons, electrolyte copy, and outdoor-cardio recovery cautions.
+- **Finish preference propagation.** Settings now has workout/meal/hydration reminders, quiet hours, weight unit, and distance unit. Apply those units consistently across history/charts/share/export surfaces, then add privacy-aware weather preference controls.
+- **Persist coach transcript + undo applied actions.** Keep recent coach messages, show action history, and provide a short undo window after apply-action mutations.
+- **Ship cardio/HR-zone progression.** Strava imports, Apple Health, and `hr_summary` already provide the raw data for pace/power/Zone 2 trend cards.
+
 ## Performance / Observability
 
 - **Backend log structuring**: `KeyError("Attempt to overwrite 'created'")` from `gut_backfill` startup pollutes Sentry. Move to `extra={...}` keys that don't collide with `LogRecord` reserved names.
 - **Per-route latency budgets**: `/workouts/weekly-review` and `/meals/score` are hot paths. Add `time.perf_counter()` log line with route + duration.
 - **AI cost tracking**: `ai_classify.estimate_amounts` runs once per unique food forever. Add counter so "AI calls per week per user" is auditable.
+- **Home / Progress / Active Workout split metrics**: track first paint, PlanWeek paint, workout-start-ready, and import-screen-ready before and after extraction so the refactor earns its keep.
 - **Watch sync batching**: `syncInProgressWorkout` batched to every 3 sets via `lastSyncedSetCountRef` (Apr 28). Verify on next high-volume session that watch updates still feel responsive at the 3-set cadence.
 - **Animation ref pruning in ActiveWorkoutScreen**: pruning hooked into `playExerciseCompleteStamp` (Apr 28); confirms refs for 20 slots cleared on exercise complete. Long sessions should no longer accumulate hundreds of stale `Animated.Value` refs.
 
@@ -54,6 +91,7 @@ These fields are written to the DB on every session but are never queried or sho
 
 ### Cardio Metrics
 - Treadmill distance/pace/incline, bike cadence/output/watt, rowing SPM, swimming laps are all collected via `MetricField` in ActiveWorkoutScreen and written to the completion payload.
+- **Now collected for outdoor cardio**: phone/Watch GPS can capture route-backed distance and pace for outdoor run/walk/ride/hike sessions.
 - **Not surfaced**: no pace trend chart, no output progression, no "your 5k pace improved 8 seconds" signal.
 - **Unlock**: a simple cardio performance tab on ProgressScreen. Pace/power over time by activity type. Especially valuable for endurance-goal users.
 
@@ -111,6 +149,7 @@ These are built on the backend or partially built on the frontend but not connec
 - **actual_rir trend surfacing** — per-set capture now exists; the next step is trend/history UI and clearer progress coaching based on the stored effort signal.
 - **Siri intent build pass** — Intents extension target + deep-link handler (#111).
 - **Pre/post-workout time-aware fueling card** — fires when planned workout is in next 2–3h or just finished.
+- **Optional weather-aware hydration** — opt-in approximate location or manual climate setting; never continuous GPS. Activate heat/humidity/altitude hydration guidance without changing nutrition scoring authority.
 - **Functional-pattern archetypes** — `HYBRID_KB_COMPLEX`, `HYBRID_CARRY_FOCUS` for kettlebell/sled users.
 
 ---
@@ -124,6 +163,7 @@ These are built on the backend or partially built on the frontend but not connec
 - **Wave loading / periodization** — multi-week loading patterns + mesocycle tracking. Phase 2 placeholder in planner; nothing built.
 - **Cycle-phase-aware training** — auto-adjust volume/intensity by menstrual phase via `healthDataSummary` → planner.
 - **Cardio performance service** — pace trend, distance progression, output efficiency per cardio type. Data is being written; no analysis service or UI exists.
+- **Weather-aware hydration context** — wire an optional coarse weather snapshot into `compute_hydration_target_oz(ambient_temp_f=...)` and electrolyte/recovery copy. Store weather facts, not raw background location.
 - **HR zone analysis** — zone time-in-band history (Zone 2 / Zone 4 / Zone 5) from `hr_summary` on completions. More granular than Apple Health minutes.
 - **Soreness heat-map overlay** — soreness now feeds fatigue; remaining UX is a separate visual layer for reported soreness vs modeled fatigue.
 
@@ -131,6 +171,9 @@ These are built on the backend or partially built on the frontend but not connec
 
 ## UI Polish
 
+- **Settings hub**: make Import / Notifications / Units / Weather & Hydration / Data & Privacy / Watch & Health / Account stable first-class rows.
+- **Pending import banner**: drive users back to MFP / Strong / Strava imports after onboarding or source selection.
+- **Offline/cache pill**: make cached Home data visible when backend reads fail.
 - Migrate remaining one-off direct `readHealthSummary` consumers where they do not need raw HealthKit details; keep direct reads only for permission/connect flows and raw-detail refreshes.
 - **Quick-intent action wiring**: auto-apply on user confirm when chat returns structured action (e.g. `shorten_workout`).
 - **Cardio metric hints**: show contextual field labels in the MetricField list based on exercise type (e.g. hide "watts" for treadmill, show pace/incline).

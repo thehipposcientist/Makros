@@ -1,15 +1,18 @@
-"""Food classifier — normalize + deterministic + heuristic.
+"""Food classifier — types + name normalization.
 
-Pipeline: normalize_name → classify_deterministic → classify_heuristic → unknown.
-AI fallback is invoked separately (see `ai_classify.py`) only for rows whose
-deterministic+heuristic pass returned source="unknown".
+Classification (processing tier, plant diversity, fermented / omega-3 / etc.)
+is **never** derived from substring keyword matching. It comes from:
 
-All outputs are explainable and conservative. When a food has multiple plant
-ingredients (e.g., "mixed berries"), we return the list — but only for items
-we can verify from the name alone. We prefer "unknown" over hallucination.
+  1. an authoritative external processing grade when one exists
+     (OpenFoodFacts NOVA on the barcode path), and
+  2. the AI classifier (`ai_classify.ai_classify_food`) for everything else.
 
-Bump CLASSIFIER_VERSION when the logic changes materially — the backfill
-job uses the version to decide which rows need reprocessing.
+See `ai_classify.get_or_create_metadata` for the live + backfill entry point.
+This module only holds the shared dataclass, the cache-key `normalize_name`
+helper, and the plant-slug → category reference map.
+
+Bump CLASSIFIER_VERSION when the classification contract changes materially —
+the backfill uses the version to decide which FoodMetadata rows to reprocess.
 """
 
 from __future__ import annotations
@@ -18,11 +21,27 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-CLASSIFIER_VERSION = 5   # v5: conservative alcohol phrase detection + deterministic amount estimates
+# v7: substring keyword classification removed — processing bucket and all
+# food-quality flags are now AI-authoritative (NOVA-preferred). Bumping the
+# version invalidates every prior FoodMetadata row so it reclassifies on next
+# read (or via the explicit gut backfill job).
+# v8: protein_source prompt tightened — "mixed" now means an item with BOTH
+# plant and animal protein; single plant foods ("mixed nuts", peanut butter)
+# are "plant", not "mixed".
+CLASSIFIER_VERSION = 8
 
-Source = Literal["deterministic", "heuristic", "ai", "unknown"]
+Source = Literal["ai", "external", "defaulted", "unknown"]
 ProcessingBucket = Literal["minimally_processed", "processed", "ultra_processed", "unknown"]
 ProteinSource = Literal["plant", "animal", "mixed", "none", "unknown"]
+Omega3Source = Literal["marine_epa_dha", "plant_ala", "supplement", "none"]
+
+PROCESSING_BUCKETS: frozenset[str] = frozenset(
+    {"minimally_processed", "processed", "ultra_processed", "unknown"}
+)
+PROTEIN_SOURCES: frozenset[str] = frozenset({"plant", "animal", "mixed", "none", "unknown"})
+OMEGA3_SOURCES: frozenset[str] = frozenset(
+    {"marine_epa_dha", "plant_ala", "supplement", "none"}
+)
 
 
 @dataclass
@@ -39,19 +58,38 @@ class FoodClassification:
     notes: str | None = None
     protein_source: ProteinSource = "unknown"
     probiotic_flag: bool = False
-    # v3 additions — drive weekly pattern metrics (seafood 2x/wk signal
-    # for omega-3, produce counts, alcohol log, processed-meat freq,
-    # refined-grain freq). All facts, not scored directly.
+    # Weekly pattern facts — seafood 2x/wk omega-3 signal, produce counts,
+    # alcohol log, processed-meat freq, refined-grain freq.
     seafood_flag: bool = False
     fruit_flag: bool = False
     vegetable_flag: bool = False
     alcohol_flag: bool = False
     processed_meat_flag: bool = False
     refined_grain_flag: bool = False
-    omega3_source: Literal["marine_epa_dha", "plant_ala", "supplement", "none"] = "none"
+    omega3_source: Omega3Source = "none"
+
+
+def empty_classification(raw_name: str, *, notes: str | None = None) -> FoodClassification:
+    """An all-unknown classification — used only as a transient placeholder
+    when AI is unavailable. Never persisted as the final state of a food."""
+    return FoodClassification(
+        normalized_name=normalize_name(raw_name),
+        display_name=raw_name or "",
+        likely_plant_foods=[],
+        plant_count_value=0,
+        fermented_flag=False,
+        omega3_flag=False,
+        processing_bucket="unknown",
+        confidence=0.0,
+        source="unknown",
+        notes=notes,
+        protein_source="unknown",
+        probiotic_flag=False,
+    )
 
 
 # ── Normalization ────────────────────────────────────────────────────────────
+# Used only to build a stable FoodMetadata cache key — NOT for classification.
 
 _BRAND_NOISE = re.compile(
     r"\b(organic|fresh|frozen|raw|cooked|plain|whole|low[- ]fat|fat[- ]free|sugar[- ]free|"
@@ -65,12 +103,13 @@ _BRAND_NOISE = re.compile(
 _MULTISPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s&/-]")
 
+
 def normalize_name(raw: str) -> str:
     """Lowercase, strip punctuation, drop common brand/marketing noise.
 
     We keep hyphens/slashes since they often carry meaning ("greek-yogurt",
-    "soy/tofu"). We intentionally preserve the essential noun — this is NOT
-    a stemmer; pluralization is partially handled downstream where it matters.
+    "soy/tofu"). This is NOT a stemmer; pluralization is partially handled so
+    the cache key collapses "berries" and "berry" onto one row.
     """
     if not raw:
         return ""
@@ -78,555 +117,45 @@ def normalize_name(raw: str) -> str:
     n = _PUNCT.sub(" ", n)
     n = _BRAND_NOISE.sub(" ", n)
     n = _MULTISPACE.sub(" ", n).strip()
-    # Singularize common plurals at word boundaries: berries → berry, tomatoes → tomato
     n = re.sub(r"\b(\w+?)ies\b", r"\1y", n)
     n = re.sub(r"\b(\w+?)oes\b", r"\1o", n)
     n = re.sub(r"\b(\w+?)ves\b", r"\1f", n)
-    n = re.sub(r"\b(\w+?)s\b", r"\1", n) if len(n) > 3 else n
+
+    def _drop_simple_plural(match: re.Match) -> str:
+        word = match.group(0)
+        if word.endswith(("us", "ss", "is")):
+            return word
+        return word[:-1]
+
+    n = re.sub(r"\b\w+s\b", _drop_simple_plural, n) if len(n) > 3 else n
     return n.strip()
 
 
-# ── Plant diversity tables ───────────────────────────────────────────────────
-#
-# Each key is a canonical plant slug. Values are name fragments to match in
-# normalized form. Composite items (e.g. "smoothie") are intentionally absent
-# — we don't guess their contents. Herbs/spices are kept conservative (only
-# common, visually-distinct ones) to avoid double-counting seasoning.
+# ── Plant slug → category reference map ──────────────────────────────────────
+# A static taxonomy table used by the insight engine to count *category*
+# diversity (fruit / vegetable / legume / ...) from the plant slugs the AI
+# classifier returns. Not a classifier — just a lookup over known slugs.
 
-_PLANT_LEXICON: dict[str, list[str]] = {
-    # Fruits
-    "apple": ["apple"], "banana": ["banana"], "blueberry": ["blueberry"],
-    "raspberry": ["raspberry"], "strawberry": ["strawberry"], "blackberry": ["blackberry"],
-    "cherry": ["cherry"], "grape": ["grape"], "orange": ["orange"], "lemon": ["lemon"],
-    "lime": ["lime"], "peach": ["peach"], "pear": ["pear"], "plum": ["plum"],
-    "mango": ["mango"], "pineapple": ["pineapple"], "kiwi": ["kiwi"],
-    "watermelon": ["watermelon"], "cantaloupe": ["cantaloupe"], "pomegranate": ["pomegranate"],
-    "avocado": ["avocado"], "coconut": ["coconut"], "fig": ["fig"], "date": ["date fruit", " date "],
-    "cranberry": ["cranberry"],
-    # Vegetables
-    "spinach": ["spinach"], "kale": ["kale"], "arugula": ["arugula"],
-    "lettuce": ["lettuce", "romaine"], "broccoli": ["broccoli"], "cauliflower": ["cauliflower"],
-    "carrot": ["carrot"], "tomato": ["tomato"], "cucumber": ["cucumber"],
-    "bell_pepper": ["bell pepper", "red pepper", "yellow pepper", "green pepper"],
-    "onion": ["onion", "shallot"], "garlic": ["garlic"], "zucchini": ["zucchini"],
-    "squash": ["squash", "butternut"], "sweet_potato": ["sweet potato", "yam"],
-    "potato": ["potato"], "mushroom": ["mushroom"], "celery": ["celery"],
-    "asparagus": ["asparagus"], "brussels_sprout": ["brussels sprout"],
-    "cabbage": ["cabbage"], "eggplant": ["eggplant", "aubergine"],
-    "beet": ["beet"], "corn": ["corn"], "green_bean": ["green bean"],
-    "pea": ["pea "], "edamame": ["edamame"],
-    # Legumes
-    "chickpea": ["chickpea", "garbanzo"], "black_bean": ["black bean"],
-    "kidney_bean": ["kidney bean"], "pinto_bean": ["pinto bean"],
-    "lentil": ["lentil"], "white_bean": ["white bean", "cannellini", "navy bean"],
-    "soy": ["soybean", "soy "], "tofu": ["tofu"], "tempeh": ["tempeh"],
-    # Whole grains
-    "oat": ["oat", "oatmeal"], "quinoa": ["quinoa"], "brown_rice": ["brown rice"],
-    "wild_rice": ["wild rice"], "barley": ["barley"], "buckwheat": ["buckwheat"],
-    "farro": ["farro"], "bulgur": ["bulgur"], "millet": ["millet"],
-    "whole_wheat": ["whole wheat", "whole grain"],
-    # Nuts
-    "almond": ["almond"], "walnut": ["walnut"], "cashew": ["cashew"],
-    "pecan": ["pecan"], "pistachio": ["pistachio"], "hazelnut": ["hazelnut"],
-    "macadamia": ["macadamia"], "brazil_nut": ["brazil nut"], "peanut": ["peanut"],
-    # Seeds
-    "chia": ["chia"], "flax": ["flax", "flaxseed"], "pumpkin_seed": ["pumpkin seed", "pepita"],
-    "sunflower_seed": ["sunflower seed"], "sesame": ["sesame", "tahini"],
-    "hemp_seed": ["hemp seed", "hemp heart"],
-    # Herbs/spices (conservative — only clearly distinct, named ones)
-    "basil": ["basil"], "cilantro": ["cilantro", "coriander"], "parsley": ["parsley"],
-    "mint": ["mint"], "rosemary": ["rosemary"], "thyme": ["thyme"],
-    "turmeric": ["turmeric"], "ginger": ["ginger"], "cinnamon": ["cinnamon"],
-}
-
-# Fragments that are strongly NOT a plant detection (negations).
-_PLANT_NEGATIVES = [
-    "flavor", "flavored", "artificial", "extract", "candy", "gummy",
-]
-
-# Slug category → used by scorers to prefer diversity of categories
 PLANT_CATEGORY: dict[str, str] = {}
 for _cat, _slugs in {
-    "fruit": ["apple","banana","blueberry","raspberry","strawberry","blackberry","cherry","grape",
-              "orange","lemon","lime","peach","pear","plum","mango","pineapple","kiwi","watermelon",
-              "cantaloupe","pomegranate","avocado","coconut","fig","date","cranberry"],
-    "vegetable": ["spinach","kale","arugula","lettuce","broccoli","cauliflower","carrot","tomato",
-                  "cucumber","bell_pepper","onion","garlic","zucchini","squash","sweet_potato",
-                  "potato","mushroom","celery","asparagus","brussels_sprout","cabbage","eggplant",
-                  "beet","corn","green_bean","pea","edamame"],
-    "legume": ["chickpea","black_bean","kidney_bean","pinto_bean","lentil","white_bean","soy","tofu","tempeh"],
-    "whole_grain": ["oat","quinoa","brown_rice","wild_rice","barley","buckwheat","farro","bulgur","millet","whole_wheat"],
-    "nut": ["almond","walnut","cashew","pecan","pistachio","hazelnut","macadamia","brazil_nut","peanut"],
-    "seed": ["chia","flax","pumpkin_seed","sunflower_seed","sesame","hemp_seed"],
-    "herb": ["basil","cilantro","parsley","mint","rosemary","thyme","turmeric","ginger","cinnamon"],
+    "fruit": ["apple", "banana", "blueberry", "raspberry", "strawberry", "blackberry",
+              "cherry", "grape", "orange", "lemon", "lime", "peach", "pear", "plum",
+              "mango", "pineapple", "kiwi", "watermelon", "cantaloupe", "pomegranate",
+              "avocado", "coconut", "fig", "date", "cranberry", "apricot", "papaya"],
+    "vegetable": ["spinach", "kale", "arugula", "lettuce", "broccoli", "cauliflower",
+                  "carrot", "tomato", "cucumber", "bell_pepper", "onion", "garlic",
+                  "zucchini", "squash", "sweet_potato", "potato", "mushroom", "celery",
+                  "asparagus", "brussels_sprout", "cabbage", "eggplant", "beet", "corn",
+                  "green_bean", "pea", "edamame", "okra", "leek", "chard"],
+    "legume": ["chickpea", "black_bean", "kidney_bean", "pinto_bean", "lentil",
+               "white_bean", "soy", "tofu", "tempeh"],
+    "whole_grain": ["oat", "quinoa", "brown_rice", "wild_rice", "barley", "buckwheat",
+                    "farro", "bulgur", "millet", "whole_wheat"],
+    "nut": ["almond", "walnut", "cashew", "pecan", "pistachio", "hazelnut",
+            "macadamia", "brazil_nut", "peanut"],
+    "seed": ["chia", "flax", "pumpkin_seed", "sunflower_seed", "sesame", "hemp_seed"],
+    "herb": ["basil", "cilantro", "parsley", "mint", "rosemary", "thyme",
+             "turmeric", "ginger", "cinnamon"],
 }.items():
     for _s in _slugs:
         PLANT_CATEGORY[_s] = _cat
-
-
-# ── Fermented foods ──────────────────────────────────────────────────────────
-# Conservative list — only foods with clear fermentation as a defining
-# characteristic. "Cheese" and "bread" are intentionally excluded because the
-# fermentation is non-probiotic in most consumer-grade forms.
-
-_FERMENTED_FRAGMENTS = [
-    "yogurt", "kefir", "kimchi", "sauerkraut", "miso", "tempeh",
-    "kombucha", "natto", "kvass", "skyr",
-    # Probiotic-style dairy that's explicitly labeled:
-    "probiotic", "cultured cottage cheese", "cultured buttermilk",
-]
-
-# Things that have "cheese" in the name but aren't meaningfully fermented:
-_FERMENTED_NEGATIVES = ["cheese flavor", "cheese puff", "cheez"]
-
-# Live-culture probiotic foods. Strict subset of _FERMENTED_FRAGMENTS — we
-# drop tempeh + miso because they're typically cooked/heated before eating
-# and lose probiotic viability. "Pasteurized" on the label also kills
-# cultures; users can't detect that from a food name so we accept some
-# false positives on things like commercial sauerkraut.
-_PROBIOTIC_FRAGMENTS = [
-    "yogurt", "kefir", "kimchi", "sauerkraut", "kombucha", "natto",
-    "skyr", "kvass", "cultured buttermilk", "cultured cottage cheese",
-    "probiotic",
-]
-
-_AMOUNT_NEGATIVES = [
-    "flavored", "flavour", "frozen yogurt", "yogurt covered", "yogurt-coated",
-    "yogurt coating", "pasteurized", "pasteurised", "shelf stable",
-]
-
-
-def estimate_amounts_deterministic(raw_name: str) -> dict:
-    """Conservative per-serving collagen/probiotic estimate from food name.
-
-    Normal daily nutrition reads use this instead of OpenAI. Unknown foods
-    return explicit zeros so cached metadata is complete and repeat reads stay
-    deterministic.
-    """
-    n = normalize_name(raw_name)
-    collagen = 0.0
-    cfu = 0.0
-    conf = "none"
-
-    if not n:
-        return {
-            "collagen_g_per_serving": 0.0,
-            "probiotic_cfu_billions_per_serving": 0.0,
-            "amount_confidence": "none",
-        }
-
-    if "collagen" in n and any(x in n for x in ("peptide", "powder", "supplement", "protein")):
-        collagen, conf = 15.0, "high"
-    elif "bone broth" in n:
-        collagen, conf = 9.0, "high"
-    elif "gelatin" in n:
-        collagen, conf = 6.0, "high"
-    elif "pork rind" in n or "chicharr" in n:
-        collagen, conf = 4.0, "med"
-    elif any(x in n for x in ("oxtail", "short rib", "beef tendon", "tripe", "trotter", "chicken feet")):
-        collagen, conf = 12.0, "med"
-    elif ("chicken" in n and "skin" in n and "skinless" not in n) or "chicken wing" in n:
-        collagen, conf = 3.0, "med"
-    elif "fish skin" in n or "salmon skin" in n:
-        collagen, conf = 3.0, "med"
-
-    probiotic_blocked = any(x in n for x in _AMOUNT_NEGATIVES)
-    if not probiotic_blocked:
-        if "kefir" in n:
-            cfu, conf = 35.0, "high" if conf == "none" else conf
-        elif "kombucha" in n:
-            cfu, conf = 1.0, "med" if conf == "none" else conf
-        elif "kimchi" in n:
-            cfu, conf = 5.0, "med" if conf == "none" else conf
-        elif "sauerkraut" in n:
-            cfu, conf = 1.5, "low" if conf == "none" else conf
-        elif "natto" in n:
-            cfu, conf = 5.0, "med" if conf == "none" else conf
-        elif "yogurt" in n or "skyr" in n:
-            cfu, conf = 8.0, "med" if conf == "none" else conf
-        elif "probiotic" in n and any(x in n for x in ("capsule", "supplement", "pill", "tablet")):
-            cfu, conf = 20.0, "low" if conf == "none" else conf
-
-    if collagen <= 0 and cfu <= 0:
-        conf = "none"
-
-    return {
-        "collagen_g_per_serving": round(max(0.0, min(30.0, collagen)), 2),
-        "probiotic_cfu_billions_per_serving": round(max(0.0, min(200.0, cfu)), 2),
-        "amount_confidence": conf,
-    }
-
-
-# ── Protein source ───────────────────────────────────────────────────────────
-# Classifier for plant vs animal protein sources. Used for the longevity
-# card's plant-to-animal protein ratio. Keeps pure-carb / fat-only items
-# as "none" so they don't skew the ratio.
-
-_ANIMAL_PROTEIN_FRAGMENTS = [
-    # Meat
-    "chicken", "beef", "pork", "lamb", "bison", "veal", "venison",
-    "turkey", "duck", "goose", "bacon", "ham", "sausage", "steak",
-    "brisket", "ribs", "meatball", "burger",
-    # Fish / seafood
-    "salmon", "tuna", "cod", "tilapia", "halibut", "sardine", "anchovy",
-    "mackerel", "herring", "trout", "bass", "snapper", "flounder",
-    "shrimp", "prawn", "crab", "lobster", "scallop", "mussel", "clam",
-    "oyster", "octopus", "squid",
-    # Dairy / eggs
-    "egg", "eggs", "whey", "casein", "milk", "greek yogurt", "yogurt",
-    "kefir", "cottage cheese", "ricotta", "cheddar", "mozzarella",
-    "parmesan", "feta", "cheese",
-]
-
-_PLANT_PROTEIN_FRAGMENTS = [
-    "tofu", "tempeh", "seitan", "edamame", "lentil", "chickpea", "garbanzo",
-    "black bean", "kidney bean", "pinto bean", "navy bean", "white bean",
-    "cannellini", "split pea", "pea protein", "soy protein", "soy milk",
-    "oat milk", "almond milk", "almond", "peanut", "peanut butter",
-    "cashew", "walnut", "pistachio", "pecan", "hemp seed", "hemp heart",
-    "chia", "flax", "flaxseed", "pumpkin seed", "sunflower seed",
-    "quinoa", "farro", "bulgur", "nutritional yeast",
-]
-
-# Items that usually pair plant + animal protein in one line (composite
-# dishes). Detected via "X with Y" or joint keywords.
-_MIXED_PROTEIN_COMPOSITES = [
-    "chicken caesar", "tuna salad", "egg salad", "chef salad",
-    "chicken salad", "protein bowl", "buddha bowl",
-]
-
-# Exclusions — items that MIGHT look like protein but aren't meaningful
-# protein sources on their own.
-_LOW_PROTEIN_CARBS_OR_FATS = {
-    "oil", "butter", "sauce", "syrup", "honey", "sugar", "jam", "juice",
-    "soda", "coffee", "tea", "water",
-}
-
-
-# ── Omega-3 rich foods ───────────────────────────────────────────────────────
-# Whole foods + supplements we can confidently flag. Plant-based omega-3 (ALA)
-# sources count but are noted as notes in the classification.
-
-_OMEGA3_MARINE = [
-    "salmon", "sardine", "anchovy", "mackerel", "herring", "trout",
-    "tuna",
-]
-_OMEGA3_PLANT_ALA = [
-    "flax", "flaxseed", "chia", "walnut",
-    "hemp seed", "hemp heart",
-]
-_OMEGA3_WHOLE = _OMEGA3_MARINE + _OMEGA3_PLANT_ALA
-_OMEGA3_SUPPLEMENT = ["fish oil", "omega 3", "omega-3", "cod liver oil", "krill oil", "algae oil"]
-
-
-# ── Seafood / fruit / vegetable / alcohol / processed-meat / refined-grain ──
-
-_SEAFOOD_FRAGMENTS = [
-    "salmon", "tuna", "cod", "tilapia", "halibut", "sardine", "anchovy",
-    "mackerel", "herring", "trout", "bass", "snapper", "flounder", "fish",
-    "shrimp", "prawn", "crab", "lobster", "scallop", "mussel", "clam",
-    "oyster", "octopus", "squid", "calamari", "sushi", "sashimi", "poke",
-]
-
-_FRUIT_FRAGMENTS = [
-    "apple", "banana", "berry", "berries", "blueberry", "raspberry",
-    "strawberry", "blackberry", "cherry", "grape", "orange", "peach",
-    "pear", "plum", "mango", "pineapple", "kiwi", "watermelon", "melon",
-    "cantaloupe", "pomegranate", "fig", "date fruit", " date ",
-    "papaya", "apricot", "nectarine", "lychee", "guava", "passion fruit",
-    "cranberry", "grapefruit",
-]
-
-_VEGETABLE_FRAGMENTS = [
-    "spinach", "kale", "arugula", "lettuce", "romaine", "broccoli",
-    "cauliflower", "carrot", "tomato", "cucumber", "bell pepper",
-    "red pepper", "yellow pepper", "green pepper", "onion", "shallot",
-    "garlic", "zucchini", "squash", "sweet potato", "mushroom", "celery",
-    "asparagus", "brussels sprout", "cabbage", "eggplant", "aubergine",
-    "beet", "green bean", "snap pea", "snow pea", "edamame", "okra",
-    "bok choy", "collard", "chard", "watercress", "leek", "fennel",
-    "artichoke", "radish", "turnip",
-]
-
-_ALCOHOL_FRAGMENTS = [
-    "beer", "wine", "champagne", "prosecco", "cocktail", "whiskey", "whisky",
-    "bourbon", "vodka", "gin", "rum", "tequila", "mezcal", "scotch",
-    "margarita", "mojito", "martini", "old fashioned", "cider", "sake",
-    "liqueur", "brandy", "ipa", "lager", "stout", "pilsner",
-    "rosé", "rose wine", "mimosa", "bloody mary", "moscow mule",
-    "negroni", "aperol", "spritz", "hard seltzer", "white claw",
-]
-
-_ALCOHOL_NEGATIVE_FRAGMENTS = [
-    "non alcoholic", "non-alcoholic", "alcohol free", "alcohol-free", "zero proof", "mocktail", "virgin",
-    "root beer", "ginger beer", "near beer", "beer batter", "beer battered",
-    "wine vinegar", "cider vinegar", "apple cider vinegar", "cooking wine",
-    "cocktail sauce", "shrimp cocktail", "fruit cocktail",
-    "old fashioned oat", "old fashioned oatmeal",
-    "espresso shot", "shot of espresso",
-]
-
-_PROCESSED_MEAT_FRAGMENTS = [
-    "bacon", "sausage", "hot dog", "salami", "pepperoni", "deli meat",
-    "lunch meat", "ham", "prosciutto", "pastrami", "corned beef",
-    "cured", "chorizo", "bratwurst", "kielbasa", "mortadella",
-    "spam", "jerky", "slim jim", "beef stick", "meat stick", "bologna",
-    "liverwurst", "breakfast sausage",
-]
-
-_REFINED_GRAIN_FRAGMENTS = [
-    "white bread", "white rice", "white flour", "white pasta", "all-purpose flour",
-    "baguette", "ciabatta", "croissant", "bagel", "english muffin",
-    "tortilla", "flour tortilla", "pita",
-    "pretzel", "cracker", "saltine", "cereal", "corn flakes",
-    "instant rice", "instant noodle", "ramen",
-]
-
-# If any of these appear, we know it's NOT a refined grain even though it
-# contains a refined-grain keyword (e.g. "whole wheat pasta").
-_REFINED_GRAIN_NEGATIVES = [
-    "whole wheat", "whole grain", "whole-wheat", "whole-grain",
-    "brown rice", "sprouted",
-]
-
-
-# ── Processing buckets ───────────────────────────────────────────────────────
-# NOVA-inspired, simplified. Strongest signals first.
-
-_ULTRA_PROCESSED_FRAGMENTS = [
-    "protein bar", "candy bar", "cookie", "chip", "cracker", "pretzel",
-    "soda", "cola", "energy drink", "sports drink",
-    "ice cream", "frozen meal", "tv dinner", "pop tart", "toaster pastry",
-    "instant noodle", "ramen cup", "hot pocket",
-    "nugget", "hot dog", "sausage stick", "jerky stick",
-    "margarine", "cool whip", "creamer",
-    "cereal bar", "granola bar",  # most are UPF, even "healthy" ones
-    "pudding", "jello",
-    "fast food", "mcdonald", "burger king", "taco bell", "wendy", "kfc",
-    "breakfast sandwich",
-]
-
-_PROCESSED_FRAGMENTS = [
-    "bread", "pasta", "tortilla", "bagel", "muffin",
-    "cheese", "butter", "cured",
-    "bacon", "ham", "sausage", "deli meat", "lunch meat",
-    "canned", "canned soup", "pasta sauce", "ketchup", "mayonnaise", "salad dressing",
-    "protein powder", "protein shake", "protein drink",
-    "granola",  # packaged granola is typically processed
-    "dried fruit",  # added sugars/oils common
-]
-
-_MINIMALLY_PROCESSED_HINTS = [
-    "whole", "plain", "raw", "fresh",
-]
-
-
-def _contains_phrase(normalized: str, phrase: str) -> bool:
-    pattern = r"(?<![a-z0-9])" + re.escape(phrase).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
-    return re.search(pattern, normalized) is not None
-
-
-def _detect_alcohol(normalized: str) -> bool:
-    if any(_contains_phrase(normalized, frag) for frag in _ALCOHOL_NEGATIVE_FRAGMENTS):
-        return False
-    return any(_contains_phrase(normalized, frag) for frag in _ALCOHOL_FRAGMENTS)
-
-
-# ── Public API ───────────────────────────────────────────────────────────────
-
-def classify_food(raw_name: str) -> FoodClassification:
-    """Deterministic + heuristic classifier. Returns source='unknown' when the
-    name is too vague to classify safely."""
-    normalized = normalize_name(raw_name)
-    if not normalized or len(normalized) < 2:
-        return FoodClassification(
-            normalized_name=normalized, display_name=raw_name, likely_plant_foods=[],
-            plant_count_value=0, fermented_flag=False, omega3_flag=False,
-            processing_bucket="unknown", confidence=0.0, source="unknown",
-            notes="empty or too short", protein_source="unknown", probiotic_flag=False,
-        )
-
-    plants = _detect_plants(normalized)
-    fermented = _detect_fermented(normalized)
-    omega3 = _detect_omega3(normalized)
-    omega3_source = _detect_omega3_source(normalized)
-    bucket = _detect_processing(normalized, plants=plants, fermented=fermented)
-    protein_source = _detect_protein_source(normalized)
-    probiotic = _detect_probiotic(normalized)
-    seafood = any(frag in normalized for frag in _SEAFOOD_FRAGMENTS)
-    fruit = any(frag in normalized for frag in _FRUIT_FRAGMENTS)
-    vegetable = any(frag in normalized for frag in _VEGETABLE_FRAGMENTS)
-    alcohol = _detect_alcohol(normalized)
-    processed_meat = any(frag in normalized for frag in _PROCESSED_MEAT_FRAGMENTS)
-    refined_grain = (
-        not any(neg in normalized for neg in _REFINED_GRAIN_NEGATIVES)
-        and any(frag in normalized for frag in _REFINED_GRAIN_FRAGMENTS)
-    )
-    source, confidence, notes = _score_source(normalized, plants, fermented, omega3, bucket)
-
-    return FoodClassification(
-        normalized_name=normalized,
-        display_name=raw_name,
-        likely_plant_foods=plants,
-        plant_count_value=len(plants),
-        fermented_flag=fermented,
-        omega3_flag=omega3,
-        processing_bucket=bucket,
-        confidence=confidence,
-        source=source,
-        notes=notes,
-        protein_source=protein_source,
-        probiotic_flag=probiotic,
-        seafood_flag=seafood,
-        fruit_flag=fruit,
-        vegetable_flag=vegetable,
-        alcohol_flag=alcohol,
-        processed_meat_flag=processed_meat,
-        refined_grain_flag=refined_grain,
-        omega3_source=omega3_source,
-    )
-
-
-def _detect_probiotic(n: str) -> bool:
-    # Same negative list as fermented — "cheese puff" etc.
-    for neg in _FERMENTED_NEGATIVES:
-        if neg in n:
-            return False
-    return any(frag in n for frag in _PROBIOTIC_FRAGMENTS)
-
-
-def _detect_protein_source(n: str) -> ProteinSource:
-    """Classify the dominant protein source. Prefers exact composite
-    matches first, then looks for animal + plant tokens. "mixed" when both
-    appear without a composite label. "none" for clearly non-protein
-    items (oils, sauces, sugary drinks)."""
-    for comp in _MIXED_PROTEIN_COMPOSITES:
-        if comp in n:
-            return "mixed"
-    # Strip out the low-protein-only items first — a single token like
-    # "butter" shouldn't inherit "animal" just because butter is dairy.
-    tokens = set(n.split())
-    if tokens and tokens.issubset(_LOW_PROTEIN_CARBS_OR_FATS):
-        return "none"
-    has_animal = any(frag in n for frag in _ANIMAL_PROTEIN_FRAGMENTS)
-    has_plant = any(frag in n for frag in _PLANT_PROTEIN_FRAGMENTS)
-    if has_animal and has_plant:
-        return "mixed"
-    if has_animal:
-        return "animal"
-    if has_plant:
-        return "plant"
-    return "unknown"
-
-
-_MULTI_PLANT_COMPOSITES: dict[str, int] = {
-    "salad": 3, "mixed salad": 4, "garden salad": 4, "side salad": 3,
-    "stir fry": 4, "stir-fry": 4, "veggie stir fry": 5,
-    "smoothie": 3, "green smoothie": 4,
-    "mixed vegetable": 4, "mixed veggie": 4, "mixed veg": 4,
-    "ratatouille": 4, "minestrone": 4, "vegetable soup": 3,
-    "buddha bowl": 4, "grain bowl": 3, "poke bowl": 3,
-    "trail mix": 3, "mixed nuts": 3,
-    "fruit salad": 4, "mixed berries": 3, "mixed fruit": 3,
-    "succotash": 3, "coleslaw": 2,
-}
-
-
-def _detect_plants(n: str) -> list[str]:
-    """Return plant slugs present in the normalized name.
-
-    Caveat: for composite items like "blueberry greek yogurt" we include the
-    detected plant (blueberry) — this is conservative because the plant is
-    named explicitly. For items with only a category word ("smoothie", "salad")
-    and no named ingredients, we return [].
-
-    Multi-plant composites ("mixed salad", "stir fry") get a heuristic
-    plant count when no individual plants are named explicitly.
-    """
-    for neg in _PLANT_NEGATIVES:
-        if neg in n:
-            return []
-    found: set[str] = set()
-    for slug, fragments in _PLANT_LEXICON.items():
-        for frag in fragments:
-            if frag in n:
-                found.add(slug)
-                break
-    if not found:
-        for composite, count in _MULTI_PLANT_COMPOSITES.items():
-            if composite in n:
-                return [f"_composite_{i}" for i in range(count)]
-    return sorted(found)
-
-
-def _detect_fermented(n: str) -> bool:
-    for neg in _FERMENTED_NEGATIVES:
-        if neg in n:
-            return False
-    return any(frag in n for frag in _FERMENTED_FRAGMENTS)
-
-
-def _detect_omega3(n: str) -> bool:
-    return any(frag in n for frag in _OMEGA3_WHOLE + _OMEGA3_SUPPLEMENT)
-
-
-def _detect_omega3_source(n: str) -> Literal["marine_epa_dha", "plant_ala", "supplement", "none"]:
-    if any(frag in n for frag in _OMEGA3_SUPPLEMENT):
-        return "supplement"
-    if any(frag in n for frag in _OMEGA3_MARINE):
-        return "marine_epa_dha"
-    if any(frag in n for frag in _OMEGA3_PLANT_ALA):
-        return "plant_ala"
-    return "none"
-
-
-def _detect_processing(n: str, *, plants: list[str], fermented: bool) -> ProcessingBucket:
-    # Ultra-processed beats everything.
-    for frag in _ULTRA_PROCESSED_FRAGMENTS:
-        if frag in n:
-            return "ultra_processed"
-    # Clearly processed but not UPF.
-    for frag in _PROCESSED_FRAGMENTS:
-        if frag in n:
-            return "processed"
-    # Plant or fermented whole foods = minimally processed.
-    if plants or fermented:
-        return "minimally_processed"
-    for hint in _MINIMALLY_PROCESSED_HINTS:
-        if hint in n:
-            return "minimally_processed"
-    # Single-word basic proteins/fats (chicken, egg, rice w/o "white")
-    simple_tokens = {
-        "chicken", "beef", "turkey", "pork", "lamb", "egg", "fish",
-        "rice", "milk", "water", "coffee", "tea",
-        "salmon", "tuna", "cod", "tilapia", "halibut", "sardine",
-        "anchovy", "mackerel", "herring", "trout", "bass", "shrimp",
-        "crab", "lobster", "scallop",
-    }
-    tokens = set(n.split())
-    if simple_tokens & tokens:
-        return "minimally_processed"
-    return "unknown"
-
-
-def _score_source(n: str, plants: list[str], fermented: bool, omega3: bool, bucket: str) -> tuple[Source, float, str | None]:
-    """Decide whether this classification is deterministic, heuristic, or unknown.
-
-    Deterministic = one unambiguous signal we'd bet money on.
-    Heuristic = matched a fragment, but the name is composite or noisy.
-    Unknown = nothing matched.
-    """
-    if not plants and not fermented and not omega3 and bucket == "unknown":
-        return "unknown", 0.0, "no signals matched"
-
-    # Deterministic: single-ingredient name where the normalized form IS a known slug.
-    if len(n.split()) <= 2 and (plants or fermented or omega3):
-        return "deterministic", 0.9, None
-
-    # Heuristic: matched but the name carries extra words.
-    notes = None
-    conf = 0.7
-    if bucket == "unknown":
-        conf = 0.55
-        notes = "signal matched but processing bucket unresolved"
-    return "heuristic", conf, notes

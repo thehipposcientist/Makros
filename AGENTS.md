@@ -44,6 +44,7 @@ USDA_FDC_API_KEY=...
 MODEL_CHAT=gpt-4o-mini
 MODEL_PLAN_GENERATION=gpt-4o-mini
 MODEL_MEAL_PARSING=gpt-4o-mini
+MODEL_TRANSCRIPTION=gpt-4o-mini-transcribe
 MODEL_IMAGE=gpt-5.4-mini
 PLAN_REVIEW_ENABLED=0       # no-op — AI plan review permanently disabled
 NUTRITION_REVIEW_ENABLED=0  # no-op

@@ -36,6 +36,7 @@ All output is deterministic: same (profile, days) → same recipe.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -59,6 +60,182 @@ logger = logging.getLogger(__name__)
 
 from .archetypes import DayArchetype, ARCHETYPE_META, archetype_to_focus_bucket, archetype_to_focus_family, is_conditioning
 from .goal_profiles import GoalProfile
+
+
+_CARDIO_FINISHER_LIFT_ARCHETYPES = frozenset({
+    DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+})
+
+
+@dataclass(frozen=True)
+class WeeklyRecipeSummary:
+    """Debug summary for deterministic weekly recipes.
+
+    "Selected training days" are selected planned sessions. Mobility
+    and recovery sessions are active planned sessions, so passive off
+    days are only the unplanned calendar days left in the 7-day week.
+
+    Dedicated cardio days are cardio-dominant `COND_*` days. Cardio
+    finisher lift days are `LIFT_*_PLUS_CARDIO`: structurally lift days
+    with same-day cardio attached, not standalone cardio sessions.
+    `cardio_exposures` is the more useful aggregate for goals such as
+    recomp and fat loss because it counts dedicated cardio, cardio
+    finishers, and hybrid sessions that actually include conditioning.
+
+    Core target is the desired programming target. Actual generated
+    direct-core exposure can be lower because dense sessions, lower-body
+    days, heavy-lower days, incompatible archetypes, or time caps
+    intentionally block direct core insertion.
+    """
+    selected_planned_sessions: int
+    passive_off_days: int
+    lift_days: int
+    heavy_lift_days: int
+    hypertrophy_lift_days: int
+    volume_lift_days: int
+    cardio_finisher_lift_days: int
+    dedicated_cardio_days: int
+    hybrid_days: int
+    mobility_days: int
+    recovery_days: int
+    target_core_days: int | None = None
+    actual_core_days_generated: int | None = None
+    core_skip_reasons: tuple[str, ...] = ()
+    cardio_exposures: int = 0
+    hybrid_conditioning_exposures: int = 0
+    strength_maintenance_lift_days: int = 0
+    archetypes: tuple[str, ...] = field(default_factory=tuple)
+
+    def as_dict(self) -> dict:
+        return {
+            "selected_planned_sessions": self.selected_planned_sessions,
+            "passive_off_days": self.passive_off_days,
+            "lift_days": self.lift_days,
+            "heavy_lift_days": self.heavy_lift_days,
+            "hypertrophy_lift_days": self.hypertrophy_lift_days,
+            "volume_lift_days": self.volume_lift_days,
+            "cardio_finisher_lift_days": self.cardio_finisher_lift_days,
+            "dedicated_cardio_days": self.dedicated_cardio_days,
+            "hybrid_days": self.hybrid_days,
+            "mobility_days": self.mobility_days,
+            "recovery_days": self.recovery_days,
+            "target_core_days": self.target_core_days,
+            "actual_core_days_generated": self.actual_core_days_generated,
+            "core_skip_reasons": list(self.core_skip_reasons),
+            "cardio_exposures": self.cardio_exposures,
+            "hybrid_conditioning_exposures": self.hybrid_conditioning_exposures,
+            "strength_maintenance_lift_days": self.strength_maintenance_lift_days,
+            "archetypes": list(self.archetypes),
+        }
+
+
+def _is_cardio_finisher_lift(archetype: DayArchetype) -> bool:
+    """PLUS_CARDIO is a lift-day subtype with a finisher, not cardio."""
+    return archetype in _CARDIO_FINISHER_LIFT_ARCHETYPES
+
+
+def _is_hybrid_conditioning_exposure(archetype: DayArchetype) -> bool:
+    """A hybrid counts as cardio exposure only when it accepts cardio.
+
+    Current hybrid archetypes all include conditioning, but the rule is
+    explicit so future non-conditioning hybrids do not inflate cardio
+    exposure counts by category alone.
+    """
+    meta = ARCHETYPE_META[archetype]
+    return meta.category == "hybrid" and "cardio" in meta.accepts_types
+
+
+def _is_summary_heavy_lift(archetype: DayArchetype) -> bool:
+    if _is_cardio_finisher_lift(archetype):
+        return False
+    meta = ARCHETYPE_META[archetype]
+    if meta.category != "lift":
+        return False
+    return meta.training_type == "strength" and meta.intensity_cost >= 4
+
+
+def _is_summary_volume_lift(archetype: DayArchetype) -> bool:
+    if _is_cardio_finisher_lift(archetype):
+        return False
+    meta = ARCHETYPE_META[archetype]
+    return meta.category == "lift" and meta.training_type == "volume"
+
+
+def summarize_weekly_recipe(
+    recipe: list[DayArchetype],
+    *,
+    target_core_days: int | None = None,
+    actual_core_days_generated: int | None = None,
+    core_skip_reasons: tuple[str, ...] | list[str] = (),
+) -> WeeklyRecipeSummary:
+    """Return deterministic recipe counts for tests, logs, and audits."""
+    selected_planned_sessions = len(recipe)
+    lift_days = sum(1 for a in recipe if ARCHETYPE_META[a].category == "lift")
+    heavy_lift_days = sum(1 for a in recipe if _is_summary_heavy_lift(a))
+    volume_lift_days = sum(1 for a in recipe if _is_summary_volume_lift(a))
+    cardio_finisher_lift_days = sum(1 for a in recipe if _is_cardio_finisher_lift(a))
+    strength_maintenance_lift_days = sum(
+        1 for a in recipe if a == DayArchetype.LIFT_STRENGTH_MAINTENANCE
+    )
+    hypertrophy_lift_days = (
+        lift_days
+        - heavy_lift_days
+        - volume_lift_days
+        - cardio_finisher_lift_days
+        - strength_maintenance_lift_days
+    )
+    dedicated_cardio_days = sum(
+        1 for a in recipe if ARCHETYPE_META[a].category == "cond"
+    )
+    hybrid_days = sum(1 for a in recipe if ARCHETYPE_META[a].category == "hybrid")
+    mobility_days = sum(1 for a in recipe if ARCHETYPE_META[a].category == "mobility")
+    recovery_days = sum(1 for a in recipe if ARCHETYPE_META[a].category == "recovery")
+    hybrid_conditioning_exposures = sum(
+        1 for a in recipe if _is_hybrid_conditioning_exposure(a)
+    )
+    cardio_exposures = (
+        dedicated_cardio_days
+        + cardio_finisher_lift_days
+        + hybrid_conditioning_exposures
+    )
+    return WeeklyRecipeSummary(
+        selected_planned_sessions=selected_planned_sessions,
+        passive_off_days=max(0, 7 - selected_planned_sessions),
+        lift_days=lift_days,
+        heavy_lift_days=heavy_lift_days,
+        hypertrophy_lift_days=hypertrophy_lift_days,
+        volume_lift_days=volume_lift_days,
+        cardio_finisher_lift_days=cardio_finisher_lift_days,
+        dedicated_cardio_days=dedicated_cardio_days,
+        hybrid_days=hybrid_days,
+        mobility_days=mobility_days,
+        recovery_days=recovery_days,
+        target_core_days=target_core_days,
+        actual_core_days_generated=actual_core_days_generated,
+        core_skip_reasons=tuple(dict.fromkeys(core_skip_reasons or ())),
+        cardio_exposures=cardio_exposures,
+        hybrid_conditioning_exposures=hybrid_conditioning_exposures,
+        strength_maintenance_lift_days=strength_maintenance_lift_days,
+        archetypes=tuple(a.value for a in recipe),
+    )
+
+
+def generate_weekly_summary(
+    profile: GoalProfile,
+    days_per_week: int,
+    **kwargs,
+) -> WeeklyRecipeSummary:
+    """Generate a recipe and return its deterministic summary only."""
+    recipe = generate_weekly_recipe(profile, days_per_week, **kwargs)
+    try:
+        from .core_programmer import weekly_core_target
+        target_core_days = weekly_core_target(profile.bucket, days_per_week).default
+    except Exception:
+        target_core_days = None
+    return summarize_weekly_recipe(recipe, target_core_days=target_core_days)
 
 
 def _is_ul_family(split: str | None) -> bool:

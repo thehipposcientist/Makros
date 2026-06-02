@@ -52,7 +52,7 @@ Companion docs:
 | Duration | 28 | Same smooth log-normal curve as MVP, lighter weight |
 | Efficiency | 17 | Same band shape as MVP |
 | HRV vs personal baseline | 18 | ratio = hrvMs / `rollingMedian(hrvHistory)`. ≥1.10 full · ≥0.98 80% · ≥0.92 60% · ≥0.85 35% · else 10%. Falls back to age-adjusted HRV if baseline invalid |
-| **Regularity** *(new)* | 15 | Circular SD of bedtimes, handles midnight wrap. ≤30min → 15 · ≤45 → 11 · ≤60 → 7 · ≤90 → 3 · else → 0 |
+| **Regularity** *(new)* | 15 | Last night's bedtime vs recent circular-mean bedtime, handles midnight wrap. ≤30min → 15 · ≤45 → 11 · ≤60 → 7 · ≤90 → 3 · else → 0. If current bedtime is missing, falls back to circular SD of recent bedtimes |
 | Deep sleep | 9 | Same logic as MVP, lighter weight |
 | REM sleep | 4 | Same logic as MVP, lighter weight |
 | Recovery vitals | 5 | Lighter, deduction-style, includes RHR/resp/SpO₂ baseline drift where available |
@@ -139,7 +139,7 @@ Server readiness publishes a numeric score only when at least two real health pi
 
 | Sub-score | Inputs | What full credit looks like |
 |---|---|---|
-| **Adherence** | calorie alignment + protein alignment | Within ±10% of cals, ≥95% of protein target |
+| **Adherence** | calorie alignment + protein alignment | Calories within ±5% are on target, ±10% are close; protein ≥95% of target |
 | **Food Quality** | 7 inputs: fiber density (14g/1000kcal), added sugar % cals, sat fat % cals, sodium, minimally-processed %, plant diversity, omega-3 signal | All 7 in target zones |
 | **Micronutrient Coverage** | Priority-6 micros: calcium, iron, potassium, magnesium, vitamin D, vitamin B12 | All 6 ≥ RDA |
 
@@ -152,7 +152,7 @@ Server readiness publishes a numeric score only when at least two real health pi
 - strength: 45 / 30 / 25
 
 ### Versioning
-`SCORE_VERSION=4`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`. Bumping any one invalidates `FoodMetadata` cache and re-runs classification on next meal write.
+`SCORE_VERSION=6`, `METRICS_VERSION=5`, `CLASSIFIER_VERSION=7`. Bumping any one invalidates cached score/classification assumptions on the next relevant write.
 
 ### Design rules
 - Protein gets full credit at ≥95% (not 100%) to avoid false penalties for hitting "close enough"
@@ -184,12 +184,13 @@ strength **30** · cardio **30** · consistency **25** · recovery **15**
 
 **Age adjustment (`_age_strength_threshold_multiplier`)**: thresholds scaled down for older lifters — <35 ×1.00 · <50 ×0.95 · <60 ×0.88 · <70 ×0.78 · 70+ ×0.68. Reasoning: masters tables show ~8–12% per decade drop after 40 is normal.
 
-### Cardio (0–100, ACSM baseline over 14-day window)
+### Cardio (0–100, VO₂ + ACSM baseline over 14-day window)
 
 | Sub | Max | Logic |
 |---|---:|---|
-| Z2 minutes | 60 | Target 300 min over 14d (= 150/wk). `min(60, mins/300 × 60)`. Unlabeled cardio counted as 0.5× Z2 |
-| Interval sessions | 40 | Target 4 sessions over 14d (= 2/wk). `min(40, sessions/4 × 40)` |
+| VO₂ max | weighted | When a recent HealthKit VO₂ max exists, it is the primary cardio-fitness marker. Bands: 50+ excellent, 42+, 35+, 28+, below 28. Missing VO₂ does not penalize the user; remaining signals re-weight. |
+| Z2 / aerobic-base minutes | weighted | Target 300 min over 14d (= 150/wk). HR zone minutes win when available. Explicit Zone 2 / steady sessions count full duration. Unlabeled cardio counts only 0.35×, easy/walking/recovery counts 0.25×, and weak-proxy-only reads are capped. |
+| Interval sessions | weighted | Target 4 sessions over 14d (= 2/wk). Explicit interval/tempo/HIIT sessions count; HR-zone rows can also count when Z3+ time is substantial. |
 
 **Age adjustment (`_age_cardio_target_multiplier`)**: <50 ×1.00 · <65 ×0.87 · 65+ ×0.73.
 
@@ -223,7 +224,7 @@ If only one signal present, that half is doubled to 100. Both missing → 50 (ne
 
 **Question:** "How fresh is each muscle right now? Should I lift today?"
 **File:** `backend/app/services/workout/activity_impact.py`
-**Range:** 0.0 (fresh) to 1.0+ (overtrained), per muscle. Derived 0–100 `readiness_score`.
+**Range:** 0.0 (fresh) to 1.0+ (very high load), per muscle. Derived 0–100 muscle-recovery score.
 **Endpoint:** `GET /workouts/fatigue` (returns full snapshot + nutrition_context).
 
 ### 12 muscle dimensions
@@ -318,7 +319,7 @@ A single hot session shouldn't lock in a too-high baseline for weeks. Medians ig
 Matches mesocycle length — older data still informs but recent performance dominates.
 
 ### Caller behavior on `null`
-`recommendation.py` falls back to (1) best-ever 1RM if available, then (2) `ai_first_time_weight.py` AI rec, then (3) deterministic tier-6/7 defaults.
+`recommendation.py` falls back to best-ever 1RM when available, then deterministic tier-6/7 defaults. Live next-set/pre-set recommendations do not call the legacy AI first-time helper.
 
 ### Design rules
 - PR display still uses **best-ever** 1RM — that's the achievement
@@ -354,7 +355,8 @@ Matches mesocycle length — older data still informs but recent performance dom
 ### Set counting
 - Primary muscle: 1.0 × set
 - Secondary muscle: 0.5 × set
-- Warmups filtered out
+- Count completed effortful working sets. RIR ≤ 4 or RPE ≥ 6 counts when logged; old logs without effort data use a conservative working-set fallback.
+- Warmups, mobility, recovery, and technique sets are filtered out.
 
 ### Status tiers (in evaluation order)
 
@@ -371,7 +373,7 @@ Matches mesocycle length — older data still informs but recent performance dom
 A user ramping from 4 → 12 sets/week (in-range absolute) is the highest injury-risk pattern, even though both endpoints are "fine." The spike flag catches that before the absolute one ever triggers.
 
 ### Plan-review consumption
-`plan_review_v2.py` reads volume snapshot to emit `reduce_muscle_volume` / `add_muscle_volume` / `hold_muscle_volume` recommendations consumed by the apply-action endpoint.
+`plan_review_v2.py` reads volume snapshot to emit `reduce_muscle_volume` / `add_muscle_volume` / `hold_muscle_volume` recommendations consumed by the apply-action endpoint. A stable `high` status is not treated as bad by itself; it becomes a reduce-volume action only when paired with poor recovery. `excessive` and `spike` remain directly actionable.
 
 ---
 

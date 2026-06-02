@@ -34,7 +34,9 @@ and every code path that hits the calculator picks up the update.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
 
 # ─── Safety constants ─────────────────────────────────────────────────────────
@@ -48,8 +50,24 @@ MIN_SAFE_CALORIES = 1200
 # Above these rates you're losing muscle on a cut, or adding pure fat on a
 # bulk. Sources: ~1% of bodyweight/week is the rule of thumb; 1.5 lb/wk is
 # already aggressive for most lifters.
+#
+# IMPORTANT — scope of these clamps: they are enforced ONLY in the
+# target-weight + timeline path (calorie_calculator step_4, path a). The
+# default pace path (path b: calorie_adjustment_pct_by_pace + the per-bucket
+# calorie_adjustment_clamp) is NOT rate-clamped. So an "aggressive" surplus
+# from the pace path can imply a weekly rate above MAX_GAIN_RATE_LBS_PER_WEEK
+# at high TDEE — e.g. muscle_gain aggressive at 375 cal/day (legacy fixed
+# table) ≈ 0.75 lb/wk, above the 0.5 ceiling. If you want the pace path to
+# honor these clamps too, that's a behavior change, not a doc fix.
 MAX_LOSS_RATE_LBS_PER_WEEK = 1.5
 MAX_GAIN_RATE_LBS_PER_WEEK = 0.5
+
+# Bodyweight-aware refinement applied to the pace path: it caps at the SMALLER
+# of the absolute lb/wk ceilings above and these %-of-bodyweight/week rates, so
+# a lighter user gets a proportionally tighter cap while no one ever exceeds the
+# absolute ceiling. ~0.4%/wk gain and ~1%/wk loss are common rules of thumb.
+MAX_GAIN_RATE_PCT_BW_PER_WEEK = 0.004
+MAX_LOSS_RATE_PCT_BW_PER_WEEK = 0.01
 
 # Calories per pound of body fat. Used when translating a target weight +
 # timeline into a daily calorie delta. Conventional value — assumes the
@@ -64,8 +82,10 @@ CALORIES_PER_LB = 3500
 class GoalBucketParams:
     """All the nutrition parameters for one goal bucket.
 
-    Immutable (`frozen=True`) so instances can be used as defaults and
-    nobody mutates the shared constants by accident.
+    Immutable: `frozen=True` blocks attribute reassignment, and
+    `__post_init__` wraps every mapping field in `MappingProxyType` so the
+    nested per-pace dicts are read-only too. Together these mean a caller
+    cannot mutate a shared bucket constant by accident.
     """
 
     # Human-readable name — shown in `CalorieTargets.bucket_name` so you
@@ -73,19 +93,25 @@ class GoalBucketParams:
     name: str
 
     # Daily calorie delta from TDEE by pace. Populated with three keys:
-    # "conservative", "moderate", "aggressive". The calculator looks up
-    # req.goalDetails.pace and applies the matching value.
+    # "conservative", "moderate", "aggressive".
+    #
+    # NOTE: this fixed table is the LEGACY fallback (calorie_calculator
+    # step_4, path c). The live path is `calorie_adjustment_pct_by_pace` +
+    # `calorie_adjustment_clamp` (path b). Neither pace path is rate-clamped
+    # against MAX_GAIN/MAX_LOSS — see the note on those constants above.
     #
     # Negative values = deficit (cut), positive = surplus (bulk), zero =
-    # maintenance. Chosen so that even the "aggressive" setting stays
-    # within the weekly-rate safety clamps above.
-    calorie_adjustment_by_pace: dict[str, int]
+    # maintenance.
+    calorie_adjustment_by_pace: Mapping[str, int]
 
-    # Protein target in g per pound of bodyweight. ISSN 2017 recommends
-    # 1.4-2.2 g/kg (~0.64-1.0 g/lb) for active adults. We pin the high
-    # end for muscle/strength goals, the low end for endurance where
-    # carbs take precedence, and 0.9 for fat loss (elevated to preserve
-    # lean mass during a deficit).
+    # Protein target in g per pound of bodyweight. The ISSN 2017 protein
+    # position stand puts the general range at 1.4-2.0 g/kg/day
+    # (~0.64-0.9 g/lb) for most exercising adults, with higher intakes
+    # (up to ~2.2-3.1 g/kg) supported during energy restriction. We pin
+    # toward the high end for muscle/strength goals, the low end for
+    # endurance where carbs take precedence, and elevate fat-loss protein
+    # to preserve lean mass during a deficit. [needs-verification: exact
+    # g/kg figures cited against the published stand]
     protein_per_lb: float
 
     # Fat as a fraction of total daily calories. The calculator also
@@ -99,6 +125,33 @@ class GoalBucketParams:
     # from fat (down to its own floor) to keep carbs above it. Strength
     # and endurance goals need more glycogen, so their floors are higher.
     min_carbs_g: int = 75
+
+    # Preferred formula-driven model. When present, the calculator uses a
+    # percentage of maintenance and clamps the result into the configured
+    # range. The fixed table above remains a legacy fallback/reference.
+    calorie_adjustment_pct_by_pace: Mapping[str, float] | None = None
+    calorie_adjustment_clamp: tuple[int, int] | None = None
+    pace_labels: Mapping[str, str] | None = None
+
+    # Optional pace-specific protein/fat targets. Protein is multiplied by
+    # the calculator's selected protein weight basis, not blindly by current
+    # bodyweight.
+    protein_per_lb_by_pace: Mapping[str, float] | None = None
+    fat_percent_by_pace: Mapping[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        # Deep-freeze the mapping fields so the shared bucket constants are
+        # genuinely immutable, not just shielded from attribute reassignment.
+        for field_name in (
+            "calorie_adjustment_by_pace",
+            "calorie_adjustment_pct_by_pace",
+            "pace_labels",
+            "protein_per_lb_by_pace",
+            "fat_percent_by_pace",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, dict):
+                object.__setattr__(self, field_name, MappingProxyType(dict(value)))
 
 
 # ─── Bucket instances ─────────────────────────────────────────────────────────
@@ -116,9 +169,20 @@ FAT_LOSS = GoalBucketParams(
         "moderate":     -500,
         "aggressive":   -750,
     },
+    calorie_adjustment_pct_by_pace={
+        "conservative": -0.10,
+        "moderate":     -0.15,
+        "aggressive":   -0.20,
+    },
+    calorie_adjustment_clamp=(-750, -250),
     # Elevated protein during a deficit to preserve lean mass. Evidence
     # consistently shows 0.8-1.0 g/lb during a cut outperforms 0.6-0.7.
     protein_per_lb=0.9,
+    protein_per_lb_by_pace={
+        "conservative": 0.9,
+        "moderate":     1.0,
+        "aggressive":   1.1,
+    },
     # Slightly below the default 30% so more of the remaining calories go
     # to carbs — fuller on a deficit, sustains training better.
     fat_percent_of_calories=0.28,
@@ -129,21 +193,31 @@ FAT_LOSS = GoalBucketParams(
 
 MUSCLE_GAIN = GoalBucketParams(
     name="muscle_gain",
-    # Lean-bulk surplus. 300 cal/day ≈ ~0.5 lb/wk gain, the accepted
-    # upper bound for minimizing fat accrual in trained lifters.
-    # 2026-04-13: aggressive dropped from 500 → 375. 500 cal/day pushes
-    # past the lean-gain ceiling (~0.5 lb/wk) and produces visible fat
-    # gain for most users, which isn't the default-app experience we
-    # want. 375 still exceeds the moderate bucket while keeping the
-    # weekly rate inside the safety clamp.
+    # Lean-bulk surplus (legacy fixed table — live path is the pct table
+    # + clamp below). At the 3500 cal/lb model: 300 cal/day ≈ 0.6 lb/wk
+    # and 375 ≈ 0.75 lb/wk — both ABOVE MAX_GAIN_RATE_LBS_PER_WEEK (0.5),
+    # which the pace path does not enforce. ~0.5 lb/wk (≈250 cal/day) is
+    # the usual upper bound for minimizing fat accrual in trained lifters.
+    # 2026-04-13: aggressive dropped 500 → 375 to reduce fat accrual.
     calorie_adjustment_by_pace={
         "conservative": 150,
         "moderate":     300,
         "aggressive":   375,
     },
+    calorie_adjustment_pct_by_pace={
+        "conservative": 0.05,
+        "moderate":     0.08,
+        "aggressive":   0.11,
+    },
+    calorie_adjustment_clamp=(150, 500),
     # Top of the ISSN range — plenty of substrate for muscle protein
     # synthesis. Research doesn't show benefit above ~1.0 g/lb.
-    protein_per_lb=1.0,
+    protein_per_lb=0.9,
+    protein_per_lb_by_pace={
+        "conservative": 0.85,
+        "moderate":     0.9,
+        "aggressive":   1.0,
+    },
     fat_percent_of_calories=0.25,  # more carbs = better training fuel
     min_carbs_g=100,
 )
@@ -159,7 +233,23 @@ BODY_RECOMP = GoalBucketParams(
         "moderate":        0,
         "aggressive":    100,
     },
+    calorie_adjustment_pct_by_pace={
+        "conservative": -0.04,
+        "moderate":      0.00,
+        "aggressive":    0.04,
+    },
+    calorie_adjustment_clamp=(-150, 150),
+    pace_labels={
+        "conservative": "fat_priority",
+        "moderate": "balanced",
+        "aggressive": "muscle_priority",
+    },
     protein_per_lb=1.0,  # high protein is the whole point of recomp
+    protein_per_lb_by_pace={
+        "conservative": 0.95,
+        "moderate":     1.0,
+        "aggressive":   1.0,
+    },
     fat_percent_of_calories=0.28,
     min_carbs_g=100,
 )
@@ -178,7 +268,18 @@ STRENGTH = GoalBucketParams(
         "moderate":     300,
         "aggressive":   350,
     },
-    protein_per_lb=1.0,
+    calorie_adjustment_pct_by_pace={
+        "conservative": 0.00,
+        "moderate":     0.03,
+        "aggressive":   0.05,
+    },
+    calorie_adjustment_clamp=(0, 350),
+    protein_per_lb=0.9,
+    protein_per_lb_by_pace={
+        "conservative": 0.85,
+        "moderate":     0.9,
+        "aggressive":   1.0,
+    },
     fat_percent_of_calories=0.28,
     # High carbs for CNS recovery and heavy-session performance.
     min_carbs_g=120,
@@ -194,6 +295,12 @@ ENDURANCE = GoalBucketParams(
         "moderate":     200,
         "aggressive":   300,
     },
+    calorie_adjustment_pct_by_pace={
+        "conservative": 0.00,
+        "moderate":     0.03,
+        "aggressive":   0.05,
+    },
+    calorie_adjustment_clamp=(0, 400),
     # Lower than strength/muscle — endurance prioritizes carbs for glycogen
     # replenishment. 0.8 g/lb ≈ 1.76 g/kg — above the ACSM minimum of
     # 1.2 g/kg, reflecting that our users also do resistance training.
@@ -214,10 +321,17 @@ ATHLETIC = GoalBucketParams(
         "moderate":     250,
         "aggressive":   400,
     },
-    # 2026-04-13: bumped 0.9 → 1.0 g/lb. Power/speed/agility work has
-    # the same fiber recruitment demands as strength training, and the
-    # ISSN 2017 stand supports 1.0 g/lb across the board for trained
-    # athletes with explosive demands.
+    calorie_adjustment_pct_by_pace={
+        "conservative": 0.00,
+        "moderate":     0.03,
+        "aggressive":   0.05,
+    },
+    calorie_adjustment_clamp=(0, 500),
+    # 2026-05-23: 1.0 g/lb across all paces. Power/speed/agility work has
+    # fiber-recruitment demands similar to strength training, and the ISSN
+    # 2017 stand supports intakes at this level for trained athletes with
+    # explosive demands. No pace map — every pace resolves to this base, so
+    # conservative/moderate athletes get 1.0 too (previously 0.8/0.9).
     protein_per_lb=1.0,
     fat_percent_of_calories=0.28,
     min_carbs_g=120,
@@ -226,13 +340,19 @@ ATHLETIC = GoalBucketParams(
 GENERAL_HEALTH = GoalBucketParams(
     name="general_health",
     # Default bucket for unknown goals and lifestyle/health / stress-relief
-    # / flexibility / toning (light) categories. Near-maintenance calories,
-    # moderate protein, sensible macro split.
+    # / flexibility categories. Near-maintenance calories, moderate protein,
+    # sensible macro split. (Note: "toning" maps to FAT_LOSS, not here.)
     calorie_adjustment_by_pace={
         "conservative": -100,
         "moderate":        0,
         "aggressive":    100,
     },
+    calorie_adjustment_pct_by_pace={
+        "conservative": -0.03,
+        "moderate":      0.00,
+        "aggressive":    0.03,
+    },
+    calorie_adjustment_clamp=(-150, 150),
     # 2026-04-13: bumped 0.75 → 0.8 g/lb. 0.75 sat below the ISSN 2017
     # floor for physically active adults (0.8 g/lb ≈ 1.8 g/kg). Even
     # sedentary older adults benefit from ≥0.8 g/lb for lean-mass
@@ -303,7 +423,9 @@ GOAL_BUCKET_MAP: dict[str, GoalBucketParams] = {
     "train_10k":           ENDURANCE,
     "train_half":          ENDURANCE,
     "train_marathon":      ENDURANCE,
-    "sprint_speed":        ENDURANCE,
+    # interval_perf is ambiguous (VO2 intervals vs HIIT / repeated-sprint).
+    # Defaulting to ENDURANCE; reassign or split per-id if the client
+    # taxonomy ever distinguishes the two.
     "interval_perf":       ENDURANCE,
     "hiking_endurance":    ENDURANCE,
     "cycling_endurance":   ENDURANCE,
@@ -320,6 +442,7 @@ GOAL_BUCKET_MAP: dict[str, GoalBucketParams] = {
     "improve_power":        ATHLETIC,
     "improve_vertical":     ATHLETIC,
     "improve_acceleration": ATHLETIC,
+    "sprint_speed":         ATHLETIC,  # was ENDURANCE — aligns with improve_speed/acceleration
     "improve_cod":          ATHLETIC,
     "improve_coordination": ATHLETIC,
     "improve_balance":      ATHLETIC,

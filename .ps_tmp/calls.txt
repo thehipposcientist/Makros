@@ -1,0 +1,197 @@
+39:import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult, HealthPillarKey, SleepScore, SleepStageTimeline, WeightEntry } from '../types';
+40:import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
+45:  readHealthSummary,
+49:  loadSleepHistory,
+50:  readDailyNutritionSnapshot,
+87:import { getMealChecks } from '../utils/mealTracker';
+110:import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getCalorieRanges, CalorieRanges, getGoalScores, type GoalScoreResult } from '../services/api';
+138:  buildLocalE1RMHistory,
+152:import type { MealHistoryEntry } from '../services/api';
+409:  const { getHealthDataSummary } = await import('../services/healthDataSummary');
+410:  const agg = await getHealthDataSummary({ age, force }).catch(() => null);
+411:  return isFullHealthSummary(agg?.raw) ? agg.raw : readHealthSummary({ age });
+546:async function loadProgressSleepHistory(authToken: string | null | undefined, summary?: HealthSummary | null): Promise<ProgressSleepHistoryPoint[]> {
+547:  const localRows = (await loadSleepHistory().catch(() => []))
+552:    const { getSleepHistory } = await import('../services/api');
+553:    remoteRows = (await getSleepHistory(authToken, 30).catch(() => []))
+709:  dailyRows: import('../services/api').DailyHealthHistoryItem[] | null,
+978:function normalizeBodyScanEntry(raw: any): BodyScanEntry | null {
+1016:function bodyScanSortValue(entry: BodyScanEntry): number {
+1023:function bodyScanMergeKey(entry: BodyScanEntry): string {
+1027:function bodyScanHasServerId(entry: BodyScanEntry): boolean {
+1034:function onlyServerBackedBodyScans(entries: BodyScanEntry[]): BodyScanEntry[] {
+1038:async function quarantineLegacyBodyScans(entries: BodyScanEntry[], reason: string): Promise<void> {
+1057:function bodyScanPhotoVisibleInHistory(entry: BodyScanEntry): boolean {
+1818:  bodyScanHistory: BodyScanEntry[];
+2302:  bodyScanHistory: BodyScanEntry[];
+2949:function OneRepMaxTrendCard({
+2959:  points: import('../services/api').E1RMHistoryPoint[];
+3120:  bodyScanHistory: BodyScanEntry[];
+4150:function bodyScanValue(scan: BodyScanEntry | null | undefined): number | null {
+4155:function latestBodyScanBefore(scans: BodyScanEntry[], capDate: string): BodyScanEntry | null {
+4193:  bodyScanHistory: BodyScanEntry[];
+4280:        const scan = latestBodyScanBefore(bodyScansSinceGoalStart, week.capDate);
+4350:  const latestBodyScan = latestBodyScanBefore(bodyScansSinceGoalStart, todayKeyValue);
+4351:  const latestBodyFatPct = bodyScanValue(latestBodyScan) ?? (useBodyFatSecondary ? startBodyFatPct : null);
+4368:          detail: useBodyFatSecondary ? (latestBodyScan ? formatGoalTimelineDate(latestBodyScan.date) : 'goal start') : 'latest week',
+6650:  meal: MealHistoryEntry;
+6690:function mealConsumedAt(meal: MealHistoryEntry): Date | null {
+6694:function mealCalories(meal: MealHistoryEntry): number {
+6700:function mealFat(meal: MealHistoryEntry): number {
+6706:function mealLabel(meal: MealHistoryEntry): string {
+6710:function mealText(meal: MealHistoryEntry): string {
+6718:function mealHasAlcohol(meal: MealHistoryEntry): boolean {
+6723:function mealHasCaffeine(meal: MealHistoryEntry): boolean {
+6728:function timedMealsBeforeSleep(meals: MealHistoryEntry[] | null | undefined, sleepStart: Date, maxHours: number): TimedMealContext[] {
+6756:function lateMealPatternText(meals: MealHistoryEntry[] | null | undefined, sleepHistory: ProgressSleepHistoryPoint[] | null | undefined): string | null {
+6829:  mealHistory?: MealHistoryEntry[] | null;
+7366:  mealHistory?: MealHistoryEntry[] | null;
+8084:  const [bodyScanLoading, setBodyScanLoading] = useState(false);
+8085:  const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
+8086:  const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
+8090:  const [bodyScanLoaded, setBodyScanLoaded] = useState(false);
+8096:  const [bodyScanPrepSource, setBodyScanPrepSource] = useState<'camera' | 'library' | null>(null);
+8112:  const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
+8136:  const [topLiftHistory, setTopLiftHistory] = useState<{ name: string; points: import('../services/api').E1RMHistoryPoint[] } | null>(null);
+8252:  const [dailyHealthHistory, setDailyHealthHistory] = useState<import('../services/api').DailyHealthHistoryItem[] | null>(null);
+8253:  const [dailyHealthHistoryDays, setDailyHealthHistoryDays] = useState(0);
+8254:  const [dailyHealthHistoryLoading, setDailyHealthHistoryLoading] = useState(false);
+8256:  // Flips true after loadWeightHistory resolves (success OR error). Empty
+8270:  const [mealHistory, setMealHistory] = useState<import('../services/api').MealHistoryEntry[] | null>(null);
+8299:      const snapshot = await readDailyNutritionSnapshot(dayStart, dayEnd);
+8370:      : buildLocalE1RMHistory(history, selectedExercise, (w, r, opts) =>
+8501:  const localOneRepMaxLifts = useMemo<import('../services/api').OneRepMaxLift[]>(() => {
+8504:      .map((pr): import('../services/api').OneRepMaxLift | null => {
+8529:      .filter((lift): lift is import('../services/api').OneRepMaxLift => lift != null)
+8533:  const displayedOneRepMaxLifts = oneRepMaxLifts.length > 0 ? oneRepMaxLifts : localOneRepMaxLifts;
+8535:    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, displayedOneRepMaxLifts, weightUnit, distanceUnit, { showWorkoutProgress, showMealProgress }),
+8536:    [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, weightUnit],
+8578:    //    `derivePersonalRecords` returns one heaviest-set record per
+8699:      oneRepMaxLifts: displayedOneRepMaxLifts,
+8711:    [bodyScanHistory, calorieRanges, displayedOneRepMaxLifts, distanceUnit, healthSummary?.avgSleepHours7d, healthSummary?.vo2Max, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
+9001:                const fresh = await readHealthSummary({ age });
+9111:                      loadProgressSleepHistory(authToken, fresh).then(setSleepHistory).catch(() => null);
+9407:      getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
+9417:        loadWorkoutHistory(),
+9418:        loadWorkoutSummaries(),
+9419:        loadGoalHistory(),
+9420:        loadPlanChanges(),
+9424:            listWorkoutSessions(authToken, {
+9431:            listWorkoutCompletions(authToken, {
+9452:        setPrs(derivePersonalRecords(localHistory));
+9464:        setPrs(derivePersonalRecords(localHistory));
+9473:      setPrs(derivePersonalRecords(scoped.history));
+9493:    getGoalScores(authToken, { window: 'rolling_7d' })
+9516:    import('../utils/weightHistory').then(({ loadWeightHistory }) =>
+9517:      loadWeightHistory()
+9537:    getInsights(authToken).then(setInsights).catch(() => null);
+9538:    getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
+9540:      getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+9551:    getProgressionInsights(authToken, prs[0].exerciseName)
+9572:      setOneRepMaxLifts([]);
+9581:    import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
+9582:      getOneRepMaxShowcase(authToken)
+9584:          setOneRepMaxLifts(lifts);
+9591:              const resp = await getE1RMHistory(authToken, top.name);
+9602:        .catch(() => setOneRepMaxLifts([]))
+9609:    import('../services/api').then(({ getPlateaus }) =>
+9610:      getPlateaus(authToken, 4)
+9635:        setMealHistory(null);
+9646:    import('../services/api').then(({ getMealHistory }) =>
+9647:      getMealHistory(authToken, 14)
+9648:        .then(r => setMealHistory(r.meals ?? []))
+9649:        .catch(() => setMealHistory(null))
+9670:    setBodyScanHistory([]);
+9699:          checksByDate[k] = await getMealChecks(k).catch(() => ({}));
+9733:    loadHealthSummary().then(setHealthSummary);
+9734:    loadHealthScore().then(setHealthScore);
+9749:      const local: BodyScanEntry[] = localRows
+9750:        .map(normalizeBodyScanEntry)
+9751:        .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
+9754:        await quarantineLegacyBodyScans(localOnly, 'bodyScanHistory local-only row ignored; DB is canonical');
+9756:      const localSorted = onlyServerBackedBodyScans(local).sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
+9760:      if (!cancelled && localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
+9763:          const { getBodyScanHistory } = await import('../services/api');
+9764:          const remote = (await getBodyScanHistory(authToken))
+9765:            .map(normalizeBodyScanEntry)
+9766:            .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
+9768:          const sorted = onlyServerBackedBodyScans(remote)
+9770:          setBodyScanHistory(sorted.slice(0, RECENT_CAP));
+9776:      .finally(() => { if (!cancelled) setBodyScanLoaded(true); });
+9783:    getCalorieRanges(authToken)
+9823:            setSleepHistory(await loadProgressSleepHistory(authToken, fresh));
+9840:    import('../services/api').then(({ getSleepPressure }) => {
+9841:      getSleepPressure(authToken, 14)
+9853:    setDailyHealthHistoryLoading(true);
+9854:    import('../services/api').then(({ getDailyHealthHistory }) => {
+9855:      getDailyHealthHistory(authToken, biometricHistoryWindow)
+9858:          setDailyHealthHistory(Array.isArray(rows) ? rows : []);
+9859:          setDailyHealthHistoryDays(biometricHistoryWindow);
+9863:            setDailyHealthHistory([]);
+9864:            setDailyHealthHistoryDays(biometricHistoryWindow);
+9868:          if (!cancelled) setDailyHealthHistoryLoading(false);
+9872:        setDailyHealthHistory([]);
+9873:        setDailyHealthHistoryDays(biometricHistoryWindow);
+9874:        setDailyHealthHistoryLoading(false);
+9892:    setDailyHealthHistoryLoading(true);
+9893:    import('../services/api').then(({ getDailyHealthHistory }) => {
+9894:      getDailyHealthHistory(authToken, GOAL_EXECUTION_BLOCK_DAYS)
+9897:          setDailyHealthHistory(Array.isArray(rows) ? rows : []);
+9898:          setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+9902:            setDailyHealthHistory([]);
+9903:            setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+9907:          if (!cancelled) setDailyHealthHistoryLoading(false);
+9911:        setDailyHealthHistory([]);
+9912:        setDailyHealthHistoryDays(GOAL_EXECUTION_BLOCK_DAYS);
+9913:        setDailyHealthHistoryLoading(false);
+10003:      setMealHistory(null);
+10015:        api.getMealHistory(authToken, 14).catch(() => undefined),
+10019:      if (historyResp) setMealHistory(historyResp.meals ?? []);
+10039:  const handleShareBodyScan = async () => {
+10056:  const handleDeleteBodyScan = (entry: BodyScanEntry) => {
+10069:                await quarantineLegacyBodyScans([entry], 'bodyScanHistory local-only delete ignored by DB');
+10072:                const { deleteBodyScan } = await import('../services/api');
+10073:                await deleteBodyScan(authToken, entry.id);
+10078:              setBodyScanHistory(updated);
+10079:              await AsyncStorage.setItem(BODY_SCAN_CACHE_KEY, JSON.stringify(onlyServerBackedBodyScans(updated)));
+10081:                setBodyScanResult(null);
+10117:  const handleBodyScan = async (source: 'camera' | 'library') => {
+10227:      setBodyScanLoading(true);
+10228:      setBodyScanResult(null);
+10232:      const scanResult = await scanBody(authToken, {
+10243:      setBodyScanResult(scanResult);
+10246:      const entry: BodyScanEntry = {
+10268:      const updated = [entry, ...onlyServerBackedBodyScans(bodyScanHistory).filter(existing => String(existing.id) !== String(entry.id))].slice(0, 20);
+10269:      setBodyScanHistory(updated);
+10284:            onPress: () => handleBodyScan(altSource),
+10289:      setBodyScanLoading(false);
+10293:  const renderBodyScanHistoryTile = (entry: BodyScanEntry, idx: number) => {
+10309:          onPress={() => handleDeleteBodyScan(entry)}
+10395:    import('../services/api').then(({ getE1RMHistory }) =>
+10396:      getE1RMHistory(authToken, selectedExercise)
+10421:  const latestBodyScanEntry = bodyScanHistory.length > 0
+10429:    currentBodyFatPct: latestBodyScanEntry?.bodyFatPct,
+11285:                  <OneRepMaxTrendCard
+12160:          {displayedOneRepMaxLifts.length > 0 && (
+12164:                const maxOneRepMax = Math.max(...displayedOneRepMaxLifts.map(lift => lift.oneRepMaxLbs), 1);
+12174:                    {displayedOneRepMaxLifts.map(lift => {
+12175:                      const fillPct = Math.max(0.18, lift.oneRepMaxLbs / maxOneRepMax);
+12232:                    <OneRepMaxTrendCard
+13951:                        const fresh = await readHealthSummary({ age });
+14067:                              loadProgressSleepHistory(authToken, fresh).then(setSleepHistory).catch(() => null);
+14482:                                const { loadWeightHistory } = await import('../utils/weightHistory');
+14483:                                setWeightEntries(await loadWeightHistory());
+14622:                  onPress={() => setBodyScanPrepSource('camera')}
+14632:                  onPress={() => setBodyScanPrepSource('library')}
+14725:              onPress={handleShareBodyScan}
+14742:                {bodyScanHistory.map((entry, idx) => renderBodyScanHistoryTile(entry, idx))}
+14918:                      {bodyScanHistory.map((entry, idx) => renderBodyScanHistoryTile(entry, idx))}
+16532:        onRequestClose={() => setBodyScanPrepSource(null)}>
+16537:            onPress={() => setBodyScanPrepSource(null)}
+16551:              <TouchableOpacity onPress={() => setBodyScanPrepSource(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+16574:                onPress={() => setBodyScanPrepSource(null)}>
+16581:                  setBodyScanPrepSource(null);
+16582:                  if (source) handleBodyScan(source);
+16646:          const [h, s] = await Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()]);
+16661:          const [h, s] = await Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()]);
+16665:            getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});

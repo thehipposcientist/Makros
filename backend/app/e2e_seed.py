@@ -66,7 +66,7 @@ from app.services.workout.weekly_recipe import PLANNER_VERSION
 
 
 DEFAULT_E2E_PASSWORD = "SeedTest1234"
-E2E_LEGAL_VERSION = os.getenv("E2E_LEGAL_VERSION", "2026-05-06.2")
+E2E_LEGAL_VERSION = os.getenv("E2E_LEGAL_VERSION", "2026-05-31.1")
 
 
 @dataclass(frozen=True)
@@ -212,7 +212,7 @@ def e2e_personas() -> tuple[PersonaSpec, ...]:
             equipment=(
                 "Barbell",
                 "Dumbbells",
-                "Cable machine",
+                "Dual cable station",
                 "Squat rack",
                 "Adjustable bench",
                 "Lat pulldown",

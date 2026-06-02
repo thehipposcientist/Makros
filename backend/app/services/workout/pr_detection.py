@@ -24,11 +24,20 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Iterable
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 
 def epley_1rm(weight_lbs: float, reps: int) -> float:
-    """Epley 1RM estimate. Returns 0 for invalid inputs."""
+    """Epley 1RM estimate. Returns 0 for invalid inputs.
+
+    Intentionally does NOT take RIR — PR detection is "did this raw set
+    exceed the prior best raw set?" Reading RIR here would make a 2-RIR
+    set with the same weight+reps appear to PR over a true-failure set,
+    which is the opposite of what users mean by a PR. The
+    rolling-e1RM / prescription path uses RIR (and now caps effective
+    reps + tracks RIR source); this function stays a clean raw-Epley
+    so PR celebrations remain conservative."""
     if weight_lbs is None or reps is None:
         return 0.0
     try:
@@ -71,6 +80,7 @@ def _iter_user_sets(user_id: int, db: Session, *, exclude_session_id: int | None
         .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
         .where(WorkoutSession.user_id == user_id)
         .where(ExerciseSet.completed == True)  # noqa: E712
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     )
     if exclude_session_id is not None:
         stmt = stmt.where(WorkoutSession.id != exclude_session_id)
@@ -143,6 +153,7 @@ def detect_prs(user_id: int, session_id: int, db: Session) -> list[dict]:
         .join(WorkoutExercise, WorkoutExercise.id == ExerciseSet.workout_exercise_id)
         .where(WorkoutExercise.session_id == session_id)
         .where(ExerciseSet.completed == True)  # noqa: E712
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     ).all()
 
     if not rows:

@@ -27,6 +27,15 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var hrZoneLow: Int?
         public var hrZoneHigh: Int?
         public var hrZoneColorHex: String?
+        // ── Cardio mode (mode == "cardio") ─────────────────────────
+        // Optional fields populated for outdoor / indoor cardio
+        // Live Activities. The widget renders the cardio variant
+        // (time + distance + pace + calories) when distanceMeters
+        // is non-nil; the rest / elapsed paths ignore them.
+        public var distanceMeters: Double?
+        public var paceSecPerKm: Double?
+        public var activeCalories: Double?
+        public var distanceUnit: String?  // "mi" or "km" — display preference
 
         public init(
             mode: String? = "rest",
@@ -45,7 +54,11 @@ public struct RestTimerAttributes: ActivityAttributes {
             hrZoneLabel: String? = nil,
             hrZoneLow: Int? = nil,
             hrZoneHigh: Int? = nil,
-            hrZoneColorHex: String? = nil
+            hrZoneColorHex: String? = nil,
+            distanceMeters: Double? = nil,
+            paceSecPerKm: Double? = nil,
+            activeCalories: Double? = nil,
+            distanceUnit: String? = nil
         ) {
             self.mode = mode
             self.startedAtMs = startedAtMs
@@ -64,6 +77,10 @@ public struct RestTimerAttributes: ActivityAttributes {
             self.hrZoneLow = hrZoneLow
             self.hrZoneHigh = hrZoneHigh
             self.hrZoneColorHex = hrZoneColorHex
+            self.distanceMeters = distanceMeters
+            self.paceSecPerKm = paceSecPerKm
+            self.activeCalories = activeCalories
+            self.distanceUnit = distanceUnit
         }
     }
 

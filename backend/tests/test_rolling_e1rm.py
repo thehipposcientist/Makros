@@ -11,12 +11,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.services.workout.rolling_e1rm import (
-    UsableSet, compute_rolling_e1rm,
+    UsableSet, compute_rolling_e1rm, set_e1rm,
 )
 
 
 def make_set(*, days_ago: int, w: float, reps: int, rir: float | None,
-             role_compat: str = "primary"):
+             role_compat: str = "primary", workout_id: int | None = None,
+             target_rir: float = 2.0):
     """Build a UsableSet at `days_ago` days back."""
     completed = date.today() - timedelta(days=days_ago)
     return UsableSet(
@@ -24,8 +25,9 @@ def make_set(*, days_ago: int, w: float, reps: int, rir: float | None,
         actual_weight_lbs=w,
         actual_reps=reps,
         actual_rir=rir,
-        target_rir=2.0,
+        target_rir=target_rir,
         set_type="working",
+        workout_id=workout_id,
     )
 
 
@@ -142,19 +144,187 @@ def test_rir_fallback_to_target():
 
 
 def test_confidence_tiers():
-    print("[test] confidence tier from sample count + spread")
-    # Many samples, tight spread → high confidence.
+    print("[test] confidence tier from sample count + spread + sessions")
+    # Many samples spread across 7 distinct dates, all actual_rir, tight
+    # → high confidence.
     tight = [make_set(days_ago=i, w=185, reps=8, rir=2.0) for i in range(7)]
     out = compute_rolling_e1rm(tight)
     assert out is not None
     assert out.confidence == "high", f"expected high, got {out.confidence}"
-    print(f"  ✓ tight: confidence={out.confidence}")
+    print(f"  ✓ tight (7 dates): confidence={out.confidence}")
     # Few samples → low confidence regardless of spread.
     few = [make_set(days_ago=i, w=185, reps=8, rir=2.0) for i in range(3)]
     out = compute_rolling_e1rm(few)
     assert out is not None
     assert out.confidence in ("low", "med"), f"expected low/med, got {out.confidence}"
     print(f"  ✓ few samples: confidence={out.confidence}")
+
+
+# ── New behaviour: effective rep cap ─────────────────────────────────
+
+
+def test_set_e1rm_caps_effective_reps_for_main_compound():
+    print("[test] set_e1rm caps main-compound reps at 10")
+    # 225 × 10 @ 4 RIR — raw eff_reps would be 14 → 330 lb.
+    # With cap, eff_reps = 10 → 225 * (1 + 10/30) = 300 lb.
+    out = set_e1rm(225, 10, 4, role="primary")
+    assert_close(out, 300.0, 0.5, "225×10@4RIR capped at 10 reps")
+    # Without role (default), same cap applies.
+    out_default = set_e1rm(225, 10, 4)
+    assert_close(out_default, 300.0, 0.5, "default role uses main-compound cap")
+
+
+def test_set_e1rm_caps_effective_reps_for_machine_compound():
+    print("[test] set_e1rm caps machine-compound reps at 12")
+    # 100 × 12 @ 4 RIR — raw eff_reps would be 16 → ~153.3 lb.
+    # With cap, eff_reps = 12 → 100 * (1 + 12/30) = 140 lb.
+    out = set_e1rm(100, 12, 4, role="machine_compound")
+    assert_close(out, 140.0, 0.5, "100×12@4RIR capped at 12 reps for machine")
+
+
+def test_set_e1rm_isolation_returns_none():
+    print("[test] set_e1rm refuses isolation lifts")
+    out = set_e1rm(30, 12, 1, role="isolation")
+    assert out is None, f"isolation must return None, got {out}"
+    print("  ✓ isolation returns None")
+
+
+def test_rolling_uses_cap_in_estimate():
+    print("[test] compute_rolling_e1rm honors the rep cap")
+    # 3 sets of 225 × 10 @ 4 RIR — each capped at eff_reps=10 → 300 lb.
+    sets = [make_set(days_ago=i, w=225, reps=10, rir=4.0) for i in range(3)]
+    out = compute_rolling_e1rm(sets, role="primary")
+    assert out is not None
+    assert_close(out.e1rm_lbs, 300.0, 1.0, "rolling cap → 300 lb not 330")
+
+
+# ── New behaviour: RIR-source confidence downgrade ───────────────────
+
+
+def test_target_rir_only_caps_confidence_at_low():
+    print("[test] target_rir-only samples cap confidence at 'low'")
+    # 7 samples across 7 dates with tight spread BUT all actual_rir=None
+    # so target_rir is the fallback for every set → actual_ratio = 0%.
+    sets = [
+        UsableSet(
+            completed_at=date.today() - timedelta(days=i),
+            actual_weight_lbs=185, actual_reps=8,
+            actual_rir=None, target_rir=2.0,
+            set_type="working", workout_id=i + 1,
+        )
+        for i in range(7)
+    ]
+    out = compute_rolling_e1rm(sets)
+    assert out is not None, "fallback still produces estimate"
+    assert out.confidence == "low", (
+        f"target-only must cap at low, got {out.confidence}"
+    )
+    print(f"  ✓ 0% actual_rir → confidence={out.confidence}")
+
+
+def test_mostly_target_rir_caps_confidence_at_med():
+    print("[test] 50–70% actual_rir caps confidence at 'med' (no high)")
+    # 7 samples — 4 actual + 3 target → ratio 4/7 ≈ 0.57 (between 0.5
+    # and 0.7) → high becomes med, lower tiers untouched.
+    sets = []
+    for i in range(4):
+        sets.append(make_set(days_ago=i, w=185, reps=8, rir=2.0,
+                             workout_id=i + 1))
+    for i in range(4, 7):
+        sets.append(UsableSet(
+            completed_at=date.today() - timedelta(days=i),
+            actual_weight_lbs=185, actual_reps=8,
+            actual_rir=None, target_rir=2.0,
+            set_type="working", workout_id=i + 1,
+        ))
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence != "high", (
+        f"57% actual must block high, got {out.confidence}"
+    )
+    print(f"  ✓ 57% actual_rir → confidence={out.confidence}")
+
+
+def test_all_actual_rir_allows_high():
+    print("[test] 100% actual_rir + 3+ sessions + tight spread → high")
+    sets = [make_set(days_ago=i, w=185, reps=8, rir=2.0,
+                     workout_id=i + 1) for i in range(7)]
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence == "high", (
+        f"100% actual_rir should allow high, got {out.confidence}"
+    )
+    print(f"  ✓ confidence={out.confidence}")
+
+
+# ── New behaviour: distinct sessions in confidence ───────────────────
+
+
+def test_single_session_cannot_be_high():
+    print("[test] 7 sets from one workout — no high confidence")
+    # All seven sets share workout_id=1 → distinct_sessions=1.
+    sets = [make_set(days_ago=0, w=185, reps=8, rir=2.0, workout_id=1)
+            for _ in range(7)]
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence != "high", (
+        f"single-session 7 sets must NOT be high, got {out.confidence}"
+    )
+    print(f"  ✓ 1 session: confidence={out.confidence}")
+
+
+def test_two_sessions_can_be_med_not_high():
+    print("[test] 7 sets across 2 sessions — med max")
+    sets = []
+    for i in range(4):
+        sets.append(make_set(days_ago=0, w=185, reps=8, rir=2.0, workout_id=1))
+    for i in range(3):
+        sets.append(make_set(days_ago=3, w=185, reps=8, rir=2.0, workout_id=2))
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence in ("low", "med"), (
+        f"2-session sample must NOT be high, got {out.confidence}"
+    )
+    print(f"  ✓ 2 sessions: confidence={out.confidence}")
+
+
+def test_three_sessions_can_be_high():
+    print("[test] 7 sets across 3 distinct sessions → high possible")
+    sets = []
+    for wid in (1, 2, 3):
+        for k in range(3 if wid == 1 else 2):
+            sets.append(make_set(days_ago=wid, w=185, reps=8, rir=2.0,
+                                 workout_id=wid))
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence == "high", (
+        f"3-session tight sample should be high, got {out.confidence}"
+    )
+    print(f"  ✓ 3 sessions: confidence={out.confidence}")
+
+
+def test_distinct_falls_back_to_date_when_workout_id_missing():
+    print("[test] missing workout_id → distinct sessions from dates")
+    # No workout_id set, but 7 different dates → 7 distinct sessions → high.
+    sets = [make_set(days_ago=i, w=185, reps=8, rir=2.0) for i in range(7)]
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence == "high", (
+        f"7 distinct dates should reach high without workout_id, got {out.confidence}"
+    )
+    print(f"  ✓ date fallback: confidence={out.confidence}")
+
+
+def test_distinct_same_date_cannot_be_high_without_workout_id():
+    print("[test] same-date sets without workout_id can't be high")
+    # All sets on the same day, no workout_id → distinct=1.
+    sets = [make_set(days_ago=0, w=185, reps=8, rir=2.0) for _ in range(7)]
+    out = compute_rolling_e1rm(sets)
+    assert out is not None
+    assert out.confidence != "high", (
+        f"single-date no-id sample must NOT be high, got {out.confidence}"
+    )
+    print(f"  ✓ same date, no id: confidence={out.confidence}")
 
 
 if __name__ == "__main__":
@@ -165,4 +335,16 @@ if __name__ == "__main__":
     test_role_aware_rep_band()
     test_rir_fallback_to_target()
     test_confidence_tiers()
+    test_set_e1rm_caps_effective_reps_for_main_compound()
+    test_set_e1rm_caps_effective_reps_for_machine_compound()
+    test_set_e1rm_isolation_returns_none()
+    test_rolling_uses_cap_in_estimate()
+    test_target_rir_only_caps_confidence_at_low()
+    test_mostly_target_rir_caps_confidence_at_med()
+    test_all_actual_rir_allows_high()
+    test_single_session_cannot_be_high()
+    test_two_sessions_can_be_med_not_high()
+    test_three_sessions_can_be_high()
+    test_distinct_falls_back_to_date_when_workout_id_missing()
+    test_distinct_same_date_cannot_be_high_without_workout_id()
     print("\n✅ test_rolling_e1rm.py PASSED")

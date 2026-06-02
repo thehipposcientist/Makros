@@ -437,6 +437,7 @@ def most_recent_sessions_for_muscle(
             select(ExerciseSet)
             .where(ExerciseSet.workout_exercise_id == we_id)
             .where(ExerciseSet.completed == True)  # noqa: E712
+            .where((ExerciseSet.set_type.is_(None)) | (~ExerciseSet.set_type.in_(["warmup", "warm_up"])))
             .order_by(ExerciseSet.set_number)
         ).all()
         if not sets:
@@ -474,7 +475,7 @@ def get_recent_completions_for_fatigue(
     activity fields. Used by `compute_rolling_fatigue` in activity_impact.py.
     """
     from sqlmodel import select
-    from app.models import RecoveryActivity, WorkoutCompletion
+    from app.models import RecoveryActivity, UserDayState, WorkoutCompletion
     cutoff = date.today() - timedelta(days=days)
     rows = db_session.exec(
         select(WorkoutCompletion)
@@ -496,8 +497,13 @@ def get_recent_completions_for_fatigue(
             "activity_category": getattr(row, "activity_category", None),
             "activity_subtype": getattr(row, "activity_subtype", None),
             "activity_intensity": getattr(row, "activity_intensity", None),
+            # Carries session RPE (sessionRpe) — a finer effort signal
+            # than activity_intensity for manually logged activities.
+            "activity_details": getattr(row, "activity_details", None),
             "source_context": getattr(row, "source_context", None),
             "cardio_style": getattr(row, "cardio_style", None),
+            "hr_summary": getattr(row, "hr_summary", None),
+            "cardio_load": getattr(row, "cardio_load", None),
             "resolved_muscle_fatigue": getattr(row, "resolved_muscle_fatigue", None),
             "soreness_areas": getattr(row, "soreness_areas", None),
         }
@@ -530,8 +536,50 @@ def get_recent_completions_for_fatigue(
             "soreness_areas": None,
         })
 
+    feedback_rows = db_session.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == user_id)
+        .where(UserDayState.day_key >= cutoff)
+        .where(
+            (UserDayState.pain_present == True)  # noqa: E712
+            | (UserDayState.soreness_severity_0_10.is_not(None))
+        )
+        .order_by(UserDayState.day_key.desc())
+        .limit(10)
+    ).all()
+    feedback_items = []
+    for row in feedback_rows:
+        feedback: dict = {}
+        if row.soreness_body_part and row.soreness_severity_0_10:
+            feedback["soreness"] = [{
+                "body_part": row.soreness_body_part,
+                "severity": row.soreness_severity_0_10,
+            }]
+        if row.pain_present and row.pain_body_part and row.pain_severity_0_10:
+            feedback["joint_pain"] = [{
+                "body_part": row.pain_body_part,
+                "severity": row.pain_severity_0_10,
+            }]
+        if not feedback:
+            continue
+        feedback_items.append({
+            "workout_date": row.day_key,
+            "completed_at": getattr(row, "updated_at", None),
+            "focus_label": "Readiness feedback",
+            "duration_seconds": 0,
+            "stimulus": None,
+            "activity_category": "feedback",
+            "activity_subtype": "self_report",
+            "activity_intensity": None,
+            "source_context": "user_day_state",
+            "cardio_style": None,
+            "activity_details": {"fatigue_context": {"readiness_feedback": feedback}},
+            "resolved_muscle_fatigue": {},
+            "soreness_areas": None,
+        })
+
     return sorted(
-        completion_items + recovery_items,
+        completion_items + recovery_items + feedback_items,
         key=lambda item: (
             item.get("workout_date") or date.min,
             item.get("completed_at").isoformat() if hasattr(item.get("completed_at"), "isoformat") else "",
@@ -550,47 +598,87 @@ def db_history_lookup(user_id: int, db_session) -> HistoryLookup:
     completed `WorkoutSession.completed_at` cutoff) and looks up each
     exercise lazily.
     """
+    from sqlalchemy import or_
     from sqlmodel import select
 
     from app.models import Exercise, ExerciseSet, WorkoutExercise, WorkoutSession
+    from app.services.workout.exercise_metadata import resolve_seed_exercise_slug
 
     def lookup(slug: str) -> list[SetResult]:
         if not slug:
             return []
-        # 1. Resolve slug → Exercise.id
+        # 1. Resolve slug → Exercise.id when the seed row exists. Older
+        # sessions may only carry snapshots, so exercise_id is not required.
         exercise = db_session.exec(
             select(Exercise).where(Exercise.slug == slug)
         ).first()
-        if exercise is None or exercise.id is None:
-            return []
         # 2. Most-recent completed WorkoutExercise for this user + exercise
-        last_we = db_session.exec(
-            select(WorkoutExercise)
+        match_conditions = [WorkoutExercise.exercise_slug_snapshot == slug]
+        if exercise is not None and exercise.id is not None:
+            match_conditions.append(WorkoutExercise.exercise_id == exercise.id)
+        last_row = db_session.exec(
+            select(WorkoutExercise, WorkoutSession.workout_date)
             .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
             .where(WorkoutSession.user_id == user_id)
             .where(WorkoutSession.completed_at.is_not(None))
-            .where(WorkoutExercise.exercise_id == exercise.id)
+            .where(or_(*match_conditions))
             .order_by(WorkoutSession.completed_at.desc())
         ).first()
+        last_we = None
+        last_performed_on = None
+        if last_row is not None:
+            last_we, last_performed_on = last_row
         if last_we is None:
-            return []
+            recent = db_session.exec(
+                select(WorkoutExercise, WorkoutSession.workout_date)
+                .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+                .where(WorkoutSession.user_id == user_id)
+                .where(WorkoutSession.completed_at.is_not(None))
+                .order_by(WorkoutSession.completed_at.desc())
+                .limit(80)
+            ).all()
+            for candidate, performed_on in recent:
+                try:
+                    resolved = resolve_seed_exercise_slug(
+                        candidate.name,
+                        candidate.exercise_slug_snapshot,
+                    )
+                except Exception:
+                    resolved = None
+                if resolved == slug:
+                    last_we = candidate
+                    last_performed_on = performed_on
+                    break
+            if last_we is None:
+                return []
         # 3. Read its completed sets in order
         sets = db_session.exec(
             select(ExerciseSet)
             .where(ExerciseSet.workout_exercise_id == last_we.id)
             .where(ExerciseSet.completed == True)  # noqa: E712
+            .where((ExerciseSet.set_type.is_(None)) | (~ExerciseSet.set_type.in_(["warmup", "warm_up"])))
             .order_by(ExerciseSet.set_number)
         ).all()
         results: list[SetResult] = []
         for s in sets:
             if s.actual_reps is None or s.actual_weight_lbs is None:
                 continue
+            # Prefer the user-LOGGED RIR (`actual_rir`) over the planned
+            # `rir_target`. The actual value is what tells us "she stopped
+            # at failure" vs "she had reps in reserve" — critical for
+            # deciding whether to drop load next session. Falling back to
+            # `rir_target` when the user didn't log keeps legacy rows
+            # usable, but a missing actual_rir on an under-repped set is
+            # an honest "we don't know" — `recommend_next_set` treats that
+            # as at-failure and drops load, which is the right default.
+            actual_rir = getattr(s, "actual_rir", None)
             results.append(SetResult(
                 set_number=s.set_number,
                 weight_lbs=float(s.actual_weight_lbs),
                 reps=int(s.actual_reps),
-                rir=s.rir_target,        # planned RIR — best signal we have
+                rir=actual_rir if actual_rir is not None else s.rir_target,
                 feedback=None,           # not persisted yet (Phase 2+ field)
+                performed_on=last_performed_on,
             ))
         return results
 
@@ -729,10 +817,8 @@ def recommend_next_session_load(
     if not last_session_working_sets:
         return None, "hold", "no history"
 
-    # Filter to working sets only (strip warmups). We didn't persist
-    # set_type to ExerciseSet in the data layer, so we use what we have:
-    # the prior session's `set_number` order. Warmups are typically logged
-    # as separate exercises in our flow today.
+    # Filter to working sets only (warmups are excluded by the DB lookup
+    # when set_type is available; older logs without set_type remain usable).
     working_sets = list(last_session_working_sets)
 
     # Build the rep-range target. Prefer the planner's explicitly-assigned
@@ -786,6 +872,24 @@ def recommend_next_session_load(
         ProgressionPace.AGGRESSIVE: 1.5,
     }.get(profile.progression_pace, 1.0)
     increment = prescription.increment_lbs * pace_mult
+
+    performed_dates = [s.performed_on for s in working_sets if s.performed_on is not None]
+    last_performed_on = max(performed_dates) if performed_dates else None
+    if last_performed_on is not None and anchor_weight and anchor_weight > 0:
+        from .recency import recency_adjustment
+
+        adj = recency_adjustment(last_performed_on)
+        if adj.is_stale:
+            reacclimation_weight = engine.round_to_increment(
+                anchor_weight * adj.load_multiplier,
+                prescription.increment_lbs,
+            )
+            action = "decrease" if reacclimation_weight < anchor_weight else "hold"
+            reason = (
+                f"{adj.reason} instead of progressing the old "
+                f"{anchor_weight:g} lb top working weight"
+            )
+            return reacclimation_weight, action, reason
 
     top_set_count = sum(
         1 for c in classifications if c in ("top_of_range", "underloaded_or_strong")

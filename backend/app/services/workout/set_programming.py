@@ -117,6 +117,10 @@ def load_increment_for(exercise: dict) -> float:
       - Bodyweight: 0 (progression is reps or tempo, not load)
       - Unknown: 5 lb as a safe default
     """
+    from app.services.workout.exercise_metadata import uses_numeric_load
+
+    if not uses_numeric_load(exercise):
+        return 0.0
     bucket = (exercise.get("equipment_bucket") or "").lower()
     if bucket == "bodyweight":
         return 0.0
@@ -344,6 +348,8 @@ def build_set_scheme(
     rep_str = str(reps or "")
     anchor = target_weight_lbs or 0.0
     increment = load_increment_for(exercise)
+    if increment <= 0:
+        anchor = 0.0
     is_compound = bool(exercise.get("is_compound"))
     is_primary = role in ("primary", "compound")
     exp = (experience or "intermediate").lower()
@@ -496,10 +502,18 @@ def recommend_next_set(
     # Non-numeric (timed / held) schemes — no load progression intra-session.
     if rng is None:
         return NextSetRecommendation(
-            next_set_weight_lbs=weight if weight > 0 else None,
+            next_set_weight_lbs=None if inc <= 0 else (weight if weight > 0 else None),
             next_set_rep_target=planned_set.target_reps,
             action="hold_load",
             explanation="Held-duration or timed set — maintain load and duration for the next set.",
+        )
+
+    if inc <= 0:
+        return NextSetRecommendation(
+            next_set_weight_lbs=None,
+            next_set_rep_target=f"{rng[0]}-{rng[1]}",
+            action="hold_load",
+            explanation="No numeric load for this movement — progress reps, tempo, or band tension.",
         )
 
     lo, hi = rng
@@ -679,9 +693,13 @@ def recommend_next_session_load(
     data is unusable.
     """
     if not last_session_sets:
+        if load_increment_for(exercise) <= 0:
+            return (None, "hold_load", "No numeric load for this movement — progress reps, tempo, or band tension.")
         return (planned_set.target_weight_lbs, "hold_load", "No recent data — holding planned load.")
 
     inc = load_increment_for(exercise)
+    if inc <= 0:
+        return (None, "hold_load", "No numeric load for this movement — progress reps, tempo, or band tension.")
     rng = rep_range or parse_rep_range(planned_set.target_reps)
     if rng is None:
         return (planned_set.target_weight_lbs, "hold_load", "Non-numeric rep scheme — holding.")

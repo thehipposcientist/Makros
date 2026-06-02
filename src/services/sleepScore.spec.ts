@@ -1,7 +1,7 @@
 // Sleep score — runnable spec. No test runner is wired into this
 // project (the backend uses Python tests via `backend/tests/run_all.py`;
 // the frontend has no Jest/Vitest setup). This file is a standalone
-// script that exercises the deep/REM/awake patch:
+// script that exercises the sleep-score scoring behavior:
 //
 //     npx tsx src/services/sleepScore.spec.ts
 //
@@ -9,17 +9,17 @@
 // project later adds a TS test runner, the cases below convert to Jest
 // `test(...)` blocks with a regex find/replace.
 //
-// Cases covered (per the patch spec):
+// Cases covered:
 //   1. Low deep + high REM should score lower than high deep + low REM
 //      (deep is weighted ~2× REM, so the trade favors deep).
 //   2. Missing stage data must NOT tank the score (neutral-conservative fallback).
 //   3. Low deep on a 7+ hour night triggers the deep-sleep insight +
 //      a sub-max deepSleep pillar (absolute-minutes floor).
 //   4. >60 min awake reduces the awakeFragmentation pillar.
-//   5. Smooth duration scoring avoids hard pillar cliffs at band edges.
-//   6. Long clean sleep is not automatically hard-capped, but long sleep
-//      with off recovery markers is still clamped.
-//   7. Bonus — verifies pillar weights sum to 100 in MVP mode.
+//   5. Duration uses soft penalties over hard caps, because caps feel
+//      unintuitive and create score cliffs.
+//   6. Missing HRV/stage/vitals data stays conservative.
+//   7. Personalized mode activates only with 14+ HRV + bedtime nights.
 
 import { scoreSleep, scoreSleepMVP, scoreSleepPersonalized } from './sleepScore';
 import type { SleepScoreInput } from './sleepScore';
@@ -51,6 +51,176 @@ function baseInput(overrides: Partial<SleepScoreInput> = {}): SleepScoreInput {
     },
     ...overrides,
   };
+}
+
+
+// ─── Case 0: duration uses smooth recovery limiters, not blunt caps ──────────
+console.log('\n[case] Very short sleep stays low even with great quality signals');
+{
+  const shortGreat = scoreSleepMVP(baseInput({
+    totalSleepHours: 4.5,
+    inBedMinutes: 285,
+    deepSleepHours: 0.9,
+    remSleepHours: 0.9,
+    hrvMs: 80,
+    spo2Percent: 98,
+    respiratoryRate: 14,
+    stages: { core: 2.7, deep: 0.9, rem: 0.9, awake: 0.1, total: 4.5 },
+  }))!;
+  expect(
+    shortGreat.score < 70 && shortGreat.rating !== 'Excellent',
+    `4.5h with great quality signals should stay Poor/Fair-ish, got score=${shortGreat.score}, rating=${shortGreat.rating}`,
+  );
+}
+
+console.log('\n[case] 5.8h nights vary naturally instead of landing on one cap');
+{
+  const highQuality = scoreSleepMVP(baseInput({
+    totalSleepHours: 5.8,
+    inBedMinutes: 375,
+    deepSleepHours: 1.05,
+    remSleepHours: 1.1,
+    hrvMs: 72,
+    stages: { core: 3.65, deep: 1.05, rem: 1.1, awake: 0.15, total: 5.8 },
+  }))!;
+  const roughQuality = scoreSleepMVP(baseInput({
+    totalSleepHours: 5.8,
+    inBedMinutes: 420,
+    deepSleepHours: 0.6,
+    remSleepHours: 0.7,
+    hrvMs: 45,
+    stages: { core: 4.5, deep: 0.6, rem: 0.7, awake: 0.55, total: 5.8 },
+  }))!;
+  expect(
+    highQuality.score !== roughQuality.score,
+    `same-duration 5.8h nights should vary; high=${highQuality.score}, rough=${roughQuality.score}`,
+  );
+  expect(
+    !(highQuality.score === 59 && roughQuality.score === 59),
+    `5.8h nights should not both collapse to the old 59 cap`,
+  );
+}
+
+console.log('\n[case] 6.4h and 6.6h do not have a sharp duration cliff');
+{
+  const sixFour = scoreSleepMVP(baseInput({
+    totalSleepHours: 6.4,
+    inBedMinutes: 410,
+    deepSleepHours: 1.1,
+    remSleepHours: 1.2,
+    stages: { core: 4.1, deep: 1.1, rem: 1.2, awake: 0.2, total: 6.4 },
+  }))!;
+  const sixSix = scoreSleepMVP(baseInput({
+    totalSleepHours: 6.6,
+    inBedMinutes: 425,
+    deepSleepHours: 1.2,
+    remSleepHours: 1.25,
+    stages: { core: 4.15, deep: 1.2, rem: 1.25, awake: 0.2, total: 6.6 },
+  }))!;
+  expect(
+    Math.abs(sixSix.score - sixFour.score) <= 8,
+    `6.4h score=${sixFour.score} and 6.6h score=${sixSix.score} should stay close`,
+  );
+}
+
+console.log('\n[case] 7.5–8.5h with good efficiency and vitals can score high');
+{
+  const excellentWindow = scoreSleepMVP(baseInput({
+    totalSleepHours: 8.2,
+    inBedMinutes: 515,
+    deepSleepHours: 1.6,
+    remSleepHours: 1.8,
+    hrvMs: 76,
+    restingHeartRate: 54,
+    spo2Percent: 98,
+    respiratoryRate: 14,
+    stages: { core: 4.8, deep: 1.6, rem: 1.8, awake: 0.15, total: 8.2 },
+  }))!;
+  expect(
+    excellentWindow.score >= 85 && excellentWindow.rating === 'Excellent',
+    `8.2h clean night should be able to score high; got score=${excellentWindow.score}, rating=${excellentWindow.rating}`,
+  );
+}
+
+console.log('\n[case] Oversleeping is smoothly penalized');
+{
+  const ideal = scoreSleepMVP(baseInput({
+    totalSleepHours: 8.2,
+    inBedMinutes: 515,
+    deepSleepHours: 1.6,
+    remSleepHours: 1.8,
+    hrvMs: 76,
+    spo2Percent: 98,
+    respiratoryRate: 14,
+    stages: { core: 4.8, deep: 1.6, rem: 1.8, awake: 0.15, total: 8.2 },
+  }))!;
+  const long = scoreSleepMVP(baseInput({
+    totalSleepHours: 10.75,
+    inBedMinutes: 660,
+    deepSleepHours: 1.7,
+    remSleepHours: 2.2,
+    hrvMs: 76,
+    spo2Percent: 98,
+    respiratoryRate: 14,
+    stages: { core: 6.85, deep: 1.7, rem: 2.2, awake: 0.2, total: 10.75 },
+  }))!;
+  const veryLong = scoreSleepMVP(baseInput({
+    totalSleepHours: 11.75,
+    inBedMinutes: 720,
+    deepSleepHours: 1.8,
+    remSleepHours: 2.3,
+    hrvMs: 76,
+    spo2Percent: 98,
+    respiratoryRate: 14,
+    stages: { core: 7.65, deep: 1.8, rem: 2.3, awake: 0.2, total: 11.75 },
+  }))!;
+  expect(
+    long.score < ideal.score && veryLong.score < long.score,
+    `oversleep scores should taper smoothly: ideal=${ideal.score}, 10.75h=${long.score}, 11.75h=${veryLong.score}`,
+  );
+  expect(
+    long.score > 80 && veryLong.score > 55,
+    `long clean nights should be penalized without collapsing: 10.75h=${long.score}, 11.75h=${veryLong.score}`,
+  );
+}
+
+console.log('\n[case] Missing HRV/stage/vitals data stays conservative');
+{
+  const missingSignals = scoreSleepMVP(baseInput({
+    deepSleepHours: null,
+    remSleepHours: null,
+    hrvMs: null,
+    spo2Percent: null,
+    respiratoryRate: null,
+    stages: null,
+  }))!;
+  expect(
+    missingSignals.score < 85,
+    `missing HRV/stage/vitals should not inflate to Excellent; got score=${missingSignals.score}`,
+  );
+  expect(
+    missingSignals.insights.some(s => s.toLowerCase().includes('limited quality data') || s.toLowerCase().includes('unavailable')),
+    `expected missing-data insight; got: ${JSON.stringify(missingSignals.insights)}`,
+  );
+}
+
+console.log('\n[case] Personalized mode activates only after 14+ HRV and bedtime nights');
+{
+  const thirteenHrv = scoreSleep(baseInput({
+    hrvHistory: Array.from({ length: 13 }, () => 55),
+    bedtimeHistory: Array.from({ length: 14 }, () => 23 * 60),
+  }))!;
+  const thirteenBedtimes = scoreSleep(baseInput({
+    hrvHistory: Array.from({ length: 14 }, () => 55),
+    bedtimeHistory: Array.from({ length: 13 }, () => 23 * 60),
+  }))!;
+  const enoughHistory = scoreSleep(baseInput({
+    hrvHistory: Array.from({ length: 14 }, () => 55),
+    bedtimeHistory: Array.from({ length: 14 }, () => 23 * 60),
+  }))!;
+  expect(thirteenHrv.mode === 'mvp', `13 HRV nights should stay MVP, got ${thirteenHrv.mode}`);
+  expect(thirteenBedtimes.mode === 'mvp', `13 bedtime nights should stay MVP, got ${thirteenBedtimes.mode}`);
+  expect(enoughHistory.mode === 'personalized', `14+ HRV and bedtime nights should use personalized mode, got ${enoughHistory.mode}`);
 }
 
 
@@ -128,7 +298,7 @@ console.log('\n[case] Short night → no absolute floor; deep ratio drives scori
   expect(shortNightGoodRatio.pillars.deepSleep === 10,
     `5h with 20% deep ratio → deepSleep pillar should be max=10, got ${shortNightGoodRatio.pillars.deepSleep}`);
   expect(shortNightGoodRatio.score <= 59,
-    `5h should cap below Good even with a good deep ratio; got score=${shortNightGoodRatio.score}`);
+    `5h should stay below Good even with a good deep ratio; got score=${shortNightGoodRatio.score}`);
 }
 
 
@@ -294,8 +464,8 @@ console.log('\n[case] Duration-only sleep data caps below Good/Excellent');
 }
 
 
-// ─── Case 5: pillar weights sum to 100 in both modes ─────────────────────────
-console.log('\n[case] All pillars sum to score (≤100) — no hidden double-count');
+// ─── Case 5: clean MVP night still matches the visible pillar sum ────────────
+console.log('\n[case] Clean MVP night matches visible pillar sum');
 {
   const mvp = scoreSleepMVP(baseInput())!;
   const mvpSum =
@@ -328,6 +498,27 @@ console.log('\n[case] Personalized mode includes regularity AND the new deep/REM
   expect(personalized.pillars.deepSleep != null, `deepSleep pillar present`);
   expect(personalized.pillars.remSleep != null, `remSleep pillar present`);
   expect(personalized.pillars.awakeFragmentation != null, `awakeFragmentation pillar present`);
+}
+
+console.log('\n[case] Personalized bedtime regularity follows the current bedtime');
+{
+  const hrvHistory = Array.from({ length: 14 }, () => 55);
+  const bedtimeHistory = Array.from({ length: 14 }, () => 23 * 60);
+  const onTime = scoreSleepPersonalized({
+    ...baseInput(),
+    bedtimeMinutes: 23 * 60 + 15,
+    hrvHistory,
+    bedtimeHistory,
+  })!;
+  const late = scoreSleepPersonalized({
+    ...baseInput(),
+    bedtimeMinutes: 1 * 60,
+    hrvHistory,
+    bedtimeHistory,
+  })!;
+  expect(onTime.pillars.regularity === 15, `bedtime inside target should get full regularity, got ${onTime.pillars.regularity}`);
+  expect((late.pillars.regularity ?? 99) <= 3, `bedtime far from target should dock regularity, got ${late.pillars.regularity}`);
+  expect(onTime.score > late.score, `on-time bedtime score=${onTime.score} should beat late bedtime score=${late.score}`);
 }
 
 

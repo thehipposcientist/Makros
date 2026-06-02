@@ -30,6 +30,7 @@ from app.workout_progression import (
     WorkoutFocus,
     WorkoutProgressionEngine,
 )
+from app.services.nutrition.added_sugar import resolve_added_sugar_g
 
 from .models import PlanRequest
 
@@ -45,14 +46,26 @@ class AIUsageLimitError(RuntimeError):
 
 # ── Model selectors (all configurable via .env) ───────────────────────────────
 # Model-selection policy (2026-Q2):
-#   - gpt-5.4-mini is used for dedicated image-analysis tasks (food photo,
-#     meal photo, body scan, form photo, supplement label).
+#   - gpt-5.4-mini handles high-fidelity image tasks where visual detail
+#     drives the answer: food-portion estimation, supplement-label OCR,
+#     lifting-form posture, body composition.
+#   - gpt-4o-mini handles coarse recognition (model_image_light) — gym
+#     machine / equipment / gear ID — at ~5x lower input / ~7.5x lower
+#     output cost. These already run at detail="low", so the cheap model
+#     is sufficient.
+#   - gpt-4o-mini-transcribe is used for phone speech-to-meal audio.
 #   - Everything else runs on gpt-4o-mini for cost + latency.
 # Override any via .env.
 def model_image() -> str:
-    """Vision / image-analysis model. Used only when the prompt includes
-    an image_url content part."""
+    """High-fidelity vision model. Use when visual detail drives the answer
+    (food portions, label text, form, body composition)."""
     return os.getenv("MODEL_IMAGE", "gpt-5.4-mini")
+
+def model_image_light() -> str:
+    """Coarse-recognition vision model. Use for object-ID tasks that run at
+    detail="low" — gym machine / equipment / gear identification — where the
+    high-fidelity model is wasted spend."""
+    return os.getenv("MODEL_IMAGE_LIGHT", "gpt-4o-mini")
 
 def model_plan_generation() -> str:
     return os.getenv("MODEL_PLAN_GENERATION", "gpt-4o-mini")
@@ -64,6 +77,10 @@ def model_meal_parsing() -> str:
     """Text-only meal parsing (food search, meal instructions). For
     photo-based parsing use `model_image()` instead."""
     return os.getenv("MODEL_MEAL_PARSING", "gpt-4o-mini")
+
+def model_transcription() -> str:
+    """Audio transcription for phone speech-to-meal."""
+    return os.getenv("MODEL_TRANSCRIPTION", "gpt-4o-mini-transcribe")
 
 def model_chat() -> str:
     return os.getenv("MODEL_CHAT", "gpt-4o-mini")
@@ -312,10 +329,17 @@ def _hydrate_foods_from_db(food_names: list[str], *, user_id: int | None = None)
                 if nutrition is None or nutrition.reference_grams <= 0:
                     return {"fiber": 0, "sugar": 0, "sodium": 0}
                 ratio = grams_in_serving / nutrition.reference_grams
+                sugar = round((nutrition.sugar or 0) * ratio, 2)
+                added_sugar = resolve_added_sugar_g(
+                    food.name,
+                    reported_added_sugar_g=round((getattr(nutrition, "added_sugar_g", 0) or 0) * ratio, 2),
+                    sugar_g=sugar,
+                    serving_grams=grams_in_serving,
+                )
                 out = {
                     "fiber":  round((nutrition.fiber or 0) * ratio, 2),
-                    "sugar":  round((nutrition.sugar or 0) * ratio, 2),
-                    "added_sugar_g": round((getattr(nutrition, "added_sugar_g", 0) or 0) * ratio, 2),
+                    "sugar":  sugar,
+                    "added_sugar_g": added_sugar if added_sugar is not None else 0,
                     "sodium": round((nutrition.sodium_mg or 0) * ratio, 2),
                 }
                 extras = getattr(nutrition, "extra_nutrients", None) or {}
@@ -363,11 +387,8 @@ def _hydrate_foods_from_db(food_names: list[str], *, user_id: int | None = None)
     return hydrated, unknowns
 
 
-# Layer 1 + Layer 2 micronutrient fields that should be present on
-# every hydrated food for the insight engine to work. Used by the
-# on-the-fly AI backfill below to decide whether a DB-hydrated food
-# needs an AI top-up and to write the results back to FoodNutrition
-# so we only pay once per food.
+# Layer 1 + Layer 2 micronutrient fields used for diagnostics when foods
+# hydrate from the local DB.
 _REQUIRED_MICRO_FIELDS: tuple[str, ...] = (
     "fiber", "sugar", "sodium", "cholesterol",
     "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
@@ -375,159 +396,6 @@ _REQUIRED_MICRO_FIELDS: tuple[str, ...] = (
     "potassium", "calcium", "iron", "magnesium",
     "vitamin_c", "vitamin_d", "vitamin_b12",
 )
-
-
-def _safe_float(v) -> float:
-    """Convert a value to float, returning 0.0 on any failure."""
-    try:
-        return float(v) if v is not None else 0.0
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _food_needs_micro_backfill(food_dict: dict) -> bool:
-    """Return True if this food is missing ANY of the required micro fields.
-    Aggressive by design — we'd rather burn a cheap AI call than ship a
-    food card with half-empty chips. Once backfilled, the food is cached
-    in FoodNutrition.extra_nutrients so the cost is one-time per food."""
-    for k in _REQUIRED_MICRO_FIELDS:
-        v = food_dict.get(k)
-        try:
-            if v is None or float(v or 0) <= 0:
-                # Allow legitimate zeros ONLY for cholesterol (vegan foods)
-                # and vitamin_b12 (plant foods) — everything else should
-                # have SOMETHING on a real food.
-                if k in ("cholesterol", "vitamin_b12") and v is not None:
-                    continue
-                return True
-        except (TypeError, ValueError):
-            return True
-    return False
-
-
-def _ai_backfill_micros(
-    client: OpenAI,
-    thin_foods: list[dict],
-) -> dict[str, dict[str, float]]:
-    """One AI call to backfill Layer 1 + Layer 2 micronutrients for a
-    batch of DB-hydrated foods that came back missing most of them.
-    Returns {food_name_lower: micros_dict}. Silently fails to {} on
-    any error — the plan pipeline can still ship the macros it already
-    has.
-
-    Batched to avoid N+1 calls: even 20 thin foods = 1 call ≈ $0.001.
-    """
-    if not thin_foods:
-        return {}
-    prompt_items = []
-    for f in thin_foods:
-        prompt_items.append({
-            "name": f.get("name"),
-            "serving": f.get("serving") or f.get("quantity") or "1 serving",
-        })
-    prompt = (
-        "Return USDA micronutrient values for each food at its STATED serving "
-        "size. Use snake_case keys, match the exact units below, omit a field only "
-        "if it is truly zero for that food.\n\n"
-        "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat/"
-        "omega_3/omega_6 in grams; sodium/cholesterol/potassium/calcium/iron/"
-        "magnesium/vitamin_c in milligrams; vitamin_d and vitamin_b12 in micrograms.\n\n"
-        f"Foods:\n{json.dumps(prompt_items, indent=2)}\n\n"
-        "Return JSON with this exact shape:\n"
-        '{"foods": [\n'
-        '  {"name": "chicken breast", "micros": {"fiber": 0, "sugar": 0, "sodium": 120, '
-        '"cholesterol": 140, "saturated_fat": 1.5, "monounsaturated_fat": 2, '
-        '"polyunsaturated_fat": 1, "omega_3": 0.04, "omega_6": 0.6, "potassium": 440, '
-        '"calcium": 12, "iron": 1.5, "magnesium": 50, "vitamin_c": 0, "vitamin_d": 0.2, '
-        '"vitamin_b12": 0.5}},\n'
-        '  ...\n'
-        ']}'
-    )
-    try:
-        resp = client.chat.completions.create(
-            model=model_food_enrichment(),
-            messages=[
-                {"role": "system", "content": "You are a USDA nutrition database. Return only the required JSON, no prose."},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            max_tokens=2500,
-            timeout=25,
-        )
-        raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
-    except Exception as e:
-        print(f"[enrich_foods] backfill AI call failed: {e}")
-        return {}
-
-    out: dict[str, dict[str, float]] = {}
-    for entry in data.get("foods") or []:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "").strip().lower()
-        micros = entry.get("micros")
-        if not name or not isinstance(micros, dict):
-            continue
-        clean: dict[str, float] = {}
-        for k, v in micros.items():
-            if k not in _REQUIRED_MICRO_FIELDS:
-                continue
-            try:
-                clean[k] = float(v)
-            except (TypeError, ValueError):
-                continue
-        if clean:
-            out[name] = clean
-    return out
-
-
-def _persist_backfilled_micros(name_to_micros: dict[str, dict[str, float]], *, user_id: int | None = None) -> None:
-    """Write the AI-backfilled micros back to FoodNutrition.extra_nutrients
-    so the next plan gen hydrates them from the DB and skips the AI call.
-    Silent failure — persistence is an optimization, not a correctness
-    requirement."""
-    if not name_to_micros:
-        return
-    try:
-        from sqlmodel import Session, select, or_
-        from app.database import engine
-        from app.models import Food, FoodNutrition
-        with Session(engine) as db:
-            for name_lower, micros in name_to_micros.items():
-                norm = re.sub(r"[^a-z0-9 ]", "", name_lower.lower()).strip()
-                visibility_filter = (
-                    Food.owner_user_id == None  # noqa: E711
-                    if user_id is None
-                    else or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
-                )
-                matches = db.exec(
-                    select(Food).where(Food.normalized_name == norm, visibility_filter)
-                ).all()
-                matches = [f for f in matches if f.is_active and (f.owner_user_id is None or f.owner_user_id == user_id)]
-                matches.sort(key=lambda f: (0 if f.owner_user_id == user_id else 1, 0 if f.is_verified else 1, f.name.lower()))
-                food = matches[0] if matches else None
-                if not food:
-                    continue
-                nut = db.exec(
-                    select(FoodNutrition).where(FoodNutrition.food_id == food.id)
-                ).first()
-                if not nut:
-                    continue
-                extras = dict(getattr(nut, "extra_nutrients", None) or {})
-                for k, v in micros.items():
-                    if k == "fiber":
-                        nut.fiber = v
-                    elif k == "sugar":
-                        nut.sugar = v
-                    elif k == "sodium":
-                        nut.sodium_mg = v
-                    else:
-                        extras[k] = v
-                nut.extra_nutrients = extras
-                db.add(nut)
-            db.commit()
-    except Exception as e:
-        print(f"[enrich_foods] backfill persist failed (non-fatal): {e}")
 
 
 def enrich_foods_with_macros(
@@ -543,13 +411,9 @@ def enrich_foods_with_macros(
 
     Resolution order:
       1. Hydrate every food we can from the local DB (zero AI cost).
-      2. Any DB-hydrated food that came back thin on micronutrients gets
-         its Layer 2 fields topped up via a single batched AI call. The
-         result is persisted back to `FoodNutrition.extra_nutrients` so
-         future plans skip the AI call.
-      3. If there's a `meal_routine` free-text OR any unknown foods, make
+      2. If there's a `meal_routine` free-text OR any unknown foods, make
          a SINGLE AI call for just those — not the whole list.
-      4. Merge DB + AI results before returning.
+      3. Merge DB + AI results before returning.
     """
     if not foods and not meal_routine:
         return {"foods": [], "routine_meals": []}
@@ -568,45 +432,6 @@ def enrich_foods_with_macros(
             f"[enrich_foods] STEP 1 sample '{sample.get('name')}' has "
             f"{present}/{len(_REQUIRED_MICRO_FIELDS)} micro fields populated"
         )
-
-    # ── Lazy inline micro backfill (batched at 5) ──────────────────
-    # Check each hydrated food: if fewer than 8 of the 16 required
-    # micro fields have non-zero values, queue it for AI enrichment.
-    # This runs during plan gen so every food in the plan ships with
-    # full micros — no separate script or startup hook needed.
-    thin_foods = []
-    for f in hydrated:
-        populated = sum(
-            1 for k in _REQUIRED_MICRO_FIELDS
-            if _safe_float(f.get(k)) > 0
-        )
-        if populated < 8:
-            thin_foods.append(f)
-
-    if thin_foods:
-        print(
-            f"[enrich_foods] {len(thin_foods)}/{len(hydrated)} DB foods have "
-            f"<8/16 micro fields — running lazy backfill in batches of 5"
-        )
-        # Process in batches of 5 to avoid timeouts
-        for batch_start in range(0, len(thin_foods), 5):
-            batch = thin_foods[batch_start:batch_start + 5]
-            name_to_micros = _ai_backfill_micros(client, batch)
-            if name_to_micros:
-                # Write back to the hydrated food dicts so this plan
-                # gen sees the data immediately.
-                for f in hydrated:
-                    fname = str(f.get("name") or "").strip().lower()
-                    if fname in name_to_micros:
-                        for mk, mv in name_to_micros[fname].items():
-                            f[mk] = mv
-                # Persist to DB so future plan gens skip the AI call.
-                _persist_backfilled_micros(name_to_micros, user_id=user_id)
-                print(
-                    f"[enrich_foods] backfill batch "
-                    f"{batch_start // 5 + 1}: enriched "
-                    f"{len(name_to_micros)} foods"
-                )
 
     # Fast path: if everything resolved from DB AND there's no free-text
     # routine, we're done — no AI call at all.
@@ -667,18 +492,18 @@ def _enrich_via_ai(
     # Scale max_tokens by food count so large lists don't truncate.
     _max_tokens = min(4000, max(1000, len(foods) * 80 + 500))
     try:
-        resp = client.chat.completions.create(
-            model=_model,
-            messages=[
+        kwargs = _build_chat_kwargs(
+            _model,
+            [
                 {"role": "system", "content": "You are a nutrition database. Return accurate macro data as JSON only."},
                 {"role": "user", "content": prompt},
             ],
-            response_format={"type": "json_object"},
             max_tokens=_max_tokens,
-            timeout=30,
+            timeout_secs=30,
         )
+        resp = _chat_create(client, **kwargs)
         raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
+        data = _extract_json(raw)
         food_count = len(data.get("foods", []))
         routine_count = len(data.get("routine_meals", []))
         print(f"[enrich_foods] OK — {food_count} foods, {routine_count} routine meals, model={_model}")
@@ -763,7 +588,7 @@ def infer_exercise_category(exercise_name: str) -> ExerciseCategory:
     # Machine first (highest priority — overrides other keywords)
     if any(x in name for x in [
         "machine", "cable", "smith", "leg press", "pulldown", "lat pull",
-        "seated row machine", "pec deck", "leg extension", "leg curl machine",
+        "seated row machine", "pec deck", "leg extension", "leg curl",
         "hack squat machine", "chest press machine",
     ]):
         return ExerciseCategory.MACHINE
@@ -903,79 +728,13 @@ def compute_tdee_and_targets(req: PlanRequest, db=None, user_id: int | None = No
     fat = targets.fat_g
     goal_rate_summary = targets.rate_summary
 
-    # ── Normalise mealsPerDay ────────────────────────────────────────────────
-    # Accept any value 1..10. Previously this silently snapped any value
-    # outside {2,3,4} back to 3, which made the user's actual setting
-    # invisible to the rest of the pipeline. The downstream meal-data dict
-    # only has slot keys for the 2/3/4-meal cases (legacy display), so we
-    # still pick one of those for those keys, but the canonical `meals`
-    # field carries the real number for the assembler.
-    raw_meals = int(req.mealsPerDay or 3)
-    meals = max(1, min(10, raw_meals))
-    legacy_meal_bucket = meals if meals in (2, 3, 4) else (4 if meals > 4 else 3)
-
-    # ── Per-meal splits (practical, not perfectly even) ──────────────────────
-    #   Ratios: 2-meal → lunch 45% / dinner 55%
-    #           3-meal → breakfast 25% / lunch 35% / dinner 40%
-    #           4-meal → breakfast 25% / lunch 30% / dinner 35% / snack 10%
-
-    def _split(total: int, ratios: list[float]) -> list[int]:
-        """Split `total` across `ratios`, last bucket absorbs rounding."""
-        buckets = [round(total * r) for r in ratios]
-        buckets[-1] = total - sum(buckets[:-1])
-        return buckets
-
-    meal_data: dict = {}
-
-    if legacy_meal_bucket == 2:
-        cal_splits  = _split(calories, [0.45, 0.55])
-        prot_splits = _split(protein,  [0.45, 0.55])
-        carb_splits = _split(carbs,    [0.45, 0.55])
-        fat_splits  = _split(fat,      [0.45, 0.55])
-        meal_data = {
-            "lunch_cal":    cal_splits[0],  "lunch_prot":   prot_splits[0],
-            "lunch_carbs":  carb_splits[0], "lunch_fat":    fat_splits[0],
-            "dinner_cal":   cal_splits[1],  "dinner_prot":  prot_splits[1],
-            "dinner_carbs": carb_splits[1], "dinner_fat":   fat_splits[1],
-        }
-    elif legacy_meal_bucket == 4:
-        cal_splits  = _split(calories, [0.25, 0.30, 0.35, 0.10])
-        prot_splits = _split(protein,  [0.25, 0.30, 0.35, 0.10])
-        carb_splits = _split(carbs,    [0.25, 0.30, 0.35, 0.10])
-        fat_splits  = _split(fat,      [0.25, 0.30, 0.35, 0.10])
-        meal_data = {
-            "breakfast_cal":   cal_splits[0],  "breakfast_prot":  prot_splits[0],
-            "breakfast_carbs": carb_splits[0], "breakfast_fat":   fat_splits[0],
-            "lunch_cal":       cal_splits[1],  "lunch_prot":      prot_splits[1],
-            "lunch_carbs":     carb_splits[1], "lunch_fat":       fat_splits[1],
-            "dinner_cal":      cal_splits[2],  "dinner_prot":     prot_splits[2],
-            "dinner_carbs":    carb_splits[2], "dinner_fat":      fat_splits[2],
-            "snack_cal":       cal_splits[3],  "snack_prot":      prot_splits[3],
-            "snack_carbs":     carb_splits[3], "snack_fat":       fat_splits[3],
-        }
-    else:  # 3 meals
-        cal_splits  = _split(calories, [0.25, 0.35, 0.40])
-        prot_splits = _split(protein,  [0.25, 0.35, 0.40])
-        carb_splits = _split(carbs,    [0.25, 0.35, 0.40])
-        fat_splits  = _split(fat,      [0.25, 0.35, 0.40])
-        meal_data = {
-            "breakfast_cal":   cal_splits[0],  "breakfast_prot":  prot_splits[0],
-            "breakfast_carbs": carb_splits[0], "breakfast_fat":   fat_splits[0],
-            "lunch_cal":       cal_splits[1],  "lunch_prot":      prot_splits[1],
-            "lunch_carbs":     carb_splits[1], "lunch_fat":       fat_splits[1],
-            "dinner_cal":      cal_splits[2],  "dinner_prot":     prot_splits[2],
-            "dinner_carbs":    carb_splits[2], "dinner_fat":      fat_splits[2],
-        }
-
     return {
         "tdee": tdee,
         "calories": calories,
         "protein": protein,
         "carbs": carbs,
         "fat": fat,
-        "meals": meals,
         "goal_rate_summary": goal_rate_summary,
-        **meal_data,
     }
 
 
@@ -1383,59 +1142,76 @@ SCHEMA_WORKOUT_SUMMARY = {
 MICRONUTRIENT_AI_FIELDS: tuple[str, ...] = (
     "fiber", "sugar", "added_sugar_g", "sodium",
     "cholesterol",
-    "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
-    "omega_3", "omega_6",
+    "saturated_fat", "trans_fat_g",
+    "monounsaturated_fat", "polyunsaturated_fat",
+    # Omega-3 total + subtypes, omega-6 explicit unit.
+    "omega_3", "omega_3_ala_mg", "omega_3_epa_mg", "omega_3_dha_mg", "omega_6_mg",
     "vitamin_a", "vitamin_c", "vitamin_d", "vitamin_e", "vitamin_k",
     "thiamin_b1", "riboflavin_b2", "niacin_b3", "vitamin_b6",
     "folate_b9", "vitamin_b12", "biotin_b7", "pantothenic_acid_b5",
+    "choline_mg",
     "calcium", "iron", "magnesium", "phosphorus", "potassium",
-    "zinc", "selenium", "copper", "manganese",
+    "zinc", "selenium", "copper", "manganese", "iodine_mcg",
+    "caffeine_mg", "alcohol_g",
 )
 
 
 def _micros_schema_props() -> dict:
     """Return a JSON-schema `properties` dict mapping every canonical
-    micronutrient field to a number. Used by the strict schemas that
-    accept a `micronutrients` object on AI responses."""
-    return {k: {"type": "number"} for k in MICRONUTRIENT_AI_FIELDS}
+    micronutrient field. Accepts either a number OR null so the model can
+    flag unknown values instead of hallucinating zeros (USDA reports 0 for
+    items it has data for; unknown ≠ zero, see MICRONUTRIENT_PROMPT_GUIDE)."""
+    return {k: {"type": ["number", "null"]} for k in MICRONUTRIENT_AI_FIELDS}
 
 
 # Shared text fragment for AI prompts. Asks the AI to populate the full
 # panel using USDA per-serving values, with explicit unit guidance.
 MICRONUTRIENT_PROMPT_GUIDE = (
     "Populate `micronutrients` with USDA-style values per the SAME serving "
-    "you reported in the macros. Units: fiber/sugar/added_sugar_g in grams; sodium, "
+    "you reported in the macros. Be conservative — only fill values you have "
+    "real data for. Use null (not 0) when you genuinely don't know a "
+    "micronutrient for this food; reserve 0 for cases where the source "
+    "explicitly reports zero. Do not invent micronutrient values. "
+    "Units: fiber/sugar/added_sugar_g/alcohol_g in grams; sodium, "
     "cholesterol, calcium, iron, magnesium, phosphorus, potassium, zinc, "
     "vitamin_c, vitamin_e, thiamin_b1, riboflavin_b2, niacin_b3, vitamin_b6, "
-    "pantothenic_acid_b5 in mg; vitamin_a, vitamin_d, vitamin_k, folate_b9, "
-    "biotin_b7, vitamin_b12, selenium in µg; saturated_fat, monounsaturated_fat, "
-    "polyunsaturated_fat, omega_3, omega_6 in grams; copper, manganese in mg. "
-    "Return 0 for any value you don't have data on. Never omit fields."
+    "pantothenic_acid_b5, choline_mg, caffeine_mg, omega_3_ala_mg, "
+    "omega_3_epa_mg, omega_3_dha_mg, omega_6_mg in mg; vitamin_a, vitamin_d, "
+    "vitamin_k, folate_b9, biotin_b7, vitamin_b12, selenium, iodine_mcg in µg; "
+    "saturated_fat, trans_fat_g, monounsaturated_fat, polyunsaturated_fat, "
+    "omega_3 in grams; copper, manganese in mg."
 )
 
 
 SCHEMA_FOOD_PHOTO = {
     "name": "food_photo_response",
-    # `strict=False` because we want the AI to fill in micronutrients but
-    # OpenAI's strict mode requires every nested optional field to appear
-    # in `required`, which makes the schema brittle. Validation happens
-    # downstream when the assembler reads the dict.
+    # `strict=False` because photo scans are a visual-estimation pass. The
+    # backend computes final nutrition after matching foods to local/USDA rows.
     "strict": False,
     "schema": {
         "type": "object",
         "properties": {
             "meal_name": {"type": "string"},
             "items": {"type": "array", "items": {"type": "string"}},
-            "calories": {"type": "number"},
-            "protein": {"type": "number"},
-            "carbs": {"type": "number"},
-            "fat": {"type": "number"},
-            "micronutrients": {
-                "type": "object",
-                "properties": _micros_schema_props(),
+            "item_details": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "preparation": {"type": "string"},
+                        "serving": {"type": "string"},
+                        "estimated_grams": {"type": "number"},
+                        "gram_range_low": {"type": "number"},
+                        "gram_range_high": {"type": "number"},
+                        "portion_confidence": {"type": "string"},
+                        "visible_fraction": {"type": "number"},
+                    },
+                    "required": ["name", "serving", "estimated_grams", "portion_confidence"],
+                },
             },
         },
-        "required": ["meal_name", "items", "calories", "protein", "carbs", "fat"],
+        "required": ["meal_name", "item_details"],
     },
 }
 
@@ -1451,17 +1227,15 @@ SCHEMA_SCAN_FOODS = {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
+                        "preparation": {"type": "string"},
                         "serving": {"type": "string"},
-                        "calories": {"type": "number"},
-                        "protein": {"type": "number"},
-                        "carbs": {"type": "number"},
-                        "fat": {"type": "number"},
-                        "micronutrients": {
-                            "type": "object",
-                            "properties": _micros_schema_props(),
-                        },
+                        "estimated_grams": {"type": "number"},
+                        "gram_range_low": {"type": "number"},
+                        "gram_range_high": {"type": "number"},
+                        "portion_confidence": {"type": "string"},
+                        "visible_fraction": {"type": "number"},
                     },
-                    "required": ["name", "serving", "calories", "protein", "carbs", "fat"],
+                    "required": ["name", "serving", "estimated_grams", "portion_confidence"],
                 },
             },
         },
@@ -1482,10 +1256,28 @@ SCHEMA_SUPPLEMENT_INFO = {
             "tagline": {"type": "string"},
             "whatItDoes": {"type": "string"},
             "evidence": {"type": "string"},
+            "effectivenessConfidence": {"type": "string"},
             "dose": {"type": "string"},
             "timing": {"type": "string"},
             "goodFor": {"type": "array", "items": {"type": "string"}},
             "cautions": {"type": "string"},
+            "commonUses": {"type": "array", "items": {"type": "string"}},
+            "deficiencyRisks": {"type": "array", "items": {"type": "string"}},
+            "excessRisks": {"type": "array", "items": {"type": "string"}},
+            "foodSources": {"type": "array", "items": {"type": "string"}},
+            "servingSize": {"type": "object"},
+            "nutrientFacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "nutrient": {"type": "string"},
+                        "amount": {"type": "number"},
+                        "unit": {"type": "string"},
+                        "percent_dv": {"type": ["number", "null"]},
+                    },
+                },
+            },
         },
         "required": ["found", "name"],
     },

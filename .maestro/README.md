@@ -131,6 +131,17 @@ Or:
 make smoke-mobile-social
 ```
 
+Android platform parity coverage:
+
+```bash
+make seed-e2e
+MAESTRO='maestro --device emulator-5554' make smoke-mobile-android-platform
+```
+
+This seeded Android-only flow checks that Account/Settings use Health Connect
+copy, the Apple Watch sync row is absent, and the Health Permissions screen
+stays in the expected "Health Connect unavailable / coming soon" state.
+
 Account, settings, auth recovery, and active PlanWeek immutability checks:
 
 ```bash

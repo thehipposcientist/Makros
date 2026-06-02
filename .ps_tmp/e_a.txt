@@ -1,0 +1,181 @@
+9360|       return true;
+9361|     });
+9362|   }, [prFocusFilter, prSearch, prs]);
+9363|   const visiblePrsForTab = useMemo(
+9364|     () => filteredPrsForTab.slice(0, visiblePrCount),
+9365|     [filteredPrsForTab, visiblePrCount],
+9366|   );
+9367| 
+9368|   useEffect(() => {
+9369|     setVisiblePrCount(40);
+9370|   }, [prFocusFilter, prSearch]);
+9371| 
+9372|   useEffect(() => {
+9373|     if (!visibleProgressTabs.some(([key]) => key === tab)) {
+9374|       selectProgressTab('today');
+9375|     }
+9376|   }, [selectProgressTab, tab, visibleProgressTabs]);
+9377| 
+9378|   useEffect(() => {
+9379|     if (!showWorkoutProgress || tab !== 'trends') return;
+9380|     if (filteredChartExercises.length === 0) {
+9381|       if (selectedExercise) setSelectedExercise(null);
+9382|       return;
+9383|     }
+9384|     const stillVisible = selectedExercise
+9385|       ? filteredChartExercises.some(option => option.name === selectedExercise)
+9386|       : false;
+9387|     if (!stillVisible) setSelectedExercise(filteredChartExercises[0].name);
+9388|   }, [filteredChartExercises, selectedExercise, showWorkoutProgress, tab]);
+9389| 
+9390|   useEffect(() => {
+9391|     if (!showWorkoutProgress || tab !== 'trends') return;
+9392|     if (paceExerciseGroups.length === 0) {
+9393|       if (selectedCardioExercise) setSelectedCardioExercise(null);
+9394|       return;
+9395|     }
+9396|     const stillVisible = selectedCardioExercise
+9397|       ? paceExerciseGroups.some(group => group.key === selectedCardioExercise)
+9398|       : false;
+9399|     if (!stillVisible) setSelectedCardioExercise(paceExerciseGroups[0].key);
+9400|   }, [paceExerciseGroups, selectedCardioExercise, showWorkoutProgress, tab]);
+9401| 
+9402|   useEffect(() => {
+9403|     if (!isActive) return;
+9404|     if (!showWorkoutProgress) return;
+9405|     if (tab === 'trends' && authToken && !paceLoadedRef.current) {
+9406|       paceLoadedRef.current = true;
+9407|       getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
+9408|     }
+9409|   }, [tab, authToken, isActive, showWorkoutProgress]);
+9410| 
+9411|   useEffect(() => {
+9412|     if (!isActive) return;
+9413|     let cancelled = false;
+9414|     setLoading(true);
+9415|     (async () => {
+9416|       const localProgressPromise = Promise.allSettled([
+9417|         loadWorkoutHistory(),
+9418|         loadWorkoutSummaries(),
+9419|         loadGoalHistory(),
+9420|         loadPlanChanges(),
+9421|       ]);
+9422|       const serverProgressPromise = authToken
+9423|         ? Promise.allSettled([
+9424|             listWorkoutSessions(authToken, {
+9425|               limit: PROGRESS_SERVER_SESSION_LIMIT,
+9426|               skip: 0,
+9427|               fresh: true,
+9428|               timeoutMs: PROGRESS_SERVER_HYDRATE_TIMEOUT_MS,
+9429|               noRetry: true,
+9430|             }),
+9431|             listWorkoutCompletions(authToken, {
+9432|               limit: PROGRESS_SERVER_COMPLETION_LIMIT,
+9433|               skip: 0,
+9434|               fresh: true,
+9435|               timeoutMs: PROGRESS_SERVER_HYDRATE_TIMEOUT_MS,
+9436|               noRetry: true,
+9437|             }),
+9438|           ])
+9439|         : null;
+9440|       const [historyResult, summaryResult, goalResult, planChangeResult] = await localProgressPromise;
+9441|       if (cancelled) return;
+9442| 
+9443|       const localHistory = historyResult.status === 'fulfilled' ? historyResult.value : [];
+9444|       const localSummaries = summaryResult.status === 'fulfilled' ? summaryResult.value : [];
+9445|       const localGoals = goalResult.status === 'fulfilled' ? goalResult.value : [];
+9446|       const localPlanChanges = planChangeResult.status === 'fulfilled' ? planChangeResult.value : [];
+9447| 
+9448|       setGoalHistory(localGoals);
+9449|       setPlanChanges(localPlanChanges);
+9450| 
+9451|       if (!serverProgressPromise) {
+9452|         setPrs(derivePersonalRecords(localHistory));
+9453|         setHistory(localHistory);
+9454|         setSummaries(localSummaries);
+9455|         setLoading(false);
+9456|         return;
+9457|       }
+9458| 
+9459|       const [serverSessionsResult, completionsResult] = await serverProgressPromise;
+9460|       if (cancelled) return;
+9461|       const serverSessions = serverSessionsResult.status === 'fulfilled' ? serverSessionsResult.value : null;
+9462|       const completions = completionsResult.status === 'fulfilled' ? completionsResult.value : null;
+9463|       if (!serverSessions && !completions) {
+9464|         setPrs(derivePersonalRecords(localHistory));
+9465|         setHistory(localHistory);
+9466|         setSummaries(localSummaries);
+9467|         setLoading(false);
+9468|         return;
+9469|       }
+9470| 
+9471|       const historyWithServerSets = mergeWorkoutSessionSources(localHistory, serverSessions);
+9472|       const scoped = reconcileWorkoutProgressData(historyWithServerSets, localSummaries, completions);
+9473|       setPrs(derivePersonalRecords(scoped.history));
+9474|       setHistory(scoped.history);
+9475|       setSummaries(scoped.summaries);
+9476|       setLoading(false);
+9477|       if (completions) {
+9478|         AsyncStorage.setItem('workoutHistory', JSON.stringify(scoped.history.slice(0, 100))).catch(() => {});
+9479|         AsyncStorage.setItem('workoutSummaries', JSON.stringify(scoped.summaries.slice(0, 100))).catch(() => {});
+9480|       }
+9481|     })().catch(() => {
+9482|       if (!cancelled) setLoading(false);
+9483|     });
+9484|     return () => { cancelled = true; };
+9485|   }, [authToken, isActive]);
+9486| 
+9487|   useEffect(() => {
+9488|     let cancelled = false;
+9489|     if (!isActive || !authToken || !showMixedGoalProgress) {
+9490|       setGoalScore(null);
+9491|       return () => { cancelled = true; };
+9492|     }
+9493|     getGoalScores(authToken, { window: 'rolling_7d' })
+9494|       .then(response => {
+9495|         if (!cancelled) setGoalScore(response.scores?.[0] ?? null);
+9496|       })
+9497|       .catch(() => {
+9498|         if (!cancelled) setGoalScore(null);
+9499|       });
+9500|     return () => { cancelled = true; };
+9501|   }, [
+9502|     authToken,
+9503|     isActive,
+9504|     showMixedGoalProgress,
+9505|     userProfile.goal,
+9506|     nutritionLogRefreshKey,
+9507|     history.length,
+9508|     summaries.length,
+9509|     bodyScanHistory.length,
+9510|     healthSummary?.avgSleepHours7d,
+9511|   ]);
+9512| 
+9513|   useEffect(() => {
+9514|     if (!isActive) return;
+9515|     let cancelled = false;
+9516|     import('../utils/weightHistory').then(({ loadWeightHistory }) =>
+9517|       loadWeightHistory()
+9518|         .then((history) => {
+9519|           if (cancelled) return;
+9520|           setWeightEntries(history);
+9521|         })
+9522|         .catch(() => null)
+9523|         .finally(() => {
+9524|           if (!cancelled) setWeightEntriesLoaded(true);
+9525|         })
+9526|     );
+9527|     return () => { cancelled = true; };
+9528|   }, [authToken, isActive]);
+9529| 
+9530|   useEffect(() => {
+9531|     if (!isActive || !authToken) {
+9532|       setInsights(null);
+9533|       setGuardrails([]);
+9534|       setCoachMemory([]);
+9535|       return;
+9536|     }
+9537|     getInsights(authToken).then(setInsights).catch(() => null);
+9538|     getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
+9539|     if (isProTier) {
+9540|       getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);

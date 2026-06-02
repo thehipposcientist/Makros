@@ -303,7 +303,7 @@ def test_two_week_ppl_fatigue_accumulation():
     total_fatigue = sum(getattr(mf, m) for m in FATIGUE_MUSCLES)
     assert total_fatigue > 0, "14 days of training should produce some fatigue"
 
-    # Readiness should be in a moderate range (not overtrained from 14 days
+    # Readiness should be in a moderate range (not recovery-needed from 14 days
     # because older days are dropped entirely by the 5-day window).
     assert snap.readiness_score >= 30, (
         f"readiness {snap.readiness_score} too low for a PPL rotation "
@@ -670,9 +670,9 @@ def test_5_day_ppl_pull_balance():
     _ok("5-day PPL pull balance: lifting-mode goals have >=2 pull days")
 
 
-def test_readiness_normal_training_not_overtrained():
+def test_readiness_normal_training_not_recovery_needed():
     """Normal 3-4x/week training with rest days should produce Ready or
-    Moderate, not Fatigued or Overtrained."""
+    Moderate, not High load or Recovery needed."""
     print("\n[test] readiness: normal training patterns = Ready/Moderate")
     today = date.today()
     from datetime import timedelta
@@ -731,7 +731,7 @@ ALL_TESTS = [
     test_readiness_7_hard_worse_than_5_hard,
     test_ppl_fatigue_rotation_fires,
     test_5_day_ppl_pull_balance,
-    test_readiness_normal_training_not_overtrained,
+    test_readiness_normal_training_not_recovery_needed,
 ]
 
 

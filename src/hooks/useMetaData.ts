@@ -13,11 +13,33 @@ import { getFoods, getFoodCategories, getEquipment, getGoals, getPaces, getGoalC
 export interface FoodItem {
   id?: number | null;
   name: string;
+  category?: string;
   unit: string;
+  serving_grams?: number | null;
   calories: number;
   protein: number;
   carbs: number;
   fat: number;
+  fiber?: number;
+  sugar?: number;
+  added_sugar_g?: number;
+  sodium?: number;
+  sodium_mg?: number;
+  saturated_fat?: number;
+  omega_3?: number;
+  calcium?: number;
+  iron?: number;
+  potassium?: number;
+  magnesium?: number;
+  vitamin_d?: number;
+  vitamin_b12?: number;
+  processing_bucket?: string;
+  food_quality?: string;
+  plant_count?: number;
+  omega3_rich?: boolean;
+  omega3_flag?: boolean;
+  seafood?: boolean;
+  seafood_flag?: boolean;
 }
 
 export interface FoodCategoryGroup {
@@ -144,8 +166,17 @@ export function useMetaData(): MetaData {
           if (!foodsByCat[f.category]) foodsByCat[f.category] = [];
           foodsByCat[f.category].push({
             id: f.id ?? null,
-            name: f.name, unit: f.unit,
+            name: f.name, category: f.category, unit: f.unit,
             calories: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat,
+            serving_grams: f.serving_grams ?? null,
+            fiber: f.fiber, sugar: f.sugar, added_sugar_g: f.added_sugar_g,
+            sodium: f.sodium, sodium_mg: f.sodium_mg, saturated_fat: f.saturated_fat,
+            omega_3: f.omega_3, calcium: f.calcium, iron: f.iron,
+            potassium: f.potassium, magnesium: f.magnesium,
+            vitamin_d: f.vitamin_d, vitamin_b12: f.vitamin_b12,
+            processing_bucket: f.processing_bucket, food_quality: f.food_quality,
+            plant_count: f.plant_count, omega3_rich: f.omega3_rich,
+            omega3_flag: f.omega3_flag, seafood: f.seafood, seafood_flag: f.seafood_flag,
           });
         }
         const categoryOrder = ['proteins', 'plant_proteins', 'dairy', 'grains_carbs', 'vegetables', 'fruits', 'fats_oils'];

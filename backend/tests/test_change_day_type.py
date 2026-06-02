@@ -710,6 +710,41 @@ def test_pick_generated_lift_day_consumes_distinct_variants():
     assert_ne(second["archetype"], first["archetype"], "second pick uses another variant")
 
 
+def test_pick_generated_lift_day_prefers_requested_plus_cardio():
+    """A Change Focus request for '+ Cardio' should use the generated
+    PLUS_CARDIO variant when one exists, not a plain lift with only
+    core slots added later."""
+    print("[change_day_type] generated lift picker prefers requested plus cardio")
+    from app.services.workout.change_day_type import pick_generated_lift_day_for_change
+
+    proposed = [{"focus": "Pull + Cardio"}]
+    generated = [
+        {"focus": "Pull", "archetype": "lift_pull", "stimulus": "hypertrophy"},
+        {"focus": "Pull + Cardio", "archetype": "lift_pull_plus_cardio", "stimulus": "mixed"},
+    ]
+    _, picked = pick_generated_lift_day_for_change(
+        proposed, generated, set(), 0, "Pull + Cardio",
+    )
+    assert_eq(picked["archetype"], "lift_pull_plus_cardio", "picks plus cardio variant")
+
+
+def test_pick_generated_lift_day_prefers_plain_when_plain_requested():
+    """Plain Change Focus requests should not accidentally consume a
+    PLUS_CARDIO candidate when a plain lift variant is available."""
+    print("[change_day_type] generated lift picker prefers plain lift")
+    from app.services.workout.change_day_type import pick_generated_lift_day_for_change
+
+    proposed = [{"focus": "Pull"}]
+    generated = [
+        {"focus": "Pull + Cardio", "archetype": "lift_pull_plus_cardio", "stimulus": "mixed"},
+        {"focus": "Pull", "archetype": "lift_pull", "stimulus": "hypertrophy"},
+    ]
+    _, picked = pick_generated_lift_day_for_change(
+        proposed, generated, set(), 0, "Pull",
+    )
+    assert_eq(picked["archetype"], "lift_pull", "picks plain variant")
+
+
 # ── Test: full_body split smart adjust ────────────────────────────────
 
 def test_full_body_smart_adjust():
@@ -780,6 +815,8 @@ cases = [
     test_pick_generated_lift_day_avoids_second_heavy_legs,
     test_pick_generated_lift_day_low_readiness_prefers_lighter_legs,
     test_pick_generated_lift_day_consumes_distinct_variants,
+    test_pick_generated_lift_day_prefers_requested_plus_cardio,
+    test_pick_generated_lift_day_prefers_plain_when_plain_requested,
     test_full_body_smart_adjust,
     test_canonical_cycles_exist,
 ]

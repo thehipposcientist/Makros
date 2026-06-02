@@ -14,7 +14,7 @@ Coverage:
   * Pantry-poor users (2-3 foods, no balanced archetype coverage) still
     get meals, never a crash.
   * Vegan dietary_preference → no animal foods anywhere in the output.
-  * mealsPerDay in {5, 7} both produce templates with that many meals.
+  * Generated templates repair invalid food refs without enforcing a meal count.
 
 All tests bypass the OpenAI call entirely — the deterministic path
 only needs the PlanRequest + allowed_foods list + the usual enrichment
@@ -28,11 +28,13 @@ from app.services.nutrition.deterministic_skeleton import (
     _diet_disallows,
     _filter_pantry,
     _food_is_allergen,
+    _pick_role,
     generate_deterministic_skeleton,
 )
 from app.services.nutrition.meal_assembler import (
     DEFAULT_NUTRITION_PANTRY,
     FoodMacros,
+    MealSkeleton,
     _CARB_KEYWORDS,
     _CARB_KEYWORDS_PREFERRED,
     _FAT_KEYWORDS,
@@ -40,8 +42,10 @@ from app.services.nutrition.meal_assembler import (
     _VEG_KEYWORDS,
     _build_deterministic_template,
     _food_matches_keywords,
+    assemble_meal,
     assemble_nutrition_response,
     assemble_template,
+    build_food_lookup,
     food_names_for_generation,
     validate_and_repair_skeletons,
 )
@@ -69,7 +73,6 @@ def _make_plan_request(**overrides) -> PlanRequest:
         workoutDurationMinutes=60,
         equipment=["dumbbells"],
         foodsAvailable=[],
-        mealsPerDay=3,
         mealVariety=3,
     )
     base.update(overrides)
@@ -184,7 +187,7 @@ def _run_pipeline(
     """Run the full generate → validate → assemble chain so we can assert
     on the final macro totals (which is what callers actually see)."""
     templates, _note, _supps = generate_deterministic_skeleton(req, variety_n, pantry)
-    templates = validate_and_repair_skeletons(templates, pantry, req.mealsPerDay)
+    templates = validate_and_repair_skeletons(templates, pantry)
     food_lookup = _enriched_for(pantry)
     return [
         assemble_template(tpl, food_lookup, target_cal, target_prot, target_carb, target_fat)
@@ -221,7 +224,7 @@ def test_hits_calorie_target_within_8_percent() -> None:
         ("fat_loss",    vegan_pantry,    1800, 140, 210, 55),
     ]
     for goal, pantry, cal, prot, carb, fat in combos:
-        req = _make_plan_request(goal=goal, mealsPerDay=3, mealVariety=1)
+        req = _make_plan_request(goal=goal, mealVariety=1)
         [plan] = _run_pipeline(req, pantry, 1, cal, prot, carb, fat)
         got_cal, _, _, _ = _total_macros(plan)
         drift = abs(got_cal - cal) / cal
@@ -237,15 +240,11 @@ def test_hits_calorie_target_within_8_percent() -> None:
 
 def test_hits_protein_target_within_5_percent_muscle_gain() -> None:
     """Muscle-gain users rely on protein hitting target — the deterministic
-    skeleton must get within ±5% after the solver runs for a 3-meal day,
-    which is the most common pattern for muscle-gain users (big meals,
-    protein dense).
+    skeleton must get within ±5% after the solver runs.
 
     The skeleton itself doesn't know per-food protein density; the solver
     in `meal_assembler.solve_portions` does the scaling. For a reasonable
-    pantry with multiple protein sources and mealsPerDay=3 (fewer slots,
-    bigger portions per slot so the solver has more room), we comfortably
-    stay inside ±5%.
+    pantry with multiple protein sources, we comfortably stay inside ±5%.
     """
     print("\n[test] protein target ±5% for muscle-gain user")
     pantry = [
@@ -253,7 +252,7 @@ def test_hits_protein_target_within_5_percent_muscle_gain() -> None:
         "eggs", "oats", "almonds", "whey", "greek yogurt",
         "salmon", "sweet potato", "spinach",
     ]
-    req = _make_plan_request(goal="muscle_gain", mealsPerDay=3, mealVariety=1)
+    req = _make_plan_request(goal="muscle_gain", mealVariety=1)
     [plan] = _run_pipeline(req, pantry, 1, 3000, 220, 330, 90)
     _, got_prot, _, _ = _total_macros(plan)
     drift = abs(got_prot - 220) / 220
@@ -274,7 +273,7 @@ def test_allergen_filter_blocks_tree_nuts() -> None:
         "greek yogurt", "banana",
     ]
     req = _make_plan_request(
-        goal="muscle_gain", mealsPerDay=3, mealVariety=3,
+        goal="muscle_gain", mealVariety=3,
         allergies=["tree_nuts"],
     )
     templates, _, _ = generate_deterministic_skeleton(req, 3, pantry)
@@ -311,7 +310,7 @@ def test_variety_day_n_and_n_plus_one_differ() -> None:
         "eggs", "oats", "almonds", "greek yogurt", "banana",
         "salmon", "sweet potato", "spinach", "avocado", "whey",
     ]
-    req = _make_plan_request(goal="muscle_gain", mealsPerDay=3, mealVariety=3)
+    req = _make_plan_request(goal="muscle_gain", mealVariety=3)
     templates, _, _ = generate_deterministic_skeleton(req, 3, pantry)
     assert len(templates) == 3
     for i in range(len(templates) - 1):
@@ -331,7 +330,7 @@ def test_variety_one_template_has_distinct_meals_with_title_case_foods() -> None
         "Eggs", "Oats", "Greek Yogurt", "Banana",
         "Salmon", "Sweet Potato", "Spinach", "Avocado",
     ]
-    tpl = _build_deterministic_template(pantry, 3)
+    tpl = _build_deterministic_template(pantry)
     signatures = [tuple(m.food_refs) for m in tpl.meals]
     assert len(signatures) == 3
     assert len(set(signatures)) == 3, signatures
@@ -347,7 +346,7 @@ def test_pantry_poor_user_gets_meals_no_crash() -> None:
     variety downstream."""
     print("\n[test] pantry-poor user → fallback meals, no crash")
     pantry = ["eggs", "oats"]
-    req = _make_plan_request(goal="general_health", mealsPerDay=3, mealVariety=1)
+    req = _make_plan_request(goal="general_health", mealVariety=1)
     templates, _, _ = generate_deterministic_skeleton(req, 1, pantry)
     assert len(templates) == 1
     assert len(templates[0].meals) == 3
@@ -355,14 +354,107 @@ def test_pantry_poor_user_gets_meals_no_crash() -> None:
         assert meal.food_refs, f"meal '{meal.name}' emitted with zero food_refs"
         for ref in meal.food_refs:
             assert ref in pantry, f"unknown food ref '{ref}' not in pantry"
-    _ok("3 meals built from 2-food pantry without crashing")
+    _ok("default generated template built from 2-food pantry without crashing")
+
+
+def test_low_utility_beverages_are_not_macro_fallbacks_when_food_exists() -> None:
+    """Coffee-style drinks can live in the user's food list, but generated
+    meal skeletons should use real foods first instead of treating a drink as
+    a macro anchor."""
+    print("\n[test] low-utility beverages are not macro-planning fallbacks")
+    pantry = ["coffee drink", "cucumber"]
+    req = _make_plan_request(goal="general_health", mealVariety=1)
+    templates, _, _ = generate_deterministic_skeleton(req, 1, pantry)
+    refs = [
+        ref.lower()
+        for meal in templates[0].meals
+        for ref in meal.food_refs
+    ]
+    assert "cucumber" in refs, refs
+    assert "coffee drink" not in refs, refs
+    _ok("coffee drink skipped when a real food can fill fallback meals")
+
+
+def test_beverage_portions_are_capped_even_when_solver_wants_more() -> None:
+    """If a beverage slips into a meal through a sparse pantry or legacy AI
+    skeleton, portion solving must not scale it to 40+ fluid ounces."""
+    print("\n[test] beverage portions are capped")
+    skeleton = MealSkeleton(
+        name="Coffee fallback",
+        index=0,
+        food_refs=["coffee drink"],
+        target_fraction=1.0,
+    )
+    food_lookup = {
+        "coffee drink": FoodMacros(
+            name="coffee drink",
+            serving_label="8 fl_oz",
+            serving_quantity=8,
+            serving_unit="fl_oz",
+            calories=180,
+            protein=3,
+            carbs=30,
+            fat=5,
+        )
+    }
+    meal = assemble_meal(skeleton, food_lookup, 1200, 60, 170, 35)
+    coffee = meal["items"][0]
+    assert coffee["quantity"] <= 16, coffee
+    assert coffee["unit"] == "fl_oz", coffee
+    assert meal["confidence"] == "low", meal
+    _ok(f"coffee drink capped at {coffee['quantity']} fl_oz")
+
+
+def test_spoonable_food_serving_defaults_to_cups() -> None:
+    """Generic enrichment servings should become familiar units. Spoonable
+    foods default to cups, while dense proteins still stay in ounces."""
+    print("\n[test] spoonable serving fallback defaults to cups")
+    lookup = build_food_lookup({
+        "foods": [
+            {
+                "name": "cottage cheese",
+                "serving": "1 serving",
+                "calories": 180,
+                "protein": 25,
+                "carbs": 8,
+                "fat": 5,
+            },
+            {
+                "name": "chicken breast",
+                "serving": "1 serving",
+                "calories": 280,
+                "protein": 53,
+                "carbs": 0,
+                "fat": 6,
+            },
+            {
+                "name": "peanut butter",
+                "serving": "1 serving",
+                "calories": 190,
+                "protein": 7,
+                "carbs": 7,
+                "fat": 16,
+            },
+        ]
+    })
+    cottage_cheese = lookup["cottage cheese"]
+    chicken = lookup["chicken breast"]
+    peanut_butter = lookup["peanut butter"]
+    assert cottage_cheese.serving_quantity == 1, cottage_cheese
+    assert cottage_cheese.serving_unit == "cup", cottage_cheese
+    assert cottage_cheese.serving_label == "1 cup", cottage_cheese
+    assert chicken.serving_quantity == 3, chicken
+    assert chicken.serving_unit == "oz", chicken
+    assert peanut_butter.serving_quantity == 1, peanut_butter
+    assert peanut_butter.serving_unit == "tbsp", peanut_butter
+    _ok("cottage cheese defaults to cups while chicken and peanut butter keep their units")
 
 
 def test_empty_pantry_returns_empty_templates() -> None:
     """Edge case: zero pantry foods → empty meals in every template. No
     crash, no exception, safe to ship downstream."""
     print("\n[test] empty pantry → empty templates, no crash")
-    req = _make_plan_request(mealsPerDay=3, mealVariety=2)
+    req = _make_plan_request(mealVariety=2)
     templates, note, supps = generate_deterministic_skeleton(req, 2, [])
     assert len(templates) == 2
     assert all(not tpl.meals for tpl in templates)
@@ -385,7 +477,7 @@ def test_vegan_preference_filters_animal_foods() -> None:
         "olive oil", "almonds", "peanut butter", "banana",
     ]
     req = _make_plan_request(
-        goal="maintain", mealsPerDay=3, mealVariety=3,
+        goal="maintain", mealVariety=3,
         dietaryPreference="vegan",
     )
     templates, _, _ = generate_deterministic_skeleton(req, 3, pantry)
@@ -437,7 +529,6 @@ def test_incompatible_pantry_does_not_fall_back_to_blocked_foods() -> None:
     pantry = ["whole milk", "cheddar", "eggs"]
     req = _make_plan_request(
         goal="maintain",
-        mealsPerDay=3,
         mealVariety=1,
         dietaryPreference="vegan",
         allergies=["dairy"],
@@ -458,7 +549,6 @@ def test_assembler_surfaces_no_compatible_foods_validation() -> None:
     pantry = ["whole milk", "cheddar", "eggs"]
     req = _make_plan_request(
         goal="maintain",
-        mealsPerDay=3,
         mealVariety=2,
         dietaryPreference="vegan",
         allergies=["dairy"],
@@ -482,7 +572,6 @@ def test_assembler_uses_default_pantry_when_foods_are_skipped() -> None:
     print("\n[test] assembler uses default pantry when foods are skipped")
     req = _make_plan_request(
         goal="fat_loss",
-        mealsPerDay=3,
         mealVariety=2,
     )
     out = assemble_nutrition_response(
@@ -515,7 +604,6 @@ def test_assembler_merges_custom_foods_into_generation_pantry() -> None:
     custom_name = "Kirkland Whey Protein"
     req = _make_plan_request(
         goal="muscle_gain",
-        mealsPerDay=3,
         mealVariety=2,
         foodsAvailable=[],
         customFoodNames=[custom_name],
@@ -553,38 +641,37 @@ def test_assembler_merges_custom_foods_into_generation_pantry() -> None:
     _ok("custom food names are eligible and selected in generated meals")
 
 
-# ─── 7. mealsPerDay in {5, 7} ───────────────────────────────────────────────
+def test_nutrition_quality_beats_rotation_and_custom_bias() -> None:
+    """Food quality score should be the primary picker objective.
 
-
-def test_meals_per_day_5() -> None:
-    """mealsPerDay=5 → template emits exactly 5 meals, indices 0..4."""
-    print("\n[test] mealsPerDay=5 produces 5 meals")
-    pantry = [
-        "chicken breast", "brown rice", "broccoli", "olive oil",
-        "eggs", "oats", "whey", "banana", "almonds", "greek yogurt",
-    ]
-    req = _make_plan_request(mealsPerDay=5, mealVariety=1)
-    templates, _, _ = generate_deterministic_skeleton(req, 1, pantry)
-    assert len(templates) == 1
-    assert len(templates[0].meals) == 5
-    assert [m.index for m in templates[0].meals] == [0, 1, 2, 3, 4]
-    _ok("5 meals emitted with indices 0..4")
-
-
-def test_meals_per_day_7() -> None:
-    """mealsPerDay=7 → template emits exactly 7 meals, indices 0..6."""
-    print("\n[test] mealsPerDay=7 produces 7 meals")
-    pantry = [
-        "chicken breast", "brown rice", "broccoli", "olive oil",
-        "eggs", "oats", "whey", "banana", "almonds", "greek yogurt",
-        "cottage cheese", "apple",
-    ]
-    req = _make_plan_request(mealsPerDay=7, mealVariety=1)
-    templates, _, _ = generate_deterministic_skeleton(req, 1, pantry)
-    assert len(templates) == 1
-    assert len(templates[0].meals) == 7
-    assert [m.index for m in templates[0].meals] == list(range(7))
-    _ok("7 meals emitted with indices 0..6")
+    Rotation can keep variety among close candidates, and custom foods get
+    a small bonus, but neither should make a much weaker food win.
+    """
+    print("\n[test] nutrition quality beats rotation/custom bias")
+    pantry = ["white rice", "brown rice", "pasta"]
+    scores = {
+        "white rice": 10.0,
+        "brown rice": 95.0,
+        "pasta": 35.0,
+    }
+    rotated = _pick_role(
+        "carb",
+        pantry,
+        set(),
+        rotation_offset=1,
+        food_quality_scores=scores,
+    )
+    assert rotated == "brown rice", f"rotation picked lower-score carb: {rotated}"
+    custom_biased = _pick_role(
+        "carb",
+        pantry,
+        set(),
+        rotation_offset=0,
+        preferred_foods={"white rice"},
+        food_quality_scores=scores,
+    )
+    assert custom_biased == "brown rice", f"custom bonus overwhelmed quality: {custom_biased}"
+    _ok("highest-score carb wins even under rotation and custom-food bonus")
 
 
 def test_full_meals_include_protein_plant_and_energy_anchor() -> None:
@@ -599,7 +686,7 @@ def test_full_meals_include_protein_plant_and_energy_anchor() -> None:
     ]
     plant_keywords = _VEG_KEYWORDS | {"berries", "berry", "apple", "banana"}
     energy_keywords = _CARB_KEYWORDS_PREFERRED | _CARB_KEYWORDS | _FAT_KEYWORDS
-    req = _make_plan_request(mealsPerDay=3, mealVariety=3)
+    req = _make_plan_request(mealVariety=3)
     templates, _, _ = generate_deterministic_skeleton(req, 3, pantry)
 
     for day_i, template in enumerate(templates):
@@ -623,8 +710,8 @@ def test_determinism_identical_inputs_produce_identical_output() -> None:
         "chicken breast", "brown rice", "broccoli", "olive oil",
         "eggs", "oats", "almonds", "greek yogurt", "salmon", "sweet potato",
     ]
-    req_a = _make_plan_request(mealsPerDay=3, mealVariety=3)
-    req_b = _make_plan_request(mealsPerDay=3, mealVariety=3)
+    req_a = _make_plan_request(mealVariety=3)
+    req_b = _make_plan_request(mealVariety=3)
     out_a, _, _ = generate_deterministic_skeleton(req_a, 3, pantry)
     out_b, _, _ = generate_deterministic_skeleton(req_b, 3, pantry)
     for i in range(3):
@@ -645,6 +732,9 @@ cases = [
     test_variety_day_n_and_n_plus_one_differ,
     test_variety_one_template_has_distinct_meals_with_title_case_foods,
     test_pantry_poor_user_gets_meals_no_crash,
+    test_low_utility_beverages_are_not_macro_fallbacks_when_food_exists,
+    test_beverage_portions_are_capped_even_when_solver_wants_more,
+    test_spoonable_food_serving_defaults_to_cups,
     test_empty_pantry_returns_empty_templates,
     test_vegan_preference_filters_animal_foods,
     test_diet_disallows_helper,
@@ -653,8 +743,7 @@ cases = [
     test_assembler_surfaces_no_compatible_foods_validation,
     test_assembler_uses_default_pantry_when_foods_are_skipped,
     test_assembler_merges_custom_foods_into_generation_pantry,
-    test_meals_per_day_5,
-    test_meals_per_day_7,
+    test_nutrition_quality_beats_rotation_and_custom_bias,
     test_full_meals_include_protein_plant_and_energy_anchor,
     test_determinism_identical_inputs_produce_identical_output,
 ]

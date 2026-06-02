@@ -5,6 +5,20 @@ export type Goal = string;
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other' | (string & {});
+export type SubscriptionTier = 'free' | 'pro';
+export type SubscriptionStatus =
+  | 'free'
+  | 'trialing'
+  | 'trial_cancelled'
+  | 'active'
+  | 'grace_period'
+  | 'cancelled'
+  | 'expired'
+  | 'revoked'
+  | 'billing_issue'
+  | 'beta'
+  | 'promotional'
+  | 'temporary';
 import type { AppThemeName as _AppThemeName } from '../constants/theme';
 export type { AppThemeName } from '../constants/theme';
 type AppThemeName = _AppThemeName;
@@ -44,13 +58,77 @@ export interface PhysicalStats {
 
 export type ActivityCategory = 'strength' | 'cardio' | 'mobility' | 'sport' | 'active' | 'recovery';
 export type StrengthSubtype = 'push' | 'pull' | 'legs' | 'upper_body' | 'lower_body' | 'full_body';
-export type CardioSubtype = 'walk' | 'run' | 'ride' | 'hike' | 'swim' | 'row' | 'stair' | 'elliptical' | 'bootcamp' | 'other';
+export type CardioSubtype = 'walk' | 'run' | 'ride' | 'hike' | 'swim' | 'row' | 'stair' | 'elliptical' | 'hiit' | 'bootcamp' | 'other';
 export type MobilitySubtype = 'yoga' | 'stretching' | 'foam_roll' | 'pilates';
-export type SportSubtype = 'basketball' | 'soccer' | 'tennis' | 'golf' | 'climbing' | 'boxing' | 'kickboxing' | 'martial_arts' | 'skiing' | 'other';
-export type RecoverySubtype = 'sauna' | 'ice_bath' | 'walk' | 'sleep' | 'meditation' | 'general';
+export type SportSubtype = 'basketball' | 'soccer' | 'tennis' | 'pickleball' | 'volleyball' | 'beach_volleyball' | 'golf' | 'climbing' | 'boxing' | 'kickboxing' | 'martial_arts' | 'skiing' | 'surfing' | 'other';
+export type RecoverySubtype =
+  | 'finnish_sauna' | 'infrared_sauna' | 'cold_plunge' | 'contrast'
+  | 'breathwork' | 'stretching' | 'walk' | 'sleep' | 'meditation' | 'general'
+  // Legacy keys preserved so previously-saved sessions still decode. New
+  // logs always pick from the explicit options above.
+  | 'sauna' | 'ice_bath';
 export type ActivityIntensity = 'easy' | 'moderate' | 'hard';
 export type CardioStyle = 'recovery' | 'easy' | 'steady' | 'intervals' | 'class';
-export type ActivitySource = 'manual' | 'peloton' | 'apple_health' | 'garmin' | 'live_tracker';
+export type ActivitySource = 'manual' | 'peloton' | 'apple_health' | 'garmin' | 'strava' | 'live_tracker';
+
+/** Per-subtype structured detail captured by LogActivityModal. Every
+ *  field is optional and only appears when the user
+ *  entered a value. Shape is intentionally a flat union of all known
+ *  fields rather than a discriminated map so it round-trips through the
+ *  backend's JSONB column without per-subtype schema drift.
+ *
+ *  Temperature is stored in °F (US default). Convert at the view layer
+ *  for °C users — there's no need to persist both. */
+export interface ManualActivityDetails {
+  // ── Recovery ───────────────────────────────────────────────
+  temperatureF?: number;         // sauna or cold plunge water temp
+  humidityPct?: number;          // sauna only
+  waterImmersion?: 'waist' | 'chest' | 'neck' | 'full';   // cold plunge
+  breathworkProtocol?: 'box' | '4-7-8' | 'wim_hof' | 'physiological_sigh' | 'other';
+  rounds?: number;               // breathwork / contrast cycles
+
+  // ── Session effort ──────────────────────────────────────────
+  sessionRpe?: number;           // 1-10 session-level RPE
+
+  // ── Cardio (swim) ──────────────────────────────────────────
+  poolLengthMeters?: number;
+  swimStroke?: 'freestyle' | 'backstroke' | 'breaststroke' | 'butterfly' | 'mixed';
+  laps?: number;
+
+  // ── Cardio (run / ride / hike) ─────────────────────────────
+  terrain?: 'road' | 'trail' | 'treadmill' | 'track' | 'indoor';
+  elevationGainFt?: number;
+  elevationHighFt?: number;
+  elevationLowFt?: number;
+  movingSeconds?: number;
+  elapsedSeconds?: number;
+  stoppedSeconds?: number;
+  durationSource?: string;
+  avgWatts?: number;             // cycling power
+  avgWattsSource?: 'estimated_from_distance_duration_elevation' | 'manual' | string;
+  weightedAvgWatts?: number;
+  maxWatts?: number;
+  kilojoules?: number;
+  avgSpeedMph?: number;
+  maxSpeedMph?: number;
+  avgPaceSecPerMi?: number;
+  avgCadence?: number;
+  steps?: number;
+  caloriesEstimated?: boolean;
+  calorieEstimateSource?: 'met_bodyweight_duration_distance' | string;
+  calorieEstimateConfidence?: 'low' | 'medium' | string;
+  calorieEstimateMet?: number;
+  indoorOutdoor?: 'indoor' | 'outdoor';
+
+  // ── Sport ──────────────────────────────────────────────────
+  climbingGrade?: string;        // e.g. "5.10b" / "V4"
+  climbingStyle?: 'boulder' | 'sport' | 'top_rope' | 'trad' | 'gym';
+  skiVerticalFt?: number;
+  skiRuns?: number;
+
+  // ── Mobility ───────────────────────────────────────────────
+  yogaStyle?: 'vinyasa' | 'hatha' | 'yin' | 'hot' | 'restorative' | 'power' | 'other';
+}
 
 export interface ManualActivity {
   id: string;
@@ -82,6 +160,7 @@ export interface GoalDetails {
   targetEvent?: string;      // for strength, endurance, athletic (e.g. "315lb deadlift", "half marathon")
   timelineWeeks?: number;    // derived from pace for performance/recomp goals
   startWeightLbs?: number;   // weight at goal start — used for progress meter
+  startBodyFatPct?: number;  // body-fat % at goal start (from BodyScan within 30d). Null when no scan existed.
   goalStartedAt?: string;    // ISO date when goal was set — used for timeline meter
 }
 
@@ -159,26 +238,38 @@ export interface CustomFoodItem {
   lastValidatedAt?: string;
 }
 
-/** User-saved exercise from AI search. Stored in userProfile.customExercises
- *  (AsyncStorage) and merged into the library view on read. Deliberately
- *  client-only for now so we don't need a new backend table + migration. */
+/** User-saved exercise from AI search/photo scan/manual entry. Mirrored in
+ *  the backend user_custom_exercises table, with userProfile.customExercises
+ *  kept as the hot local cache and legacy fallback. */
 export interface CustomExerciseItem {
   id: string;                    // locally generated UUID-ish
+  server_id?: number;            // backend user_custom_exercises.id when synced
   name: string;
   primary_muscle: string;        // matches the Exercise library muscle strings
   secondary_muscles?: string[];
   equipment: string;             // free-form to match the library's equipment tokens
+  equipment_slugs?: string[];     // backend-normalized planner equipment keys
+  equipment_bucket?: string;
   movement_pattern?: string | null;
+  exercise_type?: 'strength' | 'cardio' | 'mobility' | string;
+  default_tracking_mode?: 'reps' | 'time' | 'distance' | 'calories' | string;
   is_compound?: boolean | null;
   image_url?: string | null;
   video_id?: string | null;
+  demo_exercise_db_id?: string | null;
   sets?: number;
   reps?: string;
   rest_seconds?: number;
   description?: string;          // the AI's "why" copy
   form_cues?: string[];
+  aliases?: string[];
+  programming_tags?: string[];
   source: 'ai' | 'manual';
+  plan_eligible?: boolean;
+  ai_confidence?: 'high' | 'medium' | 'low' | 'user_confirmed' | string | null;
+  validation_status?: 'planner_ready' | 'needs_review' | 'blocked' | string;
   createdAt: string;             // ISO
+  updatedAt?: string;             // ISO
 }
 
 export interface SavedMealTemplate {
@@ -189,6 +280,21 @@ export interface SavedMealTemplate {
   protein: number;
   carbs: number;
   fat: number;
+}
+
+export type Glp1AppetiteLevel = 'normal' | 'reduced' | 'very_low';
+export type Glp1SideEffect =
+  | 'nausea'
+  | 'constipation'
+  | 'reflux'
+  | 'low_appetite'
+  | (string & {});
+
+export interface Glp1SupportSettings {
+  enabled: boolean;
+  appetite?: Glp1AppetiteLevel;
+  sideEffects?: Glp1SideEffect[];
+  updatedAt?: string;
 }
 
 // ─── Injury tracking ─────────────────────────────────────────────────────────
@@ -208,6 +314,109 @@ export interface InjuryEntry {
   statusUpdatedAt?: string;      // ISO date — last status change
   notes?: string;                // optional follow-up notes
 }
+
+// ─── Passive sun exposure estimates ─────────────────────────────────────────
+
+export type SunExposureLocationMode =
+  | 'off'
+  | 'workout_routes_only'
+  | 'coarse_location'
+  | 'precise_during_active_workout';
+
+export interface SunExposurePreferences {
+  enabled: boolean;
+  useWorkoutRoutes: boolean;
+  useCoarseLocation: boolean;
+  useHealthDaylightData: boolean;
+  useAreaCoefficients: boolean;
+  allowCorrectionPrompts: boolean;
+  highUvRemindersEnabled: boolean;
+  locationMode: SunExposureLocationMode;
+}
+
+export type AreaSunType =
+  | 'indoor'
+  | 'vehicle'
+  | 'dense_forest'
+  | 'wooded_trail'
+  | 'park_mixed'
+  | 'open_grass'
+  | 'beach'
+  | 'snow'
+  | 'water_edge'
+  | 'urban_street'
+  | 'sports_field'
+  | 'unknown';
+
+export interface AreaSunContext {
+  areaType: AreaSunType;
+  skyExposureCoefficient: number;
+  reflectionCoefficient: number;
+  source: 'osm' | 'landcover' | 'tree_canopy' | 'building_polygon' | 'manual' | 'unknown';
+  confidence: 'low' | 'medium' | 'high';
+  reasonCodes: string[];
+}
+
+export interface SunExposureSegment {
+  id: number | string;
+  userId?: number;
+  startTime: string;
+  endTime: string;
+  durationMinutes: number;
+  coarseLocationHash?: string | null;
+  activityId?: number | null;
+  uvIndexAverage: number;
+  uvIndexMax: number;
+  lightIntensityLux?: number | null;
+  localStartMinute?: number | null;
+  localEndMinute?: number | null;
+  timezoneOffsetMinutes?: number | null;
+  daylight: boolean;
+  outdoorConfidence: number;
+  areaContext: AreaSunContext;
+  effectiveUvMinutes: number;
+  openSkyEquivalentMinutes: number;
+  confidence: 'low' | 'medium' | 'high';
+  source: 'healthkit_daylight' | 'workout_route' | 'activity_recognition' | 'coarse_location' | 'manual';
+}
+
+export interface SunExposureDailySummary {
+  userId?: number;
+  date: string;
+  likelyOutdoorDaylightMinutes: number;
+  confirmedOutdoorDaylightMinutes: number;
+  possibleOutdoorDaylightMinutes: number;
+  mostlyShadedMinutes: number;
+  mostlyOpenSkyMinutes: number;
+  highUvMinutes: number;
+  veryHighUvMinutes: number;
+  effectiveUvMinutes: number;
+  openSkyEquivalentMinutes: number;
+  daylightMinutes?: number;
+  appleHealthDaylightMinutes?: number;
+  lightIntensityLuxAverage?: number | null;
+  lightIntensityLuxMax?: number | null;
+  uvIndexAverage?: number;
+  uvIndexMax?: number;
+  morningDaylightMinutes?: number;
+  middayDaylightMinutes?: number;
+  afternoonDaylightMinutes?: number;
+  uvRiskScore?: number;
+  uvRiskLabel?: string;
+  sunScore?: number;
+  sunScoreLabel?: string;
+  confidence: 'low' | 'medium' | 'high';
+  explanation: string;
+  safetyMessage?: string | null;
+}
+
+export type SunExposureCorrectionOption =
+  | 'mostly_sunny'
+  | 'mixed'
+  | 'mostly_shaded'
+  | 'indoors'
+  | 'wrong_activity'
+  | 'dismiss';
 
 // ─── User history log ─────────────────────────────────────────────────────────
 
@@ -235,6 +444,19 @@ export interface UserProfile {
   focusedMuscleGroup?: string;   // @deprecated — replaced by priorityRegion
 
   themePreference?: AppThemeName;
+  /** Single-question signup answer: what is the user here for? Drives
+   *  the default `hiddenSurfaces` (fitness → hides meals, nutrition →
+   *  hides workouts, both → nothing hidden) and lets onboarding skip
+   *  irrelevant steps. Reversible from Settings. Defaults to 'both'
+   *  for any profile created before this field existed. */
+  appFocus?: 'fitness' | 'nutrition' | 'both';
+  /** In-flight import handoffs started from onboarding/settings. The
+   *  backend stores this in UserPreferences.pending_imports so the app
+   *  can remind the user to finish export/import loops across devices. */
+  pendingImports?: PendingImportEntry[];
+  /** Optional passive estimate preferences. Derived sun records store
+   *  coarse area context and coefficients, not raw passive GPS. */
+  sunExposurePreferences?: SunExposurePreferences;
   /** Reversible app-surface visibility. Hidden surfaces keep their data
    *  intact but are removed from primary navigation and related progress UI. */
   hiddenSurfaces?: {
@@ -247,12 +469,21 @@ export interface UserProfile {
   /** Display preference for distance (cardio mileage, gear mileage).
    *  Storage is always miles; formatters convert at the display layer. */
   distanceUnit?: 'mi' | 'km';
+  /** Display preference for body height. Storage stays as heightFeet +
+   *  heightInches on physicalStats; metric just converts at render/input. */
+  heightUnit?: 'in' | 'cm';
   physicalStats: PhysicalStats;
   daysPerWeek: number;
   /** Specific days the user can train. 0=Sun, 1=Mon, ..., 6=Sat.
    *  When set, overrides daysPerWeek for scheduling. Length must match daysPerWeek. */
   trainingDays?: number[];
   workoutDurationMinutes: number;
+  /** Lifestyle activity OUTSIDE planned training. Drives the TDEE
+   *  `step_2b_apply_lifestyle_modifier` nudge on top of the training-
+   *  schedule-derived multiplier. Optional — when undefined the backend
+   *  skips the modifier so the legacy TDEE estimate is preserved (no
+   *  change for users who onboarded before this question landed). */
+  lifestyleActivity?: 'sedentary' | 'light' | 'moderate' | 'active' | 'very_active';
   equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
   equipmentSettings?: StrengthEquipmentSettings;
   strengthBaselines?: StrengthBaselines;
@@ -269,12 +500,11 @@ export interface UserProfile {
    *  unique). Lower = faster plan generation; higher = more variety.
    *  Default 3 matches the old hardcoded A/B/C behaviour. */
   mealVariety?: number;
-  /** Number of meals the user eats per day (1-6). Drives both the
-   *  generic meals[] count the assembler produces and the local
-   *  `planGenerator` fallback. Default 3. */
-  mealsPerDay?: number;
   savedMeals?: SavedMealTemplate[];
   mealRoutine?: string;          // user's fixed meal habits
+  /** Lifestyle support for users prescribed GLP-1 medication. This is
+   *  nutrition/training guidance only; no medication or dosing advice. */
+  glp1Support?: Glp1SupportSettings;
   injuries?: string;             // legacy: free-text injuries
   injuryEntries?: InjuryEntry[]; // structured injury tracking with statuses
   experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
@@ -282,6 +512,11 @@ export interface UserProfile {
    *  split for the user's goal + days. Otherwise one of:
    *  "full_body" | "upper_lower" | "ppl" | "ppl_upper_lower" | "bro" */
   preferredSplit?: string;
+  /** Pro-only manual-mode flags. When true, the planner stops auto-
+   *  generating workouts/meals; the user assembles their own week from
+   *  saved templates (workout) or just logs freely (meal). */
+  workoutManualMode?: boolean;
+  mealManualMode?: boolean;
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
   weightHistory?: WeightEntry[];
@@ -292,10 +527,28 @@ export interface UserProfile {
    *  `pro` = guided PlanWeeks, AI help, and advanced insight surfaces.
    *  Missing/unknown tiers must be treated as `free` by clients so
    *  unlocked features only come from explicit state. */
-  subscriptionTier?: 'free' | 'pro';
+  subscriptionTier?: SubscriptionTier;
+  subscriptionStatus?: SubscriptionStatus;
+  subscriptionSource?: string | null;
+  subscriptionProductId?: string | null;
+  subscriptionEntitlementId?: string | null;
+  subscriptionStore?: string | null;
+  subscriptionEnvironment?: string | null;
+  subscriptionExpiresAt?: string | null;
+  trialStartedAt?: string | null;
+  trialEndsAt?: string | null;
+  revenueCatAppUserId?: string | null;
   /** Social/profile avatar. Usually a compact image data URI persisted
    *  through UserSocialProfile so friends see it anywhere initials render. */
   avatarUrl?: string;
+}
+
+export interface PendingImportEntry {
+  source: string;
+  requested_at: string;
+  notified_at?: string | null;
+  completed_at?: string | null;
+  dismissed_at?: string | null;
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
@@ -380,7 +633,16 @@ export interface Exercise {
     interval_sets?: number;
     work_seconds?: number;
     rest_seconds?: number;
+    modality?: string;
   } | null;
+  /** Prescription category from the planner. Drives logging UI and
+   *  guided-flow detection. "yoga_flow" / "stretch_hold" / "mobility"
+   *  imply timed holds; "core_circuit" implies circuit pacing. */
+  prescriptionType?: string | null;
+  /** Guided-flow ordering tag for stretches / yoga / foam-roll poses.
+   *  "warm" | "standing" | "floor" | "cool" | "breath" | "foam_roll".
+   *  Present on yoga/recovery/mobility exercises; null for strength. */
+  flowCategory?: string | null;
 }
 
 export interface WorkoutDay {
@@ -391,7 +653,14 @@ export interface WorkoutDay {
    *  planner from the archetype's training_type. Drives the stimulus
    *  badge on the workout card. */
   stimulus?: string;
+  /** Stable planner day archetype id, e.g. "lift_push_heavy" or
+   *  "cond_zone2". */
+  archetype?: string | null;
   _source_context?: string;
+  _custom_activity_category?: ActivityCategory | string;
+  _custom_cardio_subtype?: string;
+  _custom_cardio_style?: CardioStyle | string;
+  _custom_activity_venue?: 'indoor' | 'outdoor' | string;
   _template_id?: string | null;
   planDayId?: number | null;
   plan_day_id?: number | null;
@@ -409,6 +678,19 @@ export interface SavedWorkoutTemplate {
   id: string;
   name: string;
   workout: WorkoutDay;
+  notes?: string | null;
+  /** Set when the user has generated a share link for this template.
+   *  Cleared when revoked. Imported templates start with shareCode null. */
+  shareCode?: string | null;
+  /** Number of users who have imported this template (only meaningful for
+   *  templates the current user owns + has shared). */
+  timesImported?: number;
+  /** When this template was imported from someone else's share, the
+   *  originating code. Drives the "Imported from <code>" attribution. */
+  sourceShareCode?: string | null;
+  /** Owner username snapshotted at import time. Survives revoke + owner
+   *  rename. Drives the "from @owner" pill on imported template cards. */
+  sourceOwnerUsername?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -447,18 +729,33 @@ export interface MealMicronutrients {
   added_sugar?: number;   // g — legacy alias
   sodium?: number;      // mg
   cholesterol?: number; // mg
-  // Fats panel
+  // Fats panel. `trans_fat_g` sits next to saturated/cholesterol —
+  // health insights treat them as a related triad. Unknown = undefined
+  // (per project convention); a literal 0 means "source said 0".
   saturated_fat?: number;       // g
+  trans_fat_g?: number;         // g
   monounsaturated_fat?: number; // g
   polyunsaturated_fat?: number; // g
-  omega_3?: number;             // g
-  omega_6?: number;             // g
+  // Omega-3 total (legacy, kept for back-compat) + subtypes in mg.
+  // EPA+DHA derivation is computed by the renderer when both subtypes
+  // are present and the total is missing.
+  omega_3?: number;             // g (legacy total)
+  omega_3_ala_mg?: number;      // mg
+  omega_3_epa_mg?: number;      // mg
+  omega_3_dha_mg?: number;      // mg
+  omega_3_epa_dha_mg?: number;  // mg — derived: epa + dha when both known
+  // Omega-6 explicit-unit field. `omega_6` (without units) is preserved
+  // as a legacy alias; new producers should set `omega_6_mg`.
+  omega_6_mg?: number;          // mg
+  omega_6?: number;             // legacy: ambiguous units; treat as mg
   // Vitamins
   vitamin_a?: number;             // µg RAE
   vitamin_c?: number;             // mg
   vitamin_d?: number;             // µg
-  vitamin_e?: number;             // mg
-  vitamin_k?: number;             // µg
+  vitamin_e?: number;             // mg α-tocopherol (legacy, no unit suffix)
+  vitamin_e_mg?: number;          // mg α-tocopherol (explicit unit)
+  vitamin_k?: number;             // µg (legacy, no unit suffix)
+  vitamin_k_mcg?: number;         // µg (explicit unit)
   thiamin_b1?: number;            // mg
   riboflavin_b2?: number;         // mg
   niacin_b3?: number;             // mg
@@ -467,16 +764,23 @@ export interface MealMicronutrients {
   vitamin_b12?: number;           // µg
   biotin_b7?: number;             // µg
   pantothenic_acid_b5?: number;   // mg
+  choline_mg?: number;            // mg
   // Minerals
   calcium?: number;     // mg
   iron?: number;        // mg
   magnesium?: number;   // mg
-  phosphorus?: number;  // mg
+  phosphorus?: number;  // mg (legacy)
+  phosphorus_mg?: number; // mg (explicit unit)
   potassium?: number;   // mg
   zinc?: number;        // mg
   selenium?: number;    // µg
   copper?: number;      // mg
   manganese?: number;   // mg
+  boron?: number;       // mg
+  iodine_mcg?: number;  // µg
+  // Stimulants / lifestyle inputs for sleep/recovery insights.
+  caffeine_mg?: number; // mg
+  alcohol_g?: number;   // g (canonical) — standard-drinks is derived
   // Legacy camelCase aliases — preserved so cached pre-refactor plans
   // still display. New backend output does NOT populate these.
   vitaminA?: number;
@@ -528,9 +832,10 @@ export interface MealItem {
   food_id?: number | null;
   serving_id?: number | null;
   serving_grams?: number | null;
-  source?: 'seed' | 'user' | 'usda' | 'barcode' | 'ai' | string;
+  source?: 'seed' | 'user' | 'usda' | 'fatsecret' | 'barcode' | 'ai' | string;
   fdc_id?: string | null;
   external_id?: string | null;
+  barcode?: string | null;
   brand?: string | null;
   is_verified?: boolean;
   // Baseline rate used by the edit UI to scale macros proportionally when
@@ -543,13 +848,21 @@ export interface MealItem {
   baseProtein?: number;
   baseCarbs?: number;
   baseFat?: number;
+  baseServingGrams?: number | null;
   micronutrients?: Record<string, number>;
+  processing_bucket?: 'minimally_processed' | 'processed' | 'ultra_processed' | 'unknown';
   food_quality?: 'whole' | 'processed' | 'unknown';
   protein_source?: 'plant' | 'animal' | 'mixed' | 'none' | 'unknown';
   fermented?: boolean;
   probiotic?: boolean;
   omega3_rich?: boolean;
   plant_count?: number;
+  seafood?: boolean;
+  fruit?: boolean;
+  vegetable?: boolean;
+  alcohol?: boolean;
+  processed_meat?: boolean;
+  refined_grain?: boolean;
 }
 
 export interface MealSuggestion {
@@ -578,10 +891,18 @@ export interface MealSuggestion {
   // Stable client-side IDs used for extra meals. `_localId` identifies a
   // preserved (user-checked) extra so it survives plan regeneration.
   // `_routineId` identifies an extra pinned as a routine.
+  _clientMealKey?: string;
   _localId?: string;
   _routineId?: string;
+  // Backend SavedMeal/Favorite provenance. Favorite renames can update
+  // linked meal names without changing item/macro snapshots.
+  _savedMealId?: number | null;
   // ISO timestamp for the "eaten at" time selected in the meal editor.
   _consumedAt?: string;
+  /** Optional meal image. The card UI must render fine without it —
+   *  see src/utils/foodImage.ts for the resolver + category fallback. */
+  image_url?: string | null;
+  image_source?: string | null;
 }
 
 export interface SupplementItem {
@@ -624,6 +945,10 @@ export interface WorkoutSummary {
   trainingRating?: 'Crushed' | 'Solid' | 'Light' | 'Below';
   trainingPillars?: { effort: number; volume: number; duration: number; consistency: number };
   trainingPillarBreakdown?: WorkoutSummaryTrainingPillar[];
+  /** GPS route trail captured during outdoor cardio. Renders the
+   *  post-workout map on the share/summary card. Null for indoor +
+   *  lifting sessions. */
+  routeCoords?: Array<{ lat: number; lon: number }> | null;
 }
 
 /** Per-exercise logged detail kept alongside the AI summary so the
@@ -635,6 +960,7 @@ export interface StoredWorkoutSummaryExercise {
   targetSets?: number;
   targetReps?: string;
   sets: CompletedSet[];
+  warmupSets?: CompletedSet[];
 }
 
 /** End-of-workout feedback captured on the summary modal. Optional —
@@ -653,6 +979,14 @@ export interface StoredWorkoutSummary extends WorkoutSummary {
   durationSeconds: number;
   totalSets: number;
   totalReps: number;
+  stimulus?: string | null;
+  sourceContext?: string | null;
+  activityCategory?: string | null;
+  activitySubtype?: string | null;
+  activitySource?: string | null;
+  cardioStyle?: string | null;
+  distanceMiles?: number | null;
+  importSource?: string | null;
   startedAt?: string;  // ISO — exact workout start time
   endedAt?: string;    // ISO — exact workout end time
   // Full per-exercise detail — what the user actually did. Populated
@@ -703,6 +1037,14 @@ export interface MealRoutineFood {
 
 export interface MealRoutineEntry {
   id: string;
+  /** Backend MealRoutine.id once this routine has been persisted server-side.
+   *  The local string `id` stays the device-side identity used for `_routineId`
+   *  matching; `backendId` links it to the durable, cross-device server row so
+   *  edits/deletes update the same routine instead of duplicating. */
+  backendId?: number;
+  /** Account-wide display order for routine-backed meals. Reordering two
+   *  routine rows updates this order and is reflected across every day. */
+  displayOrder?: number;
   name: string;               // e.g. "High Protein Breakfast"
   mealType?: string;          // breakfast | lunch | dinner | snack | custom
   foods: MealRoutineFood[];
@@ -732,6 +1074,9 @@ export interface DailyNutritionPlan {
   meals: MealSuggestion[];
   /** Indices into `meals[]` that the user has hidden for the day. */
   removedMealIds?: string[];
+  /** Routine ids intentionally suppressed for this specific day. Used
+   *  when a user edits a routine-backed meal with "Just today" scope. */
+  suppressedRoutineIds?: string[];
   targets: NutritionTargets;
   nutritionistNote?: string;
   supplementStack?: SupplementItem[];
@@ -753,22 +1098,40 @@ export interface CompletedSet {
   comfortRating?: number; // 1-5 for stretch/mobility comfort
   rir?: number;
   feedback?: 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
+  sessionDate?: string;
+  completedAt?: string;
   actualDistance?: number;
   actualPace?: string;
   heartRateAvg?: number;
   cardioMetrics?: Record<string, string>;
+  /** Free-form per-set note ("form sloppy on rep 5"). Persisted to
+   *  ExerciseSet.notes via the workout sync endpoint. */
+  notes?: string;
+  /** Warmups are logged but excluded from working-set progression. */
+  setType?: SetType | 'working' | 'dropset' | 'amrap';
 }
 
 export interface SessionExercise {
+  /** Stable watch-local id used to reconcile optimistic watch-added
+   *  exercises with the phone-confirmed active snapshot. */
+  clientExerciseId?: string | null;
   name: string;
   targetSets: number;
   targetReps: string;
   targetRestSeconds: number;
   equipment: string;
   sets: CompletedSet[];
+  warmupSets?: CompletedSet[];
   aiRecommendation?: string;
   image_url?: string;
   video_id?: string | null;
+  /** free-exercise-db identifier — drives the form-demo thumbnail in
+   *  the active-workout exercise row + the cycling demo card inside
+   *  FormVideoModal. Resolved server-side at seed time, also looked
+   *  up from the loaded library by name when a stale plan didn't
+   *  carry the field. */
+  demo_exercise_db_id?: string | null;
+  demoExerciseDbId?: string | null;
   /** Anchor target weight emitted by the deterministic planner (already
    *  history-aware). Forwarded to the weight-recommendation endpoint as
    *  `plannedTargetWeightLbs` so recs stay grounded in the session plan. */
@@ -787,6 +1150,8 @@ export interface SessionExercise {
   secondaryMuscles?: string[] | null;
   secondary_muscles?: string[];
   muscles_targeted?: string[];
+  movementPattern?: string | null;
+  movement_pattern?: string | null;
   /** Whether this is a compound (multi-joint) movement. Propagated from
    *  the planner's exercise library — used for 1RM estimation eligibility. */
   isCompound?: boolean | null;
@@ -795,6 +1160,9 @@ export interface SessionExercise {
   slotRole?: string | null;
   slotLabel?: string | null;
   prescriptionType?: string | null;
+  /** Guided-flow ordering tag — same field used on Exercise. Present on
+   *  poses pulled from the seed library; null for strength/cardio. */
+  flowCategory?: string | null;
   /** Where targetWeightLbs came from. 'default' means the planner
    *  fell through to the dumb category-default table — ActiveWorkoutScreen
    *  refreshes those with the AI helper before showing the user. */
@@ -812,6 +1180,11 @@ export interface WorkoutSession {
   completed: boolean;
   skipped?: boolean;      // true when the user skipped this day
   skipReason?: string;    // reason selected or typed by user
+  /** Completion provenance. Planned/planDayId sessions can satisfy the
+   *  scheduled PlanDay; custom/manual/template quick-starts stay as extras. */
+  sourceContext?: string | null;
+  templateId?: string | null;
+  planDayId?: number | null;
   feedback?: PostWorkoutFeedback;  // collected after finish
   manualActivity?: {      // structured data from the redesigned LogActivityModal
     category: ActivityCategory;
@@ -823,6 +1196,13 @@ export interface WorkoutSession {
     distanceMiles?: number;
     caloriesBurned?: number;
     avgHeartRate?: number;
+    /** Captured GPS trail. Drives the post-workout map and the
+     *  HKWorkoutRouteBuilder write so the run shows on the Apple
+     *  Fitness route map. Indoor + lifting omit. */
+    routeCoords?: Array<{ lat: number; lon: number; t_ms: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }>;
+    /** Per-subtype structured detail. Shape is sparse — fields appear
+     *  only when the selected subtype exposes them. */
+    details?: ManualActivityDetails;
   };
   /** PR achievements detected on this session's completion (Feature 2).
    *  Persisted locally so the Progress screen can surface "🏆 PR" badges
@@ -835,6 +1215,33 @@ export interface WorkoutSession {
     reps?: number | null;
     weight_lbs?: number | null;
   }>;
+  /** GPS trail for outdoor cardio sessions (planned or manual). Hydrated
+   *  from WorkoutCompletion.route_coords during reconciliation so the
+   *  Progress screen's expanded card can render a route map. Top-level
+   *  rather than nested under manualActivity because planned cardio
+   *  ships with source_context='planned', which doesn't construct a
+   *  manualActivity object. */
+  routeCoords?: Array<{ lat: number; lon: number }>;
+  /** Provenance for sessions ingested from a third-party export
+   *  (Strong, Hevy, Strava). Drives the "IMPORTED" badge on the
+   *  workout-history card. Null for native logs + Apple Health
+   *  workouts (those carry source via manualActivity instead). */
+  importSource?: string;
+  /** Apple Health workout explicitly linked onto this existing Thallo
+   *  workout. Used when a user imports/logs a workout from another
+   *  source, then attaches the HealthKit workout for calories, HR,
+   *  distance, and exact timing without creating a duplicate history row. */
+  linkedAppleHealthWorkout?: {
+    externalId: string;
+    activityName: string;
+    startDate: string;
+    endDate: string;
+    durationSeconds: number;
+    caloriesBurned?: number | null;
+    distanceMiles?: number | null;
+    avgHeartRate?: number | null;
+    maxHeartRate?: number | null;
+  };
 }
 
 // ─── Post-workout feedback ────────────────────────────────────────────────────
@@ -862,6 +1269,15 @@ export interface BodyScanEntry {
   strengths: string[];
   improvements: string[];
   assessment: string;
+  confidence?: string;
+  photoQuality?: string;
+  qualityFlags?: string[];
+  needsRetake?: boolean;
+  sensitivePhoto?: boolean;
+  photoHidden?: boolean;
+  method?: string;
+  visualEstimatePct?: number | null;
+  measurementEstimatePct?: number | null;
   weightLbs?: number;
 }
 
@@ -877,6 +1293,23 @@ export interface SleepStages {
   total: number;
 }
 
+export type SleepStageType = 'awake' | 'rem' | 'core' | 'deep';
+
+export interface SleepStageTimelineSegment {
+  stage: SleepStageType;
+  startDate: string;
+  endDate: string;
+  startOffsetMinutes: number;
+  durationMinutes: number;
+}
+
+export interface SleepStageTimeline {
+  startDate: string;
+  endDate: string;
+  durationMinutes: number;
+  segments: SleepStageTimelineSegment[];
+}
+
 export interface WorkoutDetail {
   activityType: number;
   activityName: string;
@@ -885,6 +1318,10 @@ export interface WorkoutDetail {
   endDate: string;
   calories?: number;
   distanceMiles?: number;
+  avgHeartRate?: number;
+  maxHeartRate?: number;
+  elevationGainFt?: number;
+  routeCoords?: Array<{ lat: number; lon: number; t_ms: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }>;
 }
 
 export type SleepScoreMode = 'mvp' | 'personalized';
@@ -927,16 +1364,19 @@ export interface SleepScore {
   respiratoryRate: number | null;
   oxygenSaturation: number | null;
   efficiency: number | null;
+  bedtimeMinutes?: number | null;
   pillars: SleepScorePillars;
   insights: string[];
 }
 
 export interface HealthSummary {
   restingHeartRate: number | null;
+  stepsToday: number | null;
   avgSteps7d: number | null;
   workouts7d: number | null;
   avgSleepHours7d: number | null;
   lastNightSleepHours: number | null;
+  activeEnergyToday: number | null;
   activeEnergy7d: number | null;
   hrvAvg: number | null;
   vo2Max: number | null;
@@ -946,13 +1386,20 @@ export interface HealthSummary {
   mindfulMinutes7d: number | null;
   basalEnergy7d: number | null;
   sleepScore: SleepScore | null;
+  sleepTimeline?: SleepStageTimeline | null;
   workoutDetails: WorkoutDetail[];
   fetchedAt: string;
 }
 
 export interface HealthScoreResult {
+  // ── Legacy fields — preserved for existing UI consumers ────────────
+  /** Backwards-compat alias for `overallScore`. Existing screens read
+   *  this field; new UI should prefer `overallScore` + sub-scores. */
   fitnessScore: number;               // 0-100
   recoveryMarker: RecoveryMarker;
+  /** Legacy v1 pillar breakdown. Populated for backwards compatibility
+   *  but no longer the source of truth — use `subScores` for the new
+   *  modular pillars (recovery / training / cardio / etc.). */
   scoreInputs: {
     workoutPoints: number;            // 0-40
     stepsPoints: number;              // 0-15
@@ -966,7 +1413,75 @@ export interface HealthScoreResult {
     rhrStatus: 'normal' | 'elevated' | 'unknown';
     recentLoad: 'light' | 'moderate' | 'heavy';
   };
+
+  // ── v2 — modular sub-scores ────────────────────────────────────────
+  /** Weighted blend across available pillars. Null when no pillar has
+   *  enough data to score. */
+  overallScore: number | null;
+  /** "high" when ≥75% of pillar weight has data, "medium" ≥40%,
+   *  "low" otherwise. Surfaces alongside the score so users know how
+   *  much to trust it. */
+  confidence: 'low' | 'medium' | 'high';
+  /** 0..1 — fraction of total pillar weight that had data. */
+  dataCoverage: number;
+  /** Per-pillar 0–100 sub-scores. Pillars with no data are omitted
+   *  rather than scored at 0 — UI should treat absence as "not yet
+   *  available". */
+  subScores: {
+    recovery?: number;
+    training?: number;
+    nutrition?: number;
+    cardio?: number;
+    strength?: number;
+    activity?: number;
+    gutSupport?: number;
+  };
+  /** Human-readable signals that would improve accuracy — used by the
+   *  UI to nudge users toward connecting Apple Health, logging meals,
+   *  etc. Empty when every pillar is fully scored. Flat list; UI
+   *  should prefer `missingByPillar` for grouped display. */
+  missingSignals: string[];
+  /** Same data as `missingSignals`, grouped by pillar so the explainer
+   *  modal can render a "Recovery: …, Cardio: …" layout instead of a
+   *  flat dump. Pillars with no missing data are omitted. */
+  missingByPillar: Partial<Record<HealthPillarKey, string[]>>;
+  /** Per-pillar one-line summary so the score's "why" is visible. */
+  explanation: string[];
+  /** User-facing display name for the overall score. Centralized here
+   *  so the label can be tuned without grepping screens. */
+  scoreLabel: string;
+  /** Top 2 available pillars driving the score up — formatted strings
+   *  like "Training — 12/8 sessions on target". Empty when nothing
+   *  scored above the positive threshold. */
+  topPositiveFactors: string[];
+  /** Top 2 available pillars dragging the score down. Empty when no
+   *  pillar scored below the negative threshold. */
+  topNegativeFactors: string[];
+  /** Per-pillar source/signal metadata — what data backed each
+   *  available pillar. Used by the explainer modal so the UI can say
+   *  "Recovery: sleep + RHR" or "Nutrition: server score". */
+  pillarSources: {
+    /** "server" — used the pre-computed weekly score from /meals.
+     *  "clientFallback" — used the ratio-based pillar.
+     *  "unavailable" — pillar was excluded from the blend. */
+    nutritionScoreSource: 'server' | 'clientFallback' | 'unavailable';
+    recoverySignalsUsed: Array<'sleep' | 'rhr' | 'hrv' | 'load'>;
+    cardioSignalsUsed: Array<'vo2Max' | 'zone2Minutes' | 'cardioSessions' | 'rhrTrend' | 'hrRecovery'>;
+    strengthSignalsUsed: Array<'e1rmPRs' | 'volumePRs' | 'repPRs' | 'tonnageTrend'>;
+    gutSignalsUsed: Array<'fiber' | 'plantVariety' | 'hydration' | 'fermentedDays' | 'giFlag'>;
+    activitySignalsUsed: Array<'steps' | 'activeEnergy'>;
+  };
 }
+
+/** Pillar identifier — kept in sync with `subScores` keys. */
+export type HealthPillarKey =
+  | 'recovery'
+  | 'training'
+  | 'nutrition'
+  | 'cardio'
+  | 'strength'
+  | 'activity'
+  | 'gutSupport';
 
 // ─── Navigation types ─────────────────────────────────────────────────────────
 

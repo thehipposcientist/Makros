@@ -1,6 +1,6 @@
 # Full Codebase Review — Thallo
 
-Last updated: 2026-04-29
+Last updated: 2026-05-18
 
 ---
 
@@ -138,10 +138,10 @@ Regex parsing per exercise on every render, for every day in the 7-day schedule.
 User overrides to "Legs" on fatigued day → swap is skipped (correct) but sets are silently reduced (confusing). No explanation shown to user.
 **Fix:** Skip set reduction or show a fatigue warning when override is active.
 
-### M7. Hydration Bonus Always 0
-**Category:** Product | **Files:** `nutrition_score.py:221`
-`hydration_logged` defaults to `False` and no caller ever sets it from real data. The 10-point quality bonus is silently suppressed for all users.
-**Fix:** Either remove hydration from scoring until tracking exists, or tie it to water recommendation acknowledgment.
+### M7. Hydration Bonus Always 0 — Resolved
+**Category:** Product | **Files:** `nutrition_score.py`, `score_builder.py`, `routers/meals.py`
+This finding is stale. Current code logs hydration through `/meals/hydration` into `UserDayState.nutrition_plan._hydration_oz`, and `score_builder.py` reads that value to set `hydration_logged` for the nutrition score input. Remaining work is not basic logging; it is optional weather-aware hydration context and clearer UI explanation of why the target changed.
+**Fix:** No action for the original bug. Track weather-aware hydration separately in `docs/RECOMMENDATIONS.md` / `docs/architecture/nutrition-system.md`.
 
 ### M8. MealEditModal Reseeds on Prop Identity Change
 **Category:** State Bug | **Files:** `MealEditModal.tsx:259-270`

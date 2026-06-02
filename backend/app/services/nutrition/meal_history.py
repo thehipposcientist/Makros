@@ -8,35 +8,21 @@ import json
 
 from sqlmodel import Session, select, col
 
+from app.services.nutrition.added_sugar import resolve_added_sugar_g
+
 
 # ─── Processed-food keyword detection ────────────────────────────────────────
 
-_PROCESSED_KEYWORDS = frozenset([
-    "chips", "candy", "soda", "cookie", "cookies", "cake", "donut", "donuts",
-    "ice cream", "fries", "pizza", "burger", "hot dog", "nachos", "nuggets",
-    "cereal", "granola bar", "protein bar", "pop tart", "instant", "frozen",
-    "microwave", "packaged", "wrap", "tortilla chips", "crackers", "pretzels",
-    "muffin", "bagel", "croissant", "pastry", "brownie", "syrup", "jam",
-    "jelly", "margarine", "ranch", "mayo", "ketchup", "bbq sauce",
-])
-
-_WHOLE_KEYWORDS = frozenset([
-    "chicken", "salmon", "tuna", "beef", "turkey", "egg", "eggs", "rice",
-    "oats", "oatmeal", "quinoa", "sweet potato", "potato", "broccoli",
-    "spinach", "kale", "avocado", "banana", "apple", "berries", "blueberries",
-    "strawberries", "almonds", "walnuts", "olive oil", "greek yogurt",
-    "cottage cheese", "lentils", "beans", "tofu", "tempeh", "shrimp",
-])
-
-
-def _classify_food(name: str) -> str:
-    lower = name.lower()
-    for kw in _PROCESSED_KEYWORDS:
-        if kw in lower:
-            return "processed"
-    for kw in _WHOLE_KEYWORDS:
-        if kw in lower:
-            return "whole"
+def _processing_quality(name: str, db) -> str:
+    """Coarse food-quality bucket ("whole" / "processed" / "unknown") read
+    from the AI classification cache. Never substring-matches the name."""
+    from app.services.nutrition.ai_classify import lookup_classification
+    meta = lookup_classification(name, db)
+    bucket = meta.processing_bucket if meta is not None else "unknown"
+    if bucket == "minimally_processed":
+        return "whole"
+    if bucket in ("processed", "ultra_processed"):
+        return "processed"
     return "unknown"
 
 
@@ -110,6 +96,7 @@ def dedupe_generated_plan_meals(meals: list, items_by_meal: dict[int, list] | No
             passthrough_ids.add(meal_id)
             continue
         type_key = _meal_type_name(meal)
+        client_key = _normalize_meal_text(getattr(meal, "client_meal_key", None))
         if name_key in _GENERIC_MEAL_NAMES:
             if items_by_meal is None:
                 passthrough_ids.add(meal_id)
@@ -126,9 +113,9 @@ def dedupe_generated_plan_meals(meals: list, items_by_meal: dict[int, list] | No
                 }
                 for item in items_by_meal.get(meal_id, [])
             ])
-            key = (meal_date, type_key, name_key, signature)
+            key = (meal_date, client_key or type_key, name_key, signature)
         else:
-            key = (meal_date, type_key, name_key)
+            key = (meal_date, client_key or type_key, name_key)
         current = latest_generated_by_key.get(key)
         if current is None or _meal_recency_key(meal) >= _meal_recency_key(current):
             latest_generated_by_key[key] = meal
@@ -190,12 +177,13 @@ def dedupe_meals_for_aggregation(
 
 def _delete_meal_with_items(db: Session, meal: object) -> None:
     from app.models import MealItem
+    from sqlmodel import delete as _sm_delete
 
     meal_id = getattr(meal, "id", None)
     if meal_id is None:
         return
-    for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
-        db.delete(item)
+    db.exec(_sm_delete(MealItem).where(MealItem.meal_id == meal_id))
+    db.flush()
     db.delete(meal)
 
 
@@ -222,6 +210,197 @@ def _resolve_logged_meal_type_and_source(meal_type: str, source: str):
     return resolved_type, resolved_source
 
 
+def _client_meal_key(meal_type: str | None) -> str | None:
+    raw = (meal_type or "").strip().lower()
+    if not raw:
+        return None
+    return raw[:64]
+
+
+def _client_meal_index(client_key: str | None) -> int | None:
+    if not client_key or not client_key.startswith("meal_"):
+        return None
+    try:
+        return int(client_key.split("_", 1)[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _round_number(value: object) -> int:
+    try:
+        return round(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _plan_meal_calories(meal: dict) -> int:
+    if not isinstance(meal, dict):
+        return 0
+    if meal.get("calories") is not None:
+        return _round_number(meal.get("calories"))
+    return _round_number(sum(float((item or {}).get("calories") or 0) for item in meal.get("items") or []))
+
+
+def _logged_id_from_plan_meal(meal: dict) -> int | None:
+    if not isinstance(meal, dict):
+        return None
+    raw = meal.get("_loggedMealId") or meal.get("logged_meal_id")
+    try:
+        value = int(raw)
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _strip_logged_fields_from_plan_meal(meal: dict) -> tuple[dict, bool]:
+    if not isinstance(meal, dict):
+        return meal, False
+    cleaned = dict(meal)
+    changed = False
+    for key in (
+        "_loggedMealId",
+        "logged_meal_id",
+        "_consumedAt",
+        "consumed_at",
+        "source_type",
+        "source_routine_id",
+        "routine_occurrence_key",
+    ):
+        if key in cleaned:
+            cleaned.pop(key, None)
+            changed = True
+    return cleaned, changed
+
+
+def _shift_meal_checks_after_plan_delete(checks: dict, remove_idx: int, removed_key: str | None = None) -> dict:
+    shifted: dict = {}
+    for key, value in (checks or {}).items():
+        if removed_key and key == removed_key:
+            continue
+        if not isinstance(key, str) or not key.startswith("meal_"):
+            shifted[key] = value
+            continue
+        try:
+            idx = int(key.split("_", 1)[1])
+        except (TypeError, ValueError, IndexError):
+            shifted[key] = value
+            continue
+        if idx == remove_idx:
+            continue
+        shifted[f"meal_{idx - 1}" if idx > remove_idx else key] = value
+    return shifted
+
+
+def sync_deleted_meal_day_state(
+    db: Session,
+    user_id: int,
+    meal_date: date,
+    *,
+    meal_id: int | None = None,
+    client_meal_key: str | None = None,
+    meal_name: str | None = None,
+    meal_calories: float | int | None = None,
+    remove_from_plan: bool,
+) -> bool:
+    """Keep UserDayState from resurrecting a deleted logged meal.
+
+    Meal rows are the nutrition-log source of truth, but the mobile home
+    screen also rehydrates today's visible list from UserDayState. A hard
+    delete must clear that day-state copy too or cold start can replay it.
+    """
+    from app.models import UserDayState
+
+    state = db.exec(
+        select(UserDayState).where(
+            UserDayState.user_id == user_id,
+            UserDayState.day_key == meal_date,
+        )
+    ).first()
+    if not state:
+        return False
+
+    changed = False
+    plan = dict(state.nutrition_plan or {}) if isinstance(state.nutrition_plan, dict) else {}
+    meals = list(plan.get("meals") or []) if isinstance(plan.get("meals"), list) else []
+    remove_idx: int | None = None
+
+    if meals:
+        if meal_id:
+            for idx, candidate in enumerate(meals):
+                if _logged_id_from_plan_meal(candidate) == meal_id:
+                    remove_idx = idx
+                    break
+
+        normalized_client_key = _normalize_meal_text(client_meal_key)
+        if remove_idx is None and normalized_client_key:
+            for idx, candidate in enumerate(meals):
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_key = _normalize_meal_text(
+                    candidate.get("_clientMealKey") or candidate.get("client_meal_key")
+                )
+                if candidate_key and candidate_key == normalized_client_key:
+                    remove_idx = idx
+                    break
+
+        client_idx = _client_meal_index(client_meal_key)
+        if remove_idx is None and client_idx is not None and 0 <= client_idx < len(meals):
+            remove_idx = client_idx
+
+        if remove_idx is None and meal_name:
+            normalized_name = _normalize_meal_text(meal_name)
+            rounded_calories = _round_number(meal_calories)
+            matches = [
+                idx for idx, candidate in enumerate(meals)
+                if isinstance(candidate, dict)
+                and _normalize_meal_text(str(candidate.get("meal") or candidate.get("name") or "")) == normalized_name
+                and abs(_plan_meal_calories(candidate) - rounded_calories) <= 10
+            ]
+            if len(matches) == 1:
+                remove_idx = matches[0]
+
+    checks = dict(state.meal_checks or {}) if isinstance(state.meal_checks, dict) else {}
+    if remove_from_plan and remove_idx is not None:
+        plan["meals"] = [meal for idx, meal in enumerate(meals) if idx != remove_idx]
+        state.nutrition_plan = plan
+        state.meal_checks = _shift_meal_checks_after_plan_delete(checks, remove_idx, client_meal_key)
+        changed = True
+    else:
+        if remove_idx is not None and 0 <= remove_idx < len(meals):
+            stripped, stripped_changed = _strip_logged_fields_from_plan_meal(meals[remove_idx])
+            if stripped_changed:
+                meals[remove_idx] = stripped
+                plan["meals"] = meals
+                state.nutrition_plan = plan
+                changed = True
+        check_key = client_meal_key if client_meal_key else None
+        if check_key and checks.get(check_key) is not False:
+            checks[check_key] = False
+            state.meal_checks = checks
+            changed = True
+        elif remove_idx is not None:
+            inferred_key = f"meal_{remove_idx}"
+            if checks.get(inferred_key) is not False:
+                checks[inferred_key] = False
+                state.meal_checks = checks
+                changed = True
+
+    if changed:
+        db.add(state)
+    return changed
+
+
+def _can_use_legacy_slot_fallback(client_key: str | None) -> bool:
+    """Only the first four legacy slots map one-to-one to MealType.
+
+    meal_4+ all collapse to SNACK in the enum, so using a null
+    client_meal_key + MealType fallback for those slots can overwrite a
+    distinct extra meal.
+    """
+    idx = _client_meal_index(client_key)
+    return idx is None or idx <= 3
+
+
 # ─── Log a meal from plan check-off ──────────────────────────────────────────
 
 def log_meal_from_plan(
@@ -231,6 +410,8 @@ def log_meal_from_plan(
     meal_data: dict,
     source: str = "plan_check",
     consumed_at: datetime | None = None,
+    client_meal_key: str | None = None,
+    idempotency_key: str | None = None,
     *,
     db: Session,
 ) -> dict:
@@ -240,27 +421,125 @@ def log_meal_from_plan(
       { meal: str, items: [{name, quantity, unit, calories, protein, carbs, fat}], ... }
     """
     from app.models import Meal, MealItem
+    from app.enums import MealSource
 
     # Resolve meal_type to enum — the client sends "meal_0", "breakfast", etc.
     resolved_type, resolved_source = _resolve_logged_meal_type_and_source(meal_type, source)
+    client_key = _client_meal_key(
+        client_meal_key
+        or meal_data.get("_clientMealKey")
+        or meal_data.get("client_meal_key")
+        or meal_type
+    )
     incoming_name = _normalize_meal_text(meal_data.get("meal", "Checked meal"))
     incoming_signature = _normalized_item_signature(meal_data.get("items") or [])
+    saved_meal_id = meal_data.get("_savedMealId") or meal_data.get("saved_meal_id")
+    try:
+        saved_meal_id = int(saved_meal_id) if saved_meal_id not in (None, "") else None
+    except (TypeError, ValueError):
+        saved_meal_id = None
+    if saved_meal_id is not None:
+        from app.models import SavedMeal
+
+        saved = db.get(SavedMeal, saved_meal_id)
+        if not saved or saved.user_id != user_id:
+            saved_meal_id = None
+
+    # Idempotency + provenance are written ON the row before its first flush
+    # (rule A) — not stamped afterward, which left a window for a racing retry
+    # to insert a second row. source_type stays orthogonal to MealSource.
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
+    idem_key = (idempotency_key or "").strip() or None
+    resolved_source_type = (
+        "favorite" if saved_meal_id is not None
+        else ("manual" if source == "manual_add" else "plan")
+    )
+
+    def _idem_winner() -> dict | None:
+        if not idem_key:
+            return None
+        won = db.exec(
+            select(Meal)
+            .where(Meal.user_id == user_id)
+            .where(Meal.idempotency_key == idem_key)
+        ).first()
+        if won is None:
+            return None
+        return {
+            "id": won.id,
+            "name": won.name,
+            "meal_date": str(won.meal_date),
+            "client_meal_key": won.client_meal_key,
+            "consumed_at": won.consumed_at.isoformat() if won.consumed_at else None,
+        }
+
+    # Fast path: a retried check-off with the same key returns the winner.
+    _early_winner = _idem_winner()
+    if _early_winner is not None:
+        return _early_winner
+
+    replace_target = None
+    logged_meal_id = meal_data.get("_loggedMealId") or meal_data.get("logged_meal_id")
+    try:
+        logged_meal_id = int(logged_meal_id) if logged_meal_id not in (None, "") else None
+    except (TypeError, ValueError):
+        logged_meal_id = None
+    if logged_meal_id:
+        existing = db.get(Meal, logged_meal_id)
+        if existing and existing.user_id == user_id and existing.meal_date == meal_date:
+            replace_target = existing
 
     # Idempotency for flaky networks / repeated meal-check taps:
     # if the exact same payload has already been logged for this
-    # user/date/type/source, return the existing row instead of adding
-    # another duplicate meal entry.
-    existing_query = (
+    # user/date/slot/source, return the existing row instead of adding
+    # another duplicate meal entry. The slot key matters for meal_4+:
+    # those all map to MealType.SNACK, but they are distinct plan rows.
+    base_existing_query = (
         select(Meal)
         .where(Meal.user_id == user_id)
         .where(Meal.meal_date == meal_date)
         .where(Meal.source == resolved_source)
-        .order_by(col(Meal.created_at).desc())
-        .limit(20)
     )
-    if source != "plan_check":
-        existing_query = existing_query.where(Meal.meal_type == resolved_type)
-    existing_meals = db.exec(existing_query).all()
+    if source == "plan_check" and client_key:
+        # Match by the meal's stable per-day slot key ACROSS sources, not
+        # just the resolved source. An edit always re-logs as `plan_check`
+        # (source GENERATED), but the original row may have been logged as
+        # `manual_add` (source LOGGED) — e.g. an added snack / final meal.
+        # Filtering by source here misses that original and appends a
+        # DUPLICATE: the "editing the time duplicated my meal" bug. The
+        # slot key (meal_4, dinner, …) is the meal's identity for the day,
+        # so we replace the existing row in place regardless of its source.
+        existing_query = (
+            select(Meal)
+            .where(Meal.user_id == user_id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.client_meal_key == client_key)
+        )
+    elif source != "plan_check":
+        existing_query = base_existing_query.where(Meal.meal_type == resolved_type)
+    else:
+        existing_query = base_existing_query
+    existing_meals = db.exec(
+        existing_query.order_by(col(Meal.created_at).desc()).limit(20)
+    ).all()
+
+    # Legacy rows written before client_meal_key existed can still be
+    # replaced safely for meal_0..meal_3 because those slots map one-to-one
+    # to breakfast/lunch/dinner/snack. Never use this fallback for meal_4+.
+    if (
+        source == "plan_check"
+        and client_key
+        and not existing_meals
+        and _can_use_legacy_slot_fallback(client_key)
+    ):
+        existing_meals = db.exec(
+            base_existing_query
+            .where(Meal.client_meal_key == None)  # noqa: E711
+            .where(Meal.meal_type == resolved_type)
+            .order_by(col(Meal.created_at).desc())
+            .limit(20)
+        ).all()
+
     if source == "plan_check" and existing_meals:
         existing_items = db.exec(
             select(MealItem).where(col(MealItem.meal_id).in_([m.id for m in existing_meals]))
@@ -295,10 +574,18 @@ def log_meal_from_plan(
                         deleted_duplicates = True
                 if consumed_at is not None:
                     existing.consumed_at = consumed_at
+                if saved_meal_id is not None:
+                    existing.saved_meal_id = saved_meal_id
                 if source == "plan_check":
                     existing.meal_type = resolved_type
-                    existing.source = resolved_source
-                if consumed_at is not None or deleted_duplicates or source == "plan_check":
+                    # A plan check-off that merges into a row (same slot + name
+                    # + items) is the same meal being re-saved — but it must
+                    # never reclassify a manually logged meal as a generated
+                    # plan meal. Preserve a LOGGED row's identity.
+                    if existing.source != MealSource.LOGGED:
+                        existing.source = resolved_source
+                    existing.client_meal_key = client_key or existing.client_meal_key
+                if consumed_at is not None or deleted_duplicates or source == "plan_check" or saved_meal_id is not None:
                     db.add(existing)
                     db.commit()
                     db.refresh(existing)
@@ -306,11 +593,11 @@ def log_meal_from_plan(
                     "id": existing.id,
                     "name": existing.name,
                     "meal_date": str(existing.meal_date),
+                    "client_meal_key": existing.client_meal_key,
                     "consumed_at": existing.consumed_at.isoformat() if existing.consumed_at else None,
                 }
 
-    replace_target = None
-    if source == "plan_check" and existing_meals:
+    if replace_target is None and source == "plan_check" and existing_meals:
         same_name = [m for m in existing_meals if _normalize_meal_text(m.name) == incoming_name]
         if same_name:
             replace_target = max(same_name, key=_meal_recency_key)
@@ -322,30 +609,22 @@ def log_meal_from_plan(
             if len(same_type) == 1:
                 replace_target = same_type[0]
 
-    if replace_target is None and source == "plan_check":
-        cross_source_meals = db.exec(
-            select(Meal)
-            .where(Meal.user_id == user_id)
-            .where(Meal.meal_date == meal_date)
-            .where(Meal.meal_type == resolved_type)
-            .order_by(col(Meal.created_at).desc())
-            .limit(10)
-        ).all()
-        if cross_source_meals:
-            same_name = [m for m in cross_source_meals if _normalize_meal_text(m.name) == incoming_name]
-            if len(same_name) == 1:
-                replace_target = same_name[0]
-            elif len(cross_source_meals) == 1:
-                replace_target = cross_source_meals[0]
-
     if replace_target is not None:
         old_items = db.exec(select(MealItem).where(MealItem.meal_id == replace_target.id)).all()
         for item in old_items:
             db.delete(item)
         replace_target.name = meal_data.get("meal", "Checked meal")
         replace_target.meal_type = resolved_type
-        replace_target.source = resolved_source
+        # Editing/re-saving must not downgrade a manually logged meal into a
+        # generated plan meal — keep the user's manual entry as LOGGED.
+        if not (resolved_source == MealSource.GENERATED and replace_target.source == MealSource.LOGGED):
+            replace_target.source = resolved_source
         replace_target.consumed_at = consumed_at or replace_target.consumed_at or datetime.now(timezone.utc)
+        replace_target.client_meal_key = client_key or replace_target.client_meal_key
+        if saved_meal_id is not None:
+            replace_target.saved_meal_id = saved_meal_id
+        if not replace_target.source_type:
+            replace_target.source_type = resolved_source_type
         db.add(replace_target)
         db.flush()
         meal = replace_target
@@ -358,9 +637,22 @@ def log_meal_from_plan(
             source=resolved_source,
             notes=None,
             consumed_at=consumed_at or datetime.now(timezone.utc),
+            saved_meal_id=saved_meal_id,
+            client_meal_key=client_key,
+            source_type=resolved_source_type,
+            idempotency_key=idem_key,
         )
         db.add(meal)
-        db.flush()  # get meal.id
+        # The (user_id, idempotency_key) unique index fires on this INSERT at
+        # flush time — guard it so a racing retry returns the winner (rule A).
+        try:
+            db.flush()  # get meal.id
+        except _IntegrityError:
+            db.rollback()
+            winner = _idem_winner()
+            if winner is not None:
+                return winner
+            raise
 
     # Build a name→food_id index so items can be linked to the food
     # library. Without this link, downstream code (gut_health metrics,
@@ -487,8 +779,8 @@ def log_meal_from_plan(
         return max(1.0, qty * household.get(unit, 100.0))
 
     def _category_for_food(name: str) -> FoodCategory:
-        from app.services.nutrition.food_classifier import classify_food
-        cls = classify_food(name)
+        from app.services.nutrition.ai_classify import get_or_create_metadata
+        cls = get_or_create_metadata(name, db=db, allow_ai=True)
         lower = name.lower()
         if getattr(cls, "fruit_flag", False):
             return FoodCategory.FRUITS
@@ -548,6 +840,8 @@ def log_meal_from_plan(
             nutrition = FoodNutrition(food_id=food.id)
 
         extras = dict(nutrition.extra_nutrients or {})
+        sugar_value: float | None = None
+        added_sugar_value: float | None = None
         for k, raw_v in micros.items():
             try:
                 v = float(raw_v or 0)
@@ -557,12 +851,19 @@ def log_meal_from_plan(
                 nutrition.fiber = v
             elif k == "sugar":
                 nutrition.sugar = v
+                sugar_value = v
             elif k in ("sodium", "sodium_mg"):
                 nutrition.sodium_mg = v
             elif k in ("added_sugar", "added_sugar_g"):
-                nutrition.added_sugar_g = v
+                added_sugar_value = v
             else:
                 extras[k] = v
+        nutrition.added_sugar_g = resolve_added_sugar_g(
+            name,
+            reported_added_sugar_g=added_sugar_value,
+            sugar_g=sugar_value,
+            serving_grams=grams,
+        )
         nutrition.reference_unit = reference_unit
         nutrition.reference_grams = grams
         nutrition.calories = float(item.get("calories", 0) or 0)
@@ -590,8 +891,20 @@ def log_meal_from_plan(
 
     items = meal_data.get("items") or []
     recent_food_ids: set[int] = set()
+
+    def _first_float(*values) -> float | None:
+        for value in values:
+            if value in (None, ""):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
     for item in items:
         name = item.get("name", "Unknown")
+        micros = _item_micros(item)
         food_id, default_grams = match_cache.get(name, (None, None))
         if food_id is None:
             food_id, default_grams = _upsert_logged_food_from_item(item)
@@ -627,6 +940,13 @@ def log_meal_from_plan(
                         serving_grams = (item_cal / per_ref_cal) * float(nut.reference_grams)
             if serving_grams is None and default_grams:
                 serving_grams = float(default_grams) * qty
+        sugar_g = _first_float(item.get("sugar_g"), item.get("sugar"), micros.get("sugar_g"), micros.get("sugar"))
+        added_sugar_g = resolve_added_sugar_g(
+            name,
+            reported_added_sugar_g=_first_float(item.get("added_sugar_g"), item.get("added_sugar"), micros.get("added_sugar_g"), micros.get("added_sugar")),
+            sugar_g=sugar_g,
+            serving_grams=serving_grams,
+        )
         db.add(MealItem(
             meal_id=meal.id,
             food_name=name,
@@ -638,6 +958,22 @@ def log_meal_from_plan(
             protein_g=float(item.get("protein", 0)),
             carbs_g=float(item.get("carbs", 0)),
             fat_g=float(item.get("fat", 0)),
+            saturated_fat_g=_first_float(item.get("saturated_fat_g"), micros.get("saturated_fat_g"), micros.get("saturated_fat")),
+            cholesterol_mg=_first_float(item.get("cholesterol_mg"), micros.get("cholesterol_mg"), micros.get("cholesterol")),
+            sodium_mg=_first_float(item.get("sodium_mg"), micros.get("sodium_mg"), micros.get("sodium")),
+            fiber_g=_first_float(item.get("fiber_g"), item.get("fiber"), micros.get("fiber_g"), micros.get("fiber")),
+            sugar_g=sugar_g,
+            added_sugar_g=added_sugar_g,
+            caffeine_mg=_first_float(item.get("caffeine_mg"), micros.get("caffeine_mg"), micros.get("caffeine")),
+            potassium_mg=_first_float(item.get("potassium_mg"), micros.get("potassium_mg"), micros.get("potassium")),
+            calcium_mg=_first_float(item.get("calcium_mg"), micros.get("calcium_mg"), micros.get("calcium")),
+            magnesium_mg=_first_float(item.get("magnesium_mg"), micros.get("magnesium_mg"), micros.get("magnesium")),
+            iron_mg=_first_float(item.get("iron_mg"), micros.get("iron_mg"), micros.get("iron")),
+            vitamin_d_mcg=_first_float(item.get("vitamin_d_mcg"), micros.get("vitamin_d_mcg"), micros.get("vitamin_d")),
+            vitamin_b12_mcg=_first_float(item.get("vitamin_b12_mcg"), micros.get("vitamin_b12_mcg"), micros.get("vitamin_b12")),
+            folate_mcg=_first_float(item.get("folate_mcg"), micros.get("folate_mcg"), micros.get("folate")),
+            zinc_mg=_first_float(item.get("zinc_mg"), micros.get("zinc_mg"), micros.get("zinc")),
+            omega_3_g=_first_float(item.get("omega_3_g"), micros.get("omega_3_g"), micros.get("omega_3")),
         ))
 
     for food_id in recent_food_ids:
@@ -656,12 +992,20 @@ def log_meal_from_plan(
             fat_g=float(meal_data.get("fat", 0)),
         ))
 
-    db.commit()
+    try:
+        db.commit()
+    except _IntegrityError:
+        db.rollback()
+        winner = _idem_winner()
+        if winner is not None:
+            return winner
+        raise
     db.refresh(meal)
     return {
         "id": meal.id,
         "name": meal.name,
         "meal_date": str(meal.meal_date),
+        "client_meal_key": meal.client_meal_key,
         "consumed_at": meal.consumed_at.isoformat() if meal.consumed_at else None,
     }
 
@@ -672,6 +1016,7 @@ def unlog_meal_from_plan(
     meal_type: str,
     meal_data: dict,
     source: str = "plan_check",
+    client_meal_key: str | None = None,
     *,
     db: Session,
 ) -> dict:
@@ -685,17 +1030,80 @@ def unlog_meal_from_plan(
     from app.models import Meal, MealItem
 
     resolved_type, resolved_source = _resolve_logged_meal_type_and_source(meal_type, source)
+    client_key = _client_meal_key(
+        client_meal_key
+        or meal_data.get("_clientMealKey")
+        or meal_data.get("client_meal_key")
+        or meal_type
+    )
     incoming_name = _normalize_meal_text(meal_data.get("meal", "Checked meal"))
     incoming_signature = _normalized_item_signature(meal_data.get("items") or [])
 
-    candidates = db.exec(
-        select(Meal)
-        .where(Meal.user_id == user_id)
-        .where(Meal.meal_date == meal_date)
-        .where(Meal.source == resolved_source)
-        .order_by(col(Meal.created_at).desc())
-    ).all()
+    logged_meal_id = meal_data.get("_loggedMealId") or meal_data.get("logged_meal_id")
+    try:
+        logged_meal_id = int(logged_meal_id) if logged_meal_id not in (None, "") else None
+    except (TypeError, ValueError):
+        logged_meal_id = None
+
+    candidates: list[Meal]
+    if logged_meal_id:
+        existing = db.get(Meal, logged_meal_id)
+        candidates = [existing] if existing and existing.user_id == user_id and existing.meal_date == meal_date else []
+    else:
+        base_query = (
+            select(Meal)
+            .where(Meal.user_id == user_id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.source == resolved_source)
+        )
+        query = base_query
+        if source == "plan_check" and client_key:
+            query = query.where(Meal.client_meal_key == client_key)
+        elif source != "plan_check":
+            query = query.where(Meal.meal_type == resolved_type)
+        candidates = db.exec(query.order_by(col(Meal.created_at).desc())).all()
+        if (
+            source == "plan_check"
+            and client_key
+            and not candidates
+            and _can_use_legacy_slot_fallback(client_key)
+        ):
+            candidates = db.exec(
+                base_query
+                .where(Meal.client_meal_key == None)  # noqa: E711
+                .where(Meal.meal_type == resolved_type)
+                .order_by(col(Meal.created_at).desc())
+            ).all()
+
     if not candidates:
+        changed = sync_deleted_meal_day_state(
+            db,
+            user_id,
+            meal_date,
+            meal_id=logged_meal_id,
+            client_meal_key=client_key,
+            meal_name=meal_data.get("meal", "Checked meal"),
+            meal_calories=meal_data.get("calories", 0),
+            remove_from_plan=False,
+        )
+        if changed:
+            db.commit()
+        return {"deleted": 0, "meal_date": str(meal_date)}
+
+    candidates = [m for m in candidates if m is not None]
+    if not candidates:
+        changed = sync_deleted_meal_day_state(
+            db,
+            user_id,
+            meal_date,
+            meal_id=logged_meal_id,
+            client_meal_key=client_key,
+            meal_name=meal_data.get("meal", "Checked meal"),
+            meal_calories=meal_data.get("calories", 0),
+            remove_from_plan=False,
+        )
+        if changed:
+            db.commit()
         return {"deleted": 0, "meal_date": str(meal_date)}
 
     items = db.exec(
@@ -729,7 +1137,7 @@ def unlog_meal_from_plan(
     ] if incoming_signature else []
 
     if exact_matches:
-        matches = exact_matches
+        matches = [max(exact_matches, key=_meal_recency_key)]
     else:
         is_generic = incoming_name in _GENERIC_MEAL_NAMES
         name_type_matches = [
@@ -739,14 +1147,24 @@ def unlog_meal_from_plan(
             and m.meal_type == resolved_type
         ]
         if name_type_matches:
-            matches = name_type_matches
+            matches = [max(name_type_matches, key=_meal_recency_key)]
         else:
             same_type = [m for m in candidates if m.meal_type == resolved_type]
             matches = same_type if len(same_type) == 1 else []
 
     for meal in matches:
         _delete_meal_with_items(db, meal)
-    if matches:
+    day_state_changed = sync_deleted_meal_day_state(
+        db,
+        user_id,
+        meal_date,
+        meal_id=matches[0].id if matches else logged_meal_id,
+        client_meal_key=client_key,
+        meal_name=meal_data.get("meal", "Checked meal"),
+        meal_calories=meal_data.get("calories", 0),
+        remove_from_plan=False,
+    )
+    if matches or day_state_changed:
         db.commit()
 
     return {"deleted": len(matches), "meal_date": str(meal_date)}
@@ -764,7 +1182,7 @@ def get_meal_history(
 ) -> list[dict]:
     """Get recent meal history with items, ordered by date desc. Bounded by
     `days` lookback window and `limit` row count."""
-    from app.models import Meal, MealItem
+    from app.models import FoodNutrition, Meal, MealItem
 
     today_d = end_date or date.today()
     cutoff = today_d - timedelta(days=days - 1)
@@ -783,6 +1201,159 @@ def get_meal_history(
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
     meals = dedupe_meals_for_aggregation(meals, items_by_meal)[:limit]
+    food_ids = [item.food_id for item in all_items if item.food_id is not None]
+    nutrition_by_food: dict[int, FoodNutrition] = {}
+    if food_ids:
+        for nutrition in db.exec(select(FoodNutrition).where(col(FoodNutrition.food_id).in_(food_ids))).all():
+            nutrition_by_food[nutrition.food_id] = nutrition
+
+    from app.services.nutrition.ai_classify import lookup_classification
+
+    classification_cache: dict[str, dict] = {}
+
+    def _classification_for(food_name: str) -> dict:
+        key = _normalize_meal_text(food_name)
+        if not key:
+            return {}
+        if key in classification_cache:
+            return classification_cache[key]
+        meta = lookup_classification(food_name, db)
+        if meta is None:
+            payload = {}
+        else:
+            bucket = getattr(meta, "processing_bucket", None) or "unknown"
+            payload = {
+                "processing_bucket": bucket,
+                "food_quality": "whole" if bucket == "minimally_processed" else (
+                    "processed" if bucket in ("processed", "ultra_processed") else "unknown"
+                ),
+                "protein_source": getattr(meta, "protein_source", None) or "unknown",
+                "fermented": bool(getattr(meta, "fermented_flag", False)),
+                "probiotic": bool(getattr(meta, "probiotic_flag", False)),
+                "omega3_rich": bool(getattr(meta, "omega3_flag", False)),
+                "plant_count": int(getattr(meta, "plant_count_value", 0) or 0),
+                "processed_meat": bool(getattr(meta, "processed_meat_flag", False)),
+            }
+        classification_cache[key] = payload
+        return payload
+
+    item_micro_sources: tuple[tuple[str, str], ...] = (
+        ("saturated_fat_g", "saturated_fat"),
+        ("cholesterol_mg", "cholesterol"),
+        ("sodium_mg", "sodium"),
+        ("fiber_g", "fiber"),
+        ("sugar_g", "sugar"),
+        ("added_sugar_g", "added_sugar"),
+        ("caffeine_mg", "caffeine"),
+        ("potassium_mg", "potassium"),
+        ("calcium_mg", "calcium"),
+        ("magnesium_mg", "magnesium"),
+        ("iron_mg", "iron"),
+        ("vitamin_d_mcg", "vitamin_d"),
+        ("vitamin_b12_mcg", "vitamin_b12"),
+        ("folate_mcg", "folate"),
+        ("zinc_mg", "zinc"),
+        ("omega_3_g", "omega_3"),
+    )
+
+    def _snapshot_value(item: MealItem, attr: str) -> float | None:
+        try:
+            value = getattr(item, attr, None)
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _nutrition_scale(item: MealItem, nutrition: FoodNutrition) -> float:
+        grams = float(item.serving_grams or 0)
+        if (
+            grams <= 0
+            and float(nutrition.calories or 0) > 0
+            and float(nutrition.reference_grams or 0) > 0
+            and float(item.calories or 0) > 0
+        ):
+            grams = (float(item.calories) / float(nutrition.calories)) * float(nutrition.reference_grams)
+        reference_grams = float(nutrition.reference_grams or 0)
+        return grams / reference_grams if grams > 0 and reference_grams > 0 else 0.0
+
+    def _item_micronutrients(item: MealItem) -> dict[str, float]:
+        micros: dict[str, float] = {}
+        for attr, canonical in item_micro_sources:
+            value = _snapshot_value(item, attr)
+            if value is not None:
+                if attr == "added_sugar_g" and value <= 0:
+                    continue
+                micros[canonical] = value
+        nutrition = nutrition_by_food.get(item.food_id) if item.food_id is not None else None
+        if nutrition is not None:
+            scale = _nutrition_scale(item, nutrition)
+            if scale > 0:
+                column_sources: tuple[tuple[str, str], ...] = (
+                    ("fiber", "fiber"),
+                    ("sugar", "sugar"),
+                    ("added_sugar_g", "added_sugar"),
+                    ("sodium_mg", "sodium"),
+                )
+                for attr, canonical in column_sources:
+                    if canonical in micros:
+                        continue
+                    value = getattr(nutrition, attr, None)
+                    if value is not None:
+                        micros[canonical] = float(value) * scale
+                for canonical, raw_value in (nutrition.extra_nutrients or {}).items():
+                    if canonical in micros:
+                        continue
+                    try:
+                        micros[canonical] = float(raw_value) * scale
+                    except (TypeError, ValueError):
+                        continue
+        if ("added_sugar" not in micros or micros.get("added_sugar", 0) <= 0):
+            estimated_added = resolve_added_sugar_g(
+                item.food_name,
+                reported_added_sugar_g=_snapshot_value(item, "added_sugar_g"),
+                sugar_g=micros.get("sugar") if "sugar" in micros else _snapshot_value(item, "sugar_g"),
+                serving_grams=_snapshot_value(item, "serving_grams"),
+            )
+            if estimated_added is not None and estimated_added > 0:
+                micros["added_sugar"] = estimated_added
+        return micros
+
+    def _item_payload(it: MealItem) -> dict:
+        micros = _item_micronutrients(it)
+        added_sugar = _snapshot_value(it, "added_sugar_g")
+        if added_sugar is None or added_sugar <= 0:
+            added_sugar = micros.get("added_sugar") or micros.get("added_sugar_g") or added_sugar
+        return {
+            "food_name": it.food_name,
+            "food_id": it.food_id,
+            "serving_id": it.serving_id,
+            "serving_grams": it.serving_grams,
+            "quantity": it.quantity,
+            "unit": it.unit,
+            "calories": it.calories,
+            "protein_g": it.protein_g,
+            "carbs_g": it.carbs_g,
+            "fat_g": it.fat_g,
+            "saturated_fat_g": it.saturated_fat_g,
+            "cholesterol_mg": it.cholesterol_mg,
+            "sodium_mg": it.sodium_mg,
+            "fiber_g": it.fiber_g,
+            "sugar_g": it.sugar_g,
+            "added_sugar_g": added_sugar,
+            "caffeine_mg": it.caffeine_mg,
+            "potassium_mg": it.potassium_mg,
+            "calcium_mg": it.calcium_mg,
+            "magnesium_mg": it.magnesium_mg,
+            "iron_mg": it.iron_mg,
+            "vitamin_d_mcg": it.vitamin_d_mcg,
+            "vitamin_b12_mcg": it.vitamin_b12_mcg,
+            "folate_mcg": it.folate_mcg,
+            "zinc_mg": it.zinc_mg,
+            "omega_3_g": it.omega_3_g,
+            "micronutrients": micros or None,
+            **_classification_for(it.food_name),
+        }
 
     result = []
     for m in meals:
@@ -793,28 +1364,17 @@ def get_meal_history(
             "meal_type": m.meal_type.value if m.meal_type else None,
             "name": m.name,
             "source": m.source.value if m.source else None,
+            "saved_meal_id": m.saved_meal_id,
+            "client_meal_key": m.client_meal_key,
             "consumed_at": m.consumed_at.isoformat() if m.consumed_at else None,
             "created_at": m.created_at.isoformat() if m.created_at else None,
-            "items": [
-                {
-                    "food_name": it.food_name,
-                    "food_id": it.food_id,
-                    "serving_id": it.serving_id,
-                    "serving_grams": it.serving_grams,
-                    "quantity": it.quantity,
-                    "unit": it.unit,
-                    "calories": it.calories,
-                    "protein_g": it.protein_g,
-                    "carbs_g": it.carbs_g,
-                    "fat_g": it.fat_g,
-                }
-                for it in items
-            ],
+            "items": [_item_payload(it) for it in items],
             "totals": {
                 "calories": round(sum(it.calories for it in items), 1),
                 "protein_g": round(sum(it.protein_g for it in items), 1),
                 "carbs_g": round(sum(it.carbs_g for it in items), 1),
                 "fat_g": round(sum(it.fat_g for it in items), 1),
+                "fiber_g": round(sum(float(it.fiber_g or 0) for it in items), 1),
             },
         })
     return result
@@ -824,7 +1384,7 @@ def get_meal_history(
 
 def get_rolling_averages(user_id: int, window: int = 7, *, db: Session, end_date: date | None = None) -> dict:
     """Compute rolling nutrition averages: calories, protein, carbs, fat,
-    meals/day. Aggregates directly from meals + meal_items tables.
+    and logged meal frequency. Aggregates directly from meals + meal_items tables.
 
     Returns BOTH a window-divided "true daily average" and a
     days-with-data-divided "average when logged":
@@ -1112,12 +1672,13 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     except Exception:
         pass  # Non-critical — insights degrade gracefully
 
-    # Food quality distribution
+    # Food quality distribution — read from the AI classification cache.
     all_foods = []
     for data in daily.values():
         all_foods.extend(data["food_names"])
-    whole_count = sum(1 for f in all_foods if _classify_food(f) == "whole")
-    processed_count = sum(1 for f in all_foods if _classify_food(f) == "processed")
+    _quality = [_processing_quality(f, db) for f in all_foods]
+    whole_count = sum(1 for q in _quality if q == "whole")
+    processed_count = sum(1 for q in _quality if q == "processed")
     unknown_count = len(all_foods) - whole_count - processed_count
 
     # Average calories — same window-divided treatment as protein above.
@@ -1234,6 +1795,8 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
 
 def get_meal_insights(user_id: int, *, db: Session) -> list[str]:
     """Generate 3-5 short coaching strings from meal patterns."""
+    from app.models import DailyLifestyleLog, DailyNutritionMetrics
+
     patterns = get_nutrition_patterns(user_id, days=14, db=db)
     averages = get_rolling_averages(user_id, window=7, db=db)
     insights: list[str] = []
@@ -1303,7 +1866,55 @@ def get_meal_insights(user_id: int, *, db: Session) -> list[str]:
             f"You're on a {trends['current_logging_streak_days']}-day meal logging streak."
         )
 
-    # 6. Food quality
+    # 6. Optional lifestyle context
+    recent_lifestyle = db.exec(
+        select(DailyLifestyleLog)
+        .where(DailyLifestyleLog.user_id == user_id)
+        .where(DailyLifestyleLog.local_date >= date.today() - timedelta(days=7))
+        .order_by(DailyLifestyleLog.local_date.desc())
+        .limit(7)
+    ).all()
+    lifestyle = recent_lifestyle[0] if recent_lifestyle else None
+    if lifestyle and lifestyle.appetite == "high":
+        insights.append(
+            "High appetite logged recently may be contributing to adherence pressure; protein- and fiber-forward meals can support satiety."
+        )
+    if lifestyle and (
+        lifestyle.bowel_movement_count == 0
+        or lifestyle.bowel_consistency in {"loose", "hard", "mixed"}
+    ):
+        metrics = db.exec(
+            select(DailyNutritionMetrics)
+            .where(DailyNutritionMetrics.user_id == user_id)
+            .where(DailyNutritionMetrics.metric_date == lifestyle.local_date)
+        ).first()
+        context: list[str] = []
+        if metrics and metrics.fiber_total_g < 20:
+            context.append("lower fiber")
+        processing = metrics.processing_counts if metrics and isinstance(metrics.processing_counts, dict) else {}
+        processed = int(processing.get("processed", 0) or 0) + int(processing.get("ultra_processed", 0) or 0)
+        whole = int(processing.get("whole", 0) or 0) + int(processing.get("minimally_processed", 0) or 0)
+        if processed > whole and processed > 0:
+            context.append("more processed foods")
+        if (
+            lifestyle.alcohol_level not in {None, "", "none"}
+            or (lifestyle.alcohol_drinks or 0) > 0
+            or (metrics and metrics.alcohol_servings > 0)
+        ):
+            context.append("alcohol")
+        detail = ", ".join(context) if context else "recent meals"
+        insights.append(
+            f"Bowel changes may be useful digestion context alongside {detail}; this is not diagnostic."
+        )
+    if lifestyle and (
+        lifestyle.alcohol_level not in {None, "", "none"}
+        or (lifestyle.alcohol_drinks or 0) > 0
+    ):
+        insights.append(
+            "Alcohol logged recently may make next-day appetite, sleep, and scale weight noisier than usual."
+        )
+
+    # 7. Food quality
     fq = patterns.get("food_quality", {})
     whole_pct = fq.get("whole_pct", 0)
     if whole_pct >= 70:

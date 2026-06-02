@@ -1,6 +1,7 @@
 import SwiftUI
 import HealthKit
 import WatchKit
+import UserNotifications
 
 @main
 struct ThalloWatchApp: App {
@@ -26,9 +27,25 @@ struct ThalloWatchApp: App {
     }
 }
 
-final class AppDelegate: NSObject, WKApplicationDelegate {
+final class AppDelegate: NSObject, WKApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationDidFinishLaunching() {
+        // Become the notification delegate so our own local notifications
+        // (the rest-over ding) play their sound even while the watch app
+        // is in the foreground — otherwise watchOS delivers them silently
+        // to Notification Center while the user is looking at the timer.
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
         UserDefaults.standard.set(true, forKey: "thallo.pendingWorkoutLaunch")
         NotificationCenter.default.post(name: .watchWorkoutLaunch, object: workoutConfiguration)
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.sound])
     }
 }

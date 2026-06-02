@@ -32,16 +32,21 @@ indexes into them via a cycling array.
 - `POST /plans/week/auto-renew` — when the active week's `end_date` has
   passed, generates the next 7 days from `prev.end_date + 1`. It also snapshots the
   expired week into `plan_week_checkins` so the user has one day to review
-  the coach summary and apply durable setting changes for future generated
-  weeks. If the user ignores it, the generated week stays as-is and the
-  recap remains readable.
+  an informational week summary and choose whether explicit setup changes (goal, training
+  days, split, session length) should wait for future generated weeks or
+  rebuild remaining unlocked days in the already-generated current week. If the
+  user ignores it, the generated week stays as-is and the recap remains readable.
   Idempotent: a no-op while the current week is still active.
 - `POST /plans/week/pause` / `POST /plans/week/resume` — pause/resume
   auto-renew, auto-skip, and reminders for travel/illness windows. The active
   week stays intact.
-- `POST /plans/week/review-and-apply` — applies user-selected
-  recommendations from the weekly check-in to durable settings; it does not
-  rewrite the active `PlanWeek`.
+- `POST /plans/week/review-and-apply` — legacy endpoint for user-selected
+  recommendations from the weekly check-in; the current weekly review UI does
+  not call it.
+- `POST /plans/week/checkin-settings` — saves explicit weekly review setup
+  changes to `UserPreferences` / `UserGoal`. With user confirmation, it may
+  call the deterministic remaining-week paths so only unlocked current/future
+  `PlanDay` rows change; completed, skipped, and started days stay locked.
 - `PATCH /plans/days/{day_date}/workout` and `…/nutrition` — partial
   per-day patches (used by Change Focus, exercise swaps, and manual edits).
 - `POST /plans/days/{day_date}/start` — locks a day when the user begins it.
@@ -52,6 +57,10 @@ indexes into them via a cycling array.
 - `POST /plans/week/repair-injury-conflicts` — safety exception after injury
   changes; rewrites unlocked current/future exercise lists without changing the
   dated week structure.
+- `POST /plans/week/repair-equipment-conflicts` — availability exception after
+  equipment removal; swaps only incompatible exercises on unlocked
+  current/future workouts while preserving the dated week structure, focus,
+  rest/training days, and compatible exercises.
 - `POST /plans/week/regenerate-remaining` — explicit mid-week settings-change
   path for unlocked future days after days/week or split changes.
 
@@ -123,9 +132,17 @@ deterministic path only.
 Goal, equipment, split, duration, and days/week edits update
 `UserGoal` / `UserPreferences` immediately, but they do **not** replace the
 active `PlanWeek`. The current dated week remains the source of truth until
-auto-renew. If the user wants an immediate workout change, use the explicit
-per-day Change Focus / Swap flows, which patch only unlocked current/future
-`PlanDay` rows.
+auto-renew. Equipment removal is a scoped exception: the app may call
+`repair-equipment-conflicts` to swap only exercises that require now-unavailable
+equipment on today/future unlocked workouts. Adding equipment does not reshuffle
+the current week; it is available to Swap flows immediately and normal plan
+generation on the next PlanWeek. Session-duration changes are also scoped: the
+app may call `update-session-duration` to rebuild only today/future unlocked
+workouts against the new time budget and snapshot `PlanWeek.session_minutes`.
+The app should only offer immediate current-week changes through explicit user
+confirmation. Split, goal, and days/week changes normally wait for the next
+generated PlanWeek, unless the user chooses the review/remaining-week
+regeneration flow that protects locked days.
 
 ## History Plumbing
 

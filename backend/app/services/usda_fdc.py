@@ -16,6 +16,8 @@ import time
 import httpx
 from typing import Any
 
+from app.services.nutrition.added_sugar import resolve_added_sugar_g
+
 _BASE = "https://api.nal.usda.gov/fdc/v1"
 _TIMEOUT = 8.0
 
@@ -37,7 +39,12 @@ _NUTRIENT_MAP: dict[int, str] = {
     1087: "calcium_mg",    # Calcium, Ca
     1089: "iron_mg",       # Iron, Fe
     1090: "magnesium_mg",  # Magnesium, Mg
+    1091: "phosphorus_mg", # Phosphorus, P
     1092: "potassium_mg",  # Potassium, K
+    1095: "zinc_mg",       # Zinc, Zn
+    1098: "copper_mg",     # Copper, Cu
+    1101: "manganese_mg",  # Manganese, Mn
+    1103: "selenium_mcg",  # Selenium, Se
     1114: "vitamin_d_mcg", # Vitamin D
     1178: "vitamin_b12_mcg",  # Vitamin B-12
     1162: "vitamin_c_mg",  # Vitamin C
@@ -254,6 +261,14 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
         # Scale nutrients from per-100g to per-serving
         scale = serving_grams / 100.0 if serving_grams > 0 else 1.0
         nutrients = {k: round(v * scale, 1) for k, v in nutrients_per100g.items()}
+        added_sugar = resolve_added_sugar_g(
+            name,
+            reported_added_sugar_g=nutrients.get("added_sugar_g"),
+            sugar_g=nutrients.get("sugar"),
+            serving_grams=serving_grams,
+        )
+        if added_sugar is not None:
+            nutrients["added_sugar_g"] = added_sugar
 
         entry: dict[str, Any] = {
             "name": _clean_name(name),
@@ -264,9 +279,13 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
             "fat": round(nutrients.get("fat", 0)),
             "fdc_id": str(food.get("fdcId") or ""),
             "external_id": str(food.get("fdcId") or ""),
+            "barcode": str(food.get("gtinUpc") or "") or None,
             "serving_grams": serving_grams,
             "brand": food.get("brandOwner") or food.get("brandName"),
             "source": "usda",
+            "is_verified": True,
+            "trust_badge": "verified",
+            "nutrition_confidence": "high",
         }
 
         # Remap USDA internal keys to canonical names the meal assembler
@@ -343,6 +362,14 @@ def get_food_by_fdc_id(fdc_id: int | str) -> dict[str, Any] | None:
         return None
 
     serving_label, serving_grams = _extract_serving(food)
+    added_sugar = resolve_added_sugar_g(
+        food.get("description", ""),
+        reported_added_sugar_g=nutrients.get("added_sugar_g"),
+        sugar_g=nutrients.get("sugar"),
+        serving_grams=100,
+    )
+    if added_sugar is not None:
+        nutrients["added_sugar_g"] = added_sugar
     return {
         "name": _clean_name(food.get("description", "")),
         "serving": serving_label,

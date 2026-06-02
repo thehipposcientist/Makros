@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from .pr_detection import epley_1rm
@@ -40,13 +41,20 @@ def _weekly_peaks_for_user(
     db: Session,
     *,
     lookback_weeks: int,
+    today: date | None = None,
 ) -> dict[str, dict[str, dict]]:
     """Return ``{exercise_name_lower: {iso_week: {peak_1rm, volume_sets}}}``
     for every completed set the user logged in the lookback window.
+
+    ``today`` is honored so tests can pin a date — defaults to the real
+    calendar today otherwise. Without this, tests with fixed historical
+    dates fail once the test was authored long enough ago that the wall
+    clock has moved past the cutoff.
     """
     from app.models import WorkoutSession, WorkoutExercise, ExerciseSet
 
-    cutoff = date.today() - timedelta(weeks=lookback_weeks + 1)  # +1 buffer for partial weeks
+    today = today or date.today()
+    cutoff = today - timedelta(weeks=lookback_weeks + 1)  # +1 buffer for partial weeks
     rows = db.exec(
         select(
             WorkoutExercise.name,
@@ -59,6 +67,7 @@ def _weekly_peaks_for_user(
         .where(WorkoutSession.user_id == user_id)
         .where(WorkoutSession.workout_date >= cutoff)
         .where(ExerciseSet.completed == True)  # noqa: E712
+        .where(func.lower(func.coalesce(ExerciseSet.set_type, "working")).notin_(["warmup", "warm_up"]))
     ).all()
 
     result: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(lambda: {"peak_1rm": 0.0, "volume_sets": 0, "display_name": None}))
@@ -124,7 +133,7 @@ def detect_plateaus(
     (insufficient data → cannot plateau).
     """
     today = today or date.today()
-    weekly = _weekly_peaks_for_user(user_id, db, lookback_weeks=window_weeks + 2)
+    weekly = _weekly_peaks_for_user(user_id, db, lookback_weeks=window_weeks + 2, today=today)
     target_weeks = _recent_weeks(today, window_weeks)
 
     plateaued: list[dict] = []

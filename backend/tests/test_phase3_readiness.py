@@ -63,7 +63,7 @@ def _seed_user_with_pillars(s: Session, user_id: int = 1) -> None:
         user_id=user_id, snapshot_date=today, resting_hr=58, hrv_ms=70,
     ))
     s.add(SleepLog(
-        user_id=user_id, night_date=today - timedelta(days=1), score=80,
+        user_id=user_id, night_date=today, score=80,
     ))
     s.commit()
 

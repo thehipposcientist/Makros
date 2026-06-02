@@ -13,8 +13,8 @@ and `reason_tags` fields make intent explicit.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Any, Literal, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .set_programming import NextSetRecommendation, PlannedSet
@@ -38,8 +38,8 @@ IntensityLabel = Literal[
 ChangeDirection = Literal["increase", "hold", "decrease"]
 Confidence = Literal["high", "medium", "low"]
 
-# Every reason the client might want to surface. Keep in lockstep with
-# the JSON schema sent to the AI reviewer so we can't drift.
+# Every deterministic reason the client might want to surface. Keep these
+# stable because mobile/watch surfaces use them for badges and copy.
 ReasonTag = Literal[
     # Rep-range outcomes
     "overshot_reps", "undershot_reps", "hit_range",
@@ -57,6 +57,18 @@ ReasonTag = Literal[
 ]
 
 Source = Literal["deterministic", "ai_review", "fallback"]
+AlgorithmSource = Literal["deterministic_progression"]
+DataSource = Literal[
+    "exact_exercise_history",
+    "substitution_group",
+    "movement_pattern",
+    "muscle_equipment_bucket",
+    "default",
+    "session_state",
+    "plan_snapshot",
+]
+
+RECOMMENDATION_VERSION = "live_recommendation.v1"
 
 
 @dataclass
@@ -73,6 +85,9 @@ class SetRecommendation:
     reason_tags: list[str] = field(default_factory=list)
     ask_for_feel_after_set: bool = False
     source: Source = "deterministic"
+    algorithm_source: AlgorithmSource = "deterministic_progression"
+    data_source: DataSource = "session_state"
+    trace: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +101,9 @@ class SetRecommendation:
             "reasonTags": list(self.reason_tags),
             "askForFeelAfterSet": self.ask_for_feel_after_set,
             "source": self.source,
+            "algorithmSource": self.algorithm_source,
+            "dataSource": self.data_source,
+            "trace": self.trace,
         }
 
 
@@ -135,11 +153,15 @@ def enrich_to_set_recommendation(
     planned: "PlannedSet",
     actual_reps: Optional[int] = None,
     actual_weight: Optional[float] = None,
+    actual_rir: Optional[float] = None,
     feel: Optional[str] = None,
     is_first_session: bool = False,
     is_first_set: bool = False,
     rep_range: Optional[tuple[int, int]] = None,
     source: Source = "deterministic",
+    algorithm_source: AlgorithmSource = "deterministic_progression",
+    data_source: DataSource = "session_state",
+    fallback_used: bool = False,
 ) -> SetRecommendation:
     """Wrap a deterministic `NextSetRecommendation` with the structured
     metadata the client wants. Pure function — no I/O, no LLM.
@@ -209,6 +231,16 @@ def enrich_to_set_recommendation(
     # First session → ask for feel so the next set can calibrate
     ask_feel = is_first_session or is_first_set or feel == "pain"
 
+    previous_classification = None
+    if rep_range is not None and actual_reps is not None:
+        lo, hi = rep_range
+        if actual_reps > hi:
+            previous_classification = "overshot_target"
+        elif actual_reps < lo:
+            previous_classification = "undershot_target"
+        else:
+            previous_classification = "hit_target"
+
     # Dedupe tags while preserving order
     seen: set[str] = set()
     unique_tags: list[str] = []
@@ -216,6 +248,20 @@ def enrich_to_set_recommendation(
         if t not in seen:
             seen.add(t)
             unique_tags.append(t)
+
+    trace = {
+        "recommendationVersion": RECOMMENDATION_VERSION,
+        "setIntent": set_type,
+        "previousSetClassification": previous_classification,
+        "targetRepRange": planned.target_reps if planned else det.next_set_rep_target,
+        "priorWeight": actual_weight,
+        "recommendedWeight": det.next_set_weight_lbs,
+        "recommendedReps": det.next_set_rep_target,
+        "adjustmentReason": det.action,
+        "fatigueApplied": "high_fatigue" in unique_tags,
+        "rirUsed": actual_rir,
+        "fallbackUsed": fallback_used,
+    }
 
     return SetRecommendation(
         recommended_weight_lbs=det.next_set_weight_lbs,
@@ -228,4 +274,7 @@ def enrich_to_set_recommendation(
         reason_tags=unique_tags,
         ask_for_feel_after_set=ask_feel,
         source=source,
+        algorithm_source=algorithm_source,
+        data_source=data_source,
+        trace=trace,
     )

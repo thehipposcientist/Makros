@@ -29,6 +29,11 @@ from __future__ import annotations
 from typing import Any
 from sqlmodel import Session, select
 
+# Diet-gap recommendations average 14 days of food logs. Below this many
+# logged days the averages are too sparse to call a deficiency — a user
+# who logged 2 days isn't "low on omega-3", they just under-logged.
+MIN_LOGGED_DAYS_FOR_DIET_RECS = 5
+
 
 def build_recommendations(
     db: Session,
@@ -76,6 +81,11 @@ def build_recommendations(
                 stack_slugs.add(ing.slug)
                 if ing.category:
                     stack_categories.add(ing.category.lower())
+    # Custom-named supplements (no ingredient_id) — infer slug from the
+    # free-text name so users who added "Nutricost D3 5000 IU" or
+    # "NOW Fish Oil" don't keep getting recommended Vitamin D / Omega-3.
+    from app.services.supplement_name_match import infer_slugs_from_stack
+    stack_slugs |= infer_slugs_from_stack(stack_rows)
 
     # Convenience helpers — treat the whole class as covered if the
     # user takes any variant. Avoids "you take creatine HCl, here's
@@ -92,9 +102,15 @@ def build_recommendations(
 
     # ── 4. Pull diet rollup (14d) ───────────────────────────────────
     try:
-        rollup = compute_weekly_rollup(db, user_id=user_id, days=14)
+        rollup = compute_weekly_rollup(db, user_id, date.today(), days=14)
     except Exception:
         rollup = {}
+
+    # Gate diet-gap recs behind a minimum logged-day count. Profile,
+    # goal and training recs (vitamin D, creatine, magnesium, ...) are
+    # unaffected — only food-log-derived signals need the coverage.
+    days_logged = int(rollup.get("days_with_data", 0) or 0)
+    diet_data_ok = days_logged >= MIN_LOGGED_DAYS_FOR_DIET_RECS
 
     omega3 = rollup.get("omega3_servings", 0) or 0
     seafood = rollup.get("seafood_servings", 0) or 0
@@ -170,7 +186,7 @@ def build_recommendations(
         })
 
     # Omega-3 — diet gap
-    if omega3 < 1 and seafood < 1 and not in_stack("omega_3", "fish_oil", "epa_dha", "algae_oil"):
+    if diet_data_ok and omega3 < 1 and seafood < 1 and not in_stack("omega_3", "fish_oil", "epa_dha", "algae_oil"):
         sigs = [f"omega-3 servings 14d: {omega3:.1f}", f"seafood servings 14d: {seafood:.1f}"]
         priority = "high" if (age or 0) >= 40 else "moderate"
         if priority == "high":
@@ -222,7 +238,7 @@ def build_recommendations(
 
     # Protein — gap + goal aware
     if (
-        protein_target_g and protein_gap_pct > 15
+        diet_data_ok and protein_target_g and protein_gap_pct > 15
         and goal_type in ("muscle_gain", "body_recomp", "strength", "fat_loss", "toning")
         and not in_stack("whey_protein", "whey", "protein_powder", "casein", "plant_protein", category="protein")
     ):
@@ -272,7 +288,7 @@ def build_recommendations(
 
     # B12 — flagged for high plant-protein ratio (likely low animal-source intake)
     if (
-        plant_protein_pct >= 70 and (plant_protein + animal_protein) > 0
+        diet_data_ok and plant_protein_pct >= 70 and (plant_protein + animal_protein) > 0
         and not in_stack("vitamin_b12", "b12", "methylcobalamin", "cyanocobalamin", category="b_complex")
     ):
         sigs = [f"plant protein share: {plant_protein_pct:.0f}%"]
@@ -286,7 +302,7 @@ def build_recommendations(
 
     # Iron — female-specific signal, especially with low animal protein
     if (
-        is_female and animal_protein < 30 and (avg_protein > 0)
+        diet_data_ok and is_female and animal_protein < 30 and (avg_protein > 0)
         and not in_stack("iron", "ferrous_sulfate", "ferrous_bisglycinate", category="iron")
     ):
         sigs = ["female biological sex (higher iron needs)", f"animal protein 14d: {animal_protein:.0f}g/day"]
@@ -360,7 +376,7 @@ def build_recommendations(
 
     # Probiotic — low fermented + low fiber (gut-health signal)
     if (
-        fermented < 2 and fiber < 18
+        diet_data_ok and fermented < 2 and fiber < 18
         and not in_stack("probiotic", "probiotics", category="probiotic")
     ):
         sigs = [f"fermented servings 14d: {fermented:.0f}", f"avg fiber 14d: {fiber:.0f}g"]
@@ -373,7 +389,7 @@ def build_recommendations(
         )
 
     # Fiber gap — food first
-    if fiber and fiber < 18 and plants < 15:
+    if diet_data_ok and fiber and fiber < 18 and plants < 15:
         sigs = [f"avg fiber 14d: {fiber:.0f}g", f"plant variety 14d: {plants:.0f}"]
         add(
             slug=None,
@@ -387,7 +403,7 @@ def build_recommendations(
     # for cardiovascular emphasis users, but only as a "discuss with clinician"
     # since RYR has interactions with statins.
     if (
-        sat_fat > 0 and avg_cals > 0
+        diet_data_ok and sat_fat > 0 and avg_cals > 0
         and (sat_fat * 9 / avg_cals) > 0.10
         and (age or 0) >= 45
     ):

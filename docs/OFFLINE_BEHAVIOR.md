@@ -5,19 +5,21 @@
 | Feature | Offline? | How |
 |---------|----------|-----|
 | View workout plan | Yes | Active `PlanWeek` projected into `aiWorkoutPlan` cache |
-| Start and complete a workout | Yes | All tracking is local (AsyncStorage) |
-| Log sets, reps, weight | Yes | Saved locally, synced to backend when online |
+| Start and complete a workout | Yes | Active session is a local crash-recovery draft; completion syncs to backend with idempotency |
+| Log sets, reps, weight | Yes | Drafted locally during the session, written to backend on completion/retry |
 | View exercise library | Yes | Cached for 24h in AsyncStorage |
 | View exercise images | Partial | Cached by React Native's image cache after first load |
-| View meal plan | Yes | All nutrition plans cached per-day in AsyncStorage |
-| Check off meals | Yes | Meal checks saved locally |
-| Edit meals (add/remove items) | Yes | Saved locally |
-| Log weight | Yes | Weight history stored in AsyncStorage |
-| View weight history | Yes | All local |
-| View workout history | Yes | All local |
-| View progress/PRs | Yes | Computed from local history |
+| View meal plan | Yes | DB PlanDay nutrition is cached in AsyncStorage for offline rendering |
+| Check off meals | Yes | Meal checks update local cache, then DB-backed meal/day state when online |
+| Edit meals (add/remove items) | Yes | Drafted locally and synced to backend day state when online |
+| Log hydration | Yes | Optimistic local cache with pending rows; replayed to `/meals/hydration` when online |
+| Log weight | Yes | Cached locally and written to backend weight entries when authenticated |
+| View weight history | Yes | Backend weight entries cached locally |
+| View workout history | Yes | Backend workout sessions/completions cached locally |
+| View progress/PRs | Yes | Computed from backend history with local cache fallback |
 | Change workout day focus | Partial | UI can keep local edits, but authoritative exercise patch needs backend |
 | Timer (rest timer, timed exercises) | Yes | Fully client-side |
+| Outdoor cardio GPS tracking | Yes | Phone/Watch location can capture distance/pace/route during the session; backend sync waits until online |
 | Theme selection | Yes | Instant, local preference |
 | Profile settings (view) | Yes | Cached in AsyncStorage |
 
@@ -55,14 +57,18 @@ Fetched from `/meta/exercises` and cached for 24h in `exercise_library_cache_v4`
 Cached in `exercise_image_map_v1` (AsyncStorage). Image URLs are stored locally; the actual images are cached by React Native's built-in HTTP image cache. After first render, images show offline.
 
 ### Meal Plans
-Each day's nutrition plan is saved per-date in AsyncStorage. The 7-day PlanWeek carries `nutrition_json` on each `PlanDay`; the `aiNutritionPlans` template array remains a cache / legacy fallback. Edits (add food, remove food, rename meal) save locally and sync to backend day state when available.
+Each day's nutrition plan is database-backed through the active `PlanWeek` and its 7 `PlanDay.nutrition_json` rows. AsyncStorage meal-plan keys are hot/offline caches or unsaved drafts only; they must not be treated as canonical saved meals. Edits (add food, remove food, rename meal) can stage locally while offline and sync to backend day state when available.
 
 ### Workout Tracking
 The entire ActiveWorkoutScreen runs locally:
 - Set logging → AsyncStorage (`activeWorkoutSets`)
 - Rest timer → client-side
+- Outdoor cardio GPS route/distance/pace → local live state, included in the pending completion payload when present
 - Exercise progression tips → pre-stamped on plan data (no live API needed)
-- Completion → saves to local history, queues backend sync
+- Completion → updates the local cache, persists a pending `/workouts/complete` payload in `pendingWorkoutCompletions_v1`, then retries backend sync with the same idempotency key when the app signs in / foregrounds
+
+### Hydration
+Hydration quick-add and manual set write optimistically to the per-date hydration cache. If the backend call fails, the cache marks the row pending and `hydrationRetry` replays it later. The server remains authoritative once `/meals/hydration` succeeds.
 
 ### Readiness / Fatigue
 Canonical training readiness requires the backend (`POST /readiness/today`), and detailed muscle fatigue requires `/workouts/fatigue`. If those calls fail, the UI falls back to cached/local context or a conservative empty/default state rather than treating the offline result as authoritative. The fatigue model becomes useful after recent completions have synced to the backend.
@@ -70,16 +76,16 @@ Canonical training readiness requires the backend (`POST /readiness/today`), and
 ## Sync Behavior
 
 When the app comes back online:
-- `logWorkoutDone` sends any completed workouts to the backend
+- `flushPendingWorkoutCompletions` replays any queued workout completions to the backend using the original `external_source_id` / `idempotency_key`
 - `syncOnboarding` pushes profile changes
 - `upsertDayState` syncs meal plan state per-day
 - `loadPlans` refetches the active PlanWeek and auto-renews only if the week expired
 
-There is no explicit offline queue — each feature handles its own retry. Failed backend calls are caught silently and the app continues with local data.
+Workout completions now have an explicit offline queue because they are user-critical. Other feature retries remain local/best-effort unless noted above.
 
 ## What Could Be Improved
 
-1. **Explicit offline queue** — buffer failed API calls and replay when connectivity returns
+1. **Broader offline queue** — extend the durable queue pattern beyond workout completions to other critical writes
 2. **Offline food search** — cache the full USDA food database locally (large but possible)
 3. **Offline fatigue** — compute from local workout history instead of requiring backend
 4. **Sync status indicator** — show the user when data hasn't been synced yet
