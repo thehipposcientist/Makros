@@ -8,7 +8,9 @@ import type { AdjustedDailyTarget, HydrationStatus } from '../../services/api';
 import { humanizeToken } from '../../utils/exerciseGuide';
 import {
   HYDRATION_QUICK_ADD_OUNCES,
+  HYDRATION_QUICK_REMOVE_OUNCES,
   formatHydrationQuickAddLabel,
+  formatHydrationQuickRemoveLabel,
   formatHydrationTargetRange,
   hydrationTargetRangeOz,
 } from '../../utils/hydration';
@@ -485,7 +487,7 @@ export function HydrationTodayPanel({
     if (previousOunces.current === ounces) return;
     const delta = ounces - previousOunces.current;
     previousOunces.current = ounces;
-    setBurstLabel(delta > 0 ? `+${Math.round(delta)} oz` : 'Updated');
+    setBurstLabel(delta > 0 ? `+${Math.round(delta)} oz` : `${Math.round(delta)} oz`);
     rippleAnim.setValue(0);
     burstAnim.setValue(0);
     Animated.sequence([
@@ -723,6 +725,41 @@ export function HydrationTodayPanel({
           </PressableScale>
         </View>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+          {HYDRATION_QUICK_REMOVE_OUNCES.map(oz => {
+            const disabled = loading || ounces <= 0;
+            return (
+              <PressableScale
+                key={`remove-${oz}`}
+                testID={`hydration-quick-remove-${oz}`}
+                onPress={() => onDelta(-oz)}
+                disabled={disabled}
+                scaleDown={0.94}
+                style={{
+                  flex: 1,
+                  flexBasis: '18%',
+                  minWidth: 54,
+                  minHeight: 32,
+                  paddingVertical: 7,
+                  paddingHorizontal: 6,
+                  borderRadius: 10,
+                  backgroundColor: controlBackground,
+                  borderWidth: 1,
+                  borderColor: darkPhoto ? 'rgba(255,255,255,0.22)' : colors.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  opacity: disabled ? 0.45 : 1,
+                }}>
+                <Text
+                  style={{ fontSize: 10, fontWeight: '900', color: panelTextMuted }}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.85}
+                >
+                  {formatHydrationQuickRemoveLabel(oz)}
+                </Text>
+              </PressableScale>
+            );
+          })}
           {HYDRATION_QUICK_ADD_OUNCES.map(oz => (
             <PressableScale
               key={oz}

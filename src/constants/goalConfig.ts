@@ -56,7 +56,7 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
   { id: 'build_lower_body',    label: 'Build Lower Body',         category: 'muscle_physique',      description: 'Extra volume for quads, hamstrings, glutes, and calves. Upper body is maintained. Good if your legs are a weak point.',  launch: false },
   { id: 'build_arms',          label: 'Build Arms',               category: 'muscle_physique',      description: 'Extra bicep and tricep work added to your programme. Includes direct arm training 3-4x/week with progressive overload.',  launch: false },
   { id: 'build_shoulders',     label: 'Build Shoulders',          category: 'muscle_physique',      description: 'Lateral raises, overhead pressing, and rear delt work prioritised. Builds the "capped shoulder" look and wider frame.',  launch: false },
-  { id: 'body_recomp',         label: 'Body Recomposition',       category: 'muscle_physique',      description: 'Eat at or near maintenance calories with high protein (1g/lb). You lose fat and gain muscle at the same time. Scale weight may not change much, but your body composition improves. Best for beginners or those returning after a break.',  launch: true },
+  { id: 'body_recomp',         label: 'Body Recomposition',       category: 'muscle_physique',      description: 'Eat in a slight deficit or at maintenance with high protein (1g/lb). You lose fat and gain muscle at the same time. Scale weight may not change much, but your body composition improves. Best for beginners or those returning after a break.',  launch: true },
   { id: 'maintain_physique',   label: 'Maintain Physique',        category: 'muscle_physique',      description: 'Eat at maintenance calories. Training keeps current muscle mass and strength. No surplus or deficit. Good between bulk/cut phases or when life is busy.',  launch: false },
 
   // ── Fat Loss ───────────────────────────────────────────────────────────────
@@ -452,7 +452,7 @@ export function getTrainingProfile(goalId: string): GoalTrainingProfile {
 
   // Goal-specific overrides
   const overrides: Record<string, Partial<GoalTrainingProfile>> = {
-    body_recomp:      { nutritionBias: 'maintenance (slight deficit on rest, slight surplus on training)', repRange: '8-12' },
+    body_recomp:      { nutritionBias: 'slight deficit to maintenance', repRange: '8-12' },
     lean_bulk:        { nutritionBias: 'slight surplus (+200-300)', repRange: '6-12' },
     cut:              { nutritionBias: 'aggressive deficit', intensity: 'moderate-high' },
     powerlifting:     { repRange: '1-5', restSeconds: '180-300', intensity: 'very high' },

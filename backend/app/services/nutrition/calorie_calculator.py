@@ -907,7 +907,7 @@ def compute_targets(inputs: CalorieInputs) -> CalorieTargets:
 # ─── Cut / bulk / maintain reference card ────────────────────────────────────
 #
 # A convenience that runs the full calculator three times — once each for
-# fat loss, body recomp (maintenance), and muscle gain — so the user can
+# fat loss, maintenance, and muscle gain — so the user can
 # see all three targets side by side in the UI. Uses the user's own body
 # stats + training volume, so the numbers reflect THEIR TDEE.
 #
@@ -972,7 +972,7 @@ def calculate_reference_ranges(inputs: CalorieInputs) -> CalorieRangeCard:
         )
 
     cut = compute_targets(_inputs_for("fat_loss"))
-    maintain = compute_targets(_inputs_for("body_recomp"))
+    maintain = compute_targets(_inputs_for("maintain"))
     bulk = compute_targets(_inputs_for("muscle_gain"))
 
     def _duration_label(minutes: int) -> str:

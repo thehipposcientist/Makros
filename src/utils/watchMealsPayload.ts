@@ -56,12 +56,16 @@ export function buildWatchMealsPayload(
     const checkKey = mealCheckKey(keyedPlan, m, i);
     const checked = !!checks[checkKey];
     const macros = macroTotalsFromMeal(m);
-    if (checked) {
-      actCal += macros.calories;
-      actPro += macros.protein;
-      actCarb += macros.carbs;
-      actFat += macros.fat;
-    }
+    // Day totals must mirror the phone's NutritionCard, which sums EVERY
+    // visible meal regardless of checked state. Summing only checked meals
+    // here was the root cause of the watch's calories/macros disagreeing with
+    // the phone whenever a meal was left unchecked (a 1-of-3-checked plan
+    // showed ~1/3 of the phone's total on the wrist). `checked` is still
+    // reported per-meal so the watch row checkboxes stay accurate.
+    actCal += macros.calories;
+    actPro += macros.protein;
+    actCarb += macros.carbs;
+    actFat += macros.fat;
     return {
       mealType: checkKey,
       name: String(m.meal || m.name || `Meal ${i + 1}`),

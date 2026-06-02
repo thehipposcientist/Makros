@@ -86,6 +86,7 @@ interface Props {
    *  not race the favorite write. Optional — older callers can omit. */
   externalMutationPending?: boolean;
   autoOpenFoodCamera?: boolean;
+  autoOpenBarcodeScanner?: boolean;
   cookingSkill?: string;
   prepTimeMinutes?: number;
   dietaryPreference?: string;
@@ -368,7 +369,7 @@ function favoriteMealToItems(favorite: FavoriteMealCopy): MealItem[] {
   });
 }
 
-export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], favoriteMeals = [], authToken, dateKey, onSave, onClose, onAddCustomFood, onToggleRoutine, onSaveAsMeal, mode = 'day', onSaveRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName, externalMutationPending = false, autoOpenFoodCamera = false }: Props) {
+export default function MealEditModal({ visible, mealType, meal, nutritionPlan, allFoods, foodCategories, savedMeals = [], favoriteMeals = [], authToken, dateKey, onSave, onClose, onAddCustomFood, onToggleRoutine, onSaveAsMeal, mode = 'day', onSaveRoutine, cookingSkill, prepTimeMinutes, dietaryPreference, allergies, themeName, externalMutationPending = false, autoOpenFoodCamera = false, autoOpenBarcodeScanner = false }: Props) {
   const colors = useMemo(() => getTheme(themeName).colors, [themeName]);
   const s = useMemo(() => createStyles(colors), [colors]);
   // Structured items are the source of truth. Legacy foods[] / amounts[]
@@ -859,6 +860,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   // prop rerenders. The ref flips synchronously so the second call bails.
   const scanLock = useRef(false);
   const autoFoodCameraStartedRef = useRef(false);
+  const autoBarcodeStartedRef = useRef(false);
   const pickAndScan = async (source: 'camera' | 'library') => {
     if (!authToken) return;
     if (scanLock.current) return;
@@ -917,6 +919,20 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }, Platform.OS === 'ios' ? 450 : 180);
     return () => clearTimeout(timer);
   }, [visible, autoOpenFoodCamera, authToken, dateKey, mealType]);
+
+  useEffect(() => {
+    if (!visible || !autoOpenBarcodeScanner) {
+      autoBarcodeStartedRef.current = false;
+      return;
+    }
+    if (!authToken) return;
+    if (autoBarcodeStartedRef.current) return;
+    autoBarcodeStartedRef.current = true;
+    const timer = setTimeout(() => {
+      setBarcodeScanning(true);
+    }, Platform.OS === 'ios' ? 450 : 180);
+    return () => clearTimeout(timer);
+  }, [visible, autoOpenBarcodeScanner, authToken, dateKey, mealType]);
 
   // These ran on every render (incl. every keystroke in the name field and
   // every qtyDraft change). Memoize so macro math only recomputes when its

@@ -301,8 +301,10 @@ import { displayFocusForExercises, displayFocusForWorkout } from '../utils/worko
 import { normalizeWorkoutStimulus, workoutStimulusDisplayKeys } from '../utils/workoutStimulusDisplay';
 import {
   HYDRATION_QUICK_ADD_OUNCES,
+  HYDRATION_QUICK_REMOVE_OUNCES,
   HYDRATION_REMINDER_INTERVAL_HOURS,
   formatHydrationQuickAddLabel,
+  formatHydrationQuickRemoveLabel,
   formatHydrationReminderInterval,
   hydrationTargetRangeOz,
 } from '../utils/hydration';
@@ -337,7 +339,7 @@ import {
   workoutSummaryFromCompletion,
   workoutSummaryFromSession,
 } from '../utils/workoutCompletion';
-import { completeWorkoutWithOfflineQueue } from '../utils/workoutCompletionQueue';
+import { completeWorkoutWithOfflineQueue, type WorkoutCompletionRequest } from '../utils/workoutCompletionQueue';
 import { filterWorkoutHistory, type WorkoutHistoryTypeFilter } from '../utils/workoutHistorySearch';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks, clearSavedNutritionPlansForDates, clearPreservedMealsForDates } from '../utils/mealTracker';
@@ -3491,6 +3493,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   useEffect(() => {
     authTokenRef.current = authToken;
   }, [authToken]);
+  const userProfileRef = useRef(userProfile);
+  useEffect(() => {
+    userProfileRef.current = userProfile;
+  }, [userProfile]);
   const onUpdateWeightRef = useRef(onUpdateWeight);
   useEffect(() => {
     onUpdateWeightRef.current = onUpdateWeight;
@@ -3993,6 +3999,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       this so it always operates on the newest profile snapshot, even
       if several triggers queued up. */
   const loadPlansLatestProfileRef = useRef<UserProfile | null>(null);
+  const loadPlansRef = useRef<((profile: UserProfile) => Promise<void>) | null>(null);
   const [switchDayIdx, setSwitchDayIdx]   = useState<number>(-1);
   // Which plan-day indices are currently regenerating after a Switch-Day tap.
   // Surfaced to the DayCard so it can render a shimmer overlay while the
@@ -4529,7 +4536,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const mealHistoryWindowDaysRef = useRef(mealHistoryWindowDays);
   const savedMealLibraryRef = useRef<SavedMealReference[]>([]);
   const reloadSavedMealsRef = useRef<(() => void) | null>(null);
-  const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion; historyMealId?: number; markEatenOnSave?: boolean; startWithCamera?: boolean } | null>(null);
+  const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion; historyMealId?: number; markEatenOnSave?: boolean; startWithCamera?: boolean; startWithBarcode?: boolean } | null>(null);
   const [hydration, setHydration] = useState<HydrationSummary | null>(null);
   const [hydrationByDate, setHydrationByDate] = useState<Record<string, HydrationSummary>>({});
   const [hydrationLoading, setHydrationLoading] = useState(false);
@@ -4553,6 +4560,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [stepCountsByDate, setStepCountsByDate] = useState<Record<string, number | null>>({});
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
   const routineToggleInFlightRef = useRef<Set<string>>(new Set());
+  const routineResyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Pull backend-owned meal routines into the local cache (cross-device +
   // survives reinstall) before the first plan overlay of each day. Keyed by
   // day key, not a once-per-session boolean: a once-per-session gate let
@@ -4641,6 +4649,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // initiated cardio used to finish on the watch but never land in
   // phone history.
   const [liveTrackerFinishTick, setLiveTrackerFinishTick] = useState(0);
+  const healthWorkoutRecoveryInFlightRef = useRef(false);
   // Workout template builder modal — create a new template (or edit an
   // existing one) without having to start an active workout. Distinct
   // from the "Save as Template" button on the active-workout summary.
@@ -6521,6 +6530,53 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => sub.remove();
   }, [claimHomeFullWatchSync, pushHomeWatchSnapshot]);
 
+  // Live phone → watch re-push for the two channels the user edits directly.
+  // The full-snapshot path only runs on watch reachability / pull_state /
+  // foreground, so logging a meal, checking a meal, or logging water ON THE
+  // PHONE didn't reach the wrist until the next wake — a key reason the watch
+  // and phone macros/hydration looked out of sync. This pushes meals +
+  // hydration whenever today's values change. `watchSync` de-dupes unchanged
+  // payloads (2-min reassert window) so it's cheap; the debounce coalesces
+  // bursts (e.g. checking several meals in a row). Non-force so the de-dupe
+  // applies. Independent of the workout channel, so it's safe mid-workout.
+  useEffect(() => {
+    const todayISO = todayKey();
+    const timer = setTimeout(() => {
+      (async () => {
+        try {
+          const { pushMealsToWatch, pushHydrationToWatch } = await import('../utils/watchSync');
+          if (showMealsSurface) {
+            const todayPlan = nutritionPlansByDate[todayISO]
+              ?? (Object.values(nutritionPlansByDate)[0] as any);
+            if (todayPlan) {
+              await pushMealsToWatch(
+                todayPlan,
+                checkedMealsByDate[todayISO],
+                todayISO,
+                nutritionScoreData?.score ?? null,
+                { displayTargets: watchMealDisplayTargetsFromAdjusted(adjustedDailyTarget) },
+              ).catch(() => {});
+            }
+          }
+          const hydrationSnapshot = hydrationByDate?.[todayISO] ?? hydration ?? null;
+          if (hydrationSnapshot) {
+            await pushHydrationToWatch({
+              dateISO: hydrationSnapshot.date ?? todayISO,
+              ounces: hydrationSnapshot.ounces ?? 0,
+              targetOunces: hydrationSnapshot.target_ounces ?? 64,
+              targetOuncesMin: hydrationSnapshot.target_ounces_min,
+              targetOuncesMax: hydrationSnapshot.target_ounces_max,
+            }).catch(() => {});
+          }
+        } catch { /* bridge optional */ }
+      })();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [
+    nutritionPlansByDate, checkedMealsByDate, nutritionScoreData?.score,
+    adjustedDailyTarget, hydration, hydrationByDate, showMealsSurface, currentDate,
+  ]);
+
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
   // for state that already lives on the phone.
@@ -6545,6 +6601,365 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       toggleMeal: (date: string, mealType: string, checked?: boolean) => handleToggleMeal(date, mealType, checked),
     };
   });
+
+  const persistWatchEndedWorkoutFallback = useCallback(async (payload: Record<string, any>): Promise<boolean> => {
+    if (hasActiveWatchCommandConsumer()) return false;
+
+    const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
+      ? payload.userId.trim()
+      : null;
+    const currentUserId = await AsyncStorage.getItem('last_user_id').catch(() => null);
+    if (commandUserId && currentUserId && commandUserId !== currentUserId) {
+      recordWatchCommandEvent({ phase: 'dropped', command: 'end_workout', surface: 'home', detail: 'wrong_user' });
+      return true;
+    }
+    if (!claimWatchCommand('end_workout', payload)) {
+      recordWatchCommandEvent({ phase: 'deduped', command: 'end_workout', surface: 'home', detail: 'fallback' });
+      return true;
+    }
+
+    const completion = payload?.completion && typeof payload.completion === 'object'
+      ? payload.completion as Record<string, any>
+      : null;
+    const text = (...values: unknown[]) => {
+      for (const value of values) {
+        const s = String(value ?? '').trim();
+        if (s) return s;
+      }
+      return '';
+    };
+    const finite = (...values: unknown[]) => {
+      for (const value of values) {
+        const n = Number(value);
+        if (Number.isFinite(n)) return n;
+      }
+      return null;
+    };
+    const objectValue = (value: unknown): Record<string, any> | undefined =>
+      value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : undefined;
+    const routeValue = (value: unknown) =>
+      Array.isArray(value)
+        ? value
+            .map((point: any) => {
+              const lat = Number(point?.lat);
+              const lon = Number(point?.lon);
+              if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+              const row: { lat: number; lon: number; t_ms: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null } = {
+                lat,
+                lon,
+                t_ms: Number.isFinite(Number(point?.t_ms)) ? Number(point.t_ms) : Date.now(),
+              };
+              if (point?.acc_m != null) row.acc_m = Number(point.acc_m);
+              if (point?.alt_m != null) row.alt_m = Number(point.alt_m);
+              if (point?.v_acc_m != null) row.v_acc_m = Number(point.v_acc_m);
+              return row;
+            })
+            .filter(Boolean) as Array<{ lat: number; lon: number; t_ms: number; acc_m?: number | null; alt_m?: number | null; v_acc_m?: number | null }>
+        : [];
+    const hrSummaryValue = (value: unknown) => {
+      const raw = objectValue(value);
+      const avg = finite(raw?.avgBpm, raw?.avg_bpm);
+      const max = finite(raw?.maxBpm, raw?.max_bpm, avg);
+      if (!avg) return undefined;
+      const zones = Array.isArray(raw?.zoneMinutes) ? raw.zoneMinutes.map((z: unknown) => Number(z) || 0) : [];
+      return { avgBpm: Math.round(avg), maxBpm: Math.round(max ?? avg), zoneMinutes: zones };
+    };
+    const setRows = (rawSets: unknown) => Array.isArray(rawSets)
+      ? rawSets.map((set: any, index: number) => ({
+          setNumber: Number(set?.set_number ?? set?.setNumber ?? index + 1) || index + 1,
+          reps: Number(set?.actual_reps ?? set?.reps ?? 0) || 0,
+          weightLbs: Number(set?.actual_weight_lbs ?? set?.weight_lbs ?? set?.weightLbs ?? 0) || 0,
+          ...(finite(set?.duration_seconds, set?.durationSeconds) ? { durationSeconds: Math.round(finite(set?.duration_seconds, set?.durationSeconds)!) } : {}),
+          ...(finite(set?.actual_rir, set?.rir) ? { rir: Math.round(finite(set?.actual_rir, set?.rir)!) } : {}),
+          ...(finite(set?.heart_rate_avg, set?.heartRateAvg) ? { heartRateAvg: Math.round(finite(set?.heart_rate_avg, set?.heartRateAvg)!) } : {}),
+        }))
+      : [];
+
+    const endedMs = finite(
+      completion?.ended_at ? new Date(completion.ended_at).getTime() : null,
+      payload?.endedAt ? new Date(payload.endedAt).getTime() : null,
+      payload?.tsMs,
+      Date.now(),
+    ) ?? Date.now();
+    const durationSeconds = Math.max(1, Math.round(finite(completion?.duration_seconds, payload?.duration_seconds, payload?.elapsedSeconds) ?? 0));
+    const startedMs = finite(
+      completion?.started_at ? new Date(completion.started_at).getTime() : null,
+      payload?.startedAt ? new Date(payload.startedAt).getTime() : null,
+      endedMs - durationSeconds * 1000,
+    ) ?? (endedMs - durationSeconds * 1000);
+    if (!Number.isFinite(startedMs) || !Number.isFinite(endedMs) || endedMs <= startedMs) return false;
+
+    const startedAt = new Date(startedMs).toISOString();
+    const endedAt = new Date(endedMs).toISOString();
+    const workoutDate = /^\d{4}-\d{2}-\d{2}$/.test(text(completion?.workout_date))
+      ? text(completion?.workout_date)
+      : dateKey(new Date(startedMs));
+    const sourceId = text(
+      completion?.external_source_id,
+      payload?.completionId,
+      payload?.sessionId ? `watch:${payload.sessionId}` : '',
+      `watch:${startedAt}`,
+    );
+    const localSessionId = sourceId.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 96) || `watch_${startedMs}`;
+    const focusLabel = text(completion?.focus_label, payload?.focus, payload?.label, 'Watch workout');
+    const activityCategory = text(completion?.activity_category);
+    const activitySubtype = text(completion?.activity_subtype, activityCategory === 'cardio' ? focusLabel.toLowerCase() : '');
+    const activitySource = text(completion?.activity_source, 'watch');
+    const sourceContext = text(completion?.source_context, activityCategory === 'cardio' ? 'custom_cardio' : 'watch');
+    let distanceMiles = finite(completion?.distance_miles);
+    let caloriesBurned = finite(completion?.calories_burned);
+    let routeCoords = routeValue(completion?.route_coords ?? payload?.routeCoords);
+    let hrSummary = hrSummaryValue(completion?.hr_summary);
+    const activityDetails = objectValue(completion?.activity_details);
+    const exercises = Array.isArray(completion?.exercises) ? completion!.exercises : [];
+
+    try {
+      const hk = await import('../services/appleHealth');
+      const [workouts, route, hr] = await Promise.all([
+        hk.getAppleHealthWorkouts(startedMs - 5 * 60_000, endedMs + 5 * 60_000).catch(() => []),
+        routeCoords.length > 0 ? Promise.resolve(null) : hk.getAppleHealthWorkoutRoute(startedMs, endedMs).catch(() => null),
+        hrSummary ? Promise.resolve(null) : hk.getWorkoutHrSummary(startedMs, endedMs, userProfile?.physicalStats?.age ?? null).catch(() => null),
+      ]);
+      const best = Array.isArray(workouts)
+        ? workouts
+            .map((w: any) => {
+              const ws = new Date(w.startDate).getTime();
+              const we = new Date(w.endDate).getTime();
+              return { workout: w, overlap: Math.max(0, Math.min(endedMs, we) - Math.max(startedMs, ws)) };
+            })
+            .sort((a, b) => b.overlap - a.overlap)[0]
+        : null;
+      if (best && best.overlap >= 60_000) {
+        if (distanceMiles == null && finite(best.workout?.distanceMiles) != null) distanceMiles = finite(best.workout.distanceMiles);
+        if (caloriesBurned == null && finite(best.workout?.calories) != null) caloriesBurned = finite(best.workout.calories);
+      }
+      if (route?.routeCoords?.length) routeCoords = route.routeCoords;
+      if (hr) hrSummary = { avgBpm: hr.avgBpm, maxBpm: hr.maxBpm, zoneMinutes: hr.zoneMinutes };
+    } catch {
+      // HealthKit enrichment is optional; the watch payload still saves.
+    }
+
+    const localExercises = exercises.map((exercise: any, index: number) => ({
+      name: text(exercise?.name, `Exercise ${index + 1}`),
+      targetSets: Number(exercise?.target_sets ?? exercise?.targetSets ?? 0) || 0,
+      targetReps: text(exercise?.target_reps, exercise?.targetReps),
+      targetRestSeconds: Number(exercise?.rest_seconds ?? exercise?.targetRestSeconds ?? 60) || 60,
+      equipment: text(exercise?.equipment, 'other'),
+      sets: setRows(exercise?.sets),
+      slug: exercise?.slug ?? undefined,
+      primaryMuscle: exercise?.primary_muscle ?? undefined,
+      primary_muscle: exercise?.primary_muscle ?? undefined,
+      secondaryMuscles: Array.isArray(exercise?.secondary_muscles) ? exercise.secondary_muscles : undefined,
+      secondary_muscles: Array.isArray(exercise?.secondary_muscles) ? exercise.secondary_muscles : undefined,
+      isCompound: typeof exercise?.is_compound === 'boolean' ? exercise.is_compound : undefined,
+    }));
+
+    const manualActivity = activityCategory ? {
+      category: activityCategory as any,
+      subtype: activitySubtype || focusLabel,
+      intensity: text(completion?.activity_intensity, 'moderate') as any,
+      source: activitySource as any,
+      ...(text(completion?.cardio_style) ? { cardioStyle: text(completion?.cardio_style) as any } : {}),
+      ...(distanceMiles != null && distanceMiles > 0 ? { distanceMiles } : {}),
+      ...(caloriesBurned != null && caloriesBurned > 0 ? { caloriesBurned: Math.round(caloriesBurned) } : {}),
+      ...(hrSummary?.avgBpm ? { avgHeartRate: Math.round(hrSummary.avgBpm) } : {}),
+      ...(activityDetails && Object.keys(activityDetails).length > 0 ? { details: activityDetails as any } : {}),
+      ...(routeCoords.length > 0 ? { routeCoords } : {}),
+    } : undefined;
+    const session: WorkoutSession = {
+      id: localSessionId,
+      date: startedAt,
+      focus: focusLabel,
+      durationSeconds,
+      startedAt,
+      endedAt,
+      exercises: localExercises as any,
+      completed: true,
+      sourceContext,
+      ...(text(completion?.template_id) ? { templateId: text(completion?.template_id) } : {}),
+      ...(finite(completion?.plan_day_id) != null ? { planDayId: Math.round(finite(completion?.plan_day_id)!) } : {}),
+      ...(manualActivity ? { manualActivity } : {}),
+      ...(routeCoords.length > 0 ? { routeCoords: routeCoords.map(p => ({ lat: p.lat, lon: p.lon })) } : {}),
+    };
+
+    await saveWorkoutSession(session, { skipHealthMirror: true });
+
+    const currentSid = await AsyncStorage.getItem('activeWatchSessionId').catch(() => null);
+    const endedSid = text(payload?.sessionId);
+    if (endedSid && currentSid === endedSid) {
+      setActiveWatchSessionId(null);
+      await AsyncStorage.multiRemove([
+        'activeWorkoutStartTime',
+        'activeWatchSessionId',
+        'activeWorkoutSession',
+        'activeWorkoutSets',
+        ACTIVE_WORKOUT_TIMERS_KEY,
+        ACTIVE_WORKOUT_PAUSED_AT_KEY,
+        ACTIVE_WORKOUT_PAUSED_ACCUM_MS_KEY,
+      ]).catch(() => undefined);
+    }
+
+    if (workoutDate === todayKey()) {
+      import('../utils/workoutReminders')
+        .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+        .catch(() => undefined);
+    }
+
+    const request: WorkoutCompletionRequest = {
+      workout_date: workoutDate,
+      focus_label: focusLabel,
+      duration_seconds: durationSeconds,
+      exercises: exercises as any,
+      activity: manualActivity ? {
+        category: manualActivity.category,
+        subtype: manualActivity.subtype,
+        intensity: manualActivity.intensity,
+        source: manualActivity.source,
+        cardioStyle: manualActivity.cardioStyle,
+        distanceMiles: manualActivity.distanceMiles,
+        caloriesBurned: manualActivity.caloriesBurned,
+        avgHeartRate: manualActivity.avgHeartRate,
+        details: manualActivity.details,
+        routeCoords: manualActivity.routeCoords,
+      } : undefined,
+      healthMetrics: (caloriesBurned != null || hrSummary)
+        ? {
+            ...(caloriesBurned != null && caloriesBurned > 0 ? { caloriesBurned: Math.round(caloriesBurned) } : {}),
+            ...(hrSummary ? { hrSummary } : {}),
+          }
+        : undefined,
+      source: {
+        sourceContext,
+        stimulus: text(completion?.stimulus) || undefined,
+        templateId: text(completion?.template_id) || undefined,
+        planDayId: finite(completion?.plan_day_id) != null ? Math.round(finite(completion?.plan_day_id)!) : undefined,
+        startedAt,
+        endedAt,
+        externalSourceId: sourceId,
+        idempotencyKey: text(completion?.idempotency_key, sourceId),
+      },
+    };
+    const currentAuthToken = authTokenRef.current;
+    if (currentAuthToken) {
+      await completeWorkoutWithOfflineQueue(currentAuthToken, request, session);
+      await refreshNutritionAfterActivity(workoutDate).catch(() => undefined);
+    }
+
+    const { history, summaries } = await loadWorkoutHistoryBundle();
+    setWorkoutHistoryList(history);
+    setWorkoutHistorySummaries(summaries);
+    recordWatchCommandEvent({ phase: 'applied', command: 'end_workout', surface: 'home', detail: 'fallback_completion' });
+    return true;
+  }, [loadWorkoutHistoryBundle, refreshNutritionAfterActivity, userProfile?.physicalStats?.age]);
+
+  const recoverMissedThalloHealthWorkouts = useCallback(async () => {
+    if (healthWorkoutRecoveryInFlightRef.current) return;
+    healthWorkoutRecoveryInFlightRef.current = true;
+    try {
+      const enabled = await isAppleHealthEnabled().catch(() => false);
+      if (!enabled) return;
+      const appleHealth = await import('../services/appleHealth');
+      if (!appleHealth.isHealthKitAvailable()) return;
+      const now = Date.now();
+      const lookbackDays = 3;
+      const appleWorkouts = await appleHealth.getAppleHealthWorkouts(now - lookbackDays * 86400000, now);
+      if (!Array.isArray(appleWorkouts) || appleWorkouts.length === 0) return;
+      const existingBundle = await loadWorkoutHistoryBundle().catch(() => null);
+      const existingIntervals = (existingBundle?.history ?? [])
+        .filter(session => !session.skipped)
+        .map((session) => {
+          const start = new Date(session.startedAt ?? session.date).getTime();
+          const end = session.endedAt
+            ? new Date(session.endedAt).getTime()
+            : start + Math.max(1, Number(session.durationSeconds) || 30 * 60) * 1000;
+          return Number.isFinite(start) && Number.isFinite(end)
+            ? { start: start - 5 * 60_000, end: Math.max(end, start + 60_000) + 5 * 60_000 }
+            : null;
+        })
+        .filter((interval): interval is { start: number; end: number } => Boolean(interval));
+      const overlapsExisting = (startISO: string, endISO: string, durationMin: number) => {
+        const start = new Date(startISO).getTime();
+        const parsedEnd = new Date(endISO).getTime();
+        const end = parsedEnd > start ? parsedEnd : start + Math.max(1, durationMin) * 60_000;
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+        return existingIntervals.some(interval => start < interval.end && interval.start < end);
+      };
+      const autoImport = await import('../utils/workoutAutoImport');
+      const candidates = (await autoImport.detectUnloggedWorkouts(appleWorkouts as any[], lookbackDays))
+        .filter(autoImport.isThalloSourcedWorkoutCandidate)
+        .filter(candidate => !overlapsExisting(candidate.startDate, candidate.endDate, candidate.durationMin))
+        .slice(0, 3);
+      if (candidates.length === 0) return;
+
+      const importedDates = new Set<string>();
+      for (const candidate of candidates) {
+        try {
+          const session = await autoImport.importCandidate(candidate);
+          const sessionDate = dateKey(new Date(session.date));
+          importedDates.add(sessionDate);
+          if (sessionDate === todayKey()) {
+            import('../utils/workoutReminders')
+              .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+              .catch(() => undefined);
+          }
+          const currentAuthToken = authTokenRef.current;
+          if (currentAuthToken) {
+            await completeWorkoutWithOfflineQueue(
+              currentAuthToken,
+              {
+                workout_date: sessionDate,
+                focus_label: session.focus,
+                duration_seconds: session.durationSeconds,
+                activity: session.manualActivity ? {
+                  category: session.manualActivity.category,
+                  subtype: session.manualActivity.subtype,
+                  intensity: session.manualActivity.intensity,
+                  source: session.manualActivity.source,
+                  cardioStyle: session.manualActivity.cardioStyle,
+                  distanceMiles: session.manualActivity.distanceMiles,
+                  caloriesBurned: session.manualActivity.caloriesBurned,
+                  avgHeartRate: session.manualActivity.avgHeartRate,
+                  details: session.manualActivity.details,
+                  routeCoords: session.manualActivity.routeCoords,
+                } : undefined,
+                healthMetrics: appleHealthMetricsFromWorkoutSession(session),
+                source: {
+                  sourceContext: 'apple_health',
+                  startedAt: session.startedAt ?? session.date,
+                  endedAt: session.endedAt ?? null,
+                  externalSourceId: session.id,
+                  idempotencyKey: session.id,
+                },
+              },
+              session,
+            );
+            await refreshNutritionAfterActivity(sessionDate).catch(() => undefined);
+          }
+        } catch (err: any) {
+          console.warn('[health workout recovery] import failed:', err?.message ?? err);
+        }
+      }
+
+      if (importedDates.size > 0) {
+        const { history, summaries } = await loadWorkoutHistoryBundle();
+        setWorkoutHistoryList(history);
+        setWorkoutHistorySummaries(summaries);
+      }
+    } finally {
+      healthWorkoutRecoveryInFlightRef.current = false;
+    }
+  }, [loadWorkoutHistoryBundle, refreshNutritionAfterActivity]);
+
+  useEffect(() => {
+    const run = () => {
+      recoverMissedThalloHealthWorkouts().catch(() => undefined);
+    };
+    run();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') run();
+    });
+    return () => sub.remove();
+  }, [recoverMissedThalloHealthWorkouts]);
 
   // ── Hourly readiness refresh on app foreground ─────────────────────────
   // Backed by the per-process readiness TTL cache (60s) on the server, so
@@ -6679,13 +7094,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // Watch ended a session it started (Quick Start cardio).
             // Route through the tracker's finish flow so the cardio
             // session reaches /workouts/complete instead of being
-            // silently dismissed. ActiveWorkoutScreen's handler still
-            // runs if it has the matching sessionId — only one of the
-            // two surfaces is visible at any given moment.
+            // silently dismissed. If no tracker/screen owns it (for
+            // example, phone app was closed), persist a late fallback
+            // completion from the watch payload.
             if (showLiveTrackerRef.current) {
               setLiveTrackerFinishTick(t => t + 1);
+              return;
             }
-            // Don't `return` — same reason as cancel_workout above.
+            if (!hasActiveWatchCommandConsumer()) {
+              persistWatchEndedWorkoutFallback(payload)
+                .then((handled) => {
+                  if (!handled) enqueueActiveWatchCommand(command, payload).catch(() => undefined);
+                })
+                .catch(() => enqueueActiveWatchCommand(command, payload).catch(() => undefined));
+              return;
+            }
+            // ActiveWorkoutScreen owns the remaining mounted case.
           }
           if (command === 'start_custom_workout') {
             // Watch picked an activity from its Quick-Start tab. The
@@ -8114,6 +8538,47 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     }
   };
+  loadPlansRef.current = loadPlans;
+
+  const scheduleMealRoutineResync = useCallback((reason: string) => {
+    const profile = userProfileRef.current;
+    if (!profile) return;
+    if (routineResyncTimerRef.current) {
+      clearTimeout(routineResyncTimerRef.current);
+    }
+    routineResyncTimerRef.current = setTimeout(() => {
+      routineResyncTimerRef.current = null;
+      (async () => {
+        try {
+          setMealPlanHydrating(true);
+          const currentAuthToken = authTokenRef.current;
+          if (currentAuthToken) {
+            routinesSyncedDayRef.current = null;
+            const synced = await syncMealRoutinesFromBackend(currentAuthToken);
+            const applied = applyRoutinesToAll(nutritionPlansByDateRef.current, synced);
+            nutritionPlansByDateRef.current = applied;
+            setNutritionPlansByDate(applied);
+          }
+          const runLoadPlans = loadPlansRef.current;
+          if (runLoadPlans) {
+            await runLoadPlans(profile);
+          }
+        } catch (err: any) {
+          console.warn(`[routine resync] ${reason} failed:`, err?.message ?? err);
+          setMealPlanHydrating(false);
+        }
+      })();
+    }, 180);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (routineResyncTimerRef.current) {
+        clearTimeout(routineResyncTimerRef.current);
+        routineResyncTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const applySuppResult = (res: Awaited<ReturnType<typeof lookupSupplement>>, fallbackName: string) => {
     if (!res.found) {
@@ -9557,10 +10022,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const reconciled = await reconcileRoutinesToBackend(authToken, ordered);
       const stamped = stampMealRoutineDisplayOrder(reconciled);
       await saveMealRoutines(stamped);
+      scheduleMealRoutineResync('persist');
       return stamped;
     }
+    scheduleMealRoutineResync('persist');
     return ordered;
-  }, [authToken]);
+  }, [authToken, scheduleMealRoutineResync]);
 
   const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion, opts?: { routineScope?: 'today' | 'all'; userInitiated?: boolean; markEaten?: boolean }) => {
     // userInitiated defaults to true — every existing call site is a
@@ -10016,13 +10483,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     });
   }, [authToken, applyMealPageResponse, stampLoggedMealIdInLoadedState]);
 
-  const handleAddSnack = useCallback((date: string, options?: { startWithCamera?: boolean }) => {
+  const handleAddSnack = useCallback((date: string, options?: { startWithCamera?: boolean; startWithBarcode?: boolean }) => {
     const emptyMeal: MealSuggestion = { meal: 'New Meal', foods: [], calories: 0, protein: 0, carbs: 0, fat: 0 };
     setEditingMeal({
       dateKey: date,
       type: 'new_meal',
       meal: emptyMeal,
       ...(options?.startWithCamera ? { startWithCamera: true } : {}),
+      ...(options?.startWithBarcode ? { startWithBarcode: true } : {}),
     });
   }, []);
 
@@ -13274,6 +13742,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             loggedNutrition={todayHomeLoggedNutritionRow}
             hydration={todayHomeHydration}
             hydrationQuickAddLabel={formatHydrationQuickAddLabel(HYDRATION_QUICK_ADD_OUNCES[0] ?? 16)}
+            hydrationQuickRemoveLabel={formatHydrationQuickRemoveLabel(HYDRATION_QUICK_REMOVE_OUNCES[0] ?? 8)}
             hydrationLoading={hydrationLoading}
             stepsToday={todayHealthSummary?.steps ?? null}
             goalLoading={todayGoalLoading}
@@ -13315,8 +13784,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               setSelectedMealDayKey(todayHomeISO);
               handleAddSnack(todayHomeISO, { startWithCamera: true });
             }}
+            onScanBarcodeMeal={() => {
+              setSelectedMealDayKey(todayHomeISO);
+              handleAddSnack(todayHomeISO, { startWithBarcode: true });
+            }}
             onQuickAddWater={() => {
               handleHydrationDelta(HYDRATION_QUICK_ADD_OUNCES[0] ?? 16, todayHomeISO).catch(() => {});
+            }}
+            onQuickRemoveWater={() => {
+              handleHydrationDelta(-(HYDRATION_QUICK_REMOVE_OUNCES[0] ?? 8), todayHomeISO).catch(() => {});
             }}
           />
         </ErrorBoundary>

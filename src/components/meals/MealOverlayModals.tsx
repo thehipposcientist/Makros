@@ -30,6 +30,7 @@ type MealEditorTarget = {
   historyMealId?: number;
   markEatenOnSave?: boolean;
   startWithCamera?: boolean;
+  startWithBarcode?: boolean;
 } | null;
 
 type RecipeTarget = {
@@ -306,6 +307,7 @@ function EditableMealSheet({
       dietaryPreference={userProfile.dietaryPreference}
       allergies={userProfile.allergies}
       autoOpenFoodCamera={editingMeal.startWithCamera === true}
+      autoOpenBarcodeScanner={editingMeal.startWithBarcode === true}
       // The modal awaits these; bubble parent errors so it can keep
       // the editor open and surface an alert. Capturing dateKey/type
       // from `editingMeal` at invocation time (not from a closure that

@@ -1,6 +1,6 @@
 # Apple Watch — Architecture
 
-Last synced from app state: 2026-05-31
+Last synced from app state: 2026-06-02
 
 ## Bidirectional Sync via WCSession
 
@@ -48,6 +48,9 @@ The native phone bridge also answers every accepted `pull_state` from its cached
 - **Realtime `sendMessage` mirror covers every channel.** `ConnectivityStore.absorbMessage` switches on `kind` for all channels including `activity` and `templates` (previously those two only arrived via the slower `applicationContext` blob and were dropped from the realtime path).
 - **Decoders are drift-tolerant.** The meal / supplement / readiness structs decode via flexible `init(from:)` helpers (matching the workout decoder), so a single type drift from the phone — a macro sent as `30.5` instead of `31`, a `null`, or a missing key — can no longer throw and silently blank an entire watch tab. Only the key *names* must still agree across the bridge.
 - Setless cardio (`targetSets === 0`) is no longer marked done-on-arrival — `isDone` now requires `targetSets > 0`.
+- **Watch meal day-totals mirror the phone.** `buildWatchMealsPayload.actual` sums **every visible meal**, not just checked ones, matching `NutritionCard`'s consumed total. `toggleMealLocal` flips only the per-meal checkbox and leaves `actual` untouched (the phone re-pushes authoritative totals after it persists the log). Previously the watch summed checked-only and the phone summed all-visible, so the wrist disagreed with the phone whenever a meal was unchecked.
+- **Hydration ordering survives watch clock skew.** Incoming hydration pushes are ordered against the last *phone-authoritative* `syncedAtMs` (`lastHydrationPushMs`), not the live `hydration.syncedAtMs`. Optimistic local taps bump the live stamp to the watch's own clock for a fresh age reading; if the watch clock ran ahead of the phone, that made the phone's authoritative re-push look stale and get rejected — leaving the wrist stuck on the optimistic value. Phone is source of truth, so any push newer than the last accepted push wins.
+- **Phone-side meal/hydration edits re-push live.** A debounced effect pushes the meals + hydration channels whenever today's plan/checks/hydration change on the phone, so editing on the phone reaches the wrist without waiting for the next reachability/pull_state wake. `watchSync` de-dupes unchanged payloads, so it's cheap.
 
 ## Watch App Pages
 

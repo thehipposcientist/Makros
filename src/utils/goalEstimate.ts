@@ -91,36 +91,36 @@ export interface RecompProjection {
   fatLossRange: string;
   leanMassNote: string;
   bestSignals: string[];
-  /** Non-null for aggressive pace; warns that fat loss is slower due to surplus. */
+  /** Optional note for paces where the visual change may be slower. */
   caveat: string | null;
   timelineWeeks: number;
 }
 
 // Calorie context mirrors backend goal_params.py BODY_RECOMP adjustments:
-//   conservative: -100 cal/day (slight deficit → better fat loss)
-//   moderate:       0 cal/day (maintenance + training effect)
-//   aggressive:   +100 cal/day (slight surplus → better muscle, slower fat loss)
+//   conservative: -8% capped at -250 cal/day (fat-priority recomp)
+//   moderate:     -5% capped at -250 cal/day (balanced 95% maintenance)
+//   aggressive:    0% maintenance (muscle-priority recomp)
 const RECOMP_CONFIG: Record<string, {
   fatLow: number; fatHigh: number;
   scaleNote: string; leanNote: string; caveat: string | null;
 }> = {
   conservative: {
-    fatLow: 0.15, fatHigh: 0.35,
-    scaleNote: '±0.25 lb/week',
+    fatLow: 0.25, fatHigh: 0.55,
+    scaleNote: 'slight loss or stable',
     leanNote: 'maintain',
     caveat: null,
   },
   moderate: {
-    fatLow: 0.2, fatHigh: 0.5,
+    fatLow: 0.2, fatHigh: 0.45,
     scaleNote: '±0.25 lb/week',
     leanNote: 'maintain or slowly increase',
     caveat: null,
   },
   aggressive: {
     fatLow: 0.1, fatHigh: 0.3,
-    scaleNote: 'mostly stable or slight gain',
+    scaleNote: 'mostly stable',
     leanNote: 'slowly building (muscle focus)',
-    caveat: 'A slight calorie surplus prioritizes muscle growth. Fat loss will be slower — body composition still improves through strength gains.',
+    caveat: 'Maintenance calories prioritize training output. Fat loss may be slower, but body composition can still improve through strength gains.',
   },
 };
 

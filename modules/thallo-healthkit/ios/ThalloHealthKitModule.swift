@@ -434,6 +434,8 @@ public class ThalloHealthKitModule: Module {
                             "duration": w.duration / 60.0,
                             "startDate": ThalloHealthKitModule.iso(w.startDate),
                             "endDate": ThalloHealthKitModule.iso(w.endDate),
+                            "sourceName": w.sourceRevision.source.name,
+                            "sourceBundleIdentifier": w.sourceRevision.source.bundleIdentifier,
                         ]
                         if let cal = w.totalEnergyBurned?.doubleValue(for: .kilocalorie()) { entry["calories"] = cal }
                         if let dist = w.totalDistance?.doubleValue(for: .mile()) { entry["distanceMiles"] = dist }

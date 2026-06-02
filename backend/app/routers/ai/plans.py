@@ -1290,8 +1290,8 @@ def _generate_nutritionist_note(
             )
         elif "recomp" in goal_key:
             goal_rationale = (
-                f"{tgt_cal} kcal is set near maintenance so you can add muscle and "
-                f"drop fat simultaneously; high protein ({tgt_prot}g / "
+                f"{tgt_cal} kcal is set in a slight-deficit to maintenance range so you can "
+                f"drop fat while still training hard; high protein ({tgt_prot}g / "
                 f"{prot_per_lb or '?'} g/lb) is the lever that makes recomp possible."
             )
         else:

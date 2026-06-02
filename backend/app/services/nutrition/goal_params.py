@@ -51,14 +51,10 @@ MIN_SAFE_CALORIES = 1200
 # bulk. Sources: ~1% of bodyweight/week is the rule of thumb; 1.5 lb/wk is
 # already aggressive for most lifters.
 #
-# IMPORTANT — scope of these clamps: they are enforced ONLY in the
-# target-weight + timeline path (calorie_calculator step_4, path a). The
-# default pace path (path b: calorie_adjustment_pct_by_pace + the per-bucket
-# calorie_adjustment_clamp) is NOT rate-clamped. So an "aggressive" surplus
-# from the pace path can imply a weekly rate above MAX_GAIN_RATE_LBS_PER_WEEK
-# at high TDEE — e.g. muscle_gain aggressive at 375 cal/day (legacy fixed
-# table) ≈ 0.75 lb/wk, above the 0.5 ceiling. If you want the pace path to
-# honor these clamps too, that's a behavior change, not a doc fix.
+# These clamps apply to the target-weight + timeline path directly. The pace
+# path also derives daily kcal caps from them, blended with the bodyweight-aware
+# percentage caps below, so a very high TDEE cannot turn an aggressive pace into
+# an unsafe weekly rate.
 MAX_LOSS_RATE_LBS_PER_WEEK = 1.5
 MAX_GAIN_RATE_LBS_PER_WEEK = 0.5
 
@@ -97,8 +93,8 @@ class GoalBucketParams:
     #
     # NOTE: this fixed table is the LEGACY fallback (calorie_calculator
     # step_4, path c). The live path is `calorie_adjustment_pct_by_pace` +
-    # `calorie_adjustment_clamp` (path b). Neither pace path is rate-clamped
-    # against MAX_GAIN/MAX_LOSS — see the note on those constants above.
+    # `calorie_adjustment_clamp` (path b), then the bodyweight-aware
+    # rate caps above.
     #
     # Negative values = deficit (cut), positive = surplus (bulk), zero =
     # maintenance.
@@ -224,10 +220,41 @@ MUSCLE_GAIN = GoalBucketParams(
 
 BODY_RECOMP = GoalBucketParams(
     name="body_recomp",
-    # Near-maintenance band. Recomp is slow by nature; big swings in
-    # either direction defeat the purpose. Conservative = slight deficit
-    # for fat loss emphasis, aggressive = slight surplus for muscle
-    # emphasis.
+    # Slight-deficit recomp band. Recomp should bias toward fat loss while
+    # keeping enough fuel for lifting performance. Conservative = clearer
+    # fat-loss emphasis, moderate = 95% of maintenance, aggressive = true
+    # maintenance for muscle-priority recomp without crossing into bulk.
+    calorie_adjustment_by_pace={
+        "conservative": -200,
+        "moderate":     -125,
+        "aggressive":      0,
+    },
+    calorie_adjustment_pct_by_pace={
+        "conservative": -0.08,
+        "moderate":     -0.05,
+        "aggressive":    0.00,
+    },
+    calorie_adjustment_clamp=(-250, 0),
+    pace_labels={
+        "conservative": "fat_priority",
+        "moderate": "balanced",
+        "aggressive": "muscle_priority",
+    },
+    protein_per_lb=1.0,  # high protein is the whole point of recomp
+    protein_per_lb_by_pace={
+        "conservative": 0.95,
+        "moderate":     1.0,
+        "aggressive":   1.0,
+    },
+    fat_percent_of_calories=0.28,
+    min_carbs_g=100,
+)
+
+MAINTENANCE = GoalBucketParams(
+    name="maintenance",
+    # True maintenance bucket for maintain-style goals and the cut /
+    # maintain / bulk reference card. Kept separate from BODY_RECOMP so
+    # changing recomp policy does not quietly turn maintenance into a cut.
     calorie_adjustment_by_pace={
         "conservative": -100,
         "moderate":        0,
@@ -240,11 +267,11 @@ BODY_RECOMP = GoalBucketParams(
     },
     calorie_adjustment_clamp=(-150, 150),
     pace_labels={
-        "conservative": "fat_priority",
-        "moderate": "balanced",
-        "aggressive": "muscle_priority",
+        "conservative": "maintenance_light",
+        "moderate": "maintenance",
+        "aggressive": "maintenance_plus",
     },
-    protein_per_lb=1.0,  # high protein is the whole point of recomp
+    protein_per_lb=1.0,
     protein_per_lb_by_pace={
         "conservative": 0.95,
         "moderate":     1.0,
@@ -391,8 +418,8 @@ GOAL_BUCKET_MAP: dict[str, GoalBucketParams] = {
 
     # ── Recomposition / maintenance ──────────────────────────────────────────
     "body_recomp":       BODY_RECOMP,
-    "maintain":          BODY_RECOMP,
-    "maintain_physique": BODY_RECOMP,
+    "maintain":          MAINTENANCE,
+    "maintain_physique": MAINTENANCE,
     "general_health":    GENERAL_HEALTH,
 
     # ── Strength / powerlifting ──────────────────────────────────────────────

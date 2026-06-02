@@ -1318,6 +1318,8 @@ export interface WorkoutDetail {
   endDate: string;
   calories?: number;
   distanceMiles?: number;
+  sourceName?: string;
+  sourceBundleIdentifier?: string;
   avgHeartRate?: number;
   maxHeartRate?: number;
   elevationGainFt?: number;

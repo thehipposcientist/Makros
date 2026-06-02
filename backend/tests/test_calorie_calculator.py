@@ -76,7 +76,7 @@ def test_male_fat_loss_moderate() -> None:
 def test_body_recomp_moderate() -> None:
     """30yo male, 175 lb, 5'11", training 4 days/wk, body_recomp moderate.
 
-    Moderate recomp = 0 cal/day adjustment (maintenance). High protein 1.0 g/lb.
+    Moderate recomp = 95% of maintenance. High protein 1.0 g/lb.
 
     Expected chain:
         BMR    = 10*(175/2.205) + 6.25*71*2.54 - 5*30 + 5
@@ -84,11 +84,11 @@ def test_body_recomp_moderate() -> None:
                ≈ 793 + 1127 - 150 + 5
                ≈ 1775
         TDEE   = 1775 * 1.55 ≈ 2751
-        recomp = 2751 + 0 ≈ 2751
+        recomp = 2751 * 0.95 ≈ 2613
 
         Protein = 175 * 1.0 = 175g
-        Fat     = max(0.3*175=52.5, 0.25*2751/9=76.4) = 76g
-        Carbs   ≈ (2751 - 175*4 - 76*9) / 4 = (2751 - 700 - 684) / 4 = 1367/4 ≈ 342g
+        Fat     = max(0.3*175=52.5, 0.28*2613/9=81.3) = 81g
+        Carbs   ≈ (2613 - 175*4 - 81*9) / 4 = (2613 - 700 - 729) / 4 = 1184/4 ≈ 296g
     """
     print("\n[test] 30yo M, 175lb, 5'11\", 4d/wk, body_recomp, moderate")
     targets = compute_targets(CalorieInputs(
@@ -99,9 +99,10 @@ def test_body_recomp_moderate() -> None:
     ))
     _assert_near(targets.bmr,       1775, 15, "BMR")
     _assert_near(targets.tdee,      2751, 20, "TDEE")
-    _assert_near(targets.calories,  2751, 20, "calories (maintenance)")
+    _assert_near(targets.calories,  2613, 20, "calories (95% maintenance)")
     _assert_near(targets.protein_g,  175,  3, "protein_g (1.0 g/lb)")
     assert targets.bucket_name == "body_recomp", f"expected body_recomp, got {targets.bucket_name}"
+    assert targets.goal_adjustment_pct == -0.05
     # Macro consistency — sum must match stated calories within 10 kcal.
     delta = macro_consistency_delta(
         targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g,
@@ -351,19 +352,19 @@ def test_calculated_target_is_internally_consistent() -> None:
     guard — step 7's fat-floor/carb-floor logic must never leave the
     three macros summing to something wildly different from calories."""
     print("\n[test] calculated targets stay internally consistent")
-    for goal in ("fat_loss", "muscle_gain", "body_recomp", "strength",
+    for goal in ("fat_loss", "muscle_gain", "body_recomp", "maintain", "strength",
                  "endurance", "athletic_performance", "general_health"):
         targets = compute_targets(_base_inputs(goal_id=goal))
         delta = macro_consistency_delta(
             targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g,
         )
         assert abs(delta) <= 10, f"goal={goal} drift={delta}"
-    print(f"  ✓ all 7 buckets consistent within 10 kcal")
+    print(f"  ✓ all 8 sampled buckets consistent within 10 kcal")
 
 
 def test_moderate_recomp_180_lb_example() -> None:
     """Regression for the user-visible case: 180 lb, 32yo male, 6'0",
-    4 day/week balanced recomp should be near 2800 kcal and label the pace
+    4 day/week balanced recomp should be near 2650 kcal and label the pace
     as balanced rather than "aggressive/conservative" semantics."""
     print("\n[test] 32yo M, 180lb, 6'0\", 4d/wk, body_recomp, moderate")
     targets = compute_targets(CalorieInputs(
@@ -374,9 +375,9 @@ def test_moderate_recomp_180_lb_example() -> None:
     ))
     _assert_near(targets.bmr, 1804, 10, "BMR")
     _assert_near(targets.tdee, 2796, 20, "TDEE")
-    _assert_near(targets.calories, 2796, 20, "calories")
+    _assert_near(targets.calories, 2656, 20, "calories")
     _assert_near(targets.protein_g, 180, 2, "protein_g")
-    assert targets.goal_adjustment_kcal == 0
+    assert targets.goal_adjustment_kcal == -140
     assert targets.goal_pace_label == "balanced"
     assert 0.25 <= (targets.fat_percent or 0) <= 0.30
     assert targets.carbs_g > 0

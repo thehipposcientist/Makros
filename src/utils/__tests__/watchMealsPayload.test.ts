@@ -25,7 +25,7 @@ const plan: any = {
 };
 
 describe('watch meal payload', () => {
-  it('uses stable meal keys and phone check state for watch rows', () => {
+  it('reports per-meal check state but totals ALL visible meals (matches phone NutritionCard)', () => {
     const payload = buildWatchMealsPayload(
       plan,
       { oats_key: true, chicken_key: false },
@@ -36,11 +36,28 @@ describe('watch meal payload', () => {
 
     expect(payload.meals.map(m => m.mealType)).toEqual(['oats_key', 'chicken_key']);
     expect(payload.meals.map(m => m.checked)).toEqual([true, false]);
-    expect(payload.actual).toEqual({ calories: 300, proteinG: 10, carbsG: 52, fatG: 6 });
+    // The phone's NutritionCard sums every visible meal regardless of checked
+    // state, so the watch must too — otherwise the wrist total disagreed with
+    // the phone whenever a meal was left unchecked.
+    expect(payload.actual).toEqual({ calories: 820, proteinG: 54, carbsG: 107, fatG: 18 });
     expect(payload.score).toBe(82);
   });
 
-  it('normalizes legacy meal_N checks before calculating watch totals', () => {
+  it('totals are independent of which meals are checked', () => {
+    const allChecked = buildWatchMealsPayload(
+      plan, { oats_key: true, chicken_key: true }, '2026-05-24', null, { syncedAtMs: 1 },
+    );
+    const noneChecked = buildWatchMealsPayload(
+      plan, {}, '2026-05-24', null, { syncedAtMs: 1 },
+    );
+    expect(allChecked.actual).toEqual(noneChecked.actual);
+    expect(allChecked.actual).toEqual({ calories: 820, proteinG: 54, carbsG: 107, fatG: 18 });
+    // ...but the per-meal checkboxes still differ for the watch row UI.
+    expect(allChecked.meals.map(m => m.checked)).toEqual([true, true]);
+    expect(noneChecked.meals.map(m => m.checked)).toEqual([false, false]);
+  });
+
+  it('normalizes legacy meal_N checks for the row flags without changing totals', () => {
     const payload = buildWatchMealsPayload(
       plan,
       { meal_1: true },
@@ -51,6 +68,6 @@ describe('watch meal payload', () => {
 
     expect(payload.meals.map(m => m.mealType)).toEqual(['oats_key', 'chicken_key']);
     expect(payload.meals.map(m => m.checked)).toEqual([false, true]);
-    expect(payload.actual).toEqual({ calories: 520, proteinG: 44, carbsG: 55, fatG: 12 });
+    expect(payload.actual).toEqual({ calories: 820, proteinG: 54, carbsG: 107, fatG: 18 });
   });
 });

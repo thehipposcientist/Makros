@@ -13,10 +13,12 @@
 
 import {
   HYDRATION_QUICK_ADD_OUNCES,
+  HYDRATION_QUICK_REMOVE_OUNCES,
   buildHydrationReminderSlots,
   dailyWaterOz,
   dailyWaterLiters,
   formatHydrationQuickAddLabel,
+  formatHydrationQuickRemoveLabel,
   formatHydrationTargetRange,
   formatWaterTarget,
   hydrationTargetRangeOz,
@@ -111,6 +113,10 @@ describe('hydration target', () => {
         '+24 oz',
         '+32 oz',
         '+40 oz',
+      ]);
+      expect([...HYDRATION_QUICK_REMOVE_OUNCES]).toEqual([8]);
+      expect(HYDRATION_QUICK_REMOVE_OUNCES.map(formatHydrationQuickRemoveLabel)).toEqual([
+        '-8 oz',
       ]);
     });
   });

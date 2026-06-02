@@ -512,9 +512,9 @@ PACE_OPTIONS_DATA = [
     ("muscle_gain", "aggressive",   "Aggressive Bulk", "trending-up-outline", "~1 lb/week",     "Maximum muscle gain — expect some added body fat"),
 
     # Body recomposition
-    ("body_recomp", "conservative", "Gradual Recomp",   "leaf-outline", "Slow shift",    "High protein + slight deficit — very sustainable, slower visual change"),
-    ("body_recomp", "moderate",     "Steady Recomp",    "swap-horizontal-outline", "Steady effort", "Balanced nutrition and consistent training for noticeable changes over months"),
-    ("body_recomp", "aggressive",   "Intensive Recomp", "flame-outline", "High effort",   "Strict calorie cycling and high training volume — best results fastest"),
+    ("body_recomp", "conservative", "Gradual Recomp",   "leaf-outline", "Slow shift",    "High protein + a clearer deficit — fat-priority recomp with slower muscle gain"),
+    ("body_recomp", "moderate",     "Steady Recomp",    "swap-horizontal-outline", "Steady effort", "High protein + about 95% of maintenance for balanced recomposition"),
+    ("body_recomp", "aggressive",   "Intensive Recomp", "flame-outline", "High effort",   "Maintenance calories with strict training consistency — muscle-priority recomp"),
 
     # Toning
     ("toning", "conservative", "Gentle Tone",   "leaf-outline", "~0.5 lbs/week",  "Slow lean-out — very sustainable, no crash dieting"),

@@ -80,6 +80,8 @@ export interface ImportCandidate {
   durationMin: number;
   calories?: number | null;
   distanceMiles?: number | null;
+  sourceName?: string | null;
+  sourceBundleIdentifier?: string | null;
   avgHeartRate?: number | null;
   maxHeartRate?: number | null;
   elevationGainFt?: number | null;
@@ -94,6 +96,19 @@ export function externalIdFor(w: WorkoutDetail): string {
   const ms = new Date(w.startDate).getTime();
   const roundedMin = Math.round(ms / 60000) * 60000;
   return `hk_${roundedMin}`;
+}
+
+function thalloSourceText(source: { sourceName?: string | null; sourceBundleIdentifier?: string | null }): string {
+  return `${source.sourceName ?? ''} ${source.sourceBundleIdentifier ?? ''}`.toLowerCase();
+}
+
+export function isThalloSourcedWorkout(source: { sourceName?: string | null; sourceBundleIdentifier?: string | null }): boolean {
+  const text = thalloSourceText(source);
+  return /\bthallo\b/.test(text) || text.includes('com.thallo.');
+}
+
+export function isThalloSourcedWorkoutCandidate(candidate: ImportCandidate): boolean {
+  return isThalloSourcedWorkout(candidate);
 }
 
 // ±5 min buffer on each end of a local session's window. Anything Apple
@@ -174,6 +189,8 @@ export async function detectUnloggedWorkouts(
       durationMin: Math.round(w.duration),
       calories: w.calories ?? null,
       distanceMiles: w.distanceMiles ?? null,
+      sourceName: w.sourceName ?? null,
+      sourceBundleIdentifier: w.sourceBundleIdentifier ?? null,
       avgHeartRate: w.avgHeartRate ?? null,
       maxHeartRate: w.maxHeartRate ?? null,
       elevationGainFt: w.elevationGainFt ?? null,

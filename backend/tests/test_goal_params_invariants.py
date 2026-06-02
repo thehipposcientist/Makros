@@ -22,6 +22,7 @@ from app.services.nutrition.goal_params import (
     FAT_LOSS,
     GENERAL_HEALTH,
     GOAL_BUCKET_MAP,
+    MAINTENANCE,
     MAX_GAIN_RATE_LBS_PER_WEEK,
     MAX_GAIN_RATE_PCT_BW_PER_WEEK,
     MAX_LOSS_RATE_LBS_PER_WEEK,
@@ -33,7 +34,7 @@ from app.services.nutrition.calorie_calculator import CalorieInputs, compute_tar
 
 
 ALL_BUCKETS = (
-    FAT_LOSS, MUSCLE_GAIN, BODY_RECOMP, STRENGTH, ENDURANCE, ATHLETIC, GENERAL_HEALTH,
+    FAT_LOSS, MUSCLE_GAIN, BODY_RECOMP, MAINTENANCE, STRENGTH, ENDURANCE, ATHLETIC, GENERAL_HEALTH,
 )
 EXPECTED_PACES = {"conservative", "moderate", "aggressive"}
 
@@ -90,6 +91,7 @@ def test_representative_goal_ids_map_to_expected_buckets() -> None:
         "improve_power": "athletic_performance",
         "sprint_speed": "athletic_performance",
         "body_recomp":  "body_recomp",
+        "maintain":     "maintenance",
     }
     for goal_id, bucket_name in expected.items():
         got = get_bucket_for_goal(goal_id).name

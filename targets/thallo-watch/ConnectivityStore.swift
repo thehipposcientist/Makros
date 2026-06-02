@@ -34,6 +34,14 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var workout: WatchWorkout?
     @Published var meals: WatchMealsDay?
     @Published var hydration: WatchHydrationDay?
+    /// `syncedAtMs` of the last PHONE-authoritative hydration payload we
+    /// accepted. Incoming pushes are ordered against this, NOT against the
+    /// live `hydration.syncedAtMs` — optimistic local taps bump the latter to
+    /// the watch's own clock for a fresh "age" reading, and if the watch clock
+    /// runs ahead of the phone that made the phone's authoritative re-push look
+    /// stale and get rejected forever. Phone is the source of truth, so any
+    /// push newer than the last accepted push wins regardless of local taps.
+    private var lastHydrationPushMs: Double = 0
     @Published var activity: WatchActivityDay?
     @Published var lifestyle: WatchLifestyleDay?
     @Published var supplements: WatchSupplementsDay?
@@ -576,8 +584,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         if let h = ctx["hydration"] as? [String: Any], userScopedAllowed {
             if let data = try? JSONSerialization.data(withJSONObject: h),
                 let decoded = try? JSONDecoder().decode(WatchHydrationDay.self, from: data) {
-                if hydration == nil || decoded.syncedAtMs >= (hydration?.syncedAtMs ?? 0) {
+                if hydration == nil || decoded.syncedAtMs >= lastHydrationPushMs {
                     self.hydration = decoded
+                    self.lastHydrationPushMs = decoded.syncedAtMs
                     Self.persistOptional(decoded, key: Self.storedHydrationKey)
                 }
             }
@@ -1103,12 +1112,16 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     /// and leaving the watch UI stale during that window felt broken.
     func toggleMealLocal(mealType: String) {
         guard let day = meals else { return }
+        // Flip only the tapped meal's checkbox. Day totals (`actual`) are the
+        // sum of ALL visible meals — the same definition the phone's
+        // NutritionCard uses — so toggling a single meal must NOT change them.
+        // The old behavior re-summed only checked meals here, which made the
+        // wrist totals collapse on every toggle and disagree with the phone.
+        // The phone re-pushes authoritative totals after it persists the log.
         var newMeals: [WatchMealItem] = []
-        var actCal = 0, actPro = 0, actCarb = 0, actFat = 0
         for m in day.meals {
-            let updated: WatchMealItem
             if m.mealType == mealType {
-                updated = WatchMealItem(
+                newMeals.append(WatchMealItem(
                     mealType: m.mealType,
                     name: m.name,
                     calories: m.calories,
@@ -1116,24 +1129,15 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     carbsG: m.carbsG,
                     fatG: m.fatG,
                     checked: !m.checked,
-                )
+                ))
             } else {
-                updated = m
+                newMeals.append(m)
             }
-            if updated.checked {
-                actCal += updated.calories
-                actPro += updated.proteinG
-                actCarb += updated.carbsG
-                actFat += updated.fatG
-            }
-            newMeals.append(updated)
         }
         let updated = WatchMealsDay(
             dateISO: day.dateISO,
             targets: day.targets,
-            actual: WatchMealTargets(
-                calories: actCal, proteinG: actPro, carbsG: actCarb, fatG: actFat,
-            ),
+            actual: day.actual,
             score: day.score,
             meals: newMeals,
             syncedAtMs: day.syncedAtMs,

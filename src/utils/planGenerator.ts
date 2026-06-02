@@ -419,7 +419,7 @@ const CALORIE_ADJUSTMENT: Partial<Record<string, Record<string, number>>> = {
   fat_loss:             { conservative: -250, moderate: -500, aggressive: -750 },
   toning:               { conservative: -200, moderate: -350, aggressive: -500 },
   muscle_gain:          { conservative: 150,  moderate: 300,  aggressive: 500  },
-  body_recomp:          { conservative: -100, moderate: 0,    aggressive: 100  },
+  body_recomp:          { conservative: -200, moderate: -125, aggressive: 0    },
   strength:             { conservative: 200,  moderate: 350,  aggressive: 500  },
   endurance:            { conservative: 100,  moderate: 200,  aggressive: 300  },
   athletic_performance: { conservative: 150,  moderate: 250,  aggressive: 400  },
@@ -427,6 +427,25 @@ const CALORIE_ADJUSTMENT: Partial<Record<string, Record<string, number>>> = {
   // deficits hurt thyroid + muscle over time).
   longevity:            { conservative: -100, moderate: 0,    aggressive: 100  },
 };
+
+const CALORIE_ADJUSTMENT_PCT: Partial<Record<string, Record<string, number>>> = {
+  body_recomp: { conservative: -0.08, moderate: -0.05, aggressive: 0 },
+};
+
+const CALORIE_ADJUSTMENT_CLAMP: Partial<Record<string, [number, number]>> = {
+  body_recomp: [-250, 0],
+};
+
+function calculateCalorieAdjustment(goal: string, pace: string, tdee: number): number {
+  const pct = CALORIE_ADJUSTMENT_PCT[goal]?.[pace];
+  if (pct != null) {
+    const raw = tdee * pct;
+    if (Math.abs(raw) < 1) return 0;
+    const [low, high] = CALORIE_ADJUSTMENT_CLAMP[goal] ?? [-Infinity, Infinity];
+    return Math.round(Math.max(low, Math.min(high, raw)));
+  }
+  return CALORIE_ADJUSTMENT[goal]?.[pace] ?? 0;
+}
 
 function calculateBMR(profile: UserProfile): number {
   const { weightLbs, heightFeet, heightInches, age, gender } = profile.physicalStats;
@@ -449,7 +468,7 @@ function getActivityMultiplier(daysPerWeek: number): number {
 export function calculateNutritionTargets(profile: UserProfile): NutritionTargets {
   const bmr = calculateBMR(profile);
   const tdee = Math.round(bmr * getActivityMultiplier(profile.daysPerWeek));
-  const adjustment = CALORIE_ADJUSTMENT[profile.goal]?.[profile.goalDetails.pace] ?? 0;
+  const adjustment = calculateCalorieAdjustment(profile.goal, profile.goalDetails.pace, tdee);
   const calories = Math.max(1200, tdee + adjustment);
 
   // Age-adjusted protein: older users need more protein per lb to prevent

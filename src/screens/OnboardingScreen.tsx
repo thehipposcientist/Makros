@@ -2202,7 +2202,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               </View>
               <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
                 {selectedGoal === 'body_recomp'
-                  ? 'Sets your calorie target. Conservative = small deficit; Moderate = maintenance; Aggressive = slight surplus (muscle focus).'
+                  ? 'Sets your calorie target. Conservative = clearer deficit; Moderate = slight deficit; Aggressive = maintenance (muscle focus).'
                   : 'Sets your weekly target rate. Used to estimate when you\'ll hit your goal.'}
               </Text>
             </View>

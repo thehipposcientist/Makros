@@ -89,6 +89,7 @@ type TodayHomeTabProps = {
     target_ounces_max?: number | null;
   } | null;
   hydrationQuickAddLabel: string;
+  hydrationQuickRemoveLabel: string;
   hydrationLoading: boolean;
   stepsToday: number | null;
   goalLoading: boolean;
@@ -114,7 +115,11 @@ type TodayHomeTabProps = {
   /** Optional camera quick-log entry: opens the new-meal editor where the AI
    *  photo scan is the primary action. Hidden when not provided. */
   onScanMeal?: () => void;
+  /** Optional packaged-food quick-log entry: opens the new-meal editor and
+   *  immediately starts the barcode scanner. Hidden when not provided. */
+  onScanBarcodeMeal?: () => void;
   onQuickAddWater: () => void;
+  onQuickRemoveWater: () => void;
 };
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -184,6 +189,7 @@ function TodayHomeTab({
   loggedNutrition,
   hydration,
   hydrationQuickAddLabel,
+  hydrationQuickRemoveLabel,
   hydrationLoading,
   stepsToday,
   goalLoading,
@@ -205,7 +211,9 @@ function TodayHomeTab({
   onOpenReadiness,
   onLogMeal,
   onScanMeal,
+  onScanBarcodeMeal,
   onQuickAddWater,
+  onQuickRemoveWater,
 }: TodayHomeTabProps) {
   const todayDate = useMemo(formatTodayDate, []);
   const greeting = useMemo(() => formatGreeting(userDisplayName), [userDisplayName]);
@@ -225,6 +233,7 @@ function TodayHomeTab({
   const loggedCarbs = loggedNutrition?.carbs_g ?? null;
   const loggedFat = loggedNutrition?.fat_g ?? null;
   const hydrationTarget = hydration?.target_ounces ?? null;
+  const hydrationRemoveDisabled = hydrationLoading || (hydration?.ounces ?? 0) <= 0;
   const hydrationLabel = hydration
     ? `${Math.round(hydration.ounces)} / ${Math.round(hydration.target_ounces)} oz`
     : 'No water logged';
@@ -578,6 +587,16 @@ function TodayHomeTab({
                 <Ionicons name="camera" size={16} color={mealsAccent} />
               </PressableScale>
             )}
+            {onScanBarcodeMeal && (
+              <PressableScale
+                scaleDown={0.95}
+                onPress={onScanBarcodeMeal}
+                accessibilityRole="button"
+                accessibilityLabel="Scan a food barcode"
+                style={[styles.logMealButton, styles.scanMealButton, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: mealsAccent }]}>
+                <Ionicons name="barcode-outline" size={17} color={mealsAccent} />
+              </PressableScale>
+            )}
           </View>
           <MacroDonutRow
             themeName={themeName}
@@ -603,19 +622,41 @@ function TodayHomeTab({
                 </Text>
               </View>
             </View>
-            <PressableScale
-              scaleDown={0.955}
-              disabled={hydrationLoading}
-              onPress={onQuickAddWater}
-              style={[styles.waterButton, { backgroundColor: themeColors.primary, opacity: hydrationLoading ? 0.62 : 1 }]}>
-              {hydrationLoading ? (
-                <ActivityIndicator size="small" color={getContrastingTextColor(themeColors.primary)} />
-              ) : (
-                <Text style={[styles.waterButtonText, { color: getContrastingTextColor(themeColors.primary) }]}>
-                  {hydrationQuickAddLabel}
+            <View style={styles.waterActions}>
+              <PressableScale
+                scaleDown={0.955}
+                disabled={hydrationRemoveDisabled}
+                onPress={onQuickRemoveWater}
+                accessibilityRole="button"
+                accessibilityLabel="Remove 8 ounces of water"
+                style={[
+                  styles.waterButton,
+                  styles.waterRemoveButton,
+                  {
+                    borderColor: themeColors.border,
+                    opacity: hydrationRemoveDisabled ? 0.45 : 1,
+                  },
+                ]}>
+                <Text style={[styles.waterButtonText, { color: themeColors.textSecondary }]}>
+                  {hydrationQuickRemoveLabel}
                 </Text>
-              )}
-            </PressableScale>
+              </PressableScale>
+              <PressableScale
+                scaleDown={0.955}
+                disabled={hydrationLoading}
+                onPress={onQuickAddWater}
+                accessibilityRole="button"
+                accessibilityLabel="Add water"
+                style={[styles.waterButton, { backgroundColor: themeColors.primary, opacity: hydrationLoading ? 0.62 : 1 }]}>
+                {hydrationLoading ? (
+                  <ActivityIndicator size="small" color={getContrastingTextColor(themeColors.primary)} />
+                ) : (
+                  <Text style={[styles.waterButtonText, { color: getContrastingTextColor(themeColors.primary) }]}>
+                    {hydrationQuickAddLabel}
+                  </Text>
+                )}
+              </PressableScale>
+            </View>
           </View>
         </PressableScale>
       </FadeInView>
@@ -1353,12 +1394,21 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   waterButton: {
-    minWidth: 70,
+    minWidth: 62,
     minHeight: 34,
     borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 12,
+  },
+  waterActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  waterRemoveButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
   },
   waterButtonText: {
     fontSize: 12,

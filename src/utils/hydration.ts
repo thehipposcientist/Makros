@@ -20,6 +20,7 @@ export interface HydrationInputs {
 }
 
 export const HYDRATION_QUICK_ADD_OUNCES = [8, 16, 24, 32, 40] as const;
+export const HYDRATION_QUICK_REMOVE_OUNCES = [8] as const;
 // Reminder cadences in hours. 0.5 = every 30 minutes — the slot builder
 // works in minutes so sub-hour intervals are first-class.
 export const HYDRATION_REMINDER_INTERVAL_HOURS = [0.5, 1, 2, 3, 4] as const;
@@ -34,6 +35,10 @@ export interface HydrationReminderWindowInput {
 
 export function formatHydrationQuickAddLabel(ounces: number): string {
   return `+${Math.round(ounces)} oz`;
+}
+
+export function formatHydrationQuickRemoveLabel(ounces: number): string {
+  return `-${Math.round(Math.abs(ounces))} oz`;
 }
 
 function finitePositiveNumber(value: unknown): number | null {
