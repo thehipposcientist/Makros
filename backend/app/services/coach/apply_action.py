@@ -20,7 +20,8 @@ and `quick_intents.IntentResponse.action.type`):
                                        adaptive_macros pass: don't move)
   • shorten_workout                 → UserPreferences.workout_duration_minutes
                                        (one new column — see migration)
-  • swap_to_recovery                → UserDayState recovery override on tomorrow
+  • swap_to_recovery                → UserDayState recovery override on target date
+                                       (defaults to tomorrow)
   • schedule_deload                 → UserCoachingState.deload_until_date
                                        + volume_adjustment_pct
   • reduce_muscle_volume /
@@ -433,34 +434,48 @@ def apply_action(
             changed_fields={},
         )
 
-    # ── swap_to_recovery (one tomorrow) ─────────────────────────────
+    # ── swap_to_recovery (defaults to tomorrow, can target a date) ───
     if action_type == "swap_to_recovery":
-        # Mark tomorrow as a recovery focus via UserDayState. The
-        # active PlanWeek stays fixed; the app reads this day-state
+        # Mark the target date as a recovery focus via UserDayState.
+        # The active PlanWeek stays fixed; the app reads this day-state
         # overlay the same way it reads a user-initiated skip.
-        tomorrow = date.today() + timedelta(days=1)
-        state = _day_state(db, user_id, tomorrow)
+        today = date.today()
+        default_day = today + timedelta(days=1)
+        target_day = _parse_date(
+            action.get("date") or action.get("day_key") or action.get("target_date"),
+            default_day,
+        )
+        if target_day < today:
+            target_day = today
+        day_label = (
+            "Today" if target_day == today
+            else "Tomorrow" if target_day == default_day
+            else str(target_day)
+        )
+        reason = str(action.get("reason") or "Coach swapped to recovery").strip() or "Coach swapped to recovery"
+        reason = reason[:160]
+        state = _day_state(db, user_id, target_day)
         old = state.skipped_focus
         old_reason = state.skip_reason
         state.skipped_focus = "recovery"
-        state.skip_reason = "Coach swapped to recovery"
+        state.skip_reason = reason
         state.updated_at = datetime.now(timezone.utc)
         db.add(state)
         _record_memory(db, user_id, "ai_apply",
-            "Tomorrow swapped to active recovery via recommendation",
-            {"action": action})
+            f"{day_label} swapped to active recovery via recommendation",
+            {"action": action, "date": str(target_day)})
         db.commit()
         return ApplyResult(
             applied=True,
-            summary="Tomorrow is set as a recovery day.",
+            summary=f"{day_label} is set as a recovery day.",
             needs_regen=False,
             changed_fields={
-                "skipped_focus": {"date": str(tomorrow), "from": old, "to": "recovery"},
-                "skip_reason": {"date": str(tomorrow), "from": old_reason, "to": state.skip_reason},
+                "skipped_focus": {"date": str(target_day), "from": old, "to": "recovery"},
+                "skip_reason": {"date": str(target_day), "from": old_reason, "to": state.skip_reason},
             },
             undo_action={
                 "type": "set_day_focus",
-                "date": str(tomorrow),
+                "date": str(target_day),
                 "skipped_focus": old,
                 "skip_reason": old_reason,
             },

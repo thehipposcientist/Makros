@@ -8,6 +8,8 @@ Run manually from inside the backend container:
 """
 from __future__ import annotations
 
+from datetime import date
+
 from app.routers.ai.quick_intents import match_intent, handle_intent
 
 
@@ -83,6 +85,38 @@ def test_time_limited_extracts_minutes():
     print("  ✓ extracted 25 min")
 
 
+def test_slept_badly_uses_heavy_today_context():
+    print("[test] slept_badly uses today's heavy workout context")
+    today = date.today().isoformat()
+    resp = handle_intent(
+        "slept_badly",
+        "slept badly last night",
+        plan_context={
+            "scheduleMapping": [
+                {"calendarDate": today, "dayLabel": "today", "planDay": "Day 1", "focus": "Legs"},
+            ],
+        },
+        workout_plan={
+            "days": [
+                {
+                    "day": "Day 1",
+                    "focus": "Legs",
+                    "stimulus": "strength",
+                    "exercises": [{"name": "Back Squat", "sets": 4, "reps": "5"}],
+                },
+            ],
+        },
+    )
+    assert resp is not None
+    assert "heavy Legs day" in resp.answer
+    assert resp.action == {
+        "type": "swap_to_recovery",
+        "date": today,
+        "reason": "Recovery guidance after poor sleep",
+    }
+    print("  ✓ heavy day returns today recovery action")
+
+
 def test_less_cardio_wins_over_broad_want_cardio():
     print("[test] less-cardio phrasing does not route to more_cardio")
     cases = [
@@ -100,5 +134,6 @@ if __name__ == "__main__":
     test_no_false_positives()
     test_handlers_return_actions()
     test_time_limited_extracts_minutes()
+    test_slept_badly_uses_heavy_today_context()
     test_less_cardio_wins_over_broad_want_cardio()
     print("\n✅ test_quick_intents.py PASSED")

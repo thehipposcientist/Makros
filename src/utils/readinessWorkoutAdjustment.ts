@@ -16,6 +16,8 @@ interface RecommendInput {
   workout: WorkoutDay | null | undefined;
   muscleFatigue?: Record<string, number> | null;
   focusReadiness?: Record<string, number> | null;
+  sleepScore?: number | null;
+  sleepHours?: number | null;
 }
 
 interface ApplyInput {
@@ -151,6 +153,49 @@ function isHardStimulus(workout: WorkoutDay): boolean {
   return stimulus === 'strength' || stimulus === 'power';
 }
 
+function isHeavyWorkout(workout: WorkoutDay): boolean {
+  if (isHardStimulus(workout)) return true;
+  const archetype = String(workout.archetype ?? '').toLowerCase();
+  if (archetype.includes('heavy') || archetype.includes('strength')) return true;
+  return (workout.exercises ?? []).some(ex => {
+    const reps = String(ex.reps ?? '').toLowerCase();
+    if (Array.isArray(ex.setScheme) && ex.setScheme.some(set => String(set.setType ?? '').toLowerCase().includes('heavy'))) {
+      return true;
+    }
+    const lowRepMatch = reps.match(/\d+/);
+    return lowRepMatch ? Number(lowRepMatch[0]) <= 6 && (Number(ex.sets) || 0) >= 3 : false;
+  });
+}
+
+function sleepReadinessFor(input: RecommendInput): number | null {
+  const direct = normalizedReadiness(input.sleepScore);
+  if (direct != null) return direct;
+  const hours = Number(input.sleepHours);
+  if (!Number.isFinite(hours) || hours <= 0) return null;
+  if (hours >= 8.0) return 90;
+  if (hours >= 7.0) return 80;
+  if (hours >= 6.5) return 65;
+  if (hours >= 6.0) return 50;
+  if (hours >= 5.0) return 30;
+  return 15;
+}
+
+function focusLabelFor(workout: WorkoutDay, focusKey: string | null): string {
+  const raw = String(workout.focus || focusKey || 'planned').replace(/[_-]/g, ' ').trim();
+  if (!raw) return 'planned';
+  return raw.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function sleepDetailPrefix(
+  workout: WorkoutDay,
+  focusKey: string | null,
+  sleepReadiness: number,
+): string {
+  const focus = focusLabelFor(workout, focusKey);
+  const heavyLabel = isHeavyWorkout(workout) ? `a heavy ${focus} day` : `${focus} today`;
+  return `I see ${heavyLabel}, but last night's sleep was low (${sleepReadiness}%).`;
+}
+
 export function recommendReadinessWorkoutAdjustment(input: RecommendInput): ReadinessWorkoutRecommendation | null {
   const workout = input.workout;
   if (!workout || !Array.isArray(workout.exercises) || workout.exercises.length === 0) return null;
@@ -162,34 +207,60 @@ export function recommendReadinessWorkoutAdjustment(input: RecommendInput): Read
   const focusKey = focusKeyFor(workout);
   const muscles = affectedMusclesFor(workout, focusKey);
   const readiness = focusReadinessFor(focusKey, muscles, input.muscleFatigue, input.focusReadiness);
-  if (readiness == null || readiness >= 60) return null;
+  const sleepReadiness = sleepReadinessFor(input);
+  const heavyWorkout = isHeavyWorkout(workout);
+  const hasPoorSleep = sleepReadiness != null && sleepReadiness < 55;
+  if ((readiness == null || readiness >= 60) && !hasPoorSleep) return null;
 
   const peakFatigue = input.muscleFatigue
     ? Math.max(0, ...muscles.map(m => Number(input.muscleFatigue?.[m] ?? 0)).filter(Number.isFinite))
     : 0;
-  if (readiness >= 45 && !isHardStimulus(workout) && peakFatigue < 0.55) return null;
+  if (!hasPoorSleep && readiness != null && readiness >= 45 && !isHardStimulus(workout) && peakFatigue < 0.55) return null;
 
   const affected = topFatiguedMuscles(muscles, input.muscleFatigue);
   const muscleLabel = affected.length ? affected.join(', ') : (focusKey ?? 'target muscles').replace(/_/g, ' ');
+  const effectiveReadiness = Math.min(...[readiness, sleepReadiness].filter((v): v is number => v != null));
 
-  if (readiness < 30) {
+  if (hasPoorSleep && sleepReadiness != null) {
+    if (sleepReadiness < 45 && heavyWorkout) {
+      return {
+        kind: 'recovery',
+        severity: 'very_high',
+        readiness: sleepReadiness,
+        title: 'Recovery fits better today',
+        detail: `${sleepDetailPrefix(workout, focusKey, sleepReadiness)} Move the hard work to tomorrow if you can; do light cardio or mobility today.`,
+        affectedMuscles: affected,
+      };
+    }
+
     return {
-      kind: 'recovery',
-      severity: 'very_high',
-      readiness,
-      title: 'Recovery fits better today',
-      detail: `${muscleLabel} readiness is ${readiness}%. A recovery day is the better default unless this session is intentionally easy.`,
+      kind: 'lighten',
+      severity: sleepReadiness < 45 ? 'high' : 'moderate',
+      readiness: sleepReadiness,
+      title: heavyWorkout ? 'Heavy day needs a lighter call' : 'Lighten today',
+      detail: `${sleepDetailPrefix(workout, focusKey, sleepReadiness)} Keep the habit, but cap intensity and skip non-essential volume.`,
       affectedMuscles: affected,
     };
   }
 
-  if (readiness < 45) {
+  if (effectiveReadiness < 30) {
+    return {
+      kind: 'recovery',
+      severity: 'very_high',
+      readiness: effectiveReadiness,
+      title: 'Recovery fits better today',
+      detail: `${muscleLabel} readiness is ${effectiveReadiness}%. A recovery day is the better default unless this session is intentionally easy.`,
+      affectedMuscles: affected,
+    };
+  }
+
+  if (effectiveReadiness < 45) {
     return {
       kind: 'lighten',
       severity: 'high',
-      readiness,
+      readiness: effectiveReadiness,
       title: 'Lighten today',
-      detail: `${muscleLabel} readiness is ${readiness}%. Cut volume and leave extra reps in reserve for this session.`,
+      detail: `${muscleLabel} readiness is ${effectiveReadiness}%. Cut volume and leave extra reps in reserve for this session.`,
       affectedMuscles: affected,
     };
   }
@@ -197,9 +268,9 @@ export function recommendReadinessWorkoutAdjustment(input: RecommendInput): Read
   return {
     kind: 'lighten',
     severity: 'moderate',
-    readiness,
+    readiness: effectiveReadiness,
     title: 'Consider a lighter version',
-    detail: `${muscleLabel} readiness is ${readiness}%. Keep the pattern, but avoid max-effort loading today.`,
+    detail: `${muscleLabel} readiness is ${effectiveReadiness}%. Keep the pattern, but avoid max-effort loading today.`,
     affectedMuscles: affected,
   };
 }

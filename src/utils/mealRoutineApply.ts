@@ -297,12 +297,16 @@ export function applyRoutines(
     });
   }
 
-  // Hard invariant: one routine → at most one row. Optimistic ids minted when
-  // a routine is created can drift from the backend-aligned ids already sitting
-  // in a loaded/remote plan; if both survive the merge above we'd render the
-  // meal twice (the duplicate that only an app restart cleared). Collapse any
-  // rows resolving to the same routine entry, preferring a logged copy. This is
-  // a safety net independent of which merge path produced the rows.
+  // Invariant: collapse only the OPTIMISTIC/stale duplicates of a routine, not
+  // legitimately-distinct logged rows. Optimistic ids minted when a routine is
+  // created can drift from the backend-aligned ids already in a loaded/remote
+  // plan; if both survive we'd render the meal twice (the duplicate that only
+  // an app restart cleared). But two rows with DISTINCT `_loggedMealId` are
+  // separate real logs (e.g. a routine occurrence plus a same-named meal the
+  // user logged and that got name-adopted) and must both survive. Rule per
+  // routine entry: keep every distinct logged row; keep at most one un-logged
+  // row, and drop un-logged rows entirely once any logged row exists for that
+  // routine (the un-logged copy is the stale/optimistic one).
   const resolveEntryId = (meal: MealSuggestion): string | null => {
     const rid = String((meal as any)._routineId ?? '').trim();
     if (rid && routinesByIdentity.has(rid)) return routinesByIdentity.get(rid)!.id;
@@ -310,26 +314,34 @@ export function applyRoutines(
     if (alias && routinesByIdentity.has(alias)) return routinesByIdentity.get(alias)!.id;
     return null;
   };
+  const loggedEntryIds = new Set<string>();
+  for (const meal of meals) {
+    const entryId = resolveEntryId(meal);
+    if (entryId != null && (meal as any)._loggedMealId != null) loggedEntryIds.add(entryId);
+  }
   const dedupedMeals: MealSuggestion[] = [];
-  const keptIndexByEntry = new Map<string, number>();
+  const seenLoggedIdsByEntry = new Map<string, Set<string>>();
+  const keptUnloggedEntries = new Set<string>();
   for (const meal of meals) {
     const entryId = resolveEntryId(meal);
     if (entryId == null) {
       dedupedMeals.push(meal);
       continue;
     }
-    const prevIdx = keptIndexByEntry.get(entryId);
-    if (prevIdx == null) {
-      keptIndexByEntry.set(entryId, dedupedMeals.length);
+    const loggedId = (meal as any)._loggedMealId;
+    if (loggedId != null) {
+      const seen = seenLoggedIdsByEntry.get(entryId) ?? new Set<string>();
+      if (seen.has(String(loggedId))) continue; // exact same log already kept
+      seen.add(String(loggedId));
+      seenLoggedIdsByEntry.set(entryId, seen);
       dedupedMeals.push(meal);
       continue;
     }
-    // Already kept a row for this routine. Prefer the logged copy (the
-    // authoritative record of what was eaten); otherwise keep the first.
-    const prev = dedupedMeals[prevIdx];
-    if ((meal as any)._loggedMealId != null && (prev as any)._loggedMealId == null) {
-      dedupedMeals[prevIdx] = meal;
-    }
+    // Un-logged row: drop it if this routine already has a logged row, or if we
+    // already kept one un-logged row for it.
+    if (loggedEntryIds.has(entryId) || keptUnloggedEntries.has(entryId)) continue;
+    keptUnloggedEntries.add(entryId);
+    dedupedMeals.push(meal);
   }
 
   return ensureMealClientKeys({

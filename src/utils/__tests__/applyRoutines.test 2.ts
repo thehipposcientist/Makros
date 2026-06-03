@@ -108,59 +108,6 @@ describe('applyRoutines — duplication on edit', () => {
     expect((out.meals[0] as any)._loggedMealId).toBe(55);
   });
 
-  it('adds a newly-pinned routine to a persisted (remote-style) day without clobbering logged meals', () => {
-    // Models the future-day bug: a day's plan was already persisted to
-    // day-state (so it loads as "remote"), then the user pins a NEW routine.
-    // loadPlans now re-applies routines to remote plans, so the routine must
-    // appear on that day while the user's logged meal is preserved.
-    const routines = [makeRoutine('r1', 'Oatmeal', 2)];
-    const persisted = plan([
-      makeMeal('Grilled Chicken', 3, { _loggedMealId: 7, _clientMealKey: 'log_7' }),
-    ]);
-    const out = applyRoutines(persisted, routines);
-    expect(out.meals.length).toBe(2);
-    expect(out.meals.map(m => m.meal)).toEqual(['Oatmeal', 'Grilled Chicken']);
-    expect((out.meals[1] as any)._loggedMealId).toBe(7);
-  });
-
-  it('does not resurrect a routine the day suppressed even when re-applied', () => {
-    // Re-applying routines to a persisted plan must respect that plan's
-    // suppressedRoutineIds so a routine the user removed for that day stays
-    // gone across reloads.
-    const routines = [makeRoutine('r1', 'Oatmeal', 2)];
-    const persisted = plan(
-      [makeMeal('Grilled Chicken', 3, { _loggedMealId: 7 })],
-      { suppressedRoutineIds: ['r1'] },
-    );
-    const out = applyRoutines(persisted, routines);
-    expect(out.meals.map(m => m.meal)).toEqual(['Grilled Chicken']);
-  });
-
-  it('keeps two DISTINCT logged rows of the same routine (ate it twice)', () => {
-    // A routine occurrence (logged id 10) plus a separately-logged same-named
-    // meal (logged id 20) that name-adoption tags to the same routine are two
-    // real logs — the dedupe must keep BOTH, not silently drop one.
-    const routines = [makeRoutine('r1', 'Protein Shake', 1)];
-    const p = plan([
-      makeMeal('Protein Shake', 1, { _routineId: 'r1', _loggedMealId: 10 }),
-      makeMeal('Protein Shake', 1, { _routineId: 'r1', _loggedMealId: 20 }),
-    ]);
-    const out = applyRoutines(p, routines);
-    expect(out.meals.length).toBe(2);
-    expect(out.meals.map(m => (m as any)._loggedMealId).sort()).toEqual([10, 20]);
-  });
-
-  it('drops an un-logged optimistic dup but keeps the logged row', () => {
-    const routines = [makeRoutine('r1', 'Protein Shake', 1)];
-    const p = plan([
-      makeMeal('Protein Shake', 1, { _routineId: 'r1', _loggedMealId: 10 }),
-      makeMeal('Protein Shake', 1, { _routineId: 'r1' }), // stale optimistic, no log
-    ]);
-    const out = applyRoutines(p, routines);
-    expect(out.meals.length).toBe(1);
-    expect((out.meals[0] as any)._loggedMealId).toBe(10);
-  });
-
   it('does not collapse two DISTINCT same-named routines', () => {
     // The dedupe invariant keys on routine entry id, never on name, so two
     // separate routines that happen to share a name both survive.

@@ -6530,53 +6530,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => sub.remove();
   }, [claimHomeFullWatchSync, pushHomeWatchSnapshot]);
 
-  // Live phone → watch re-push for the two channels the user edits directly.
-  // The full-snapshot path only runs on watch reachability / pull_state /
-  // foreground, so logging a meal, checking a meal, or logging water ON THE
-  // PHONE didn't reach the wrist until the next wake — a key reason the watch
-  // and phone macros/hydration looked out of sync. This pushes meals +
-  // hydration whenever today's values change. `watchSync` de-dupes unchanged
-  // payloads (2-min reassert window) so it's cheap; the debounce coalesces
-  // bursts (e.g. checking several meals in a row). Non-force so the de-dupe
-  // applies. Independent of the workout channel, so it's safe mid-workout.
-  useEffect(() => {
-    const todayISO = todayKey();
-    const timer = setTimeout(() => {
-      (async () => {
-        try {
-          const { pushMealsToWatch, pushHydrationToWatch } = await import('../utils/watchSync');
-          if (showMealsSurface) {
-            const todayPlan = nutritionPlansByDate[todayISO]
-              ?? (Object.values(nutritionPlansByDate)[0] as any);
-            if (todayPlan) {
-              await pushMealsToWatch(
-                todayPlan,
-                checkedMealsByDate[todayISO],
-                todayISO,
-                nutritionScoreData?.score ?? null,
-                { displayTargets: watchMealDisplayTargetsFromAdjusted(adjustedDailyTarget) },
-              ).catch(() => {});
-            }
-          }
-          const hydrationSnapshot = hydrationByDate?.[todayISO] ?? hydration ?? null;
-          if (hydrationSnapshot) {
-            await pushHydrationToWatch({
-              dateISO: hydrationSnapshot.date ?? todayISO,
-              ounces: hydrationSnapshot.ounces ?? 0,
-              targetOunces: hydrationSnapshot.target_ounces ?? 64,
-              targetOuncesMin: hydrationSnapshot.target_ounces_min,
-              targetOuncesMax: hydrationSnapshot.target_ounces_max,
-            }).catch(() => {});
-          }
-        } catch { /* bridge optional */ }
-      })();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [
-    nutritionPlansByDate, checkedMealsByDate, nutritionScoreData?.score,
-    adjustedDailyTarget, hydration, hydrationByDate, showMealsSurface, currentDate,
-  ]);
-
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
   // for state that already lives on the phone.
@@ -10269,8 +10222,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Adding a meal to a PAST day unambiguously means "I ate this" — there is
     // no forward planning for a day that already happened. So a user-initiated
     // manual add on a past day logs + checks it, creating the backend Meal row.
-    // Without this the meal only landed in the day-plan and never appeared,
-    // because the past-day view is driven by logged meals, not the plan.
+    // Without this the meal only landed in the day-plan and didn't count toward
+    // that day's logged totals; and since the past-day history list prefers
+    // logged meals when any exist, a plan-only add could be hidden behind the
+    // day's existing logs.
     const isPastManualAdd = userInitiated && isNewMeal && date < todayKey();
     const shouldAutoCheck = userInitiated && date <= todayKey() && (!!opts?.markEaten || isPastManualAdd) && !isExistingLogEdit && savedIdx >= 0;
     if (shouldAutoCheck) {
@@ -12852,6 +12807,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       workout: todayItem.workout,
       muscleFatigue: readinessScore?.muscleFatigue ?? null,
       focusReadiness: readinessScore?.focusReadiness ?? null,
+      sleepScore: readinessSleepScoreFromSummary(todayHealthSummary),
+      sleepHours: readinessSleepHoursFromSummary(todayHealthSummary),
     });
   }, [
     dismissedReadinessAdjustmentDate,
@@ -12860,6 +12817,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     readinessScore?.muscleFatigue,
     schedule,
     skippedDates,
+    todayHealthSummary,
     todayDone,
     workoutPlan,
     workoutPlanSurfaceActive,
@@ -13358,6 +13316,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     : null;
   const yesterdayISO = dateKeyOffset(currentDate, -1);
   const homeReminderCandidates: HomeReminderPrompt[] = [];
+  if (
+    !isFreeTier
+    && showWorkoutsSurface
+    && readinessAdjustmentRecommendation
+    && !todayDone
+    && !skippedDates.has(todayHomeISO)
+  ) {
+    const readinessPromptId = `readiness-adjustment:${todayHomeISO}`;
+    const recoveryRecommended = readinessAdjustmentRecommendation.kind === 'recovery';
+    const readinessAccent = recoveryRecommended
+      ? (themeColors.error ?? themeColors.warning ?? '#EF4444')
+      : (themeColors.warning ?? themeColors.primary);
+    homeReminderCandidates.push({
+      id: readinessPromptId,
+      eyebrow: 'Training today',
+      title: recoveryRecommended ? 'Recovery fits better today' : readinessAdjustmentRecommendation.title,
+      body: readinessAdjustmentRecommendation.detail,
+      icon: recoveryRecommended ? 'leaf-outline' : 'speedometer-outline',
+      accent: readinessAccent,
+      primaryLabel: recoveryRecommended ? 'Recovery Day' : 'Lighten Today',
+      secondaryLabel: 'Not now',
+      onPrimary: () => {
+        if (recoveryRecommended) {
+          void handleReadinessRecoveryDay();
+          return;
+        }
+        void handleReadinessLightenWorkout();
+      },
+      onSecondary: () => {
+        setDismissedReadinessAdjustmentDate(todayHomeISO);
+        dismissHomePrompt(readinessPromptId);
+      },
+    });
+  }
   const yesterdayPlanDay = planWeek?.days?.find(day => day.day_date === yesterdayISO) ?? null;
   const yesterdaySkipReason = skipReasonsByDate[yesterdayISO] ?? yesterdayPlanDay?.skip_reason ?? null;
   const yesterdayWorkoutFocus = displayFocusForWorkout((yesterdayPlanDay?.workout ?? null) as WorkoutDay | null)

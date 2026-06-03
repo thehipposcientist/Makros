@@ -67,6 +67,33 @@ describe('readiness workout adjustment', () => {
     expect(rec?.readiness).toBe(52);
   });
 
+  it('suggests recovery for a heavy day after poor sleep', () => {
+    const rec = recommendReadinessWorkoutAdjustment({
+      workout: legDay(),
+      focusReadiness: { legs: 0.72 },
+      muscleFatigue: { quads: 0.25, hamstrings: 0.25, glutes: 0.2, calves: 0.1 },
+      sleepScore: 38,
+    });
+
+    expect(rec?.kind).toBe('recovery');
+    expect(rec?.severity).toBe('very_high');
+    expect(rec?.detail).toContain("last night's sleep was low");
+    expect(rec?.detail).toContain('Move the hard work to tomorrow');
+  });
+
+  it('suggests a lighter version for moderate bad sleep on a heavy day', () => {
+    const rec = recommendReadinessWorkoutAdjustment({
+      workout: legDay(),
+      focusReadiness: { legs: 0.72 },
+      muscleFatigue: { quads: 0.25, hamstrings: 0.25, glutes: 0.2, calves: 0.1 },
+      sleepHours: 6.1,
+    });
+
+    expect(rec?.kind).toBe('lighten');
+    expect(rec?.severity).toBe('moderate');
+    expect(rec?.title).toBe('Heavy day needs a lighter call');
+  });
+
   it('turns a lighter day into lower volume and lower loading', () => {
     const workout = legDay();
     const rec = recommendReadinessWorkoutAdjustment({

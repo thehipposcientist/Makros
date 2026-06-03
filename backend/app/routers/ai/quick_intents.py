@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 
@@ -84,17 +85,114 @@ def match_intent(question: str) -> str | None:
     return None
 
 
-def handle_intent(intent: str, question: str, *, profile: dict | None = None) -> IntentResponse | None:
+def handle_intent(
+    intent: str,
+    question: str,
+    *,
+    profile: dict | None = None,
+    plan_context: dict | None = None,
+    workout_plan: dict | None = None,
+) -> IntentResponse | None:
     """Return a deterministic response for a matched intent, or None
     if the intent needs the full LLM path (too much context-specific
     judgment for a canned response)."""
     handler = _INTENT_HANDLERS.get(intent)
     if handler is None:
         return None
+    if intent == "slept_badly":
+        return handler(question, profile or {}, plan_context=plan_context, workout_plan=workout_plan)
     return handler(question, profile or {})
 
 
 # ── Individual handlers ────────────────────────────────────────────
+
+def _human_label(value: Any) -> str:
+    text = str(value or "").replace("_", " ").replace("-", " ").strip()
+    return " ".join(text.split()).title()
+
+
+def _today_mapping(plan_context: dict | None) -> dict | None:
+    if not isinstance(plan_context, dict):
+        return None
+    mapping = plan_context.get("scheduleMapping")
+    if not isinstance(mapping, list):
+        return None
+    today_iso = date.today().isoformat()
+    for item in mapping:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("dayLabel") or "").strip().lower() == "today":
+            return item
+        if str(item.get("calendarDate") or "")[:10] == today_iso:
+            return item
+    return None
+
+
+def _matching_workout_day(today_map: dict | None, workout_plan: dict | None) -> dict | None:
+    if not isinstance(today_map, dict) or not isinstance(workout_plan, dict):
+        return None
+    days = workout_plan.get("days")
+    if not isinstance(days, list):
+        return None
+    plan_day = str(today_map.get("planDay") or "").strip().lower()
+    focus = str(today_map.get("focus") or "").strip().lower()
+    if plan_day:
+        for day in days:
+            if isinstance(day, dict) and str(day.get("day") or "").strip().lower() == plan_day:
+                return day
+    if focus:
+        for day in days:
+            if isinstance(day, dict) and str(day.get("focus") or "").strip().lower() == focus:
+                return day
+    return None
+
+
+def _is_heavy_workout_day(day: dict | None) -> bool:
+    if not isinstance(day, dict):
+        return False
+    stimulus = str(day.get("stimulus") or "").strip().lower()
+    if stimulus in {"strength", "power"}:
+        return True
+    archetype = str(day.get("archetype") or "").strip().lower()
+    if "heavy" in archetype or "strength" in archetype:
+        return True
+    exercises = day.get("exercises")
+    if not isinstance(exercises, list):
+        return False
+    for ex in exercises:
+        if not isinstance(ex, dict):
+            continue
+        scheme = ex.get("setScheme") or ex.get("set_scheme")
+        if isinstance(scheme, list) and any(
+            isinstance(s, dict) and "heavy" in str(s.get("setType") or s.get("set_type") or "").lower()
+            for s in scheme
+        ):
+            return True
+        reps = str(ex.get("reps") or "").lower()
+        match = re.search(r"\d+", reps)
+        sets = ex.get("sets")
+        try:
+            set_count = int(sets)
+        except (TypeError, ValueError):
+            set_count = 0
+        if match and int(match.group(0)) <= 6 and set_count >= 3:
+            return True
+    return False
+
+
+def _today_workout_context(plan_context: dict | None, workout_plan: dict | None) -> dict[str, Any]:
+    today_map = _today_mapping(plan_context)
+    day = _matching_workout_day(today_map, workout_plan)
+    focus = (
+        _human_label((today_map or {}).get("focus"))
+        or _human_label((day or {}).get("focus"))
+        or "Workout"
+    )
+    return {
+        "date": str((today_map or {}).get("calendarDate") or date.today().isoformat())[:10],
+        "focus": focus,
+        "is_heavy": _is_heavy_workout_day(day),
+    }
 
 def _h_time_limited(q: str, _p: dict) -> IntentResponse:
     # Pull minutes out of the message if present; default to 30.
@@ -117,7 +215,34 @@ def _h_time_limited(q: str, _p: dict) -> IntentResponse:
     )
 
 
-def _h_slept_badly(_q: str, _p: dict) -> IntentResponse:
+def _h_slept_badly(
+    _q: str,
+    _p: dict,
+    *,
+    plan_context: dict | None = None,
+    workout_plan: dict | None = None,
+) -> IntentResponse:
+    today_ctx = _today_workout_context(plan_context, workout_plan)
+    if today_ctx["is_heavy"]:
+        focus = today_ctx["focus"]
+        return IntentResponse(
+            intent="slept_badly",
+            answer=(
+                f"I see today is a heavy {focus} day, and last night's sleep was not good. "
+                "I recommend making today light cardio or mobility and coming back to the hard lift tomorrow if your schedule allows. "
+                "Apply will mark today as recovery; your fixed PlanWeek is not rewritten."
+            ),
+            action_items=[
+                "Today: easy walk, zone 2, or mobility",
+                f"Tomorrow: return to the {focus} session if you feel recovered",
+                "If you still lift today, keep it RPE 6-7 with no grinders",
+            ],
+            action={
+                "type": "swap_to_recovery",
+                "date": today_ctx["date"],
+                "reason": "Recovery guidance after poor sleep",
+            },
+        )
     return IntentResponse(
         intent="slept_badly",
         answer=(

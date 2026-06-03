@@ -74,7 +74,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - `adjust_calorie_target` → `UserCoachingState.calorie_adjustment` (signed delta, capped ±250 kcal per apply)
 - `raise_calories` / `lower_calories` → `UserCoachingState.calorie_adjustment` (capped ±250 kcal per apply)
 - `hold_calorie_adjustment` → CoachMemory record
-- `swap_to_recovery` → tomorrow's `UserDayState.skipped_focus = "recovery"`
+- `swap_to_recovery` → target date's `UserDayState.skipped_focus = "recovery"`; defaults to tomorrow when no date is provided
 - `shorten_workout` / `set_workout_duration` → `UserPreferences.workout_duration_minutes`
 - `schedule_deload` → `UserCoachingState.deload_until_date` + volume adjustment
 - `reduce_muscle_volume` / `add_muscle_volume` / `hold_muscle_volume` → `UserCoachingState.muscle_volume_adjustments`, read by future PlanWeek generation

@@ -11,6 +11,7 @@ Coverage:
     across multiple applies, invalid kcal
   - hold_calorie_adjustment: writes memory, no state mutation
   - swap_to_recovery: creates UserDayState row tomorrow with skipped_focus + reason
+  - swap_to_recovery: accepts an explicit date for today-targeted recovery guidance
   - swap_to_recovery: updates existing UserDayState row in place
   - swap_to_recovery: does not rewrite the active PlanWeek row
   - noop: ack only, no DB writes
@@ -218,6 +219,35 @@ def test_swap_to_recovery_creates_tomorrow_day_state():
     assert row.skip_reason == "Coach swapped to recovery"
     assert res.changed_fields["skipped_focus"]["to"] == "recovery"
     assert res.changed_fields["skip_reason"]["to"] == "Coach swapped to recovery"
+
+
+def test_swap_to_recovery_accepts_explicit_today_date():
+    print("\n[test] swap_to_recovery: explicit date can target today")
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserDayState
+    from sqlmodel import select
+    _, s, u = _setup()
+    today = date.today()
+    res = apply_action(
+        s,
+        u.id,
+        {
+            "type": "swap_to_recovery",
+            "date": str(today),
+            "reason": "Recovery guidance after poor sleep",
+        },
+    )
+    assert res.applied
+    assert res.summary == "Today is set as a recovery day."
+    row = s.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == u.id, UserDayState.day_key == today)
+    ).first()
+    assert row is not None, "no UserDayState row created for today"
+    assert row.skipped_focus == "recovery"
+    assert row.skip_reason == "Recovery guidance after poor sleep"
+    assert res.changed_fields["skipped_focus"]["date"] == str(today)
+    assert res.undo_action["date"] == str(today)
 
 
 def test_swap_to_recovery_updates_existing_day_state():

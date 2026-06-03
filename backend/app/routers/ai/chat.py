@@ -520,7 +520,13 @@ def ask_trainer_question(
             from app.routers.ai.quick_intents import match_intent, handle_intent
             _intent = match_intent(q)
             if _intent:
-                _resp = handle_intent(_intent, q, profile=body.profile)
+                _resp = handle_intent(
+                    _intent,
+                    q,
+                    profile=body.profile,
+                    plan_context=body.currentPlanContext,
+                    workout_plan=body.workoutPlan,
+                )
                 if _resp:
                     logger.info(f"[trainer-question] QUICK INTENT: {_intent}")
                     return _resp.to_dict()
