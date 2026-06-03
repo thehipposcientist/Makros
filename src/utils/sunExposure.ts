@@ -128,13 +128,13 @@ export function sunExposureScoreHelp(summary: SunExposureDailySummary | null | u
   const score = sunExposureScore(summary);
   const risk = uvRiskLabel(summary).toLowerCase();
   if (risk === 'very high' || risk === 'high') {
-    return `This is a daylight score; UV risk was ${risk}, so protection guidance is shown separately.`;
+    return `Higher daylight is better, but sustained high UV can cap or lower the score. UV risk was ${risk}, so protection guidance is shown separately.`;
   }
   if (risk === 'moderate') {
-    return 'This is a daylight score; moderate UV risk is tracked separately from the score color.';
+    return 'Higher daylight is better, with moderate UV risk tracked separately from the score color.';
   }
-  if (score >= 70) return 'Useful daylight with low UV risk keeps this score high.';
-  return 'Useful daylight raises this score; sustained high UV can lower it.';
+  if (score >= 70) return 'Useful low-UV daylight keeps this score high.';
+  return 'Useful daylight raises this score; sustained high UV can cap or lower it.';
 }
 
 export function uvRiskScore(summary: SunExposureDailySummary | null | undefined): number {
@@ -285,6 +285,7 @@ export function summaryCopy(summary: SunExposureDailySummary, options: { dayPhra
   const lines = [
     `You had ${formatSunMinutes(estimatedDaylight)} daylight ${dayPhrase}.`,
     sunExposureScoreHelp(summary),
+    'It is not a raw UV risk score: too little daylight scores low, while longer high-UV windows can cap or lower an otherwise useful daylight score.',
     'The score uses daylight time, Apple light-intensity metadata when available, and UV Index.',
   ];
   if (timingLine) {

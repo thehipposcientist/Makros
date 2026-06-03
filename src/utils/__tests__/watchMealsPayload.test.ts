@@ -57,6 +57,17 @@ describe('watch meal payload', () => {
     expect(noneChecked.meals.map(m => m.checked)).toEqual([false, false]);
   });
 
+  it('marks a meal checked when it has a _loggedMealId even if the check map is empty', () => {
+    // Mirrors the phone-row fix: a logged meal stays "checked" on the wrist
+    // even when checkedMealsByDate drifted/clobbered and lacks its key.
+    const loggedPlan: any = {
+      targets: { calories: 2000, protein: 150, carbs: 200, fat: 60 },
+      meals: [{ meal: 'Oats', foods: [], calories: 300, protein: 10, carbs: 52, fat: 6, _clientMealKey: 'oats_key', _loggedMealId: 42 }],
+    };
+    const payload = buildWatchMealsPayload(loggedPlan, {}, '2026-05-24', null, { syncedAtMs: 1 });
+    expect(payload.meals[0].checked).toBe(true);
+  });
+
   it('normalizes legacy meal_N checks for the row flags without changing totals', () => {
     const payload = buildWatchMealsPayload(
       plan,

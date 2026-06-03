@@ -1889,6 +1889,28 @@ class MealItem(SQLModel, table=True):
 
 # ─── Integration credentials ────────────────────────────────────────────────
 #
+# Per-user preference for resolving overlapping health-device data. "auto"
+# means provider priority decides; a concrete provider pins that signal to a
+# chosen source when multiple connected devices write the same field.
+
+class HealthSourcePreference(SQLModel, table=True):
+    __tablename__ = "health_source_preferences"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_health_source_preferences_user"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True, index=True)
+    sleep_source: str = Field(default="auto")
+    readiness_source: str = Field(default="auto")
+    hrv_source: str = Field(default="auto")
+    resting_hr_source: str = Field(default="auto")
+    activity_source: str = Field(default="auto")
+    workout_source: str = Field(default="auto")
+    body_weight_source: str = Field(default="auto")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # Per-user OAuth tokens for third-party services (Strava, Oura, WHOOP,
 # Garmin, ...). Each row is one (user, provider) pair. Refresh tokens
 # are bearer credentials — treat them like passwords. Never log them.
@@ -1909,7 +1931,7 @@ class IntegrationCredential(SQLModel, table=True):
     )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    # "strava" | "oura" | "whoop" | "garmin" | "fitbit"
+    # "strava" | "oura" | "whoop" | "garmin" | "fitbit" | "google_health"
     provider: str = Field(index=True)
     # Stored via app.field_encryption.encrypt_text/decrypt_text. Legacy
     # plaintext rows remain readable and are re-encrypted on token refresh.

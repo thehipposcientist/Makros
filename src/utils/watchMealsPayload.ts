@@ -54,7 +54,11 @@ export function buildWatchMealsPayload(
   let actFat = 0;
   const items = mealArr.map((m: any, i: number) => {
     const checkKey = mealCheckKey(keyedPlan, m, i);
-    const checked = !!checks[checkKey];
+    // Honor `_loggedMealId` as well as the check map: a meal with a backend log
+    // IS logged even if `checkedMealsByDate` drifted (the same fix the phone
+    // row uses), so the wrist checkmark stays in sync with the phone.
+    const checked = !!checks[checkKey]
+      || Number((m as any)._loggedMealId ?? (m as any).logged_meal_id ?? 0) > 0;
     const macros = macroTotalsFromMeal(m);
     // Day totals must mirror the phone's NutritionCard, which sums EVERY
     // visible meal regardless of checked state. Summing only checked meals

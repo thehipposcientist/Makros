@@ -3679,6 +3679,45 @@ def _ensure_integration_credentials_table() -> None:
         print(f"[migration] integration_credentials table failed (non-fatal): {e}")
 
 
+def _ensure_health_source_preferences_table() -> None:
+    """Per-user source preferences for overlapping wearable signals."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS health_source_preferences ("
+                "id SERIAL PRIMARY KEY, "
+                'user_id INTEGER NOT NULL REFERENCES "user"(id), '
+                "sleep_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "readiness_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "hrv_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "resting_hr_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "activity_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "workout_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "body_weight_source VARCHAR NOT NULL DEFAULT 'auto', "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                "CONSTRAINT uq_health_source_preferences_user UNIQUE(user_id)"
+                ")"
+            ))
+            for column in (
+                "sleep_source", "readiness_source", "hrv_source",
+                "resting_hr_source", "activity_source", "workout_source",
+                "body_weight_source",
+            ):
+                conn.execute(text(
+                    f"ALTER TABLE health_source_preferences "
+                    f"ADD COLUMN IF NOT EXISTS {column} VARCHAR NOT NULL DEFAULT 'auto'"
+                ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_health_source_preferences_user_id "
+                "ON health_source_preferences(user_id)"
+            ))
+    except Exception as e:
+        print(f"[migration] health_source_preferences table failed (non-fatal): {e}")
+
+
 def _ensure_import_batches_table() -> None:
     """Create the `import_batches` table + supporting indexes.
 
@@ -3974,7 +4013,7 @@ def startup_data_maintenance_settings(
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, FoodSubmission, Equipment, ExerciseEquipment, UserCustomExercise, GoalOption, PaceOption, User, LegalAcceptanceEvent, ClientTelemetryEvent, AIUsageEvent, BillingEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, WorkoutTemplate, WorkoutTemplateBundle, WorkoutTemplateBundleItem, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, HealthLabResult, CycleLog, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, FeedComment, SocialNotification, TrainerProfile, TrainerClientRelationship, TrainerClientNote, PlanWeek, PlanDay, UserEquipmentProfile, GearItem, ImportBatch, IntegrationCredential, FitnessScoreSnapshot, SunExposureSegment, SunExposureCorrection, UserInsightPreferences, ContextInsight, ContextSegment, DailyFeatureSet
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, FoodSubmission, Equipment, ExerciseEquipment, UserCustomExercise, GoalOption, PaceOption, User, LegalAcceptanceEvent, ClientTelemetryEvent, AIUsageEvent, BillingEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, WorkoutTemplate, WorkoutTemplateBundle, WorkoutTemplateBundleItem, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, HealthLabResult, CycleLog, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, FeedComment, SocialNotification, TrainerProfile, TrainerClientRelationship, TrainerClientNote, PlanWeek, PlanDay, UserEquipmentProfile, GearItem, ImportBatch, IntegrationCredential, HealthSourcePreference, FitnessScoreSnapshot, SunExposureSegment, SunExposureCorrection, UserInsightPreferences, ContextInsight, ContextSegment, DailyFeatureSet
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -4069,6 +4108,7 @@ def create_db_and_tables():
     # import_batches table must exist before meals + workout_completions
     # can install their FK columns.
     _ensure_import_batches_table()
+    _ensure_health_source_preferences_table()
     _ensure_meal_import_columns()
     _ensure_meal_idempotency_columns()
     _ensure_saved_meal_idempotency_columns()

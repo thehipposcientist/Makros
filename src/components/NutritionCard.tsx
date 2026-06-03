@@ -23,6 +23,7 @@ import SwipeableRow, { SwipeAction } from './SwipeableRow';
 import FadeInView from './FadeInView';
 import MealThumbnail from './MealThumbnail';
 import PressableScale from './PressableScale';
+import CompletionBurst from './CompletionBurst';
 import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from './ScoreInfoModal';
 import { dynamicCompactTextProps } from '../utils/dynamicType';
 import { useBottomSheetSwipeDismiss } from './BottomSheetDismissHandle';
@@ -1484,7 +1485,7 @@ function NutritionCardInner({
                 mealType={key}
                 meal={meal}
                 mealMacros={macros}
-                checked={!!checkedMeals[key] || !!checkedMeals[legacyKey]}
+                checked={!!checkedMeals[key] || !!checkedMeals[legacyKey] || Number((meal as any)._loggedMealId ?? (meal as any).logged_meal_id ?? 0) > 0}
                 onToggle={onToggleMeal}
                 onEdit={onEditMeal}
                 onRemove={onRemoveMeal}
@@ -1616,7 +1617,10 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
   isSaved?: boolean;
 }) {
   const [itemsExpanded, setItemsExpanded] = useState(true);
+  const [checkBurstKey, setCheckBurstKey] = useState(0);
+  const [showCheckBurst, setShowCheckBurst] = useState(false);
   const rowRef = useRef<View | null>(null);
+  const checkBurstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isRoutineBacked = !!(meal as any)._routineId || !!meal.isRoutine;
   const loggedTime = formatLoggedMealTime(meal);
 
@@ -1635,6 +1639,13 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
       // Light haptic on check (best-effort — feedback util is async-imported
       // to avoid pulling the module on cold start).
       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+      if (checkBurstTimerRef.current) clearTimeout(checkBurstTimerRef.current);
+      setShowCheckBurst(true);
+      setCheckBurstKey(k => k + 1);
+      checkBurstTimerRef.current = setTimeout(() => {
+        setShowCheckBurst(false);
+        checkBurstTimerRef.current = null;
+      }, 780);
       checkScale.setValue(0);
       rowFlash.setValue(0);
       Animated.parallel([
@@ -1650,10 +1661,21 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
       ]).start();
     } else if (!checked && lastChecked.current) {
       // Reset silently on uncheck.
+      if (checkBurstTimerRef.current) {
+        clearTimeout(checkBurstTimerRef.current);
+        checkBurstTimerRef.current = null;
+      }
+      setShowCheckBurst(false);
       checkScale.setValue(0);
       rowFlash.setValue(0);
     }
     lastChecked.current = checked;
+    return () => {
+      if (checkBurstTimerRef.current) {
+        clearTimeout(checkBurstTimerRef.current);
+        checkBurstTimerRef.current = null;
+      }
+    };
   }, [checked, checkScale, rowFlash]);
   const rowFlashBg = rowFlash.interpolate({
     inputRange: [0, 1],
@@ -1711,6 +1733,17 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
         style={styles.mealItemGradient}
       />
       <View style={styles.mealTimeline}>
+        {showCheckBurst && (
+          <CompletionBurst
+            key={checkBurstKey}
+            variant="check"
+            size={54}
+            accentColor={mealAccent.strong}
+            surfaceColor={mealAccent.strong + '18'}
+            iconColor={mealAccent.strong}
+            style={styles.mealCheckBurst}
+          />
+        )}
         <TouchableOpacity
           testID={`meal-check-${mealType}`}
           style={[styles.checkbox, checked && styles.checkboxDone]}
@@ -2346,6 +2379,12 @@ const createStyles = (
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.surface,
     zIndex: 1,
+  },
+  mealCheckBurst: {
+    position: 'absolute',
+    top: -15,
+    left: -13,
+    zIndex: 0,
   },
   checkboxDone: { backgroundColor: section.strong, borderColor: section.strong },
   checkmark:    { fontSize: 12, color: '#fff', fontWeight: '800' },

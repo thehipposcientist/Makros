@@ -19,7 +19,7 @@ from app.models import (
     WeightEntry, UserCustomExercise, UserCustomExerciseCreate, UserCustomExerciseRead, UserEquipmentProfile,
     UserEquipmentProfileCreate, UserEquipmentProfileRead,
     WorkoutSession, WorkoutExercise, ExerciseSet, Meal, MealItem, BodyScan,
-    SavedMeal, SleepLog, DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, IntegrationCredential, ImportBatch, UserSupplementStack,
+    SavedMeal, SleepLog, DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, IntegrationCredential, HealthSourcePreference, ImportBatch, UserSupplementStack,
     SupplementLog, DailyNutritionMetrics, Food, FoodNutrition, FoodServing,
     FoodAlias, UserRecentFood, FoodSubmission, UserSocialProfile, Friendship, UserReport,
     WeeklyDigestCache, ActivityFeedItem, FeedLike, FeedComment, SocialNotification,
@@ -344,7 +344,7 @@ def _delete_account_owned_rows(session: Session, user_id: int) -> None:
         DailyHealthSnapshot, DailyStressSummary, DailyLifestyleLog, FitnessScoreSnapshot, WeeklyCheckIn, CoachMemory, RecoveryActivity,
         DailyRollup, UserRollup, UserFlag, UserState, PlanJob, WorkoutPlan,
         NutritionPlan, BodyScan, WeightEntry, AIDecision, WorkoutCompletion,
-        SavedMeal, IntegrationCredential, ImportBatch, DailyNutritionMetrics, UserEquipmentProfile, GearItem,
+        SavedMeal, IntegrationCredential, HealthSourcePreference, ImportBatch, DailyNutritionMetrics, UserEquipmentProfile, GearItem,
         UserSupplementStack, SupplementLog, SunExposureSegment, SunExposureCorrection,
         UserInsightPreferences, ContextInsight, ContextSegment, DailyFeatureSet,
     ):
@@ -1100,6 +1100,7 @@ def export_account_data(
         "health": {
             "sleep_logs": _dump_rows(session.exec(select(SleepLog).where(SleepLog.user_id == uid)).all()),
             "daily_health_snapshots": _dump_rows(session.exec(select(DailyHealthSnapshot).where(DailyHealthSnapshot.user_id == uid)).all()),
+            "health_source_preferences": _dump_rows(session.exec(select(HealthSourcePreference).where(HealthSourcePreference.user_id == uid)).all()),
             "daily_stress_summaries": _dump_rows(session.exec(select(DailyStressSummary).where(DailyStressSummary.user_id == uid)).all()),
             "daily_lifestyle_logs": _dump_rows(session.exec(select(DailyLifestyleLog).where(DailyLifestyleLog.user_id == uid)).all()),
             "context_insight_preferences": _dump_rows(session.exec(select(UserInsightPreferences).where(UserInsightPreferences.user_id == uid)).all()),

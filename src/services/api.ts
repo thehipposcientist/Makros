@@ -7288,8 +7288,21 @@ export async function getCardioProgression(token: string): Promise<CardioProgres
 // Garmin, Oura, WHOOP, Fitbit. Whether a provider is `connected` vs
 // `configured` vs `available` drives the Settings → Integrations tile
 // state. See docs/engineering/wearables.md.
+export type WearableProviderSlug = 'strava' | 'garmin' | 'oura' | 'whoop' | 'fitbit' | 'google_health';
+export type HealthSourcePreferenceValue =
+  | 'auto'
+  | 'apple_health'
+  | 'health_connect'
+  | 'oura'
+  | 'whoop'
+  | 'google_health'
+  | 'fitbit'
+  | 'strava'
+  | 'manual'
+  | 'watch';
+
 export interface WearableProviderInfo {
-  slug: 'strava' | 'garmin' | 'oura' | 'whoop' | 'fitbit';
+  slug: WearableProviderSlug;
   name: string;
   /** Operator has set the OAuth client creds. False → tile is "Coming soon". */
   configured: boolean;
@@ -7299,10 +7312,44 @@ export interface WearableProviderInfo {
   last_synced_at: string | null;
 }
 
+export interface HealthSourcePreferences {
+  sleep_source: HealthSourcePreferenceValue;
+  readiness_source: HealthSourcePreferenceValue;
+  hrv_source: HealthSourcePreferenceValue;
+  resting_hr_source: HealthSourcePreferenceValue;
+  activity_source: HealthSourcePreferenceValue;
+  workout_source: HealthSourcePreferenceValue;
+  body_weight_source: HealthSourcePreferenceValue;
+}
+
 export async function listIntegrations(token: string): Promise<{ providers: WearableProviderInfo[] }> {
   return request<{ providers: WearableProviderInfo[] }>('/integrations', {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getIntegrationPreferences(token: string): Promise<{
+  preferences: HealthSourcePreferences;
+  allowed_sources: HealthSourcePreferenceValue[];
+}> {
+  return request('/integrations/preferences', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updateIntegrationPreferences(
+  token: string,
+  preferences: Partial<HealthSourcePreferences>,
+): Promise<{
+  preferences: HealthSourcePreferences;
+  allowed_sources: HealthSourcePreferenceValue[];
+}> {
+  return request('/integrations/preferences', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(preferences),
   });
 }
 

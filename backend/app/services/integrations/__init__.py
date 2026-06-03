@@ -1,6 +1,6 @@
 """Wearable + activity-source integration framework.
 
-Adds new providers (Garmin, Oura, WHOOP, Fitbit) without re-implementing
+Adds new providers (Garmin, Oura, WHOOP, Fitbit, Google Health) without re-implementing
 OAuth boilerplate per provider. The pattern:
 
   1. Subclass `WearableProvider` in a new module under this package.
@@ -19,11 +19,9 @@ What lives where:
   - `app/routers/integrations.py` is the generic OAuth + sync router.
 
 What's deferred:
-  - The actual sync HTTP calls per provider (Garmin sleep, Oura readiness,
-    WHOOP strain, Fitbit activity) need API credentials to test. Each
-    provider module has a `sync()` method that raises NotImplementedError
-    until that work lands — but the OAuth handshake works as soon as
-    credentials are in place, which is the gating step for partnerships.
+  - Garmin, Fitbit, and Google Health still need live API approval/scope
+    validation before sync is enabled. Oura and WHOOP have first-pass
+    OAuth + sync implementations.
 """
 from __future__ import annotations
 
@@ -35,9 +33,10 @@ from app.services.integrations.garmin import GarminProvider
 from app.services.integrations.oura import OuraProvider
 from app.services.integrations.whoop import WhoopProvider
 from app.services.integrations.fitbit import FitbitProvider
+from app.services.integrations.google_health import GoogleHealthProvider
 
 
-# Provider name (URL slug) → class. Keep in sync with the
+# Provider name (URL slug) -> class. Keep in sync with the
 # IntegrationCredential.provider strings stored in the DB so authorize
 # / sync flows can look up the right class from a token row.
 _PROVIDER_REGISTRY: dict[str, Type[WearableProvider]] = {
@@ -46,6 +45,7 @@ _PROVIDER_REGISTRY: dict[str, Type[WearableProvider]] = {
     "oura":   OuraProvider,
     "whoop":  WhoopProvider,
     "fitbit": FitbitProvider,
+    "google_health": GoogleHealthProvider,
 }
 
 

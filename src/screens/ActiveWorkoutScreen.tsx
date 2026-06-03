@@ -93,6 +93,7 @@ import PlateCalculatorModal from '../components/PlateCalculatorModal';
 import SetEntryModal from '../components/SetEntryModal';
 import GuidedFlowView from '../components/GuidedFlowView';
 import StartCountdownOverlay from '../components/StartCountdownOverlay';
+import CompletionBurst from '../components/CompletionBurst';
 import WorkoutTimerModal, { TimerResult } from '../components/WorkoutTimerModal';
 import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from '../components/ScoreInfoModal';
 import { isWatchReachable } from '../utils/watchSync';
@@ -12016,6 +12017,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
             {/* ── Shareable Workout Summary Card ────────────────────── */}
               <FadeInView testID="post-workout-summary" style={styles.summaryModal} duration={360} slideDistance={18}>
+                <View style={styles.summaryCompletionHeader}>
+                  <CompletionBurst
+                    variant="check"
+                    active={summaryVisible}
+                    size={88}
+                    accentColor={workoutPalette.strong}
+                    surfaceColor={workoutPalette.soft}
+                    iconColor={workoutPalette.strong}
+                  />
+                  <Text style={styles.summaryCompletionTitle}>Workout complete</Text>
+                  <Text style={styles.summaryCompletionSub}>
+                    Your session is saved. Recap and sharing are ready.
+                  </Text>
+                </View>
+
                 <ViewShot ref={summaryCardRef} options={{ format: 'png', quality: 1 }}>
                   <View style={styles.shareCard}>
                     <Image
@@ -13943,6 +13959,26 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     gap: 16,
     borderTopWidth: 1,
     borderTopColor: tc.border,
+  },
+  summaryCompletionHeader: {
+    alignItems: 'center',
+    gap: 4,
+    marginTop: -2,
+    marginBottom: -4,
+  },
+  summaryCompletionTitle: {
+    fontSize: 19,
+    fontWeight: '900',
+    color: tc.textPrimary,
+    textAlign: 'center',
+  },
+  summaryCompletionSub: {
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
+    color: tc.textMuted,
+    textAlign: 'center',
+    maxWidth: 280,
   },
   summaryTitle:    { fontSize: 22, fontWeight: '800', color: tc.textPrimary, textAlign: 'center' },
   summarySubtitle: { fontSize: 13, color: tc.textSecondary, textAlign: 'center' },

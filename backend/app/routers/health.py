@@ -40,6 +40,7 @@ from app.services.labs import (
     normalize_lab_type,
     normalize_lab_value,
 )
+from app.services.integrations.sync_helpers import upsert_daily_health_snapshot
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -321,52 +322,15 @@ def upsert_snapshot(
 ):
     """Upsert a single day's HealthKit snapshot. Patch semantics — only
     non-null fields overwrite stored values."""
-    now = datetime.now(timezone.utc)
-    existing = session.exec(
-        select(DailyHealthSnapshot)
-        .where(DailyHealthSnapshot.user_id == current_user.id)
-        .where(DailyHealthSnapshot.snapshot_date == body.snapshot_date)
-    ).first()
-    if existing:
-        for field in _PATCH_FIELDS:
-            value = getattr(body, field)
-            if value is not None:
-                setattr(existing, field, value)
-        if body.source:
-            existing.source = body.source
-        existing.source_details = _merged_source_details(
-            existing.source_details,
-            body.source_details,
-            body.source,
-        )
-        existing.updated_at = now
-        session.add(existing)
-    else:
-        row = DailyHealthSnapshot(
-            user_id=current_user.id,
-            snapshot_date=body.snapshot_date,
-            steps=body.steps,
-            active_energy_kcal=body.active_energy_kcal,
-            basal_energy_kcal=body.basal_energy_kcal,
-            workout_minutes=body.workout_minutes,
-            cardio_minutes=body.cardio_minutes,
-            zone2_minutes=body.zone2_minutes,
-            resting_hr=body.resting_hr,
-            hrv_ms=body.hrv_ms,
-            vo2_max=body.vo2_max,
-            respiratory_rate=body.respiratory_rate,
-            oxygen_saturation=body.oxygen_saturation,
-            wrist_temperature_c=body.wrist_temperature_c,
-            sleep_breathing_disturbances=body.sleep_breathing_disturbances,
-            sleep_breathing_disturbances_elevated=body.sleep_breathing_disturbances_elevated,
-            weight_lbs=body.weight_lbs,
-            readiness_score=body.readiness_score,
-            source=body.source or "apple_health",
-            source_details=_merged_source_details(None, body.source_details, body.source or "apple_health"),
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(row)
+    values = {field: getattr(body, field) for field in _PATCH_FIELDS}
+    upsert_daily_health_snapshot(
+        session,
+        current_user.id,
+        body.snapshot_date,
+        body.source or "apple_health",
+        values,
+        source_extra=body.source_details,
+    )
     session.commit()
     _refresh_health_dependents(session, current_user.id, body.snapshot_date)
     return {"status": "ok"}
@@ -382,52 +346,16 @@ def upsert_snapshot_batch(
     HealthKit permissions are first granted."""
     if len(body) > 90:
         raise HTTPException(status_code=400, detail="batch limited to 90 days")
-    now = datetime.now(timezone.utc)
     for snap in body:
-        existing = session.exec(
-            select(DailyHealthSnapshot)
-            .where(DailyHealthSnapshot.user_id == current_user.id)
-            .where(DailyHealthSnapshot.snapshot_date == snap.snapshot_date)
-        ).first()
-        if existing:
-            for field in _PATCH_FIELDS:
-                value = getattr(snap, field)
-                if value is not None:
-                    setattr(existing, field, value)
-            if snap.source:
-                existing.source = snap.source
-            existing.source_details = _merged_source_details(
-                existing.source_details,
-                snap.source_details,
-                snap.source,
-            )
-            existing.updated_at = now
-            session.add(existing)
-        else:
-            session.add(DailyHealthSnapshot(
-                user_id=current_user.id,
-                snapshot_date=snap.snapshot_date,
-                steps=snap.steps,
-                active_energy_kcal=snap.active_energy_kcal,
-                basal_energy_kcal=snap.basal_energy_kcal,
-                workout_minutes=snap.workout_minutes,
-                cardio_minutes=snap.cardio_minutes,
-                zone2_minutes=snap.zone2_minutes,
-                resting_hr=snap.resting_hr,
-                hrv_ms=snap.hrv_ms,
-                vo2_max=snap.vo2_max,
-                respiratory_rate=snap.respiratory_rate,
-                oxygen_saturation=snap.oxygen_saturation,
-                wrist_temperature_c=snap.wrist_temperature_c,
-                sleep_breathing_disturbances=snap.sleep_breathing_disturbances,
-                sleep_breathing_disturbances_elevated=snap.sleep_breathing_disturbances_elevated,
-                weight_lbs=snap.weight_lbs,
-                readiness_score=snap.readiness_score,
-                source=snap.source or "apple_health",
-                source_details=_merged_source_details(None, snap.source_details, snap.source or "apple_health"),
-                created_at=now,
-                updated_at=now,
-            ))
+        values = {field: getattr(snap, field) for field in _PATCH_FIELDS}
+        upsert_daily_health_snapshot(
+            session,
+            current_user.id,
+            snap.snapshot_date,
+            snap.source or "apple_health",
+            values,
+            source_extra=snap.source_details,
+        )
     session.commit()
     if body:
         _refresh_health_dependents(

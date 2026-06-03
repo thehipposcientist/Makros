@@ -23,6 +23,7 @@ from app.database import get_session
 from app.entitlements import require_pro_feature
 from app.models import SleepLog, SleepLogUpsert, User
 from app.services.health.sleep_pressure import compute_sleep_pressure
+from app.services.integrations.sync_helpers import upsert_sleep_log as upsert_sleep_log_with_source
 
 router = APIRouter(prefix="/sleep", tags=["sleep"])
 
@@ -40,41 +41,14 @@ def _upsert_sleep_log(
     body: SleepLogUpsert,
     now: datetime,
 ) -> None:
-    existing = session.exec(
-        select(SleepLog)
-        .where(SleepLog.user_id == user_id)
-        .where(SleepLog.night_date == body.night_date)
-    ).first()
-    if existing:
-        for field in _PATCH_FIELDS:
-            value = getattr(body, field)
-            if value is not None:
-                setattr(existing, field, value)
-        existing.updated_at = now
-        session.add(existing)
-        return
-
-    session.add(SleepLog(
-        user_id=user_id,
-        night_date=body.night_date,
-        total_hours=body.total_hours,
-        in_bed_minutes=body.in_bed_minutes,
-        deep_hours=body.deep_hours,
-        rem_hours=body.rem_hours,
-        core_hours=body.core_hours,
-        awake_minutes=body.awake_minutes,
-        hrv_ms=body.hrv_ms,
-        resting_hr=body.resting_hr,
-        respiratory_rate=body.respiratory_rate,
-        spo2_percent=body.spo2_percent,
-        bedtime_minutes_from_midnight=body.bedtime_minutes_from_midnight,
-        score=body.score,
-        rating=body.rating,
-        mode=body.mode,
-        source=body.source or "apple_health",
-        created_at=now,
-        updated_at=now,
-    ))
+    values = {field: getattr(body, field) for field in _PATCH_FIELDS}
+    upsert_sleep_log_with_source(
+        session,
+        user_id,
+        body.night_date,
+        body.source or "apple_health",
+        values,
+    )
 
 
 def _refresh_sleep_dependents(user_id: int) -> None:

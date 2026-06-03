@@ -24,6 +24,7 @@ import FadeInView from './FadeInView';
 import LifestyleFactorsCard from './LifestyleFactorsCard';
 import MacroDonutRow from './MacroDonutRow';
 import PressableScale from './PressableScale';
+import SunExposureHealthCard from './SunExposureHealthCard';
 
 type ResumeInfo = {
   focus: string;
@@ -46,6 +47,16 @@ export type HomeReminderPrompt = {
   queueCount?: number;
   onPrimary: () => void;
   onSecondary?: () => void;
+};
+
+export type HomeReadinessAlert = {
+  title: string;
+  detail: string;
+  score?: number | null;
+  label?: string | null;
+  tone: 'warning' | 'danger';
+  icon?: IconName;
+  chips?: string[];
 };
 
 type TodayHomeTabProps = {
@@ -78,6 +89,7 @@ type TodayHomeTabProps = {
   } | null;
   healthSummary: HealthDataSummary | null;
   healthLoading: boolean;
+  readinessAlert?: HomeReadinessAlert | null;
   homePrompt?: HomeReminderPrompt | null;
   nutritionPlan: DailyNutritionPlan | null;
   nutritionScore: number | null;
@@ -101,6 +113,7 @@ type TodayHomeTabProps = {
   goalScore?: GoalScoreResult | null;
   showWorkoutsSurface: boolean;
   showMealsSurface: boolean;
+  showSunExposureSurface?: boolean;
   onChromeScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
   onStartWorkout: () => void;
   onStartActivity?: () => void;
@@ -183,6 +196,7 @@ function TodayHomeTab({
   readinessScore,
   healthSummary,
   healthLoading,
+  readinessAlert,
   homePrompt,
   nutritionPlan,
   nutritionScore,
@@ -199,6 +213,7 @@ function TodayHomeTab({
   goalScore,
   showWorkoutsSurface,
   showMealsSurface,
+  showSunExposureSurface = false,
   onChromeScroll,
   onStartWorkout,
   onStartActivity,
@@ -405,13 +420,23 @@ function TodayHomeTab({
         <Text style={[styles.dateText, { color: themeColors.textSecondary }]}>{todayDate}</Text>
       </FadeInView>
 
+      {readinessAlert ? (
+        <FadeInView delay={25} duration={340} slideDistance={8}>
+          <ReadinessAlertCard
+            alert={readinessAlert}
+            themeColors={themeColors}
+            onPress={onOpenReadiness}
+          />
+        </FadeInView>
+      ) : null}
+
       {homePrompt ? (
-        <FadeInView delay={35} duration={340} slideDistance={8}>
+        <FadeInView delay={readinessAlert ? 65 : 35} duration={340} slideDistance={8}>
           <HomeReminderCard prompt={homePrompt} themeColors={themeColors} />
         </FadeInView>
       ) : null}
 
-      <FadeInView delay={55} duration={360} slideDistance={10}>
+      <FadeInView delay={readinessAlert ? 95 : 55} duration={360} slideDistance={10}>
         <PressableScale
           scaleDown={0.985}
           onPress={heroCardPress}
@@ -697,10 +722,21 @@ function TodayHomeTab({
         </FadeInView>
       </View>
 
+      {authToken && showSunExposureSurface ? (
+        <FadeInView delay={270} duration={340} slideDistance={8} style={styles.sunExposureHomeCard}>
+          <SunExposureHealthCard
+            authToken={authToken}
+            themeName={themeName}
+            isActive
+            compact
+          />
+        </FadeInView>
+      ) : null}
+
       {/* Life Events — moved here under the Tracking tile (was previously
           rendered just below the day header). */}
       {authToken && todayDateKey ? (
-        <FadeInView delay={280} duration={320} slideDistance={8} style={{ marginHorizontal: 16, marginTop: 12 }}>
+        <FadeInView delay={showSunExposureSurface ? 305 : 280} duration={320} slideDistance={8} style={{ marginHorizontal: 16, marginTop: 12 }}>
           <LifestyleFactorsCard
             authToken={authToken}
             dateISO={todayDateKey}
@@ -713,6 +749,84 @@ function TodayHomeTab({
       ) : null}
     </ScrollView>
     </>
+  );
+}
+
+function ReadinessAlertCard({
+  alert,
+  themeColors,
+  onPress,
+}: {
+  alert: HomeReadinessAlert;
+  themeColors: any;
+  onPress: () => void;
+}) {
+  const accent = alert.tone === 'danger'
+    ? (themeColors.error ?? '#EF4444')
+    : (themeColors.warning ?? '#F59E0B');
+  const scoreText = alert.score != null && Number.isFinite(alert.score)
+    ? String(Math.round(alert.score))
+    : null;
+
+  return (
+    <TouchableOpacity
+      testID="home-readiness-alert"
+      activeOpacity={0.86}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${alert.title}. Open readiness details`}
+      style={[
+        styles.readinessAlertCard,
+        {
+          backgroundColor: themeColors.surface,
+          borderColor: accent + '66',
+          shadowColor: accent,
+        },
+      ]}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={[accent + '18', accent + '08', 'transparent'] as any}
+        locations={[0, 0.56, 1] as any}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <View style={[styles.readinessAlertIcon, { backgroundColor: accent + '18' }]}>
+        <Ionicons name={alert.icon ?? 'warning-outline'} size={18} color={accent} />
+      </View>
+      <View style={styles.readinessAlertCopy}>
+        <View style={styles.readinessAlertMetaRow}>
+          <Text style={[styles.readinessAlertEyebrow, { color: accent }]} numberOfLines={1}>
+            Readiness alert
+          </Text>
+          {scoreText ? (
+            <View style={[styles.readinessAlertScorePill, { backgroundColor: accent + '18', borderColor: accent + '55' }]}>
+              <Text style={[styles.readinessAlertScore, { color: accent }]} numberOfLines={1}>
+                {scoreText}{alert.label ? ` ${alert.label}` : ''}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+        <Text style={[styles.readinessAlertTitle, { color: themeColors.textPrimary }]} numberOfLines={2}>
+          {alert.title}
+        </Text>
+        <Text style={[styles.readinessAlertDetail, { color: themeColors.textSecondary }]} numberOfLines={2}>
+          {alert.detail}
+        </Text>
+        {alert.chips && alert.chips.length > 0 ? (
+          <View style={styles.readinessAlertChipRow}>
+            {alert.chips.slice(0, 3).map(chip => (
+              <View key={chip} style={[styles.readinessAlertChip, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                <Text style={[styles.readinessAlertChipText, { color: themeColors.textSecondary }]} numberOfLines={1}>
+                  {chip}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
+    </TouchableOpacity>
   );
 }
 
@@ -1112,6 +1226,96 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     fontWeight: '900',
   },
+  readinessAlertCard: {
+    minHeight: 96,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    overflow: 'hidden',
+    shadowOpacity: 0.16,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+  readinessAlertIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  readinessAlertCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  readinessAlertMetaRow: {
+    minHeight: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginBottom: 3,
+  },
+  readinessAlertEyebrow: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  },
+  readinessAlertScorePill: {
+    minHeight: 20,
+    maxWidth: 104,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 7,
+  },
+  readinessAlertScore: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  readinessAlertTitle: {
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '900',
+  },
+  readinessAlertDetail: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '600',
+    marginTop: 3,
+  },
+  readinessAlertChipRow: {
+    minHeight: 24,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  readinessAlertChip: {
+    maxWidth: 126,
+    minHeight: 22,
+    borderRadius: 11,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  readinessAlertChipText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '800',
+  },
   heroImage: {
     borderRadius: radius.lg,
   },
@@ -1429,6 +1633,9 @@ const styles = StyleSheet.create({
   metricGridFullItem: {
     width: '100%',
     alignSelf: 'stretch',
+  },
+  sunExposureHomeCard: {
+    marginTop: 12,
   },
   metricTile: {
     width: '100%',

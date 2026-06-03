@@ -4,7 +4,7 @@
  * Alert that used to fire after `handleFinish`.
  *
  * Animation:
- *   - Trophy icon: scale 0 → 1.2 → 1.0 (spring + sequence, native driver)
+ *   - Drawn trophy burst: rings + rays + icon pop
  *   - PR list: fade-in with 80ms stagger per row
  *   - Backdrop: fade-in
  */
@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { AppThemeName } from '../types';
 import { getTheme, radius } from '../constants/theme';
 import type { PRAchievement } from '../services/api';
+import CompletionBurst from './CompletionBurst';
 
 interface Props {
   prs: PRAchievement[] | null;
@@ -54,7 +55,6 @@ export default function PRCelebrationModal({ prs, themeName, onDismiss }: Props)
     return Object.values(byExercise).slice(0, 5);
   }, [prs]);
 
-  const trophyScale = useRef(new Animated.Value(0)).current;
   const backdrop = useRef(new Animated.Value(0)).current;
   const rowOpacities = useRef<Animated.Value[]>([]).current;
 
@@ -71,22 +71,17 @@ export default function PRCelebrationModal({ prs, themeName, onDismiss }: Props)
     // Haptic success on mount.
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
 
-    trophyScale.setValue(0);
     backdrop.setValue(0);
     rowOpacities.forEach(v => v.setValue(0));
 
     Animated.parallel([
       Animated.timing(backdrop, { toValue: 1, duration: 220, useNativeDriver: true }),
-      Animated.sequence([
-        Animated.spring(trophyScale, { toValue: 1.2, friction: 4, tension: 80, useNativeDriver: true }),
-        Animated.spring(trophyScale, { toValue: 1.0, friction: 5, tension: 80, useNativeDriver: true }),
-      ]),
       Animated.stagger(
         80,
         rowOpacities.map(v => Animated.timing(v, { toValue: 1, duration: 260, useNativeDriver: true })),
       ),
     ]).start();
-  }, [prs, backdrop, trophyScale, rowOpacities]);
+  }, [prs, backdrop, rowOpacities]);
 
   if (!prs || prs.length === 0) return null;
 
@@ -99,17 +94,14 @@ export default function PRCelebrationModal({ prs, themeName, onDismiss }: Props)
     >
       <Animated.View style={[styles.backdrop, { opacity: backdrop, backgroundColor: '#00000099' }]}>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: workoutPalette.strong + '66' }]}>
-          <Animated.View
-            style={[
-              styles.trophyWrap,
-              {
-                backgroundColor: workoutPalette.strong + '22',
-                transform: [{ scale: trophyScale }],
-              },
-            ]}
-          >
-            <Ionicons name="trophy" size={48} color={workoutPalette.strong} />
-          </Animated.View>
+          <CompletionBurst
+            variant="trophy"
+            size={118}
+            accentColor={workoutPalette.strong}
+            surfaceColor={workoutPalette.strong + '20'}
+            iconColor={workoutPalette.strong}
+            style={styles.trophyBurst}
+          />
 
           <Text style={[styles.title, { color: tc.textPrimary }]}>
             {display.length === 1 ? 'New PR!' : `${display.length} New PRs!`}
@@ -164,13 +156,8 @@ const styles = StyleSheet.create({
     padding: 24,
     alignItems: 'center',
   },
-  trophyWrap: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 14,
+  trophyBurst: {
+    marginBottom: 8,
   },
   title: {
     fontSize: 24,

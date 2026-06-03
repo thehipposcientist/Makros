@@ -332,7 +332,7 @@ export default function SunExposureEstimateCard({
             <ActivityIndicator size="small" color={tc.primary} />
           ) : (
             <>
-              <Text style={[styles.compactEyebrow, { color: tc.textMuted }]} numberOfLines={1}>HIGHER SCORE = BETTER</Text>
+              <Text style={[styles.compactEyebrow, { color: tc.textMuted }]} numberOfLines={1}>DAYLIGHT SCORE</Text>
               <SunSpeedometer score={exposureScore} color={scoreColor} trackColor={tc.border} mutedColor={tc.textMuted} />
               <Text style={[styles.compactScoreLabel, { color: scoreColor }]} numberOfLines={1}>{scoreStatus}</Text>
               <Text style={[styles.compactDaylight, { color: tc.textMuted }]} numberOfLines={2}>
@@ -391,7 +391,7 @@ export default function SunExposureEstimateCard({
               />
               <AnimatedSunWash color={scoreColor} opacity={0.2} style={styles.scorePanelSunWash} />
               <View style={styles.scoreTextBlock}>
-                <Text style={[styles.scoreEyebrow, { color: tc.textMuted }]}>Sun score: higher is better</Text>
+                <Text style={[styles.scoreEyebrow, { color: tc.textMuted }]}>Daylight score · UV risk separate</Text>
                 <View style={styles.scoreDescriptorRow}>
                   <Ionicons name={scoreIcon} size={17} color={scoreColor} />
                   <Text style={[styles.scoreDescriptor, { color: scoreColor }]} numberOfLines={2}>
@@ -415,7 +415,7 @@ export default function SunExposureEstimateCard({
               </View>
             </View>
             <Text style={[styles.scoreNote, { color: tc.textSecondary }]}>
-              {scoreHelp} Based on Apple Health daylight, light intensity when available, and UV Index.
+              {scoreHelp} Too little daylight scores low; sustained high UV can cap the score instead of being treated as more is always better. Based on Apple Health daylight, light intensity when available, and UV Index.
             </Text>
             <View style={styles.metricGrid}>
               <SunMetricTile

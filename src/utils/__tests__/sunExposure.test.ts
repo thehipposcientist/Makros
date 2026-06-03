@@ -50,6 +50,8 @@ describe('sun exposure copy and preferences', () => {
     }).join(' ');
     expect(copy).toContain('daylight');
     expect(copy).toContain('light-intensity metadata');
+    expect(copy).toContain('not a raw UV risk score');
+    expect(copy).toContain('high-UV windows can cap or lower');
     expect(copy.includes('open-sky equivalent')).toBe(false);
     expect(copy).toContain('Sun protection would be recommended if you were outside.');
     expect(assertSunExposureCopyIsSafe(copy)).toBe(true);
@@ -147,6 +149,7 @@ describe('sun exposure copy and preferences', () => {
     expect(sunExposureScoreStatus(highUvSummary)).toBe('Some Daylight');
     expect(sunExposureScoreMeaning(highUvSummary)).toBe('Some useful daylight; more low-UV time could score higher. UV risk was high.');
     expect(sunExposureScoreHelp(highUvSummary)).toContain('UV risk was high');
+    expect(sunExposureScoreHelp(highUvSummary)).toContain('sustained high UV can cap or lower');
     expect(sunExposureDisplayColor(highUvSummary)).toBe('#F59E0B');
     const highScoreModerateUvSummary = {
       ...balancedSummary,

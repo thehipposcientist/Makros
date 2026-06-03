@@ -16,16 +16,18 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
-from app.models import IntegrationCredential, User
+from app.models import HealthSourcePreference, IntegrationCredential, User
 from app.services.integrations import (
     get_provider,
     list_providers,
 )
 from app.services.integrations.base import ProviderNotConfiguredError
+from app.services.integrations.sync_helpers import encrypted_token_set
 from app.services.imports.strava_client import generate_state_nonce
 
 
@@ -36,6 +38,37 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 # enough that the migration is a one-line swap.
 _PENDING_OAUTH_STATES: dict[str, tuple[int, str, float]] = {}
 _STATE_TTL_SECONDS = 600
+_ALLOWED_SOURCE_PREFS = {
+    "auto",
+    "apple_health",
+    "health_connect",
+    "oura",
+    "whoop",
+    "google_health",
+    "fitbit",
+    "strava",
+    "manual",
+    "watch",
+}
+_PREFERENCE_FIELDS = (
+    "sleep_source",
+    "readiness_source",
+    "hrv_source",
+    "resting_hr_source",
+    "activity_source",
+    "workout_source",
+    "body_weight_source",
+)
+
+
+class HealthSourcePreferencePatch(BaseModel):
+    sleep_source: str | None = None
+    readiness_source: str | None = None
+    hrv_source: str | None = None
+    resting_hr_source: str | None = None
+    activity_source: str | None = None
+    workout_source: str | None = None
+    body_weight_source: str | None = None
 
 
 def _purge_expired_states() -> None:
@@ -69,6 +102,57 @@ def list_integrations(
         p["connected"] = cred is not None and cred.status == "active"
         p["last_synced_at"] = cred.last_synced_at.isoformat() if (cred and cred.last_synced_at) else None
     return {"providers": providers}
+
+
+def _preference_to_dict(pref: HealthSourcePreference) -> dict:
+    return {field: getattr(pref, field) for field in _PREFERENCE_FIELDS}
+
+
+def _get_or_create_preference(
+    db: Session,
+    user_id: int,
+) -> HealthSourcePreference:
+    pref = db.exec(
+        select(HealthSourcePreference).where(HealthSourcePreference.user_id == user_id)
+    ).first()
+    if pref is not None:
+        return pref
+    pref = HealthSourcePreference(user_id=user_id)
+    db.add(pref)
+    db.commit()
+    db.refresh(pref)
+    return pref
+
+
+@router.get("/preferences")
+def get_health_source_preferences(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    pref = _get_or_create_preference(db, current_user.id)
+    return {"preferences": _preference_to_dict(pref), "allowed_sources": sorted(_ALLOWED_SOURCE_PREFS)}
+
+
+@router.patch("/preferences")
+def update_health_source_preferences(
+    body: HealthSourcePreferencePatch,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    pref = _get_or_create_preference(db, current_user.id)
+    updates = body.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if field not in _PREFERENCE_FIELDS:
+            continue
+        normalized = str(value or "auto").strip().lower()
+        if normalized not in _ALLOWED_SOURCE_PREFS:
+            raise HTTPException(status_code=400, detail=f"{field} source is not supported")
+        setattr(pref, field, normalized)
+    pref.updated_at = datetime.now(timezone.utc)
+    db.add(pref)
+    db.commit()
+    db.refresh(pref)
+    return {"preferences": _preference_to_dict(pref), "allowed_sources": sorted(_ALLOWED_SOURCE_PREFS)}
 
 
 @router.get("/{provider}/authorize")
@@ -114,7 +198,7 @@ def integration_callback(
     except ProviderNotConfiguredError as e:
         raise HTTPException(status_code=503, detail=str(e))
     try:
-        tokens = prov.exchange_code(code)
+        tokens = encrypted_token_set(prov.exchange_code(code))
     except NotImplementedError as e:
         raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:

@@ -1,6 +1,7 @@
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRef, useEffect } from 'react';
+import ScanReticle from './ScanReticle';
 
 interface Props {
   visible: boolean;
@@ -61,12 +62,15 @@ export default function BarcodeScannerModal({ visible, onClose, onScan }: Props)
 
           {/* Viewfinder */}
           <View style={styles.viewfinderContainer}>
-            <View style={styles.viewfinder}>
-              <View style={[styles.corner, styles.cornerTL]} />
-              <View style={[styles.corner, styles.cornerTR]} />
-              <View style={[styles.corner, styles.cornerBL]} />
-              <View style={[styles.corner, styles.cornerBR]} />
-            </View>
+            <ScanReticle
+              width={260}
+              height={160}
+              cornerColor="#FFFFFF"
+              beamColor="#FFFFFF"
+              gridColor="rgba(255,255,255,0.24)"
+              surfaceColor="rgba(15,23,42,0.10)"
+              active={visible}
+            />
           </View>
 
           {/* Bottom */}
@@ -87,9 +91,6 @@ export default function BarcodeScannerModal({ visible, onClose, onScan }: Props)
   );
 }
 
-const CORNER_SIZE = 24;
-const CORNER_WIDTH = 3;
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   overlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'space-between' },
@@ -97,12 +98,6 @@ const styles = StyleSheet.create({
   title: { color: '#fff', fontSize: 18, fontWeight: '800' },
   subtitle: { color: 'rgba(255,255,255,0.7)', fontSize: 13, marginTop: 4 },
   viewfinderContainer: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  viewfinder: { width: 260, height: 160, borderRadius: 12 },
-  corner: { position: 'absolute', width: CORNER_SIZE, height: CORNER_SIZE },
-  cornerTL: { top: 0, left: 0, borderTopWidth: CORNER_WIDTH, borderLeftWidth: CORNER_WIDTH, borderColor: '#fff', borderTopLeftRadius: 12 },
-  cornerTR: { top: 0, right: 0, borderTopWidth: CORNER_WIDTH, borderRightWidth: CORNER_WIDTH, borderColor: '#fff', borderTopRightRadius: 12 },
-  cornerBL: { bottom: 0, left: 0, borderBottomWidth: CORNER_WIDTH, borderLeftWidth: CORNER_WIDTH, borderColor: '#fff', borderBottomLeftRadius: 12 },
-  cornerBR: { bottom: 0, right: 0, borderBottomWidth: CORNER_WIDTH, borderRightWidth: CORNER_WIDTH, borderColor: '#fff', borderBottomRightRadius: 12 },
   bottomBar: { alignItems: 'center', paddingBottom: 50, paddingTop: 20, backgroundColor: 'rgba(0,0,0,0.6)' },
   cancelBtn: { backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 14 },
   cancelText: { color: '#fff', fontSize: 16, fontWeight: '700' },

@@ -21,12 +21,13 @@
 import { useEffect, useState } from 'react';
 import {
   View, Text, Modal, TouchableOpacity, ScrollView, Image,
-  StyleSheet, ActivityIndicator, Alert,
+  StyleSheet, Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, getContrastingTextColor, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanEquipmentPhoto } from '../services/api';
+import ScanReticle from './ScanReticle';
 
 const MAX_PHOTOS = 6;
 
@@ -191,6 +192,21 @@ export default function EquipmentScanModal({ visible, authToken, themeName, alre
                 )}
               </View>
 
+              {scanning && (
+                <View style={[s.scanPanel, { borderColor: tc.primary + '3A', backgroundColor: tc.surface }]}>
+                  <ScanReticle
+                    width={220}
+                    height={126}
+                    cornerColor={tc.primary}
+                    beamColor={tc.primary}
+                    gridColor={tc.primary + '28'}
+                    surfaceColor={tc.primary + '08'}
+                    active
+                  />
+                  <Text style={[s.scanPanelText, { color: tc.textSecondary }]}>Reading equipment...</Text>
+                </View>
+              )}
+
               {photos.length > 0 && (
                 <TouchableOpacity
                   onPress={handleScan}
@@ -198,7 +214,7 @@ export default function EquipmentScanModal({ visible, authToken, themeName, alre
                   style={[s.primaryBtn, { backgroundColor: tc.primary }]}
                   activeOpacity={0.85}>
                   {scanning
-                    ? <ActivityIndicator size="small" color={onPrimary} />
+                    ? <Text style={{ fontSize: 14, fontWeight: '800', color: onPrimary }}>Scanning...</Text>
                     : <>
                         <Ionicons name="sparkles-outline" size={16} color={onPrimary} />
                         <Text style={{ fontSize: 14, fontWeight: '800', color: onPrimary }}>
@@ -291,6 +307,18 @@ const s = StyleSheet.create({
     width: 18, height: 18, borderRadius: 9,
     backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center', justifyContent: 'center',
+  },
+  scanPanel: {
+    alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1,
+    marginBottom: 14,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  scanPanelText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   primaryBtn: {
     marginTop: 4, paddingVertical: 13, borderRadius: radius.md,

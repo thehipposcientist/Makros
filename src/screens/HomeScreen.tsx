@@ -31,7 +31,7 @@ import LogActivityModal, { LogActivityPrefill } from '../components/LogActivityM
 import FriendsModal from '../components/FriendsModal';
 import HomeFriendsTab from '../components/HomeFriendsTab';
 import HomeYouTab from '../components/HomeYouTab';
-import TodayHomeTab, { type HomeReminderPrompt } from '../components/TodayHomeTab';
+import TodayHomeTab, { type HomeReadinessAlert, type HomeReminderPrompt } from '../components/TodayHomeTab';
 import MealsScreen from './MealsScreen';
 import MealOverlayModals from '../components/meals/MealOverlayModals';
 import type { NutritionScoreDetail } from '../components/meals/NutritionScoreDetailSheet';
@@ -13311,6 +13311,90 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         nutritionContext: readinessScore?.nutritionContext ?? null,
       }
     : readinessScore;
+  const todayHomeReadinessAlert: HomeReadinessAlert | null = (() => {
+    if (isFreeTier) return null;
+    if (todayDone || skippedDates.has(todayHomeISO)) return null;
+
+    const score = typeof todayHomeReadinessScore?.score === 'number'
+      ? todayHomeReadinessScore.score
+      : null;
+    const label = todayHomeReadinessScore?.label ?? null;
+    const sleepScore = readinessSleepScoreFromSummary(todayHealthSummary);
+    const sleepHours = readinessSleepHoursFromSummary(todayHealthSummary);
+    const sleepChip = sleepScore != null && Number.isFinite(sleepScore)
+      ? `Sleep ${Math.round(sleepScore)}`
+      : sleepHours != null && Number.isFinite(sleepHours)
+        ? `${sleepHours.toFixed(1)}h sleep`
+        : null;
+    const chipsFrom = (items: Array<string | null | undefined>) =>
+      Array.from(new Set(
+        items
+          .map(item => item?.trim())
+          .filter((item): item is string => !!item),
+      )).slice(0, 3);
+
+    if (showWorkoutsSurface && readinessAdjustmentRecommendation) {
+      const rec = readinessAdjustmentRecommendation;
+      const sleepDriven = rec.detail.toLowerCase().includes('sleep') || (sleepScore != null && rec.readiness === Math.round(sleepScore));
+      const recoveryRecommended = rec.kind === 'recovery';
+      return {
+        title: recoveryRecommended ? 'Recovery alert for today' : rec.title,
+        detail: rec.detail,
+        score: score ?? rec.readiness,
+        label,
+        tone: recoveryRecommended || rec.severity !== 'moderate' ? 'danger' : 'warning',
+        icon: sleepDriven ? 'moon-outline' : recoveryRecommended ? 'leaf-outline' : 'speedometer-outline',
+        chips: chipsFrom([
+          sleepDriven ? sleepChip ?? 'Poor sleep' : null,
+          ...rec.affectedMuscles.slice(0, 2),
+          recoveryRecommended ? 'Recovery' : 'Lighten',
+        ]),
+      };
+    }
+
+    if (score != null && Number.isFinite(score) && score > 0 && score < 45) {
+      return {
+        title: 'Readiness is low today',
+        detail: `Today's readiness is ${Math.round(score)}${label ? ` (${label})` : ''}. Check the drivers before pushing intensity.`,
+        score,
+        label,
+        tone: 'danger',
+        icon: 'pulse-outline',
+        chips: chipsFrom([sleepChip, 'Recovery', 'No max efforts']),
+      };
+    }
+
+    if (sleepScore != null && Number.isFinite(sleepScore) && sleepScore < 55) {
+      return {
+        title: 'Sleep may cap training today',
+        detail: `Last night's sleep score is ${Math.round(sleepScore)}. Keep the first working sets conservative and adjust if energy stays low.`,
+        score,
+        label,
+        tone: sleepScore < 45 ? 'danger' : 'warning',
+        icon: 'moon-outline',
+        chips: chipsFrom([sleepChip, 'Cap intensity', 'Hydration']),
+      };
+    }
+
+    const loadedMuscles = (todayHomeReadinessScore?.topFatigued ?? [])
+      .filter(row => Number(row.value) >= 0.55)
+      .sort((a, b) => Number(b.value) - Number(a.value))
+      .slice(0, 3)
+      .map(row => row.muscle.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()));
+    if (showWorkoutsSurface && loadedMuscles.length > 0) {
+      return {
+        title: 'Recovery load is stacking up',
+        detail: `${loadedMuscles.join(', ')} still show elevated load from recent training. Open readiness before deciding how hard to push.`,
+        score,
+        label,
+        tone: loadedMuscles.length >= 2 ? 'danger' : 'warning',
+        icon: 'speedometer-outline',
+        chips: chipsFrom([...loadedMuscles, 'Recent load']),
+      };
+    }
+
+    return null;
+  })();
   const todayHealthRawForReadiness = todayHealthSummary?.raw && (todayHealthSummary.raw as any).fetchedAt
     ? todayHealthSummary.raw
     : null;
@@ -13320,6 +13404,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     !isFreeTier
     && showWorkoutsSurface
     && readinessAdjustmentRecommendation
+    && !todayHomeReadinessAlert
     && !todayDone
     && !skippedDates.has(todayHomeISO)
   ) {
@@ -13738,6 +13823,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             readinessScore={todayHomeReadinessScore}
             healthSummary={todayHealthSummary}
             healthLoading={todayHealthLoading}
+            readinessAlert={todayHomeReadinessAlert}
             homePrompt={homeReminderPrompt}
             nutritionPlan={todayHomeNutritionPlan}
             nutritionScore={todayHomeNutritionScore}
@@ -13754,6 +13840,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             goalScore={todayGoalScore}
             showWorkoutsSurface={showWorkoutsSurface}
             showMealsSurface={showMealsSurface}
+            showSunExposureSurface={!isFreeTier}
             onChromeScroll={handleTopChromeScroll}
             onStartWorkout={() => {
               if (todayHomeWorkout) {
