@@ -14,8 +14,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, hitSlop, radius } from '../constants/theme';
+import BrandMark from '../components/BrandMark';
 
-const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
+const logo = require('../../assets/images/thallo-logo-compact-white.png');
 const landingPhotos = [
   { key: 'pexels-achi-murusidze-strong-woman', label: 'Training', source: require('../../assets/images/landing-photos/pexels-achi-murusidze-2064615248-35649986.jpg') },
   { key: 'pexels-foadshariyati-training', label: 'Training', source: require('../../assets/images/landing-photos/pexels-foadshariyati-31849600.jpg') },
@@ -219,7 +220,10 @@ export default function LandingScreen({ onLogin, onSignup, onWhyThallo }: Landin
       >
         <SafeAreaView style={styles.safe}>
           <View style={styles.topBar}>
-            <Image source={logo} style={styles.logo} resizeMode="contain" />
+            <View style={styles.topBrand}>
+              <BrandMark size={34} variant="tile" animated={false} style={styles.topBrandMark} />
+              <Image source={logo} style={styles.logo} resizeMode="contain" />
+            </View>
             <TouchableOpacity
               testID="landing-login-top"
               activeOpacity={0.78}
@@ -231,17 +235,17 @@ export default function LandingScreen({ onLogin, onSignup, onWhyThallo }: Landin
           </View>
 
           <View style={[styles.heroBlock, compact && styles.heroBlockCompact]}>
-            <Text style={styles.kicker}>Thallo</Text>
+            <Text style={styles.kicker}>Total health</Text>
             <Text
               style={[styles.title, narrow && styles.titleNarrow]}
               numberOfLines={3}
               adjustsFontSizeToFit
               minimumFontScale={0.86}
             >
-              Training and nutrition built around your real week.
+              Training, nutrition, and recovery built around your real week.
             </Text>
             <Text style={styles.subtitle}>
-              Get a plan that respects your schedule, equipment, food preferences, and recovery signals.
+              Get a plan that respects your schedule, equipment, food preferences, health signals, and recovery.
             </Text>
             <View style={styles.pillRow}>
               {valuePills.map(({ icon, label }) => (
@@ -315,9 +319,21 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 16,
   },
+  topBrand: {
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  topBrandMark: {
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+  },
   logo: {
-    width: 132,
-    height: 42,
+    width: 142,
+    height: 34,
   },
   topLoginButton: {
     minHeight: 40,

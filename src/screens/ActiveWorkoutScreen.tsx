@@ -80,6 +80,7 @@ import { workoutSessionCountsForPlan } from '../utils/workoutCompletion';
 import { activityFromFocus, estimateRouteElevationGainFt, type RouteCoord } from '../utils/cardioGpsTracker';
 import { cardioContextAllowsOutdoorData, isSetlessCardioExercise } from '../utils/cardioDisplay';
 import { hydrationTargetRangeOz } from '../utils/hydration';
+import { loadCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
@@ -2808,22 +2809,42 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   if (commandUserId && currentUserId && commandUserId !== currentUserId) return;
                   const rawDelta = Number(payload?.deltaOz ?? payload?.delta_oz);
                   const rawOunces = Number(payload?.ounces);
+                  const commandId = typeof payload?.commandId === 'string' && payload.commandId.trim()
+                    ? payload.commandId.trim()
+                    : undefined;
                   const hasDelta = Number.isFinite(rawDelta) && rawDelta !== 0;
                   if (hasDelta && (rawDelta < -400 || rawDelta > 400)) return;
                   if (!hasDelta && (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400)) return;
                   const dateISO = String(payload?.dateISO || dateKey(new Date())).slice(0, 10);
+                  const cached = await loadCachedHydration(dateISO).catch(() => null);
+                  const fallbackTarget = cached?.target_ounces ?? 64;
+                  const fallbackRange = hydrationTargetRangeOz(fallbackTarget);
+                  const optimisticOunces = hasDelta
+                    ? Math.max(0, Math.round(((cached?.ounces ?? (Number.isFinite(rawOunces) ? rawOunces - rawDelta : 0)) + rawDelta) * 10) / 10)
+                    : Math.max(0, Math.round(rawOunces * 10) / 10);
+                  await saveCachedHydration({
+                    date: dateISO,
+                    ounces: optimisticOunces,
+                    target_ounces: fallbackTarget,
+                    target_ounces_min: cached?.target_ounces_min ?? fallbackRange?.min,
+                    target_ounces_max: cached?.target_ounces_max ?? fallbackRange?.max,
+                  }, {
+                    pending: true,
+                    pendingCommandId: commandId,
+                    pendingDeltaOz: hasDelta ? rawDelta : undefined,
+                  }).catch(() => null);
                   const result = hasDelta
-                    ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO)
-                    : await logHydration(currentAuthToken, Math.max(0, Math.round(rawOunces * 10) / 10), dateISO);
+                    ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO, { commandId })
+                    : await logHydration(currentAuthToken, Math.max(0, Math.round(rawOunces * 10) / 10), dateISO, { commandId });
                   const fresh = await getHydration(currentAuthToken, result.date).catch(() => null);
-                  const fallbackRange = hydrationTargetRangeOz(64);
                   const saved = fresh ?? {
                     date: result.date,
                     ounces: result.ounces,
-                    target_ounces: 64,
+                    target_ounces: fallbackTarget,
                     target_ounces_min: fallbackRange?.min,
                     target_ounces_max: fallbackRange?.max,
                   };
+                  await saveCachedHydration(saved).catch(() => null);
                   const { pushHydrationToWatch } = await import('../utils/watchSync');
                   await pushHydrationToWatch({
                     dateISO: saved.date,

@@ -6,6 +6,8 @@ export const HYDRATION_CACHE_KEY = 'hydrationByDate_v1';
 
 export type CachedHydrationStatus = HydrationStatus & {
   pending?: boolean;
+  pendingCommandId?: string | null;
+  pendingDeltaOz?: number | null;
   updatedAtMs?: number;
 };
 
@@ -21,16 +23,34 @@ function normalizeRow(row: any): CachedHydrationStatus | null {
   const explicitMin = Number(row.target_ounces_min);
   const explicitMax = Number(row.target_ounces_max);
   if (!date || !Number.isFinite(ounces)) return null;
-  return {
+  const pending = !!row.pending;
+  const pendingDelta = Number(row.pendingDeltaOz ?? row.pending_delta_oz);
+  const pendingCommandId = typeof (row.pendingCommandId ?? row.pending_command_id) === 'string'
+    ? String(row.pendingCommandId ?? row.pending_command_id).trim()
+    : '';
+  const normalized: CachedHydrationStatus = {
     ...row,
     date,
     ounces: Math.max(0, Math.round(ounces * 10) / 10),
     target_ounces: normalizedTarget,
     target_ounces_min: Number.isFinite(explicitMin) && explicitMin > 0 ? explicitMin : range?.min,
     target_ounces_max: Number.isFinite(explicitMax) && explicitMax > 0 ? explicitMax : range?.max,
-    pending: !!row.pending,
+    pending,
     updatedAtMs: Number.isFinite(Number(row.updatedAtMs)) ? Number(row.updatedAtMs) : Date.now(),
   };
+  delete (normalized as any).pending_delta_oz;
+  delete (normalized as any).pending_command_id;
+  if (pending && pendingCommandId) {
+    normalized.pendingCommandId = pendingCommandId;
+  } else {
+    delete (normalized as any).pendingCommandId;
+  }
+  if (pending && Number.isFinite(pendingDelta) && pendingDelta !== 0) {
+    normalized.pendingDeltaOz = Math.round(pendingDelta * 10) / 10;
+  } else {
+    delete (normalized as any).pendingDeltaOz;
+  }
+  return normalized;
 }
 
 async function readCache(): Promise<Record<string, CachedHydrationStatus>> {
@@ -70,12 +90,14 @@ export async function loadCachedHydration(dateISO: string): Promise<CachedHydrat
 
 export async function saveCachedHydration(
   row: HydrationStatus,
-  opts: { pending?: boolean } = {},
+  opts: { pending?: boolean; pendingCommandId?: string | null; pendingDeltaOz?: number | null } = {},
 ): Promise<CachedHydrationStatus | null> {
   return queued(async () => {
     const normalized = normalizeRow({
       ...row,
       pending: !!opts.pending,
+      ...(opts.pendingCommandId ? { pendingCommandId: opts.pendingCommandId } : {}),
+      ...(opts.pendingDeltaOz != null ? { pendingDeltaOz: opts.pendingDeltaOz } : {}),
       updatedAtMs: Date.now(),
     });
     if (!normalized) return null;
@@ -90,19 +112,26 @@ export async function applyCachedHydrationDelta(
   dateISO: string,
   deltaOz: number,
   fallbackTarget: number,
-  opts: { pending?: boolean } = {},
+  opts: { pending?: boolean; pendingCommandId?: string | null } = {},
 ): Promise<CachedHydrationStatus | null> {
   return queued(async () => {
     const date = dateISO.slice(0, 10);
     const rows = await readCache();
     const prev = rows[date];
     const nextOunces = Math.max(0, Math.round(((prev?.ounces ?? 0) + deltaOz) * 10) / 10);
+    const pending = opts.pending ?? true;
+    const previousPendingDelta = Number(prev?.pendingDeltaOz);
+    const nextPendingDelta = pending
+      ? Math.round(((Number.isFinite(previousPendingDelta) ? previousPendingDelta : 0) + deltaOz) * 10) / 10
+      : null;
     const next = normalizeRow({
       ...(prev ?? { date, target_ounces: fallbackTarget }),
       date,
       ounces: nextOunces,
       target_ounces: prev?.target_ounces ?? fallbackTarget,
-      pending: opts.pending ?? true,
+      pending,
+      ...(pending && opts.pendingCommandId ? { pendingCommandId: opts.pendingCommandId } : {}),
+      ...(pending && nextPendingDelta ? { pendingDeltaOz: nextPendingDelta } : {}),
       updatedAtMs: Date.now(),
     });
     if (!next) return null;

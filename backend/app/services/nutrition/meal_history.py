@@ -669,7 +669,26 @@ def log_meal_from_plan(
         s = _re.sub(r"[^a-z0-9\s]+", " ", s)
         return _re.sub(r"\s+", " ", s).strip()
 
-    food_rows = db.exec(select(Food).where(col(Food.is_active) == True)).all()  # noqa: E712
+    from app.services.nutrition.food_classifier import normalize_name
+
+    incoming_names = [
+        str(it.get("name") or "").strip()
+        for it in (meal_data.get("items") or [])
+        if str(it.get("name") or "").strip()
+    ]
+    lookup_norms = {
+        key
+        for name in incoming_names
+        for key in (_norm(name), normalize_name(name))
+        if key
+    }
+    food_rows = []
+    if lookup_norms:
+        food_rows = db.exec(
+            select(Food)
+            .where(col(Food.is_active) == True)  # noqa: E712
+            .where(col(Food.normalized_name).in_(lookup_norms))
+        ).all()
     # Build: exact-normalized index + first-word → list of candidates.
     food_id_by_norm: dict[str, tuple[int, float | None]] = {}
     first_word_index: dict[str, list[tuple[int, float | None, str]]] = {}
@@ -780,7 +799,7 @@ def log_meal_from_plan(
 
     def _category_for_food(name: str) -> FoodCategory:
         from app.services.nutrition.ai_classify import get_or_create_metadata
-        cls = get_or_create_metadata(name, db=db, allow_ai=True)
+        cls = get_or_create_metadata(name, db=db, allow_ai=False)
         lower = name.lower()
         if getattr(cls, "fruit_flag", False):
             return FoodCategory.FRUITS

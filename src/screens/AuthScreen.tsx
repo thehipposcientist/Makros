@@ -14,6 +14,7 @@ import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestio
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
 import LegalDisclosureModal from '../components/LegalDisclosureModal';
+import BrandMark from '../components/BrandMark';
 import { LEGAL_VERSION, legalAcceptanceLabel } from '../constants/legal';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { SIGNUP_TRIAL_DAYS } from '../utils/subscription';
@@ -21,6 +22,7 @@ import { pexelsPhoto } from '../constants/stockImages';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
+const compactLogo = require('../../assets/images/thallo-logo-compact-white.png');
 
 const SIGNUP_FEATURE_PREVIEW: Array<{
   key: string;
@@ -659,8 +661,14 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                   <Text style={styles.backButtonText}>Back</Text>
                 </TouchableOpacity>
               )}
+              <BrandMark
+                size={webMode ? 78 : onBack ? 76 : 96}
+                variant="tile"
+                animated={!loading}
+                style={[styles.authBrandMark, onBack && styles.authBrandMarkCompact]}
+              />
               <Image
-                source={logo}
+                source={webMode ? compactLogo : logo}
                 style={[styles.logo, onBack && styles.logoCompact, webMode && styles.webLogo]}
                 resizeMode="contain"
               />
@@ -670,9 +678,9 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                 </Text>
               ) : (
                 <>
-                  <Text style={styles.tagline}>Personalized training, nutrition, and AI coaching.</Text>
+                  <Text style={styles.tagline}>Total health for training, nutrition, recovery, and coaching.</Text>
                   <View style={styles.featureRow}>
-                    {(['Personalized training plans', 'Nutrition support', 'AI coaching that adapts'] as const).map(f => (
+                    {(['Stable weekly plans', 'Nutrition support', 'Health signals'] as const).map(f => (
                       <View key={f} style={styles.featureChip}>
                         <Text style={styles.featureChipText}>{f}</Text>
                       </View>
@@ -1249,6 +1257,17 @@ const styles = StyleSheet.create({
     marginTop: 0,
     marginBottom: 12,
   },
+  authBrandMark: {
+    marginBottom: 14,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.24,
+    shadowRadius: 24,
+    elevation: 8,
+  },
+  authBrandMarkCompact: {
+    marginBottom: 10,
+  },
   backButton: {
     minHeight: 40,
     flexDirection: 'row',
@@ -1269,7 +1288,7 @@ const styles = StyleSheet.create({
   backButtonText: { color: colors.textPrimary, fontSize: 13, fontWeight: '800' },
   logo:          { width: SCREEN_W * 0.70, height: 130 },
   logoCompact:   { width: SCREEN_W * 0.48, height: 84 },
-  webLogo:       { width: 180, height: 58 },
+  webLogo:       { width: 188, height: 42 },
   authTitle:     { color: colors.textPrimary, fontSize: 22, lineHeight: 27, fontWeight: '900', textAlign: 'center', marginTop: 2 },
   webAuthTitle:  { fontSize: 24, lineHeight: 30 },
   tagline:       { fontSize: 15, color: colors.textSecondary, marginTop: 14, textAlign: 'center', fontWeight: '500', letterSpacing: 0.2 },

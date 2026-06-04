@@ -6,20 +6,26 @@
  * replayed those rows — the data sat in AsyncStorage forever, never
  * actually reaching `/meals/hydration`.
  *
- * `flushPendingHydration` walks every pending day, POSTs the current
- * ounce total, and clears the pending flag on success. Designed to be
- * called from app-foreground hooks and after watch commands deliver,
- * not on a timer — it's cheap when the queue is empty and bounded by
- * how many days have unsynced data.
+ * `flushPendingHydration` walks every pending day, replays quick-adds
+ * as atomic deltas when that intent is available, and clears the
+ * pending flag on success. Designed to be called from app-foreground
+ * hooks and after watch commands deliver, not on a timer — it's cheap
+ * when the queue is empty and bounded by how many days have unsynced data.
  */
 import {
+  type CachedHydrationStatus,
   loadHydrationCache,
   pendingCachedHydrationRows,
   saveCachedHydration,
 } from './hydrationCache';
-import { logHydration } from '../services/api';
+import { logHydration, logHydrationDelta } from '../services/api';
 
 let inFlight: Promise<void> | null = null;
+
+export function pendingHydrationDeltaOz(row: Pick<CachedHydrationStatus, 'pendingDeltaOz'>): number | null {
+  const delta = Number(row.pendingDeltaOz);
+  return Number.isFinite(delta) && delta !== 0 ? delta : null;
+}
 
 export async function flushPendingHydration(token: string | null | undefined): Promise<void> {
   if (!token) return;
@@ -33,7 +39,10 @@ export async function flushPendingHydration(token: string | null | undefined): P
       const cache = await loadHydrationCache();
       for (const row of pending) {
         try {
-          const saved = await logHydration(token, row.ounces, row.date);
+          const deltaOz = pendingHydrationDeltaOz(row);
+          const saved = deltaOz != null
+            ? await logHydrationDelta(token, deltaOz, row.date, { commandId: row.pendingCommandId ?? undefined })
+            : await logHydration(token, row.ounces, row.date, { commandId: row.pendingCommandId ?? undefined });
           const current = cache[row.date] ?? row;
           // Backend wins on `ounces` (it reconciles with any other
           // device's writes), but we keep the target from the cache
@@ -43,6 +52,8 @@ export async function flushPendingHydration(token: string | null | undefined): P
               date: saved.date,
               ounces: saved.ounces,
               target_ounces: current.target_ounces,
+              target_ounces_min: current.target_ounces_min,
+              target_ounces_max: current.target_ounces_max,
             },
             { pending: false },
           );

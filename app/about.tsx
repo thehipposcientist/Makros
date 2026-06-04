@@ -18,6 +18,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import DeviceSyncMockup from '../src/components/DeviceSyncMockup';
 import ScrollRevealView, { useScrollReveal } from '../src/components/ScrollRevealView';
+import BrandMark from '../src/components/BrandMark';
 import {
   THEME_PICKER_ORDER,
   colors,
@@ -29,7 +30,7 @@ import {
 } from '../src/constants/theme';
 import { SUPPORT_EMAIL } from '../src/constants/legal';
 
-const logo = require('../assets/images/thallo-logo-white-transparent-New.png');
+const logo = require('../assets/images/thallo-logo-compact-white.png');
 const auroraScreen = require('../assets/images/product-screenshots/thallo-today-home-aurora.png');
 const roseScreen = require('../assets/images/product-screenshots/thallo-today-home-rose.png');
 const paperScreen = require('../assets/images/product-screenshots/thallo-today-home-paper.png');
@@ -374,7 +375,7 @@ export default function AboutPage() {
 
   useEffect(() => {
     if (Platform.OS === 'web') {
-      document.title = 'Thallo - Fitness, nutrition, and recovery';
+      document.title = 'Thallo - Total health, training, nutrition, and recovery';
     }
   }, []);
 
@@ -413,6 +414,7 @@ export default function AboutPage() {
                 onPress={() => router.push('/')}
                 accessibilityLabel="Open Thallo app"
               >
+                <BrandMark size={34} variant="tile" animated={false} style={styles.logoMark} />
                 <Image source={logo} style={styles.logo} resizeMode="contain" />
               </TouchableOpacity>
 
@@ -441,7 +443,7 @@ export default function AboutPage() {
 
             <View style={[styles.heroContent, compact && styles.heroContentCompact]}>
               <View style={[styles.heroCopy, compact && styles.heroCopyCompact, compact && { maxWidth: contentWidth }]}>
-                <Text style={styles.heroKicker}>Fitness + nutrition</Text>
+                <Text style={styles.heroKicker}>Total health</Text>
                 <Text
                   style={[styles.heroTitle, compact && styles.heroTitleCompact]}
                   numberOfLines={desktop ? 2 : 3}
@@ -456,8 +458,8 @@ export default function AboutPage() {
                   compact && { maxWidth: Math.max(260, contentWidth - 28) },
                 ]}>
                   {compact
-                    ? 'Premium fitness, nutrition,\nrecovery, and Watch tracking\nbuilt around a weekly plan you can trust.'
-                    : 'Premium fitness, nutrition, recovery, and wearable tracking built around a weekly plan you can trust.'}
+                    ? 'Premium training, nutrition,\nrecovery, and health signals\nbuilt around a weekly plan you can trust.'
+                    : 'Premium training, nutrition, recovery, and health signals built around a weekly plan you can trust.'}
                 </Text>
                 <View style={styles.heroButtonRow}>
                   <PageButton label="Join beta" icon="mail-outline" variant="primary" onPress={openMail} />
@@ -646,7 +648,7 @@ export default function AboutPage() {
           <View style={styles.sectionInner}>
             <View style={[styles.footerRow, compact && styles.footerRowCompact]}>
               <Image source={logo} style={styles.footerLogo} resizeMode="contain" />
-              <Text style={styles.footerText}>Fitness, nutrition, recovery, and privacy-conscious coaching.</Text>
+              <Text style={styles.footerText}>Training, nutrition, recovery, and privacy-conscious coaching for total health.</Text>
               <TouchableOpacity activeOpacity={0.78} onPress={openMail} hitSlop={hitSlop.chip}>
                 <Text style={styles.footerLink}>{SUPPORT_EMAIL}</Text>
               </TouchableOpacity>
@@ -690,11 +692,20 @@ const styles = StyleSheet.create({
   },
   logoButton: {
     minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     justifyContent: 'center',
   },
+  logoMark: {
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+  },
   logo: {
-    width: 138,
-    height: 44,
+    width: 146,
+    height: 34,
   },
   navActions: {
     flexDirection: 'row',
@@ -1331,8 +1342,8 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   footerLogo: {
-    width: 118,
-    height: 36,
+    width: 126,
+    height: 30,
   },
   footerText: {
     flex: 1,

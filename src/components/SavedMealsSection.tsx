@@ -84,6 +84,14 @@ function dateKey(value: Date): string {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 }
 
+function pairColumns<T>(items: T[]): T[][] {
+  const columns: T[][] = [];
+  for (let idx = 0; idx < items.length; idx += 2) {
+    columns.push(items.slice(idx, idx + 2));
+  }
+  return columns;
+}
+
 export default function SavedMealsSection({
   authToken,
   themeName,
@@ -122,6 +130,8 @@ export default function SavedMealsSection({
     existingMealNames: saved.map(row => row.name),
     limit: 8,
   }), [allergies, dietaryPreference, foodsAvailable, goal, saved]);
+  const savedMealColumns = useMemo(() => pairColumns(saved), [saved]);
+  const suggestedMealColumns = useMemo(() => pairColumns(suggestedMeals), [suggestedMeals]);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -401,15 +411,19 @@ export default function SavedMealsSection({
           </Text>
         </View>
       ) : (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast">
-          {saved.map((sm, idx) => (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ paddingRight: 16 }}>
+          {savedMealColumns.map((column, columnIdx) => (
+            <View key={`saved-meal-column-${columnIdx}`} style={{ width: 248, marginRight: 10, gap: 10 }}>
+              {column.map((sm, rowIdx) => {
+                const idx = columnIdx * 2 + rowIdx;
+                return (
             <View
               key={sm.id}
               testID={`saved-meal-card-${idx}`}
               style={{
-                backgroundColor: tc.surface, borderRadius: 12, padding: 14, marginRight: 10,
+                backgroundColor: tc.surface, borderRadius: 12, padding: 14,
                 borderWidth: 1, borderColor: tc.border,
-                minWidth: 218, maxWidth: 248,
+                width: '100%',
                 position: 'relative',
               }}
             >
@@ -567,6 +581,9 @@ export default function SavedMealsSection({
                 <Ionicons name="ellipsis-horizontal" size={14} color={tc.textMuted} />
               </TouchableOpacity>
             </View>
+                );
+              })}
+            </View>
           ))}
         </ScrollView>
       )}
@@ -577,16 +594,19 @@ export default function SavedMealsSection({
             <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>SUGGESTED FOR YOU</Text>
             <Ionicons name="sparkles-outline" size={15} color={tc.textMuted} />
           </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast">
-            {suggestedMeals.map((suggestion, idx) => {
-              const saving = savingSuggestionId === suggestion.id;
-              const mealForImage = {
-                name: suggestion.name,
-                image_url: mealImageAssetUri(suggestion.imageAssetKey),
-                image_source: 'asset',
-                items: suggestion.items,
-              };
-              return (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ paddingRight: 16 }}>
+            {suggestedMealColumns.map((column, columnIdx) => (
+              <View key={`suggested-meal-column-${columnIdx}`} style={{ width: 280, marginRight: 10, gap: 10 }}>
+                {column.map((suggestion, rowIdx) => {
+                  const idx = columnIdx * 2 + rowIdx;
+                  const saving = savingSuggestionId === suggestion.id;
+                  const mealForImage = {
+                    name: suggestion.name,
+                    image_url: mealImageAssetUri(suggestion.imageAssetKey),
+                    image_source: 'asset',
+                    items: suggestion.items,
+                  };
+                  return (
                 <View
                   key={suggestion.id}
                   testID={`suggested-meal-card-${idx}`}
@@ -594,11 +614,9 @@ export default function SavedMealsSection({
                     backgroundColor: tc.surface,
                     borderRadius: 12,
                     padding: 14,
-                    marginRight: 10,
                     borderWidth: 1,
                     borderColor: tc.border,
-                    minWidth: 256,
-                    maxWidth: 280,
+                    width: '100%',
                   }}
                 >
                   <TouchableOpacity
@@ -677,8 +695,10 @@ export default function SavedMealsSection({
                     </TouchableOpacity>
                   </View>
                 </View>
-              );
-            })}
+                  );
+                })}
+              </View>
+            ))}
           </ScrollView>
         </View>
       )}

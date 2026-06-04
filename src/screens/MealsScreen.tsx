@@ -4,6 +4,7 @@ import {
   Alert,
   Animated,
   Pressable,
+  StyleSheet,
   Text,
   TouchableOpacity,
   View,
@@ -732,7 +733,15 @@ function MealsScreenInner({
                               key={(m as any)._localId ?? `${d}-${i}`}
                               testID={`meal-history-row-${historyIdx}-meal-${i}`}
                               accessibilityLabel={`meal-history-row-${historyIdx}-meal-${i}`}
-                              style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 10,
+                                paddingTop: i === 0 ? 2 : 10,
+                                paddingBottom: 10,
+                                borderTopWidth: i === 0 ? 0 : StyleSheet.hairlineWidth,
+                                borderTopColor: themeColors.border,
+                              }}>
                               <TouchableOpacity
                                 disabled={hasBackendMeals}
                                 onPress={() => handleToggleMeal(d, mealType)}

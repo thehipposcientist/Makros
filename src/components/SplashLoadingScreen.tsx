@@ -1,21 +1,16 @@
 import { useEffect, useRef } from 'react';
-import { View, Image, Text, Animated, Easing, StyleSheet } from 'react-native';
+import { View, Image, Animated, Easing, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Defs, G, LinearGradient as SvgLinearGradient, Path, Stop } from 'react-native-svg';
 
-const PLAN_DAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-const PLAN_LANES = [
-  { width: '76%', color: '#40E8A0' },
-  { width: '62%', color: '#60B8F0' },
-  { width: '48%', color: '#A070E8' },
-] as const;
-
-const LOGO_W = 260;
-const LOGO_H = 100;
+const MARK_SIZE = 96;
+const LOGO_W = 276;
+const LOGO_H = 92;
 
 export function SplashLoadingScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const planAnim = useRef(new Animated.Value(0)).current;
   const backgroundAnim = useRef(new Animated.Value(0)).current;
+  const heartbeatAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
@@ -34,19 +29,19 @@ export function SplashLoadingScreen() {
     );
     background.start();
 
-    const plan = Animated.loop(
+    const heartbeat = Animated.loop(
       Animated.sequence([
-        Animated.timing(planAnim, {
-          toValue: 1, duration: 3600, useNativeDriver: true,
+        Animated.timing(heartbeatAnim, {
+          toValue: 1, duration: 1800, useNativeDriver: false,
           easing: Easing.inOut(Easing.cubic),
         }),
-        Animated.delay(450),
-        Animated.timing(planAnim, { toValue: 0, duration: 0, useNativeDriver: true }),
+        Animated.timing(heartbeatAnim, { toValue: 0, duration: 0, useNativeDriver: false }),
+        Animated.delay(520),
       ]),
     );
-    plan.start();
+    heartbeat.start();
 
-    return () => { background.stop(); plan.stop(); };
+    return () => { background.stop(); heartbeat.stop(); };
   }, []);
 
   const backgroundScale = backgroundAnim.interpolate({
@@ -81,6 +76,18 @@ export function SplashLoadingScreen() {
     inputRange: [0, 1],
     outputRange: [1, 1.06],
   });
+  const heartbeatWidth = heartbeatAnim.interpolate({
+    inputRange: [0, 0.16, 0.76, 1],
+    outputRange: [0, 0, MARK_SIZE, MARK_SIZE],
+  });
+  const heartbeatOpacity = heartbeatAnim.interpolate({
+    inputRange: [0, 0.12, 0.2, 0.78, 1],
+    outputRange: [0, 0, 1, 0.9, 0],
+  });
+  const markScale = heartbeatAnim.interpolate({
+    inputRange: [0, 0.18, 0.26, 0.34, 0.48, 1],
+    outputRange: [1, 1, 1.035, 0.995, 1.018, 1],
+  });
 
   return (
     <View style={styles.root}>
@@ -95,15 +102,15 @@ export function SplashLoadingScreen() {
       />
       <LinearGradient
         colors={[
-          'rgba(4,8,14,0.96)',
-          'rgba(12,20,32,0.88)',
-          'rgba(6,11,20,0.98)',
+          'rgba(4,10,12,0.96)',
+          'rgba(6,16,15,0.90)',
+          'rgba(6,16,15,0.98)',
         ]}
         locations={[0, 0.48, 1]}
         style={StyleSheet.absoluteFill}
       />
       <LinearGradient
-        colors={['rgba(64,232,160,0.18)', 'rgba(96,184,240,0.10)', 'rgba(160,112,232,0.22)']}
+        colors={['rgba(64,232,160,0.22)', 'rgba(18,207,192,0.13)', 'rgba(160,112,232,0.08)']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={StyleSheet.absoluteFill}
@@ -155,60 +162,43 @@ export function SplashLoadingScreen() {
       </Animated.View>
 
       <Animated.View style={[styles.logoWrap, { opacity: fadeAnim }]}>
+        <Animated.View style={[styles.markStage, { transform: [{ scale: markScale }] }]}>
+          <Animated.View pointerEvents="none" style={[styles.heartbeatClip, { width: heartbeatWidth, opacity: heartbeatOpacity }]}>
+            <Svg width={MARK_SIZE} height={MARK_SIZE} viewBox="0 0 96 96" style={styles.heartbeatSvg}>
+              <Defs>
+                <SvgLinearGradient id="heartbeatGlow" x1="0" y1="0" x2="1" y2="0">
+                  <Stop offset="0" stopColor="#40E8A0" stopOpacity="0" />
+                  <Stop offset="0.18" stopColor="#40E8A0" stopOpacity="0.88" />
+                  <Stop offset="0.58" stopColor="#F8FFF8" stopOpacity="1" />
+                  <Stop offset="1" stopColor="#60B8F0" stopOpacity="0.78" />
+                </SvgLinearGradient>
+              </Defs>
+              <G>
+                <Path
+                  d="M7 51 H22 L27 43 L34 64 L43 35 L51 58 L58 46 L64 51 H89"
+                  fill="none"
+                  stroke="rgba(64,232,160,0.18)"
+                  strokeWidth="9"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <Path
+                  d="M7 51 H22 L27 43 L34 64 L43 35 L51 58 L58 46 L64 51 H89"
+                  fill="none"
+                  stroke="url(#heartbeatGlow)"
+                  strokeWidth="3.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </G>
+            </Svg>
+          </Animated.View>
+        </Animated.View>
         <Image
           source={require('../../assets/images/thallo-logo-white-transparent-New.png')}
           style={styles.logo}
           resizeMode="contain"
         />
-      </Animated.View>
-
-      <Animated.View style={[styles.planBuilder, { opacity: fadeAnim }]}>
-        <View style={styles.weekRow}>
-          {PLAN_DAYS.map((day, index) => {
-            const peak = (index + 1) / 8;
-            const before = peak - 0.11;
-            const after = peak + 0.11;
-            const dayOpacity = planAnim.interpolate({
-              inputRange: [before, peak, after],
-              outputRange: [0.44, 1, 0.44],
-              extrapolate: 'clamp',
-            });
-            const dayScale = planAnim.interpolate({
-              inputRange: [before, peak, after],
-              outputRange: [0.96, 1.07, 0.96],
-              extrapolate: 'clamp',
-            });
-
-            return (
-              <Animated.View
-                key={`${day}-${index}`}
-                style={[styles.dayCell, { opacity: dayOpacity, transform: [{ scale: dayScale }] }]}>
-                <Animated.View style={[styles.dayActiveLayer, { opacity: dayOpacity }]} />
-                <Text style={styles.dayLabel}>{day}</Text>
-                <View style={styles.dayLine} />
-              </Animated.View>
-            );
-          })}
-        </View>
-
-        <View style={styles.laneStack}>
-          {PLAN_LANES.map((lane, index) => {
-            const peak = 0.24 + index * 0.22;
-            const laneOpacity = planAnim.interpolate({
-              inputRange: [peak - 0.12, peak, peak + 0.16],
-              outputRange: [0.42, 1, 0.58],
-              extrapolate: 'clamp',
-            });
-
-            return (
-              <View key={index} style={styles.laneRow}>
-                <View style={styles.laneTrack}>
-                  <Animated.View style={[styles.laneFill, { width: lane.width, opacity: laneOpacity, backgroundColor: lane.color }]} />
-                </View>
-              </View>
-            );
-          })}
-        </View>
       </Animated.View>
     </View>
   );
@@ -217,7 +207,7 @@ export function SplashLoadingScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#060B14',
+    backgroundColor: '#06100F',
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 32,
@@ -242,76 +232,32 @@ const styles = StyleSheet.create({
   },
   logoWrap: {
     width: LOGO_W,
-    height: LOGO_H,
+    minHeight: MARK_SIZE + LOGO_H + 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  markStage: {
+    width: MARK_SIZE,
+    height: MARK_SIZE,
     marginBottom: 12,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  heartbeatClip: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    height: MARK_SIZE,
+    overflow: 'hidden',
+  },
+  heartbeatSvg: {
+    width: MARK_SIZE,
+    height: MARK_SIZE,
   },
   logo: {
     width: LOGO_W,
     height: LOGO_H,
-  },
-  planBuilder: {
-    width: '100%',
-    maxWidth: 330,
-    padding: 16,
-    marginTop: 24,
-    marginBottom: 20,
-  },
-  weekRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 6,
-    marginBottom: 16,
-  },
-  dayCell: {
-    flex: 1,
-    maxWidth: 34,
-    minWidth: 0,
-    height: 42,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(128,248,200,0.22)',
-    backgroundColor: 'rgba(20,32,46,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  dayActiveLayer: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(64,232,160,0.30)',
-  },
-  dayLabel: {
-    color: '#E8F0F8',
-    fontSize: 13,
-    fontWeight: '800',
-    zIndex: 1,
-  },
-  dayLine: {
-    position: 'absolute',
-    bottom: 6,
-    width: 14,
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: 'rgba(128,248,200,0.88)',
-  },
-  laneStack: {
-    gap: 9,
-  },
-  laneRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  laneTrack: {
-    flex: 1,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(144,168,192,0.18)',
-    overflow: 'hidden',
-  },
-  laneFill: {
-    height: '100%',
-    borderRadius: 3,
-    backgroundColor: '#40E8A0',
   },
 });
 

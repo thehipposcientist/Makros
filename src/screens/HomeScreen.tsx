@@ -308,7 +308,7 @@ import {
   formatHydrationReminderInterval,
   hydrationTargetRangeOz,
 } from '../utils/hydration';
-import { applyCachedHydrationDelta, loadCachedHydration, loadHydrationCache, pendingCachedHydrationRows, removeCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
+import { applyCachedHydrationDelta, loadCachedHydration, loadHydrationCache, removeCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
 import { buildUserFoodCategories } from '../utils/customFoodSearch';
 import { WORKOUT_CARD_BACKGROUNDS, selectCardBackgroundRotation } from '../constants/cardBackgroundRotations';
 import {
@@ -4513,7 +4513,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   useEffect(() => {
     checkedMealsByDateRef.current = checkedMealsByDate;
   }, [checkedMealsByDate]);
-  const [mealLogRefreshKey, setMealLogRefreshKey] = useState(0);
+  const [mealHistoryRefreshKey, setMealHistoryRefreshKey] = useState(0);
+  const [mealNutritionRefreshKey, setMealNutritionRefreshKey] = useState(0);
+  const requestMealDataRefresh = useCallback((scope: { history?: boolean; nutrition?: boolean } = {}) => {
+    if (scope.history !== false) setMealHistoryRefreshKey(k => k + 1);
+    if (scope.nutrition !== false) setMealNutritionRefreshKey(k => k + 1);
+  }, []);
   const lastFocusRefreshAtRef = useRef(0);
   const mealHistoryRequestSeqRef = useRef(0);
   // Re-fetch meal-derived data when Home regains focus, but only if a
@@ -4525,8 +4530,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const now = Date.now();
       if (now - lastFocusRefreshAtRef.current < 20_000) return;
       lastFocusRefreshAtRef.current = now;
-      setMealLogRefreshKey(k => k + 1);
-    }, []),
+      requestMealDataRefresh();
+    }, [requestMealDataRefresh]),
   );
   const [backendMealHistory, setBackendMealHistory] = useState<MealHistoryEntry[] | null>(null);
   const [mealHistoryLoading, setMealHistoryLoading] = useState(false);
@@ -4545,13 +4550,83 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // own — a concurrent `refreshHydration()` triggered by a tab focus or
   // day-key change reads the cache before the AsyncStorage write commits,
   // sees no pending flag, and overwrites the optimistic state with the
-  // pre-write backend value. The user's tap appears to vanish. The watch
-  // path didn't hit this because it serialized through
-  // `homeWatchHydrationCommandChainRef`. This ref is the synchronous
-  // equivalent for phone-direct writes: handlers add the dateISO before
-  // their POST and remove it after; `refreshHydration` skips the backend
-  // fetch + state overwrite for any date in the set.
+  // pre-write backend value. The user's tap appears to vanish. Phone taps
+  // and watch commands both mark the date synchronously before their cache
+  // write / POST, then `refreshHydration` and watch pull-state snapshots
+  // reuse the optimistic row until the save settles.
   const hydrationInflightDatesRef = useRef<Set<string>>(new Set());
+  const hydrationInflightCountsRef = useRef<Map<string, number>>(new Map());
+  const hydrationWriteSeqRef = useRef(0);
+  const hydrationLatestWriteSeqByDateRef = useRef<Map<string, number>>(new Map());
+  const hydrationLatestWriteKindByDateRef = useRef<Map<string, 'delta' | 'set'>>(new Map());
+  const hydrationRef = useRef<HydrationSummary | null>(null);
+  const hydrationByDateRef = useRef<Record<string, HydrationSummary>>({});
+  hydrationRef.current = hydration;
+  hydrationByDateRef.current = hydrationByDate;
+
+  const beginHydrationWrite = useCallback((dateISO: string, kind: 'delta' | 'set'): number => {
+    const date = dateISO.slice(0, 10);
+    const counts = hydrationInflightCountsRef.current;
+    counts.set(date, (counts.get(date) ?? 0) + 1);
+    hydrationInflightDatesRef.current.add(date);
+    const seq = hydrationWriteSeqRef.current + 1;
+    hydrationWriteSeqRef.current = seq;
+    hydrationLatestWriteSeqByDateRef.current.set(date, seq);
+    hydrationLatestWriteKindByDateRef.current.set(date, kind);
+    setHydrationLoading(true);
+    return seq;
+  }, []);
+
+  const endHydrationWrite = useCallback((dateISO: string) => {
+    const date = dateISO.slice(0, 10);
+    const counts = hydrationInflightCountsRef.current;
+    const nextCount = (counts.get(date) ?? 1) - 1;
+    if (nextCount > 0) {
+      counts.set(date, nextCount);
+    } else {
+      counts.delete(date);
+      hydrationInflightDatesRef.current.delete(date);
+      hydrationLatestWriteKindByDateRef.current.delete(date);
+    }
+    setHydrationLoading(counts.size > 0);
+  }, []);
+
+  const isLatestHydrationWrite = useCallback((dateISO: string, seq: number): boolean => (
+    (hydrationLatestWriteSeqByDateRef.current.get(dateISO.slice(0, 10)) ?? 0) === seq
+  ), []);
+
+  const latestHydrationWriteKind = useCallback((dateISO: string): 'delta' | 'set' | null => (
+    hydrationLatestWriteKindByDateRef.current.get(dateISO.slice(0, 10)) ?? null
+  ), []);
+
+  const visibleHydrationRow = useCallback((dateISO: string = todayKey()): HydrationSummary | null => {
+    const date = dateISO.slice(0, 10);
+    return hydrationByDateRef.current[date] ?? (date === todayKey() ? hydrationRef.current : null);
+  }, []);
+
+  const commitHydrationRow = useCallback((row: HydrationSummary): HydrationSummary => {
+    const date = row.date.slice(0, 10);
+    const normalized = { ...row, date };
+    hydrationByDateRef.current = { ...hydrationByDateRef.current, [date]: normalized };
+    setHydrationByDate(prev => ({ ...prev, [date]: normalized }));
+    if (date === todayKey()) {
+      hydrationRef.current = normalized;
+      setHydration(normalized);
+    }
+    return normalized;
+  }, []);
+
+  const removeVisibleHydrationRow = useCallback((dateISO: string) => {
+    const date = dateISO.slice(0, 10);
+    const nextRows = { ...hydrationByDateRef.current };
+    delete nextRows[date];
+    hydrationByDateRef.current = nextRows;
+    setHydrationByDate(nextRows);
+    if (date === todayKey()) {
+      hydrationRef.current = null;
+      setHydration(null);
+    }
+  }, []);
   // Recipe modal target. Opened from the meal card's "🍳 Recipe" button.
   const [recipeTarget, setRecipeTarget] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
   const [currentDate, setCurrentDate] = useState(todayKey());
@@ -5046,7 +5121,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       nutrition_log_status_source: status ? 'catchup_prompt' : null,
       ...(stampedPlanChanged && stampedPlan ? { nutrition_plan: stampedPlan } : {}),
     });
-    if (authToken && chosenItems.length > 0) setMealLogRefreshKey(k => k + 1);
+    if (authToken && chosenItems.length > 0) requestMealDataRefresh();
     if (failedCount > 0) {
       Alert.alert('Some meals were not logged', 'A few catch-up meals could not be saved. The day was left partial so you can retry.');
     }
@@ -5056,32 +5131,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const refreshHydration = useCallback(async (dateISO: string = todayKey()): Promise<HydrationSummary | null> => {
     if (!authToken) return null;
+    const requestedDate = dateISO.slice(0, 10);
     // Bail out synchronously when a write is in flight for this date.
     // Awaiting the AsyncStorage cache check first would race with the
     // optimistic write's cache commit, which is the original bug.
-    if (hydrationInflightDatesRef.current.has(dateISO)) return null;
+    if (hydrationInflightDatesRef.current.has(requestedDate)) return visibleHydrationRow(requestedDate);
     try {
-      const pendingLocal = await loadCachedHydration(dateISO).catch(() => null);
+      const pendingLocal = await loadCachedHydration(requestedDate).catch(() => null);
       if (pendingLocal?.pending) {
-        setHydrationByDate(prev => ({ ...prev, [pendingLocal.date]: pendingLocal }));
-        if (pendingLocal.date === todayKey()) setHydration(pendingLocal);
-        return pendingLocal;
+        return commitHydrationRow(pendingLocal);
       }
       // Re-check the inflight guard after the async cache read — a tap
       // can land between the two awaits and we don't want to clobber it.
-      if (hydrationInflightDatesRef.current.has(dateISO)) return null;
-      const result = await getHydration(authToken, dateISO);
-      if (hydrationInflightDatesRef.current.has(dateISO)) return null;
-      await saveCachedHydration(result).catch(() => {});
-      setHydrationByDate(prev => ({ ...prev, [result.date]: result }));
-      if (result.date === todayKey()) setHydration(result);
-      return result;
+      if (hydrationInflightDatesRef.current.has(requestedDate)) return visibleHydrationRow(requestedDate);
+      const result = await getHydration(authToken, requestedDate);
+      if (hydrationInflightDatesRef.current.has(requestedDate)) return visibleHydrationRow(requestedDate);
+      const committed = commitHydrationRow(result);
+      await saveCachedHydration(committed).catch(() => {});
+      return committed;
     } catch {
       // Hydration is additive context; keep the last visible value if the
       // endpoint is temporarily unavailable.
       return null;
     }
-  }, [authToken]);
+  }, [authToken, commitHydrationRow, visibleHydrationRow]);
 
   useEffect(() => {
     if (!authToken) {
@@ -5094,36 +5167,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const cachedRows = await loadHydrationCache();
       if (!alive) return;
       if (Object.keys(cachedRows).length > 0) {
-        setHydrationByDate(cachedRows);
-        const todayRow = cachedRows[todayKey()];
-        if (todayRow) setHydration(todayRow);
-      }
-
-      const pendingRows = await pendingCachedHydrationRows();
-      for (const row of pendingRows) {
-        try {
-          const result = await logHydration(authToken, row.ounces, row.date);
-          const fresh = await getHydration(authToken, result.date).catch(() => null);
-          const saved = fresh ?? {
-            date: result.date,
-            ounces: result.ounces,
-            target_ounces: row.target_ounces ?? 64,
-            target_ounces_min: row.target_ounces_min ?? hydrationRangeFields(row.target_ounces ?? 64).target_ounces_min,
-            target_ounces_max: row.target_ounces_max ?? hydrationRangeFields(row.target_ounces ?? 64).target_ounces_max,
-          };
-          await saveCachedHydration(saved);
-          if (!alive) continue;
-          setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
-          if (saved.date === todayKey()) setHydration(saved);
-        } catch {
-          // Keep the pending local row; the next app open/sign-in will retry.
+        const nextRows = { ...cachedRows };
+        hydrationInflightDatesRef.current.forEach(date => {
+          const visible = visibleHydrationRow(date);
+          if (visible) nextRows[date] = visible;
+        });
+        hydrationByDateRef.current = nextRows;
+        setHydrationByDate(nextRows);
+        const todayRow = nextRows[todayKey()];
+        if (todayRow) {
+          hydrationRef.current = todayRow;
+          setHydration(todayRow);
         }
       }
+
+      await import('../utils/hydrationRetry')
+        .then(m => m.flushPendingHydration(authToken))
+        .catch(() => {});
 
       if (alive) refreshHydration(todayKey()).catch(() => {});
     })();
     return () => { alive = false; };
-  }, [authToken, refreshHydration]);
+  }, [authToken, refreshHydration, visibleHydrationRow]);
 
   useEffect(() => {
     if (activeTab === 'meals' && mealsSubTab === 'plan') {
@@ -5164,16 +5229,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     dateISO: string = todayKey(),
     preferred?: HydrationSummary | null,
   ) => {
+    const requestedDate = dateISO.slice(0, 10);
     let row = preferred
-      ?? hydrationByDate[dateISO]
-      ?? (dateISO === todayKey() ? hydration : null);
-    if (!row && authToken) {
-      const result = await getHydration(authToken, dateISO);
-      row = result;
-      setHydrationByDate(prev => ({ ...prev, [result.date]: result }));
-      if (result.date === todayKey()) setHydration(result);
+      ?? visibleHydrationRow(requestedDate);
+    if (!row && authToken && !hydrationInflightDatesRef.current.has(requestedDate)) {
+      const result = await getHydration(authToken, requestedDate);
+      if (hydrationInflightDatesRef.current.has(requestedDate) && !preferred) {
+        row = visibleHydrationRow(requestedDate);
+        if (!row) return;
+      } else {
+        row = commitHydrationRow(result);
+      }
     }
-    const snapshot = row ?? { date: dateISO, ounces: 0, target_ounces: 64, ...hydrationRangeFields(64) };
+    const snapshot = row ?? { date: requestedDate, ounces: 0, target_ounces: 64, ...hydrationRangeFields(64) };
     const { pushHydrationToWatch } = await import('../utils/watchSync');
     await pushHydrationToWatch({
       dateISO: snapshot.date,
@@ -5182,44 +5250,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       targetOuncesMin: snapshot.target_ounces_min,
       targetOuncesMax: snapshot.target_ounces_max,
     });
-  }, [authToken, hydration, hydrationByDate]);
+  }, [authToken, commitHydrationRow, visibleHydrationRow]);
 
   const handleHydrationDelta = useCallback(async (deltaOz: number, dateISO: string = todayKey()) => {
     if (!authToken) return;
-    setHydrationLoading(true);
-    // Optimistic update via functional setState so rapid taps compose
-    // off the LATEST state instead of a stale closure snapshot. The
+    const writeDate = dateISO.slice(0, 10);
+    const writeSeq = beginHydrationWrite(writeDate, 'delta');
+    // Optimistic update via the immediate ref-backed row so rapid taps
+    // compose off the LATEST visible value, even before React re-renders. The
     // delta itself goes to the backend, which atomically increments
     // under a row lock — concurrent +8oz taps now sum to +24oz on the
     // server even if their POSTs interleave.
     const todayISO = todayKey();
-    const fallbackTarget = hydration?.target_ounces ?? 64;
+    const row = visibleHydrationRow(writeDate);
+    const fallbackTarget = row?.target_ounces ?? hydrationRef.current?.target_ounces ?? 64;
     const fallbackRange = hydrationRangeFields(fallbackTarget);
-    setHydrationByDate(prev => {
-      const row = prev[dateISO] ?? (dateISO === todayISO ? hydration : null);
-      const current = row?.ounces ?? 0;
-      const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
-      const optimistic = row
-        ? { ...row, ounces: next }
-        : { date: dateISO, ounces: next, target_ounces: fallbackTarget, ...fallbackRange };
-      return { ...prev, [dateISO]: optimistic };
-    });
-    if (dateISO === todayISO) {
-      setHydration(prev => {
-        const current = prev?.ounces ?? 0;
-        const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
-        return prev
-          ? { ...prev, ounces: next }
-          : { date: dateISO, ounces: next, target_ounces: fallbackTarget, ...fallbackRange };
-      });
-    }
-    await applyCachedHydrationDelta(dateISO, deltaOz, fallbackTarget).catch(() => null);
-    // Mark this date as having an inflight write so a concurrent
-    // refresh (tab focus, day-key change) doesn't overwrite the
-    // optimistic state with the pre-write backend value.
-    hydrationInflightDatesRef.current.add(dateISO);
+    const next = Math.max(0, Math.round(((row?.ounces ?? 0) + deltaOz) * 10) / 10);
+    const optimistic = row
+      ? { ...row, ounces: next }
+      : { date: writeDate, ounces: next, target_ounces: fallbackTarget, ...fallbackRange };
+    commitHydrationRow(optimistic);
+    await applyCachedHydrationDelta(writeDate, deltaOz, fallbackTarget).catch(() => null);
     try {
-      const result = await logHydrationDelta(authToken, deltaOz, dateISO);
+      const result = await logHydrationDelta(authToken, deltaOz, writeDate);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
       const saved = fresh ?? {
         date: result.date,
@@ -5227,58 +5280,61 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         target_ounces: fallbackTarget,
         ...fallbackRange,
       };
-      await saveCachedHydration(saved).catch(() => null);
-      setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
-      if (saved.date === todayISO) setHydration(saved);
-      if (saved.date === todayISO) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
-      if (saved.date === todayISO) {
-        import('../utils/hydrationReminders')
-          .then(({ maybeCancelTodayHydrationReminders }) => maybeCancelTodayHydrationReminders(saved))
-          .catch(() => {});
+      if (isLatestHydrationWrite(saved.date, writeSeq)) {
+        const committed = commitHydrationRow(saved);
+        await saveCachedHydration(committed).catch(() => null);
+        if (committed.date === todayISO) pushHydrationSnapshotToWatch(committed.date, committed).catch(() => {});
+        if (committed.date === todayISO) {
+          import('../utils/hydrationReminders')
+            .then(({ maybeCancelTodayHydrationReminders }) => maybeCancelTodayHydrationReminders(committed))
+            .catch(() => {});
+        }
       }
     } catch {
       // Revert by applying the inverse delta off whatever state the
       // user is now looking at. Safer than restoring a captured value
       // because other taps may have committed in between.
-      setHydrationByDate(prev => {
-        const row = prev[dateISO];
-        if (!row) return prev;
-        const reverted = Math.max(0, Math.round((row.ounces - deltaOz) * 10) / 10);
-        return { ...prev, [dateISO]: { ...row, ounces: reverted } };
-      });
-      if (dateISO === todayISO) {
-        setHydration(prev => prev
-          ? { ...prev, ounces: Math.max(0, Math.round((prev.ounces - deltaOz) * 10) / 10) }
-          : prev);
+      if (isLatestHydrationWrite(writeDate, writeSeq) || latestHydrationWriteKind(writeDate) === 'delta') {
+        const visible = visibleHydrationRow(writeDate);
+        if (visible) {
+          commitHydrationRow({
+            ...visible,
+            ounces: Math.max(0, Math.round((visible.ounces - deltaOz) * 10) / 10),
+          });
+        }
       }
-      await applyCachedHydrationDelta(dateISO, -deltaOz, fallbackTarget, { pending: false }).catch(() => null);
+      await applyCachedHydrationDelta(writeDate, -deltaOz, fallbackTarget, { pending: false }).catch(() => null);
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
-      hydrationInflightDatesRef.current.delete(dateISO);
-      setHydrationLoading(false);
+      endHydrationWrite(writeDate);
     }
-  }, [authToken, hydration, pushHydrationSnapshotToWatch]);
+  }, [
+    authToken,
+    beginHydrationWrite,
+    commitHydrationRow,
+    endHydrationWrite,
+    isLatestHydrationWrite,
+    latestHydrationWriteKind,
+    pushHydrationSnapshotToWatch,
+    visibleHydrationRow,
+  ]);
 
   const handleHydrationSet = useCallback(async (ounces: number, dateISO: string = todayKey()) => {
     if (!authToken) return;
-    const currentRow = hydrationByDate[dateISO] ?? (dateISO === todayKey() ? hydration : null);
+    const writeDate = dateISO.slice(0, 10);
+    const writeSeq = beginHydrationWrite(writeDate, 'set');
+    const currentRow = visibleHydrationRow(writeDate);
     const current = currentRow?.ounces ?? 0;
     const next = Math.max(0, Math.round(ounces * 10) / 10);
-    setHydrationLoading(true);
-    const optimisticTarget = currentRow?.target_ounces ?? hydration?.target_ounces ?? 64;
+    const optimisticTarget = currentRow?.target_ounces ?? hydrationRef.current?.target_ounces ?? 64;
     const optimisticRange = hydrationRangeFields(optimisticTarget);
     const optimistic = currentRow
       ? { ...currentRow, ounces: next }
-      : { date: dateISO, ounces: next, target_ounces: optimisticTarget, ...optimisticRange };
-    setHydrationByDate(prev => ({ ...prev, [dateISO]: optimistic }));
-    if (dateISO === todayKey()) setHydration(optimistic);
+      : { date: writeDate, ounces: next, target_ounces: optimisticTarget, ...optimisticRange };
+    commitHydrationRow(optimistic);
     await saveCachedHydration(optimistic, { pending: true }).catch(() => null);
-    // Inflight guard — same rationale as handleHydrationDelta. Watch path
-    // serialized via promise chain; phone-direct path needed this ref to
-    // stop a concurrent refresh from clobbering the optimistic write.
-    hydrationInflightDatesRef.current.add(dateISO);
     try {
-      const result = await logHydration(authToken, next, dateISO);
+      const result = await logHydration(authToken, next, writeDate);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
       const saved = fresh
         ? fresh
@@ -5288,35 +5344,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           target_ounces: optimisticTarget,
           ...optimisticRange,
       };
-      await saveCachedHydration(saved).catch(() => null);
-      setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
-      if (saved.date === todayKey()) setHydration(saved);
-      if (saved.date === todayKey()) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
-      if (saved.date === todayKey()) {
-        import('../utils/hydrationReminders')
-          .then(({ maybeCancelTodayHydrationReminders }) => maybeCancelTodayHydrationReminders(saved))
-          .catch(() => {});
+      if (isLatestHydrationWrite(saved.date, writeSeq)) {
+        const committed = commitHydrationRow(saved);
+        await saveCachedHydration(committed).catch(() => null);
+        if (committed.date === todayKey()) pushHydrationSnapshotToWatch(committed.date, committed).catch(() => {});
+        if (committed.date === todayKey()) {
+          import('../utils/hydrationReminders')
+            .then(({ maybeCancelTodayHydrationReminders }) => maybeCancelTodayHydrationReminders(committed))
+            .catch(() => {});
+        }
       }
     } catch {
-      if (currentRow) {
-        setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
-        if (dateISO === todayKey()) setHydration({ ...currentRow, ounces: current });
-        await saveCachedHydration({ ...currentRow, ounces: current }).catch(() => null);
-      } else {
-        setHydrationByDate(prev => {
-          const nextRows = { ...prev };
-          delete nextRows[dateISO];
-          return nextRows;
-        });
-        if (dateISO === todayKey()) setHydration(null);
-        await removeCachedHydration(dateISO).catch(() => null);
+      if (isLatestHydrationWrite(writeDate, writeSeq)) {
+        if (currentRow) {
+          const restored = commitHydrationRow({ ...currentRow, ounces: current });
+          await saveCachedHydration(restored).catch(() => null);
+        } else {
+          removeVisibleHydrationRow(writeDate);
+          await removeCachedHydration(writeDate).catch(() => null);
+        }
       }
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
-      hydrationInflightDatesRef.current.delete(dateISO);
-      setHydrationLoading(false);
+      endHydrationWrite(writeDate);
     }
-  }, [authToken, hydration, hydrationByDate, pushHydrationSnapshotToWatch]);
+  }, [
+    authToken,
+    beginHydrationWrite,
+    commitHydrationRow,
+    endHydrationWrite,
+    isLatestHydrationWrite,
+    pushHydrationSnapshotToWatch,
+    removeVisibleHydrationRow,
+    visibleHydrationRow,
+  ]);
 
   // Authoritative daily amounts from the server — collagen + probiotic
   // CFUs. These are logged-meal facts, separate from the projected
@@ -5386,9 +5447,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
     // Immediate fetch reflects DB state right now. If a recent meal write
     // hit the debounce, a follow-up fetch ~3.5s later picks up the recompute.
-    doFetch(mealLogRefreshKey > 0 || activityNutritionRefreshKey > 0).finally(() => {
+    doFetch(mealNutritionRefreshKey > 0 || activityNutritionRefreshKey > 0).finally(() => {
       if (cancelled) return;
-      if (mealLogRefreshKey > 0 || activityNutritionRefreshKey > 0) {
+      if (mealNutritionRefreshKey > 0 || activityNutritionRefreshKey > 0) {
         followupTimer = setTimeout(() => {
           if (cancelled) return;
           doFetch(false).finally(() => {
@@ -5409,7 +5470,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     userProfile?.goal,
     userProfile?.subscriptionTier,
     nutritionPlansByDate,
-    mealLogRefreshKey,
+    mealNutritionRefreshKey,
     activityNutritionRefreshKey,
   ]);
 
@@ -5439,7 +5500,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     showWorkoutsSurface,
     showMealsSurface,
     planRefreshKey,
-    mealLogRefreshKey,
+    mealNutritionRefreshKey,
     activityNutritionRefreshKey,
     workoutHistoryList.length,
     backendMealHistory?.length,
@@ -5469,7 +5530,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       } catch { /* network / bridge optional */ }
     })();
     return () => { cancelled = true; };
-  }, [authToken, checkedMealsByDate, nutritionPlansByDate, mealLogRefreshKey]);
+  }, [authToken, mealNutritionRefreshKey]);
 
   const refreshTodayHealthSnapshotForNutrition = useCallback(async (dateISO: string = todayKey()) => {
     if (!authToken) return;
@@ -5502,7 +5563,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     activeTab,
     mealsSubTab,
     selectedMealDayKey,
-    mealLogRefreshKey,
+    mealNutritionRefreshKey,
     planRefreshKey,
     refreshAdjustedDailyTarget,
   ]);
@@ -5559,12 +5620,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       } catch { /* non-fatal — today's card falls back to static targets */ }
     })();
     return () => { cancelled = true; };
-  }, [authToken, mealLogRefreshKey, planRefreshKey, refreshAdjustedDailyTarget]);
+  }, [authToken, mealNutritionRefreshKey, planRefreshKey, refreshAdjustedDailyTarget]);
 
   useEffect(() => {
-    if (!authToken || mealLogRefreshKey === 0) return;
+    if (!authToken || mealNutritionRefreshKey === 0) return;
     refreshHydration(todayKey()).catch(() => {});
-  }, [authToken, mealLogRefreshKey, refreshHydration]);
+  }, [authToken, mealNutritionRefreshKey, refreshHydration]);
 
   // Home history should show the same deduped meal rows Progress uses.
   // Plan/check state still powers editing, but backend rows are the
@@ -5594,7 +5655,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // app/index.tsx already kicked GET /meals/history before HomeScreen
     // mounted. If that response is still fresh AND scoped to this token,
     // populate state synchronously and skip the redundant fetch entirely.
-    // `consume` is single-use, so reload paths (mealLogRefreshKey bumps,
+    // `consume` is single-use, so reload paths (mealHistoryRefreshKey bumps,
     // focus refreshes, manual mutations) still re-fetch normally.
     if (isInitialHydration) {
       const warm = consumeMealHistoryCache(authToken, { days: mealHistoryWindowDays });
@@ -5645,7 +5706,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => {
       cancelled = true;
     };
-  }, [authToken, mealLogRefreshKey, mealHistoryWindowDays]);
+  }, [authToken, mealHistoryRefreshKey, mealHistoryWindowDays]);
 
   const persistDayState = useCallback(async (
     dayKey: string,
@@ -6314,9 +6375,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
     const watchWorkoutState = await readWatchWorkoutActivityState();
     const activeWorkoutOwnedByScreen = watchWorkoutState.isActive && hasActiveWatchCommandConsumer();
-    if (activeWorkoutOwnedByScreen) {
-      return;
-    }
     const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
       watchWorkoutState.isActive ? 'active'
       : s.todayDone ? 'completed'
@@ -6324,7 +6382,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       : todayItem?.isRest ? 'rest'
       : 'scheduled';
 
-    if (s.showWorkoutsSurface) {
+    if (s.showWorkoutsSurface && !activeWorkoutOwnedByScreen) {
       await pushWorkoutToWatch(todayWorkout, {
         dateISO: todayISO,
         status,
@@ -6352,18 +6410,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       ).catch(() => {});
     }
 
-    let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
-    if (!hydrationSnapshot && currentAuthToken) {
-      hydrationSnapshot = await getHydration(currentAuthToken, todayISO).catch(() => null);
+    let hydrationSnapshot: HydrationSummary | null = visibleHydrationRow(todayISO)
+      ?? s.hydrationByDate?.[todayISO]
+      ?? s.hydration
+      ?? null;
+    const hydrationWriteInflight = hydrationInflightDatesRef.current.has(todayISO);
+    if ((reason === 'pull_state' || forceSnapshot || !hydrationSnapshot) && currentAuthToken && !hydrationWriteInflight) {
+      const fetchedHydration = await getHydration(currentAuthToken, todayISO).catch(() => null);
+      if (fetchedHydration && !hydrationInflightDatesRef.current.has(todayISO)) {
+        hydrationSnapshot = commitHydrationRow(fetchedHydration);
+        await saveCachedHydration(hydrationSnapshot).catch(() => null);
+      }
     }
-    await pushHydrationToWatch({
-      dateISO: hydrationSnapshot?.date ?? todayISO,
-      ounces: hydrationSnapshot?.ounces ?? 0,
-      targetOunces: hydrationSnapshot?.target_ounces ?? 64,
-      targetOuncesMin: hydrationSnapshot?.target_ounces_min,
-      targetOuncesMax: hydrationSnapshot?.target_ounces_max,
-      force: forceSnapshot,
-    }).catch(() => {});
+    if (!hydrationInflightDatesRef.current.has(todayISO)) {
+      await pushHydrationToWatch({
+        dateISO: hydrationSnapshot?.date ?? todayISO,
+        ounces: hydrationSnapshot?.ounces ?? 0,
+        targetOunces: hydrationSnapshot?.target_ounces ?? 64,
+        targetOuncesMin: hydrationSnapshot?.target_ounces_min,
+        targetOuncesMax: hydrationSnapshot?.target_ounces_max,
+        force: forceSnapshot,
+      }).catch(() => {});
+    }
 
     if (currentAuthToken) {
       const lifestyle = await getLifestyleLog(currentAuthToken, todayISO).catch(() => null);
@@ -7210,6 +7278,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const processHydrationCommand = async () => {
               let rollbackDateISO = todayKey();
               let rollbackRow: HydrationSummary | null = null;
+              let didBeginHydrationWrite = false;
+              let writeSeq = 0;
               const currentAuthToken = authTokenRef.current;
               try {
                 if (!currentAuthToken) return;
@@ -7247,9 +7317,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return;
                   }
                 }
-                const s = rePushStateRef.current;
-                const currentRow = s.hydrationByDate?.[dateISO]
-                  ?? (dateISO === todayKey() ? s.hydration : null);
+                writeSeq = beginHydrationWrite(dateISO, hasDelta ? 'delta' : 'set');
+                didBeginHydrationWrite = true;
+                const currentRow = visibleHydrationRow(dateISO);
                 rollbackRow = currentRow;
                 const next = hasDelta
                   ? Math.max(0, Math.round(((currentRow?.ounces ?? 0) + rawDelta) * 10) / 10)
@@ -7261,9 +7331,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   target_ounces_min: currentRow?.target_ounces_min ?? hydrationRangeFields(currentRow?.target_ounces ?? 64).target_ounces_min,
                   target_ounces_max: currentRow?.target_ounces_max ?? hydrationRangeFields(currentRow?.target_ounces ?? 64).target_ounces_max,
                 };
-                setHydrationByDate(prev => ({ ...prev, [dateISO]: optimistic }));
-                if (dateISO === todayKey()) setHydration(optimistic);
-                await saveCachedHydration(optimistic, { pending: true }).catch(() => null);
+                commitHydrationRow(optimistic);
+                await saveCachedHydration(optimistic, {
+                  pending: true,
+                  pendingCommandId: commandId,
+                  pendingDeltaOz: hasDelta ? rawDelta : undefined,
+                }).catch(() => null);
                 const result = hasDelta
                   ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO, { commandId })
                   : await logHydration(currentAuthToken, next, dateISO, { commandId });
@@ -7277,50 +7350,55 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     target_ounces_min: currentRow?.target_ounces_min ?? hydrationRangeFields(currentRow?.target_ounces ?? 64).target_ounces_min,
                     target_ounces_max: currentRow?.target_ounces_max ?? hydrationRangeFields(currentRow?.target_ounces ?? 64).target_ounces_max,
                   };
-                await saveCachedHydration(saved).catch(() => null);
-                setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
-                if (saved.date === todayKey()) setHydration(saved);
+                let committed: HydrationSummary | null = null;
+                if (isLatestHydrationWrite(saved.date, writeSeq)) {
+                  committed = commitHydrationRow(saved);
+                  await saveCachedHydration(committed).catch(() => null);
+                }
                 if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
                   await AsyncStorage.setItem(commandKey, String(Math.max(lastTsMs, commandTsMs))).catch(() => {});
                   if (!hasDelta) {
                     await AsyncStorage.setItem(absoluteCommandKey, String(Math.max(lastAbsoluteTsMs, commandTsMs))).catch(() => {});
                   }
                 }
-                const { pushHydrationToWatch } = await import('../utils/watchSync');
-                await pushHydrationToWatch({
-                  dateISO: saved.date,
-                  ounces: saved.ounces,
-                  targetOunces: saved.target_ounces,
-                  targetOuncesMin: saved.target_ounces_min,
-                  targetOuncesMax: saved.target_ounces_max,
-                  force: true,
-                });
-              } catch {
-                const restored = rollbackRow ?? await getHydration(currentAuthToken, rollbackDateISO)
-                  .then(row => row)
-                  .catch(() => null);
-                if (restored) {
-                  setHydrationByDate(prev => ({ ...prev, [restored.date]: restored }));
-                  if (restored.date === todayKey()) setHydration(restored);
-                  await saveCachedHydration(restored).catch(() => null);
-                } else {
-                  setHydrationByDate(prev => {
-                    const nextRows = { ...prev };
-                    delete nextRows[rollbackDateISO];
-                    return nextRows;
+                const watchRow = committed ?? visibleHydrationRow(saved.date);
+                if (watchRow) {
+                  const { pushHydrationToWatch } = await import('../utils/watchSync');
+                  await pushHydrationToWatch({
+                    dateISO: watchRow.date,
+                    ounces: watchRow.ounces,
+                    targetOunces: watchRow.target_ounces,
+                    targetOuncesMin: watchRow.target_ounces_min,
+                    targetOuncesMax: watchRow.target_ounces_max,
+                    force: true,
                   });
-                  if (rollbackDateISO === todayKey()) setHydration(null);
-                  await removeCachedHydration(rollbackDateISO).catch(() => null);
+                }
+              } catch {
+                let restored: HydrationSummary | null = null;
+                if (!didBeginHydrationWrite || isLatestHydrationWrite(rollbackDateISO, writeSeq) || latestHydrationWriteKind(rollbackDateISO) === 'delta') {
+                  restored = rollbackRow ?? await getHydration(currentAuthToken, rollbackDateISO)
+                    .then(row => row)
+                    .catch(() => null);
+                  if (restored) {
+                    restored = commitHydrationRow(restored);
+                    await saveCachedHydration(restored).catch(() => null);
+                  } else {
+                    removeVisibleHydrationRow(rollbackDateISO);
+                    await removeCachedHydration(rollbackDateISO).catch(() => null);
+                  }
                 }
                 const { pushHydrationToWatch } = await import('../utils/watchSync');
+                const watchRow = visibleHydrationRow(restored?.date ?? rollbackDateISO) ?? restored;
                 await pushHydrationToWatch({
-                  dateISO: restored?.date ?? rollbackDateISO,
-                  ounces: restored?.ounces ?? 0,
-                  targetOunces: restored?.target_ounces ?? 64,
-                  targetOuncesMin: restored?.target_ounces_min,
-                  targetOuncesMax: restored?.target_ounces_max,
+                  dateISO: watchRow?.date ?? rollbackDateISO,
+                  ounces: watchRow?.ounces ?? 0,
+                  targetOunces: watchRow?.target_ounces ?? 64,
+                  targetOuncesMin: watchRow?.target_ounces_min,
+                  targetOuncesMax: watchRow?.target_ounces_max,
                   force: true,
                 }).catch(() => {});
+              } finally {
+                if (didBeginHydrationWrite) endHydrationWrite(rollbackDateISO);
               }
             };
             homeWatchHydrationCommandChainRef.current = homeWatchHydrationCommandChainRef.current
@@ -7667,7 +7745,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   });
                   await persistPromise?.catch(() => {});
                 }
-                setMealLogRefreshKey(k => k + 1);
+                requestMealDataRefresh();
                 // Re-push updated meals to the watch.
                 const s = rePushStateRef.current;
                 const todayPlan = nutritionPlansByDateRef.current[todayISO]
@@ -9741,7 +9819,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         await savePreservedMeal(date, preservedKey, canonicalMeal).catch(() => {});
       }
     }
-    setMealLogRefreshKey(k => k + 1);
+    requestMealDataRefresh();
   }, [persistDayState]);
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string, desiredChecked?: boolean) => {
@@ -9915,7 +9993,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (!isRoutineBacked) {
             await savePreservedMealWithBackendId(date, checkKeyAtExec, stampedMealForCache ?? { ...(mealAtExec as MealSuggestion), _loggedMealId: newId } as MealSuggestion);
           }
-          setMealLogRefreshKey(k => k + 1);
+          requestMealDataRefresh();
         } else if (!optimisticNow && isBackendLogged) {
           // === DELETE path ===
           const deleted = await deleteLoggedMealForMeal(date, checkKeyAtExec, mealAtExec as MealSuggestion);
@@ -9940,7 +10018,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const localId = mealLocalId(mealAtExec as MealSuggestion);
           if (localId) await clearPreservedMeal(date, checkKeyAtExec, localId);
           else await clearPreservedMealBySignature(date, (mealAtExec as MealSuggestion).meal, (mealAtExec as MealSuggestion).calories ?? 0);
-          setMealLogRefreshKey(k => k + 1);
+          requestMealDataRefresh();
         }
       } catch (err: any) {
         // Revert optimistic to BACKEND state (not pre-tap state — could
@@ -9967,7 +10045,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         clearMealMutationPending(mutationKeys);
       }
     });
-  }, [persistDayState, authToken, deleteLoggedMealForMeal, backendMealSuggestionsByDate, userProfile]);
+  }, [persistDayState, authToken, deleteLoggedMealForMeal, backendMealSuggestionsByDate, userProfile, requestMealDataRefresh]);
 
   // Routines are account-owned. Keep a session-local working copy for instant
   // UI updates, then wait for backend reconciliation so reinstall/cross-device
@@ -10211,7 +10289,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           Alert.alert('Could not save meal', m || 'The meal edit did not go through.');
         }
       }
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
     }
 
     // Auto-check + auto-log are reserved for explicit "mark eaten" saves only.
@@ -10304,7 +10382,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             await savePreservedMealWithBackendId(date, savedMealType, stampedMealForCache);
           }
         }
-        setMealLogRefreshKey(k => k + 1);
+        requestMealDataRefresh();
       } catch (err: any) {
         setMealHistoryLoading(false);
         setMealHistoryHydrated(true);
@@ -10370,7 +10448,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     }
     });
-  }, [persistDayState, authToken, userProfile, persistMealRoutines, noteNutritionPlanMutation, applyAndPersistFoodClassifications, applyMealPageResponse]);
+  }, [persistDayState, authToken, userProfile, persistMealRoutines, noteNutritionPlanMutation, applyAndPersistFoodClassifications, applyMealPageResponse, requestMealDataRefresh]);
 
   const handleHistoryMealSave = useCallback(async (date: string, mealType: string, mealId: number, updated: MealSuggestion) => {
     if (!authToken) return;
@@ -10436,7 +10514,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             });
             await stampLoggedMealIdInLoadedState(date, resolvedMealType, normalized as MealSuggestion, newId);
           }
-          setMealLogRefreshKey(k => k + 1);
+          requestMealDataRefresh();
           return;
         } catch (e2: any) {
           Alert.alert('Could not save meal', e2?.message || 'The meal could not be re-saved.');
@@ -10446,7 +10524,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       Alert.alert('Could not save meal', msg || 'The meal history update did not go through.');
     }
     });
-  }, [authToken, applyMealPageResponse, stampLoggedMealIdInLoadedState]);
+  }, [authToken, applyMealPageResponse, stampLoggedMealIdInLoadedState, requestMealDataRefresh]);
 
   const handleAddSnack = useCallback((date: string, options?: { startWithCamera?: boolean; startWithBarcode?: boolean }) => {
     const emptyMeal: MealSuggestion = { meal: 'New Meal', foods: [], calories: 0, protein: 0, carbs: 0, fat: 0 };
@@ -10734,7 +10812,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         await clearPreservedMealBySignature(date, meal.meal, meal.calories ?? 0);
       } catch {}
       setBackendMealHistory(prev => removeHistoryEntry(prev, mealId) ?? null);
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
       if (deletedEntry) {
         const undoMeal = mealHistoryEntryToSuggestion(deletedEntry);
         const undoDraft = { ...(undoMeal as any) };
@@ -10817,7 +10895,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (targetWasChecked) {
         try {
           const deleted = await deleteLoggedMealForMeal(date, targetCheckKey, target);
-          if (deleted) setMealLogRefreshKey(k => k + 1);
+          if (deleted) requestMealDataRefresh();
         } catch (err: any) {
           Alert.alert('Could not delete meal', err?.message ?? 'The meal is still saved in your log.');
           return;
@@ -11037,11 +11115,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         await mirrorMealHistoryEntryToDay(date, entry);
         setBackendMealHistory(prev => upsertHistoryEntry(prev, entry));
       }
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
     } catch (err: any) {
       Alert.alert('Could not duplicate meal', err?.message ?? `Try duplicating "${meal?.meal ?? 'this meal'}" again.`);
     }
-  }, [authToken, mirrorMealHistoryEntryToDay]);
+  }, [authToken, mirrorMealHistoryEntryToDay, requestMealDataRefresh]);
 
   const handleDuplicateMeal = useCallback(async (date: string, mealType: string, sourceMeal?: MealSuggestion) => {
     const fallbackPlan: DailyNutritionPlan = {
@@ -11181,7 +11259,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           setBackendMealHistory(prev => upsertHistoryEntry(prev, remainderEntry));
           await mirrorMealHistoryEntryToDay(remainderEntry.meal_date, remainderEntry);
         }
-        setMealLogRefreshKey(k => k + 1);
+        requestMealDataRefresh();
       });
     } catch (err: any) {
       Alert.alert('Could not split meal', err?.message ?? `Try splitting "${baseName}" again.`);
@@ -11189,7 +11267,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       setMealHistoryLoading(false);
       setMealHistoryHydrated(true);
     }
-  }, [authToken, mirrorMealHistoryEntryToDay]);
+  }, [authToken, mirrorMealHistoryEntryToDay, requestMealDataRefresh]);
 
   const handleSplitMeal = useCallback((date: string, mealType: string, sourceMeal?: MealSuggestion) => {
     const sourceLoggedMealId = Number((sourceMeal as any)?._loggedMealId ?? 0) || 0;
@@ -11224,8 +11302,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (!nextName) return;
     void previous;
     reloadSavedMealsRef.current?.();
-    setMealLogRefreshKey(k => k + 1);
-  }, []);
+    requestMealDataRefresh({ nutrition: false });
+  }, [requestMealDataRefresh]);
 
   const stampSavedMealReferenceInLoadedState = useCallback(async (saved: SavedMealReference) => {
     const savedId = Number(saved.id ?? 0) || null;
@@ -12419,8 +12497,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         applyAndPersistFoodClassifications,
       ).catch(() => {});
     }
-    setMealLogRefreshKey(k => k + 1);
-  }, [authToken, applyAndPersistFoodClassifications, persistDayState]);
+    requestMealDataRefresh();
+  }, [authToken, applyAndPersistFoodClassifications, persistDayState, requestMealDataRefresh]);
 
   const handleSavedMealTemplateUpdated = useCallback(async (
     updated: SavedMeal,
@@ -12458,7 +12536,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
     setBackendMealHistory(prev => removeHistoryEntry(prev, mealId) ?? null);
     if (!date) {
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
       return;
     }
 
@@ -12466,14 +12544,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       ? ensureMealClientKeys(nutritionPlansByDateRef.current[date])
       : null;
     if (!current) {
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
       return;
     }
 
     const meals = current.meals ?? [];
     const removeIdx = meals.findIndex(meal => Number((meal as any)._loggedMealId ?? 0) === mealId);
     if (removeIdx < 0) {
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
       return;
     }
 
@@ -12496,18 +12574,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         await persistDayState(date, { meal_checks: nextChecks }).catch(() => {});
       }
     }
-    setMealLogRefreshKey(k => k + 1);
-  }, [backendMealHistory, persistDayState]);
+    requestMealDataRefresh();
+  }, [backendMealHistory, persistDayState, requestMealDataRefresh]);
 
   const handleSavedMealLogChanged = useCallback(async (change?: { action?: 'deleted'; mealId?: number }) => {
     if (change?.mealId) {
       await removeLoggedMealFromLoadedState(change.mealId);
     } else {
-      setMealLogRefreshKey(k => k + 1);
+      requestMealDataRefresh();
     }
     loadDayStatus();
     reloadSavedMeals();
-  }, [reloadSavedMeals, removeLoggedMealFromLoadedState]);
+  }, [reloadSavedMeals, removeLoggedMealFromLoadedState, requestMealDataRefresh]);
   const openSavedMealTemplateEditor = useCallback((sm: any) => {
     setEditingSavedMeal({
       id: sm.id,
@@ -15983,7 +16061,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 	              focusTarget={progressFocusTarget}
 	              focusTargetToken={progressFocusToken}
 	              nutritionPlan={progressNutritionPlan}
-	              nutritionLogRefreshKey={mealLogRefreshKey + activityNutritionRefreshKey}
+	              nutritionLogRefreshKey={mealNutritionRefreshKey + activityNutritionRefreshKey}
 	              planWeekWindow={progressPlanWeekWindow}
 	              inProgressWorkout={resumeInfo}
 	              onResumeInProgressWorkout={resumeInProgressWorkout}

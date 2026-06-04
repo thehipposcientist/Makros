@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, delete as _sm_delete
@@ -286,10 +286,14 @@ def _enforce_routine_cap(db: Session, user: User) -> None:
         )
 
 
-def _refresh(db: Session, user_id: int, meal_date: date) -> None:
+def _refresh(db: Session, background_tasks: BackgroundTasks | None, user_id: int, meal_date: date) -> None:
     try:
-        from app.routers.meals import _refresh_daily_metrics
-        _refresh_daily_metrics(db, user_id, meal_date, force=True)
+        if background_tasks is None:
+            from app.routers.meals import _refresh_daily_metrics
+            _refresh_daily_metrics(db, user_id, meal_date, force=True)
+        else:
+            from app.routers.meals import _queue_daily_metrics_refresh
+            _queue_daily_metrics_refresh(background_tasks, user_id, meal_date, force=True)
     except Exception:
         pass
 
@@ -437,6 +441,7 @@ def log_routine_occurrence(
     body: LogOccurrenceBody,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Log one routine occurrence as a single Meal. Idempotent on
     (user_id, source_routine_id, routine_occurrence_key) so logging the same
@@ -521,7 +526,7 @@ def log_routine_occurrence(
                     "routine_occurrence_key": occ_key, "deduped": True}
         raise
     db.refresh(meal)
-    _refresh(db, current_user.id, occ_date)
+    _refresh(db, background_tasks, current_user.id, occ_date)
     return {"meal_id": meal.id, "source_routine_id": routine_id,
             "routine_occurrence_key": occ_key, "deduped": False}
 
@@ -532,6 +537,7 @@ def update_routine_occurrence(
     body: OccurrencePatch,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Edit ONE day of a routine (rule F). If that day is already logged,
     update its Meal row. Otherwise upsert a RoutineOccurrenceException. Never
@@ -580,7 +586,7 @@ def update_routine_occurrence(
                 skipped=True,
             )
             db.commit()
-            _refresh(db, current_user.id, occ_date)
+            _refresh(db, background_tasks, current_user.id, occ_date)
             return {"target": "log", "meal_id": None, "skipped": True}
         if body.name:
             logged.name = body.name
@@ -597,7 +603,7 @@ def update_routine_occurrence(
         from app.routers.meals import _sync_updated_meal_day_state
         _sync_updated_meal_day_state(db, current_user.id, logged)
         db.commit()
-        _refresh(db, current_user.id, occ_date)
+        _refresh(db, background_tasks, current_user.id, occ_date)
         return {"target": "log", "meal_id": logged.id, "skipped": False}
 
     # Not logged yet → write/replace the per-date exception (rule F).

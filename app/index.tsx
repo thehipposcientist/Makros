@@ -585,6 +585,7 @@ import DummyPaymentModal from '../src/components/DummyPaymentModal';
 import LiveTutorialOverlay from '../src/components/LiveTutorialOverlay';
 import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
 import { SplashLoadingScreen } from '../src/components/SplashLoadingScreen';
+import BrandMark from '../src/components/BrandMark';
 import BottomSheetDismissHandle from '../src/components/BottomSheetDismissHandle';
 import { DEFAULT_THEME_NAME, colors, getContrastingTextColor, getTheme, radius } from '../src/constants/theme';
 import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
@@ -868,9 +869,7 @@ function WebProgressShell({
     <View style={styles.root}>
       <View style={styles.topbar}>
         <View style={styles.brandCluster}>
-          <View style={styles.brandMark}>
-            <Text style={styles.brandMarkText}>T</Text>
-          </View>
+          <BrandMark size={36} variant="tile" animated={false} style={styles.brandMark} />
           <View style={styles.brandTextBlock}>
             <Text style={styles.brandTitle}>Thallo</Text>
             <Text style={styles.brandSubtitle} numberOfLines={1}>{displayName}</Text>
@@ -939,17 +938,11 @@ function createWebProgressStyles(c: ReturnType<typeof getTheme>['colors']) {
       gap: 12,
     },
     brandMark: {
-      width: 34,
-      height: 34,
       borderRadius: 8,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: c.primary,
-    },
-    brandMarkText: {
-      color: getContrastingTextColor(c.primary),
-      fontSize: 16,
-      fontWeight: '900',
+      shadowColor: c.primary,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.16,
+      shadowRadius: 10,
     },
     brandTextBlock: {
       minWidth: 0,

@@ -1,13 +1,14 @@
 from collections import defaultdict
+from threading import Lock
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, delete as _sm_delete
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from app.database import get_session
+from app.database import engine, get_session
 from app.entitlements import require_pro_feature
 from app.models import User, Meal, MealItem, MealCreate, UserDayState, UserGoal, WorkoutCompletion, SavedMeal, WatchCommandEvent
 from app.auth import get_current_user
@@ -568,14 +569,77 @@ def _copied_consumed_at(source: Meal, target_date: date, explicit: datetime | No
 # `/gut-health` self-refresh on read.
 import time as _time
 _last_refresh_at: dict[tuple[int, date], float] = {}
+_refresh_pending: set[tuple[int, date]] = set()
+_refresh_dirty: set[tuple[int, date]] = set()
+_refresh_lock = Lock()
 _REFRESH_DEBOUNCE_SECONDS = 3.0
 
 
+def _run_daily_metrics_refresh(user_id: int, meal_date: date, *, delay_seconds: float = 0.0) -> None:
+    key = (user_id, meal_date)
+    if delay_seconds > 0:
+        _time.sleep(delay_seconds)
+    while True:
+        try:
+            from app.services.nutrition.gut_health import compute_daily_metrics
+            with Session(engine) as refresh_db:
+                compute_daily_metrics(refresh_db, user_id=user_id, metric_date=meal_date, allow_ai=True)
+        except Exception:
+            pass
+        try:
+            from app.services.readiness.compute import invalidate_readiness_cache
+            invalidate_readiness_cache(user_id)
+        except Exception:
+            pass
+
+        with _refresh_lock:
+            if key in _refresh_dirty:
+                _refresh_dirty.discard(key)
+                _last_refresh_at[key] = _time.time()
+                continue
+            _refresh_pending.discard(key)
+            _last_refresh_at[key] = _time.time()
+            return
+
+
+def _queue_daily_metrics_refresh(
+    background_tasks: BackgroundTasks | None,
+    user_id: int,
+    meal_date: date,
+    *,
+    force: bool = False,
+) -> None:
+    """Queue DailyNutritionMetrics recompute for a meal write.
+
+    The request already committed the Meal/MealItem mutation. Metrics are
+    derived data, so keep them off the foreground path and coalesce bursts by
+    user/date. If a write lands while a refresh is pending/running, mark it
+    dirty so the worker performs one more recompute against the latest DB rows.
+    """
+    key = (user_id, meal_date)
+    now = _time.time()
+    delay_seconds = 0.0
+    with _refresh_lock:
+        if key in _refresh_pending:
+            _refresh_dirty.add(key)
+            return
+        last = _last_refresh_at.get(key, 0.0)
+        if not force and now - last < _REFRESH_DEBOUNCE_SECONDS:
+            delay_seconds = max(0.0, _REFRESH_DEBOUNCE_SECONDS - (now - last))
+        _refresh_pending.add(key)
+
+    if background_tasks is not None:
+        background_tasks.add_task(_run_daily_metrics_refresh, user_id, meal_date, delay_seconds=delay_seconds)
+    else:
+        _run_daily_metrics_refresh(user_id, meal_date, delay_seconds=delay_seconds)
+
+
 def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date, *, force: bool = False) -> None:
-    """Recompute DailyNutritionMetrics for the given user + date. Called
-    after any write that changes what meals exist on that day so logged
-    meal history, gut facts, and recovery signals refresh on the next read.
-    Non-blocking — failures here never break the caller."""
+    """Backward-compatible helper for old call sites/tests.
+
+    New HTTP write paths should call `_queue_daily_metrics_refresh` so meal
+    logging is not blocked by food-quality classification and metrics rollups.
+    """
     key = (user_id, meal_date)
     now = _time.time()
     last = _last_refresh_at.get(key, 0.0)
@@ -587,8 +651,25 @@ def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date, *, force:
         compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=True)
     except Exception:
         pass
-    # Nutrition adherence is one of readiness's pillars — clear the
-    # per-user cache so the next /readiness/today reflects the new meal.
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(user_id)
+    except Exception:
+        pass
+
+
+def _refresh_daily_metrics_after_write(
+    db: Session,
+    background_tasks: BackgroundTasks | None,
+    user_id: int,
+    meal_date: date,
+    *,
+    force: bool = False,
+) -> None:
+    if background_tasks is None:
+        _refresh_daily_metrics(db, user_id, meal_date, force=force)
+        return
+    _queue_daily_metrics_refresh(background_tasks, user_id, meal_date, force=force)
     try:
         from app.services.readiness.compute import invalidate_readiness_cache
         invalidate_readiness_cache(user_id)
@@ -603,6 +684,7 @@ def create_meal(
     body: MealCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     # consumed_at: honor the explicit value when the client sends one
     # (e.g. user back-logged yesterday's lunch), otherwise default to
@@ -752,7 +834,7 @@ def create_meal(
                 return _build_meal_response(existing, db)
         raise
     db.refresh(meal)
-    _refresh_daily_metrics(db, current_user.id, meal.meal_date)
+    _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, meal.meal_date)
     return _build_meal_response(meal, db)
 
 
@@ -762,6 +844,7 @@ def update_meal(
     body: dict,  # accept partial — {meal_type, consumed_at, notes, name, items}
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Patch a small set of mutable fields on an existing meal. Used by
     the meal editor to change name/items/macros, `meal_type` (e.g.
@@ -935,7 +1018,7 @@ def update_meal(
             pass
         raise HTTPException(status_code=500, detail=f"Could not save meal: {e!s}")
     for affected_date in affected_dates:
-        _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
+        _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, affected_date, force=True)
     return _build_meal_page_response(db, current_user, meal_id)
 
 
@@ -945,6 +1028,7 @@ def copy_meal(
     body: CopyMealBody,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Clone a logged meal, optionally onto a new date/type and scaled by
     `quantity_scale`. The clone is a normal Meal + MealItem set and does
@@ -1019,7 +1103,7 @@ def copy_meal(
 
     db.commit()
     db.refresh(clone)
-    _refresh_daily_metrics(db, current_user.id, target_date, force=True)
+    _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, target_date, force=True)
     return _build_meal_response(clone, db)
 
 
@@ -1029,6 +1113,7 @@ def split_meal(
     body: SplitMealBody,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Split a logged meal into two logged meals. The original meal keeps
     `keep_fraction`; the remainder is cloned into a second Meal row. Every
@@ -1086,7 +1171,7 @@ def split_meal(
     db.refresh(meal)
     db.refresh(remainder)
     for affected_date in {meal.meal_date, target_date}:
-        _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
+        _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, affected_date, force=True)
     return {
         "kept": _build_meal_response(meal, db),
         "remainder": _build_meal_response(remainder, db),
@@ -1146,6 +1231,7 @@ def log_checked_meal(
     body: LogCheckedBody,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Persist a meal the user checked off from their nutrition plan."""
     from app.services.nutrition.meal_history import log_meal_from_plan
@@ -1207,7 +1293,7 @@ def log_checked_meal(
     # the row's first flush (rule A). No post-hoc stamping — that left a race
     # window where a concurrent retry could insert a second row before the
     # key landed.
-    _refresh_daily_metrics(db, current_user.id, meal_date)
+    _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, meal_date)
     return result
 
 
@@ -1216,6 +1302,7 @@ def unlog_checked_meal(
     body: LogCheckedBody,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Remove a meal history row when the user unchecks a planned meal."""
     from app.services.nutrition.meal_history import unlog_meal_from_plan
@@ -1235,7 +1322,7 @@ def unlog_checked_meal(
         db=db,
     )
     if result.get("deleted", 0) > 0:
-        _refresh_daily_metrics(db, current_user.id, meal_date, force=True)
+        _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, meal_date, force=True)
     return result
 
 
@@ -2884,6 +2971,7 @@ def delete_meal(
     meal_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Hard-delete a meal + its items. The post-commit metrics refresh is
     isolated — if anything in `_refresh_daily_metrics` (gut-health
@@ -2976,6 +3064,6 @@ def delete_meal(
     # Metrics refresh — best-effort. The deletion already committed; any
     # failure here is a server-side observability concern, not a user one.
     try:
-        _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
+        _refresh_daily_metrics_after_write(db, background_tasks, current_user.id, affected_date, force=True)
     except Exception as e:
         _log.warning("[meals/delete] metrics refresh failed (non-fatal) meal_id=%s: %s", meal_id, e)

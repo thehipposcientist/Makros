@@ -571,6 +571,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       fat: template.fat,
     }));
   }, [favoriteMeals, savedMeals]);
+  const favoriteMealColumns = useMemo<FavoriteMealCopy[][]>(() => {
+    const columns: FavoriteMealCopy[][] = [];
+    for (let idx = 0; idx < favoriteMealChoices.length; idx += 2) {
+      columns.push(favoriteMealChoices.slice(idx, idx + 2));
+    }
+    return columns;
+  }, [favoriteMealChoices]);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -1560,7 +1567,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     );
   };
 
-  const renderFavoriteCopyCard = (favorite: FavoriteMealCopy, idx: number, variant: 'carousel' | 'sheet' = 'carousel') => {
+  const renderFavoriteCopyCard = (favorite: FavoriteMealCopy, idx: number, variant: 'carousel' | 'carouselStack' | 'sheet' = 'carousel') => {
     const totals = favoriteMealTotals(favorite);
     const itemCount = favorite.items?.length ?? 0;
     const loggedCount = Number(favorite.times_logged ?? 0);
@@ -1574,7 +1581,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     return (
       <View
         key={`favorite-copy-${favorite.id ?? `${displayName}-${idx}`}`}
-        style={[s.favoriteCard, variant === 'sheet' && s.favoriteSheetCard]}
+        style={[
+          s.favoriteCard,
+          variant === 'carouselStack' && s.favoriteCarouselStackCard,
+          variant === 'sheet' && s.favoriteSheetCard,
+        ]}
       >
         <TouchableOpacity
           activeOpacity={0.8}
@@ -2295,7 +2306,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                   decelerationRate="fast"
                   contentContainerStyle={s.favoriteCarouselContent}
                 >
-                  {favoriteMealChoices.map((template, idx) => renderFavoriteCopyCard(template, idx))}
+                  {favoriteMealColumns.map((column, columnIdx) => (
+                    <View key={`favorite-column-${columnIdx}`} style={s.favoriteCarouselColumn}>
+                      {column.map((template, rowIdx) => renderFavoriteCopyCard(template, columnIdx * 2 + rowIdx, 'carouselStack'))}
+                    </View>
+                  ))}
                 </ScrollView>
               </View>
             )}
@@ -2983,6 +2998,11 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   favoriteCarouselContent: {
     paddingRight: 16,
   },
+  favoriteCarouselColumn: {
+    width: 210,
+    gap: 8,
+    marginRight: 8,
+  },
   favoriteCard: {
     backgroundColor: colors.surface,
     borderRadius: 12,
@@ -2992,6 +3012,12 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderColor: colors.border,
     minWidth: 180,
     maxWidth: 210,
+  },
+  favoriteCarouselStackCard: {
+    width: '100%',
+    minWidth: 0,
+    maxWidth: '100%',
+    marginRight: 0,
   },
   favoriteSheetCard: {
     marginRight: 0,

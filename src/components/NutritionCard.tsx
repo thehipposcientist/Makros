@@ -427,7 +427,6 @@ interface NutritionCardProps {
    *  macro panel + individual meal cards as a clean expanding stack. */
   embedded?: boolean;
   testID?: string;
-  onMealRowExpand?: (node: View | null) => void;
 }
 
 function NutritionCardInner({
@@ -463,7 +462,6 @@ function NutritionCardInner({
   glp1Support,
   embedded = false,
   testID,
-  onMealRowExpand,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [scoreInfoOpen, setScoreInfoOpen] = useState(false);
@@ -567,7 +565,7 @@ function NutritionCardInner({
   const visibleMeals = useMemo(() => allMeals.filter(m => !removed.has(m.key) && !removed.has(m.legacyKey)), [allMeals, removed]);
   const hiddenMeals  = useMemo(() => allMeals.filter(m =>  removed.has(m.key) ||  removed.has(m.legacyKey)), [allMeals, removed]);
   const allVisible = visibleMeals;
-  const hasSwipeActions = !!(onShowRecipe || onMoveMeal || onDuplicateMeal || onSplitMeal || onRemoveMeal);
+  const hasSwipeActions = !!(onToggleSave || onToggleRoutine || onShowRecipe || onMoveMeal || onDuplicateMeal || onSplitMeal || onRemoveMeal);
   const actual = useMemo(() => ({
     calories: Math.round(allVisible.reduce((sum, m) => sum + m.macros.calories, 0)),
     protein:  Math.round(allVisible.reduce((sum, m) => sum + m.macros.protein, 0)),
@@ -1497,11 +1495,11 @@ function NutritionCardInner({
                 onDuplicate={onDuplicateMeal ? () => onDuplicateMeal(key, meal) : undefined}
                 onSplit={onSplitMeal ? () => onSplitMeal(key, meal) : undefined}
                 onToggleSave={onToggleSave}
-                onExpandItems={onMealRowExpand}
                 colors={colors}
                 styles={styles}
                 mealAccent={section}
                 isSaved={isSaved}
+                isLast={i === visibleMeals.length - 1}
               />
               </FadeInView>
             );
@@ -1592,7 +1590,28 @@ function NutritionCardInner({
 
 // ── MealRow ───────────────────────────────────────────────────────────────────
 
-function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemove, onHardDelete, onToggleRoutine, onShowRecipe, onMoveUp, onMoveDown, onDuplicate, onSplit, onToggleSave, onExpandItems, colors, styles, mealAccent, isSaved }: {
+function MealRow({
+  mealType,
+  meal,
+  mealMacros,
+  checked,
+  onToggle,
+  onEdit,
+  onRemove,
+  onHardDelete,
+  onToggleRoutine,
+  onShowRecipe,
+  onMoveUp,
+  onMoveDown,
+  onDuplicate,
+  onSplit,
+  onToggleSave,
+  colors,
+  styles,
+  mealAccent,
+  isSaved,
+  isLast,
+}: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
   meal: MealSuggestion;
@@ -1609,14 +1628,14 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
   onDuplicate?: () => void;
   onSplit?: () => void;
   onToggleSave?: (mealType: string, meal: MealSuggestion) => void;
-  onExpandItems?: (node: View | null) => void;
   colors: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
   mealAccent: ReturnType<typeof getTheme>['sections']['meals'];
   /** True when this meal's name matches one of the user's Saved Meals. */
   isSaved?: boolean;
+  isLast?: boolean;
 }) {
-  const [itemsExpanded, setItemsExpanded] = useState(true);
+  const [itemsExpanded, setItemsExpanded] = useState(false);
   const [checkBurstKey, setCheckBurstKey] = useState(0);
   const [showCheckBurst, setShowCheckBurst] = useState(false);
   const rowRef = useRef<View | null>(null);
@@ -1624,20 +1643,11 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
   const isRoutineBacked = !!(meal as any)._routineId || !!meal.isRoutine;
   const loggedTime = formatLoggedMealTime(meal);
 
-  // Meal-row animation values:
-  //   • checkScale — drives the check icon's spring from 0 → 1.2 → 1.0
-  //     so it pops in when the user taps the checkbox.
-  //   • rowFlash — drives a brief green background flash on the row,
-  //     mirroring the set-complete pulse on the workout side.
-  // `lastChecked` tracks the previous `checked` prop so we only fire
-  // when the value transitions false → true.
   const checkScale = useRef(new Animated.Value(checked ? 1 : 0)).current;
   const rowFlash = useRef(new Animated.Value(0)).current;
   const lastChecked = useRef<boolean>(checked);
   useEffect(() => {
     if (checked && !lastChecked.current) {
-      // Light haptic on check (best-effort — feedback util is async-imported
-      // to avoid pulling the module on cold start).
       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
       if (checkBurstTimerRef.current) clearTimeout(checkBurstTimerRef.current);
       setShowCheckBurst(true);
@@ -1654,13 +1664,11 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
           Animated.spring(checkScale, { toValue: 1.0, friction: 5, tension: 120, useNativeDriver: true }),
         ]),
         Animated.sequence([
-          // Non-native driver (background color) — only runs 650ms total.
           Animated.timing(rowFlash, { toValue: 1, duration: 250, useNativeDriver: false }),
           Animated.timing(rowFlash, { toValue: 0, duration: 400, useNativeDriver: false }),
         ]),
       ]).start();
     } else if (!checked && lastChecked.current) {
-      // Reset silently on uncheck.
       if (checkBurstTimerRef.current) {
         clearTimeout(checkBurstTimerRef.current);
         checkBurstTimerRef.current = null;
@@ -1677,16 +1685,11 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
       }
     };
   }, [checked, checkScale, rowFlash]);
+
   const rowFlashBg = rowFlash.interpolate({
     inputRange: [0, 1],
-    outputRange: [colors.surfaceRaised, mealAccent.strong + '33'],
+    outputRange: [checked ? mealAccent.strong + '10' : 'rgba(0,0,0,0)', mealAccent.strong + '24'],
   });
-  const macroEnergy = [
-    { key: 'protein', value: mealMacros.protein * 4, color: colors.primary },
-    { key: 'carbs', value: mealMacros.carbs * 4, color: '#F59E0B' },
-    { key: 'fat', value: mealMacros.fat * 9, color: '#A78BFA' },
-  ].sort((a, b) => b.value - a.value);
-  const mealRowAccent = macroEnergy[0]?.value > 0 ? macroEnergy[0].color : mealAccent.strong;
   const withItems = ensureItems(meal);
   const mealImageSpec = useMemo(() => resolveMealImage(meal as any), [meal]);
   const showMealPhoto = mealImageSpec.kind === 'photo';
@@ -1703,13 +1706,42 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
         amount: meal.amounts?.[i] ?? '',
         processingBucket: 'unknown' as ProcessingBucket,
       }));
+  const itemCountLabel = itemRows.length > 0 ? `${itemRows.length} item${itemRows.length === 1 ? '' : 's'} · ` : '';
+  const macroSummary = `${Math.round(mealMacros.calories)} cal · ${Math.round(mealMacros.protein)}g P · ${Math.round(mealMacros.carbs)}g C · ${Math.round(mealMacros.fat)}g F`;
+  const mealSummary = `${loggedTime ? `${loggedTime} · ` : ''}${itemCountLabel}${macroSummary}`;
+  const previewItemRows = itemRows.slice(0, 5);
+  const hiddenPreviewItemCount = Math.max(0, itemRows.length - previewItemRows.length);
 
   const swipeActions: SwipeAction[] = [];
+  if (onToggleSave) {
+    swipeActions.push({
+      icon: isSaved ? 'star' : 'star-outline',
+      color: isSaved ? getContrastingTextColor(mealAccent.strong) : mealAccent.strong,
+      bgColor: isSaved ? mealAccent.strong : mealAccent.strong + '22',
+      onPress: () => onToggleSave(mealType, {
+        ...meal,
+        calories: mealMacros.calories,
+        protein: mealMacros.protein,
+        carbs: mealMacros.carbs,
+        fat: mealMacros.fat,
+      }),
+      label: isSaved ? 'Saved' : 'Save',
+    });
+  }
+  if (onToggleRoutine) {
+    swipeActions.push({
+      icon: isRoutineBacked ? 'repeat' : 'repeat-outline',
+      color: isRoutineBacked ? getContrastingTextColor(mealAccent.strong) : mealAccent.strong,
+      bgColor: isRoutineBacked ? mealAccent.strong : mealAccent.strong + '22',
+      onPress: () => onToggleRoutine(mealType),
+      label: isRoutineBacked ? 'Pinned' : 'Routine',
+    });
+  }
   if (onShowRecipe) swipeActions.push({ icon: 'restaurant-outline', color: getContrastingTextColor(colors.primary), bgColor: colors.primary, onPress: () => onShowRecipe(mealType, meal), label: 'Recipe' });
   if (onDuplicate) swipeActions.push({ icon: 'copy-outline', color: '#fff', bgColor: '#0EA5E9', onPress: onDuplicate, label: 'Again' });
   if (onSplit) swipeActions.push({ icon: 'git-branch-outline', color: '#fff', bgColor: '#8B5CF6', onPress: onSplit, label: 'Split' });
-  if (onMoveUp) swipeActions.push({ icon: 'arrow-up', color: '#fff', bgColor: '#6B7280', onPress: onMoveUp });
-  if (onMoveDown) swipeActions.push({ icon: 'arrow-down', color: '#fff', bgColor: '#6B7280', onPress: onMoveDown });
+  if (onMoveUp) swipeActions.push({ icon: 'arrow-up', color: '#fff', bgColor: '#6B7280', onPress: onMoveUp, label: 'Up' });
+  if (onMoveDown) swipeActions.push({ icon: 'arrow-down', color: '#fff', bgColor: '#6B7280', onPress: onMoveDown, label: 'Down' });
   if (onHardDelete || onRemove) {
     swipeActions.push({
       icon: 'trash-outline',
@@ -1722,196 +1754,150 @@ function MealRow({ mealType, meal, mealMacros, checked, onToggle, onEdit, onRemo
 
   return (
     <View ref={rowRef} collapsable={false}>
-    <SwipeableRow actions={swipeActions}>
-    <Animated.View testID={`meal-row-${mealType}`} style={[styles.mealItem, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
-      <LinearGradient
-        pointerEvents="none"
-        colors={[mealRowAccent + (checked ? '18' : '22'), mealAccent.strong + (checked ? '18' : '0C'), 'transparent'] as any}
-        locations={[0, 0.58, 1]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.mealItemGradient}
-      />
-      <View style={styles.mealTimeline}>
-        {showCheckBurst && (
-          <CompletionBurst
-            key={checkBurstKey}
-            variant="check"
-            size={54}
-            accentColor={mealAccent.strong}
-            surfaceColor={mealAccent.strong + '18'}
-            iconColor={mealAccent.strong}
-            style={styles.mealCheckBurst}
-          />
-        )}
-        <TouchableOpacity
-          testID={`meal-check-${mealType}`}
-          style={[styles.checkbox, checked && styles.checkboxDone]}
-          onPress={() => onToggle?.(mealType)}
-          disabled={!onToggle}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          accessibilityRole="checkbox"
-          accessibilityLabel={`Mark ${meal.meal} as ${checked ? 'not done' : 'done'}`}
-          accessibilityState={{ checked, disabled: !onToggle }}>
-          {checked && (
-            <Animated.View style={{ transform: [{ scale: checkScale }] }}>
-              {/* Contrast against the checked circle's fill (section.strong) —
-                  white on the onyx theme, so a hardcoded white check vanished. */}
-              <Ionicons name="checkmark" size={14} color={getContrastingTextColor(mealAccent.strong)} />
-            </Animated.View>
-          )}
-        </TouchableOpacity>
-      </View>
-      {showMealPhoto ? (
-        <View style={[styles.mealPhotoThumb, checked && styles.mealPhotoThumbDone]}>
-          <MealThumbnail meal={meal as any} size="md" spec={mealImageSpec} />
-        </View>
-      ) : null}
-      <View style={styles.mealContent}>
-      {/* Title row — meal name + inline pin badge + actions. */}
-      <View style={styles.mealHeader}>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text
-            testID={`meal-row-name-${e2eId(meal.meal)}`}
-            style={[styles.mealName, checked && styles.mealNameDone]}
-            numberOfLines={1}
-            ellipsizeMode="tail">
-            {meal.meal}
-          </Text>
-          {loggedTime && (
-            <Text style={styles.mealLoggedTime}>{loggedTime}</Text>
-          )}
-        </View>
-        {/* Keep the front row to the two high-frequency actions. Destructive
-            actions live behind swipe/confirm flows so they are harder to hit. */}
-        <View style={styles.iconStrip}>
-          {onToggleSave && (
-            <TouchableOpacity
-              onPress={() => onToggleSave(mealType, {
-                ...meal,
-                calories: mealMacros.calories,
-                protein: mealMacros.protein,
-                carbs: mealMacros.carbs,
-                fat: mealMacros.fat,
-              })}
-              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-              activeOpacity={0.7}
-              accessibilityRole="button"
-              accessibilityLabel={isSaved ? `Remove ${meal.meal} from favorites` : `Add ${meal.meal} to favorites`}
-              style={[styles.iconBtn, isSaved && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}>
-              <Ionicons name={isSaved ? 'star' : 'star-outline'} size={18} color={isSaved ? mealAccent.strong : colors.textMuted} />
-            </TouchableOpacity>
-          )}
-          {onToggleRoutine && (
-            <TouchableOpacity
-              onPress={() => onToggleRoutine(mealType)}
-              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-              style={[styles.iconBtn, isRoutineBacked && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}
-              accessibilityRole="button"
-              accessibilityLabel={isRoutineBacked ? `Unpin ${meal.meal} routine` : `Pin ${meal.meal} as a routine`}>
-              <Ionicons name={isRoutineBacked ? 'repeat' : 'repeat-outline'} size={18} color={isRoutineBacked ? mealAccent.strong : colors.textMuted} />
-            </TouchableOpacity>
-          )}
-          {onEdit && (
-            <TouchableOpacity
-              onPress={() => onEdit(mealType, meal)}
-              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-              style={styles.iconBtn}
-              accessibilityRole="button"
-              accessibilityLabel={`Edit ${meal.meal}`}>
-              <Ionicons name="pencil-outline" size={18} color={colors.textMuted} />
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-
-      {/* Item list — collapsed by default, tap to expand */}
-      {itemRows.length > 0 && !itemsExpanded ? (
-        <TouchableOpacity
-          onPress={() => {
-            configureExpandAnimation(300);
-            setItemsExpanded(true);
-            onExpandItems?.(rowRef.current);
-          }}
-          activeOpacity={0.7}
-          style={{ paddingVertical: 3 }}>
-          <Text style={{ fontSize: 13, color: colors.textSecondary, fontWeight: '700' }}>
-            {itemRows.length} item{itemRows.length !== 1 ? 's' : ''} · tap to see details
-          </Text>
-        </TouchableOpacity>
-      ) : itemRows.length > 0 ? (
-        <TouchableOpacity onPress={() => { configureExpandAnimation(300); setItemsExpanded(false); }} activeOpacity={0.9}>
-          <View style={styles.mealFoodsDetail}>
-            {itemRows.map(r => {
-              const iconSpec = getFoodIconSpec(r.name);
-              const processingInfo = PROCESSING_TIER_INFO[r.processingBucket];
-              const showProcessingBadge = r.processingBucket !== 'unknown';
-              return (
-                <View key={r.key} style={styles.mealFoodRow}>
-                  <View style={[styles.mealFoodProcessingDot, { backgroundColor: showProcessingBadge ? processingInfo.color : colors.border }]} />
-                  <MaterialCommunityIcons
-                    name={iconSpec.name}
-                    size={14}
-                    color={iconSpec.color}
-                    style={{ marginRight: 6, marginTop: 1, opacity: checked ? 0.5 : 1 }}
-                  />
-                  <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1, minWidth: 0 }]} numberOfLines={2}>
-                    {r.name}
-                  </Text>
-                  {showProcessingBadge && (
-                    <Text
-                      style={[
-                        styles.mealFoodProcessingBadge,
-                        {
-                          color: processingInfo.color,
-                          backgroundColor: processingInfo.color + '14',
-                          borderColor: processingInfo.color + '44',
-                        },
-                      ]}
-                      numberOfLines={1}
-                      accessibilityLabel={processingInfo.label}>
-                      {processingInfo.rowLabel}
-                    </Text>
-                  )}
-                  {r.amount ? (
-                    <Text style={styles.mealFoodAmount}>{r.amount}</Text>
-                  ) : null}
-                </View>
-              );
-            })}
-            {meal.instructions && (
-              <View style={styles.recipeBox}>
-                <Text style={styles.recipeLabel}>Recipe</Text>
-                <Text style={styles.recipeText} numberOfLines={3}>{meal.instructions}</Text>
-              </View>
+      <SwipeableRow actions={swipeActions}>
+        <Animated.View testID={`meal-row-${mealType}`} style={[styles.mealItem, isLast && styles.mealItemLast, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
+          <View style={styles.mealTimeline}>
+            {showCheckBurst && (
+              <CompletionBurst
+                key={checkBurstKey}
+                variant="check"
+                size={54}
+                accentColor={mealAccent.strong}
+                surfaceColor={mealAccent.strong + '18'}
+                iconColor={mealAccent.strong}
+                style={styles.mealCheckBurst}
+              />
             )}
+            <TouchableOpacity
+              testID={`meal-check-${mealType}`}
+              style={[styles.checkbox, checked && styles.checkboxDone]}
+              onPress={() => onToggle?.(mealType)}
+              disabled={!onToggle}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityRole="checkbox"
+              accessibilityLabel={`Mark ${meal.meal} as ${checked ? 'not done' : 'done'}`}
+              accessibilityState={{ checked, disabled: !onToggle }}>
+              {checked && (
+                <Animated.View style={{ transform: [{ scale: checkScale }] }}>
+                  <Ionicons name="checkmark" size={14} color={getContrastingTextColor(mealAccent.strong)} />
+                </Animated.View>
+              )}
+            </TouchableOpacity>
           </View>
-        </TouchableOpacity>
-      ) : null}
 
-      {/* Macro pills — Layer 1 only. Sugar/sodium show ONLY when
-          notably high so the row stays uncluttered. Thresholds are
-          ~30% of daily cap, meaning one meal alone is spiking them. */}
-      {(() => {
-        const fiber = Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0);
-        const sugar = Math.round(meal.micronutrients?.sugar ?? 0);
-        const addedSugar = Math.round((meal.micronutrients as any)?.added_sugar_g ?? (meal.micronutrients as any)?.added_sugar ?? 0);
-        const sodium = Math.round((meal.micronutrients as any)?.sodium_mg ?? meal.micronutrients?.sodium ?? 0);
-        const highSugar = addedSugar > 0 ? addedSugar >= 10 : sugar >= 15;
-        const highSodium = sodium >= 700;
-        return (
-          <View style={styles.mealBadges}>
-            <MacroPill label="cal" value={mealMacros.calories} color={mealAccent.strong} styles={styles} />
-            <MacroPill label="p"   value={mealMacros.protein}  color={colors.primary}    styles={styles} />
-            <MacroPill label="c"   value={mealMacros.carbs}    color="#F59E0B"           styles={styles} />
-            <MacroPill label="f"   value={mealMacros.fat}      color="#A78BFA"           styles={styles} />
-            {/* Fiber / sugar / sodium pills removed — meal row stays macros-only. */}
+          {showMealPhoto ? (
+            <View style={[styles.mealPhotoThumb, checked && styles.mealPhotoThumbDone]}>
+              <MealThumbnail meal={meal as any} size="md" spec={mealImageSpec} />
+            </View>
+          ) : null}
+
+          <View style={styles.mealContent}>
+            <View style={styles.mealHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text
+                  testID={`meal-row-name-${e2eId(meal.meal)}`}
+                  style={[styles.mealName, checked && styles.mealNameDone]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail">
+                  {meal.meal}
+                </Text>
+                <Text style={styles.mealSummary} numberOfLines={1}>{mealSummary}</Text>
+              </View>
+
+              <View style={styles.iconStrip}>
+                {onEdit && (
+                  <TouchableOpacity
+                    onPress={() => onEdit(mealType, meal)}
+                    hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                    style={styles.iconBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Edit ${meal.meal}`}>
+                    <Ionicons name="pencil-outline" size={18} color={colors.textMuted} />
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {itemRows.length > 0 && (
+              <TouchableOpacity
+                onPress={() => {
+                  configureExpandAnimation(300);
+                  setItemsExpanded(v => !v);
+                }}
+                activeOpacity={0.7}
+                style={styles.mealDetailToggle}>
+                <Text style={styles.mealDetailToggleText}>{itemsExpanded ? 'Hide ingredients' : 'Show ingredients'}</Text>
+                {!itemsExpanded && (
+                  <View style={styles.mealIngredientPreview} pointerEvents="none" accessible={false}>
+                    {previewItemRows.map(r => {
+                      const iconSpec = getFoodIconSpec(r.name);
+                      return (
+                        <View key={`preview-${r.key}`} style={styles.mealIngredientPreviewIcon}>
+                          <MaterialCommunityIcons name={iconSpec.name} size={13} color={iconSpec.color} />
+                        </View>
+                      );
+                    })}
+                    {hiddenPreviewItemCount > 0 ? (
+                      <View style={styles.mealIngredientPreviewMore}>
+                        <Text style={styles.mealIngredientPreviewMoreText}>+{hiddenPreviewItemCount}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                )}
+                <Ionicons name={itemsExpanded ? 'chevron-up' : 'chevron-down'} size={13} color={colors.textMuted} />
+              </TouchableOpacity>
+            )}
+
+            {itemRows.length > 0 && itemsExpanded ? (
+              <View style={styles.mealFoodsDetail}>
+                {itemRows.map(r => {
+                  const iconSpec = getFoodIconSpec(r.name);
+                  const processingInfo = PROCESSING_TIER_INFO[r.processingBucket];
+                  const showProcessingBadge = r.processingBucket !== 'unknown';
+                  return (
+                    <View key={r.key} style={styles.mealFoodRow}>
+                      <View style={[styles.mealFoodProcessingDot, { backgroundColor: showProcessingBadge ? processingInfo.color : colors.border }]} />
+                      <MaterialCommunityIcons
+                        name={iconSpec.name}
+                        size={14}
+                        color={iconSpec.color}
+                        style={{ marginRight: 6, marginTop: 1, opacity: checked ? 0.5 : 1 }}
+                      />
+                      <Text style={[styles.mealFoodName, checked && styles.mealFoodsDone, { flex: 1, minWidth: 0 }]} numberOfLines={2}>
+                        {r.name}
+                      </Text>
+                      {showProcessingBadge && (
+                        <Text
+                          style={[
+                            styles.mealFoodProcessingBadge,
+                            {
+                              color: processingInfo.color,
+                              backgroundColor: processingInfo.color + '14',
+                              borderColor: processingInfo.color + '44',
+                            },
+                          ]}
+                          numberOfLines={1}
+                          accessibilityLabel={processingInfo.label}>
+                          {processingInfo.rowLabel}
+                        </Text>
+                      )}
+                      {r.amount ? (
+                        <Text style={styles.mealFoodAmount}>{r.amount}</Text>
+                      ) : null}
+                    </View>
+                  );
+                })}
+                {meal.instructions && (
+                  <View style={styles.recipeBox}>
+                    <Text style={styles.recipeLabel}>Recipe</Text>
+                    <Text style={styles.recipeText} numberOfLines={3}>{meal.instructions}</Text>
+                  </View>
+                )}
+              </View>
+            ) : null}
           </View>
-        );
-      })()}
-      </View>
-    </Animated.View>
-    </SwipeableRow>
+        </Animated.View>
+      </SwipeableRow>
     </View>
   );
 }
@@ -2280,20 +2266,22 @@ const createStyles = (
   },
 
   // ── Meals ────────────────────────────────────────────────────────────────────
-  meals: { gap: 10, marginBottom: 14 },
-  mealsEmbedded: { marginBottom: 0, gap: 9 },
+  meals: { gap: 0, marginBottom: 14 },
+  mealsEmbedded: { marginBottom: 0, gap: 0 },
 
   mealItem: {
-    paddingVertical: 18,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
+    paddingVertical: 14,
+    paddingHorizontal: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: 12,
+    gap: 10,
     position: 'relative',
     overflow: 'hidden',
+  },
+  mealItemLast: {
+    borderBottomWidth: 0,
   },
   mealItemGradient: {
     position: 'absolute',
@@ -2304,27 +2292,22 @@ const createStyles = (
     borderRadius: 16,
     opacity: 0.18,
   },
-  mealItemDone: { backgroundColor: section.soft + '40' },
+  mealItemDone: {},
 
   mealTimeline: {
-    width: 28,
+    width: 26,
     alignItems: 'center',
     position: 'relative',
     flexShrink: 0,
   },
   mealPhotoThumb: {
-    width: 56,
-    height: 56,
-    borderRadius: 12,
+    width: 46,
+    height: 46,
+    borderRadius: 10,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    shadowColor: '#020617',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    elevation: 3,
     flexShrink: 0,
   },
   mealPhotoThumbDone: {
@@ -2333,7 +2316,7 @@ const createStyles = (
   mealContent: {
     flex: 1,
     minWidth: 0,
-    gap: 6,
+    gap: 5,
   },
   mealHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
 
@@ -2350,20 +2333,18 @@ const createStyles = (
     fontWeight: '700',
     letterSpacing: 0.2,
   },
-  // Trailing row actions stay large enough to hit cleanly.
+  // Trailing edit action stays large enough to hit cleanly.
   iconStrip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 4,
     flexShrink: 0,
   },
   iconBtn: {
-    width: 40,
+    width: 34,
     height: 34,
-    borderRadius: 9,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surfaceRaised,
+    borderRadius: 17,
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2389,11 +2370,59 @@ const createStyles = (
   checkboxDone: { backgroundColor: section.strong, borderColor: section.strong },
   checkmark:    { fontSize: 12, color: '#fff', fontWeight: '800' },
 
-  mealName:     { ...typography.sectionTitle, fontSize: 17, lineHeight: 22, fontWeight: '900', letterSpacing: 0, color: colors.textPrimary },
+  mealName:     { ...typography.sectionTitle, fontSize: 16, lineHeight: 20, fontWeight: '900', letterSpacing: 0, color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
   mealLoggedTime: { ...typography.micro, color: colors.textMuted, marginTop: 2 },
+  mealSummary: { ...typography.micro, color: colors.textMuted, marginTop: 3, fontWeight: '700' },
 
-  mealFoodsDetail: { gap: 4, marginTop: 7, paddingLeft: 4 },
+  mealDetailToggle: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingVertical: 2,
+  },
+  mealDetailToggleText: {
+    fontSize: 12,
+    lineHeight: 16,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  mealIngredientPreview: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    marginLeft: 3,
+  },
+  mealIngredientPreviewIcon: {
+    width: 21,
+    height: 21,
+    borderRadius: 10.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  mealIngredientPreviewMore: {
+    minWidth: 21,
+    height: 21,
+    paddingHorizontal: 5,
+    borderRadius: 10.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  mealIngredientPreviewMoreText: {
+    ...typography.micro,
+    fontSize: 9,
+    lineHeight: 11,
+    color: colors.textMuted,
+    fontWeight: '900',
+  },
+  mealFoodsDetail: { gap: 5, marginTop: 3, paddingLeft: 0 },
   mealFoodRow:     { flexDirection: 'row', alignItems: 'center', gap: 8 },
   mealFoodProcessingDot: {
     width: 6,

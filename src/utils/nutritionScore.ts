@@ -38,6 +38,9 @@ export interface NutritionScoreResult {
   adherence_breakdown: NutritionScoreBreakdownItem[];
   quality_breakdown: NutritionScoreBreakdownItem[];
   micro_breakdown: NutritionScoreBreakdownItem[];
+  // Non-empty when one or more score caps applied — mirrors the server so the
+  // plan preview can't show a higher number than the authoritative score.
+  cap_reasons: string[];
 }
 
 // Plan-preview gut facts — reported as descriptive info (no scores).
@@ -199,6 +202,7 @@ export function computeNutritionScore(
     tags: [], wins: [], improvements: ['Add meals to your plan'],
     likely_gaps: [], indicators: {},
     adherence_breakdown: [], quality_breakdown: [], micro_breakdown: [],
+    cap_reasons: [],
   };
   if (!plan || !plan.meals.length) return empty;
 
@@ -384,7 +388,39 @@ export function computeNutritionScore(
 
   const [wAdh, wQual, wMicro] = GOAL_WEIGHTS[goal] ?? [0.40, 0.35, 0.25];
   const rawTotal = adherence * wAdh + quality * wQual + micro * wMicro;
-  const score = Math.round(Math.min(100, Math.max(0, rawTotal * confidenceFactor)));
+  let score = Math.round(Math.min(100, Math.max(0, rawTotal * confidenceFactor)));
+
+  // Score caps — mirror the server's meaningful-gap guardrails
+  // (nutrition_score.py compute_nutrition_score) so this plan preview can't
+  // show a number higher than the authoritative /meals/score will. Without
+  // these, a perfect-macros / poor-quality plan previewed ~90 and then visibly
+  // "dropped" to the capped value once the day round-tripped through the
+  // backend. Keep this block in lockstep with the server's cap logic.
+  const cap_reasons: string[] = [];
+  const hasCalories = totalCal > 0;
+  let meaningfulGaps = 0;
+  if (addedSugarPct > 15) meaningfulGaps++;
+  if (satFatPct > 12) meaningfulGaps++;
+  if (sodium_mg > 3500) meaningfulGaps++;
+  if (fiberDensity < 8 && hasCalories) meaningfulGaps++;
+  if (plantCount < 2 && hasCalories) meaningfulGaps++;
+  if (upfPct >= 35) meaningfulGaps++;
+  if (omegaPts < 5 && hasCalories) meaningfulGaps++;
+
+  if (meaningfulGaps >= 3) {
+    if (score > 78) { cap_reasons.push(`${meaningfulGaps} meaningful nutrition gaps`); score = 78; }
+  } else if (meaningfulGaps >= 2) {
+    if (score > 85) { cap_reasons.push(`${meaningfulGaps} meaningful nutrition gaps`); score = 85; }
+  }
+  if (addedSugarPct > 12 && satFatPct > 12 && score > 82) {
+    cap_reasons.push('High added sugar + saturated fat'); score = 82;
+  }
+  if (fiberDensity < 8 && hasCalories && score > 80) {
+    cap_reasons.push('Fiber density low'); score = 80;
+  }
+  if (adherence >= 85 && quality < 60 && score > 85) {
+    cap_reasons.push('Quality score low despite hitting macros'); score = 85;
+  }
 
   // Tags + wins + improvements
   const tags: string[] = [];
@@ -430,6 +466,7 @@ export function computeNutritionScore(
     tags, wins: wins.slice(0, 4), improvements: improvements.slice(0, 4),
     likely_gaps: gaps,
     adherence_breakdown, quality_breakdown, micro_breakdown,
+    cap_reasons,
     indicators: {
       calories_alignment: Math.round(calAlignment * 100) / 100,
       protein_alignment: Math.round(proAlignment * 100) / 100,

@@ -8,7 +8,9 @@
     "newArchEnabled": true,
     "icon": "./assets/images/thallo-icon.png",
     "splash": {
-      "backgroundColor": "#182030"
+      "image": "./assets/images/thallo-splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#06100F"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -84,8 +86,8 @@
       "package": "com.thallo.app",
       "versionCode": 1,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/thallo-icon.png",
-        "backgroundColor": "#182030"
+        "foregroundImage": "./assets/images/thallo-adaptive-icon.png",
+        "backgroundColor": "#06100F"
       },
       "permissions": [
         "android.permission.CAMERA",
@@ -97,6 +99,9 @@
     "scheme": "thallo",
     "experiments": {
       "typedRoutes": true
+    },
+    "web": {
+      "favicon": "./assets/images/thallo-favicon.png"
     },
     "extra": {
       "apiBaseUrl": "https://api.thallofitness.com",

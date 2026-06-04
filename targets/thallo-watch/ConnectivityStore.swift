@@ -34,7 +34,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var workout: WatchWorkout?
     @Published var meals: WatchMealsDay?
     @Published var hydration: WatchHydrationDay?
-    /// `syncedAtMs` of the last PHONE-authoritative hydration payload we
+    /// `syncedAtMs` of the last non-optimistic hydration payload we
     /// accepted. Incoming pushes are ordered against this, NOT against the
     /// live `hydration.syncedAtMs` — optimistic local taps bump the latter to
     /// the watch's own clock for a fresh "age" reading, and if the watch clock
@@ -72,6 +72,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private static let lastThemeSyncedAtMsKey = "thallo.lastThemeSyncedAtMs"
     private static let storedSleepKey = "thallo.storedSleep"
     private static let storedHydrationKey = "thallo.storedHydration"
+    private static let lastHydrationPushMsKey = "thallo.lastHydrationPushMs"
     private static let storedActivityKey = "thallo.storedActivity"
     private static let storedProgressKey = "thallo.latestWorkoutProgress"
     // 2026 offline-pass additions. Every channel the watch UI reads
@@ -117,6 +118,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             self.theme = storedTheme
         }
         self.hydration = Self.loadStored(WatchHydrationDay.self, key: Self.storedHydrationKey)
+        self.lastHydrationPushMs = UserDefaults.standard.double(forKey: Self.lastHydrationPushMsKey)
         self.activity = Self.loadStored(WatchActivityDay.self, key: Self.storedActivityKey)
         self.lifestyle = Self.loadStored(WatchLifestyleDay.self, key: Self.storedLifestyleKey)
         self.sleep = Self.loadStored(WatchSleepSnapshot.self, key: Self.storedSleepKey)
@@ -368,6 +370,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         workout = nil
         meals = nil
         hydration = nil
+        lastHydrationPushMs = 0
         activity = nil
         lifestyle = nil
         supplements = nil
@@ -391,6 +394,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: Self.lastThemeSyncedAtMsKey)
         UserDefaults.standard.removeObject(forKey: Self.storedSleepKey)
         UserDefaults.standard.removeObject(forKey: Self.storedHydrationKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastHydrationPushMsKey)
         UserDefaults.standard.removeObject(forKey: Self.storedActivityKey)
         UserDefaults.standard.removeObject(forKey: Self.storedProgressKey)
         UserDefaults.standard.removeObject(forKey: Self.storedMealsKey)
@@ -587,6 +591,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 if hydration == nil || decoded.syncedAtMs >= lastHydrationPushMs {
                     self.hydration = decoded
                     self.lastHydrationPushMs = decoded.syncedAtMs
+                    UserDefaults.standard.set(decoded.syncedAtMs, forKey: Self.lastHydrationPushMsKey)
                     Self.persistOptional(decoded, key: Self.storedHydrationKey)
                 }
             }
@@ -1037,6 +1042,31 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         syncComplicationSnapshot()
     }
 
+    private func applyHydrationServerResult(_ result: [String: Any]) {
+        guard let ounces = flexibleDouble(result["ounces"]) else { return }
+        let resultDate = result["date"] as? String
+        let resultDateISO = result["dateISO"] as? String
+        let dateISO = resultDate.map { String($0.prefix(10)) }
+            ?? resultDateISO.map { String($0.prefix(10)) }
+            ?? hydration?.dateISO
+            ?? localDateISO()
+        let previous = hydration
+        let syncedAtMs = Date().timeIntervalSince1970 * 1000
+        let updated = WatchHydrationDay(
+            dateISO: dateISO,
+            ounces: max(0, (ounces * 10).rounded() / 10),
+            targetOunces: previous?.targetOunces ?? 64,
+            targetOuncesMin: previous?.targetOuncesMin,
+            targetOuncesMax: previous?.targetOuncesMax,
+            syncedAtMs: syncedAtMs
+        )
+        hydration = updated
+        lastHydrationPushMs = max(lastHydrationPushMs, syncedAtMs)
+        UserDefaults.standard.set(lastHydrationPushMs, forKey: Self.lastHydrationPushMsKey)
+        Self.persistOptional(updated, key: Self.storedHydrationKey)
+        syncComplicationSnapshot()
+    }
+
     func addHydrationLocal(deltaOz: Double) {
         updateHydrationLocal(to: (hydration?.ounces ?? 0) + deltaOz)
     }
@@ -1285,9 +1315,14 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             if WatchCellularClient.shared.canSendDirectCommand(command) {
                 print("[watch] sendCommand(\(command)) — cellular fallback attempting")
                 HeartRateStore.saveDiag("→ \(command) cellular attempt")
-                WatchCellularClient.shared.sendCommand(body) { ok in
+                WatchCellularClient.shared.sendCommand(body) { [weak self] ok, result in
                     if ok {
                         HeartRateStore.saveDiag("→ \(command) cellular ok")
+                        if command == "log_hydration", let result {
+                            DispatchQueue.main.async {
+                                self?.applyHydrationServerResult(result)
+                            }
+                        }
                     } else {
                         session.transferUserInfo(body)
                         HeartRateStore.saveDiag("→ \(command) cellular fail; WC queued")

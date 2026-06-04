@@ -20,8 +20,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, hitSlop, radius } from '../constants/theme';
 import DeviceSyncMockup from '../components/DeviceSyncMockup';
+import BrandMark from '../components/BrandMark';
 
-const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
+const logo = require('../../assets/images/thallo-logo-compact-white.png');
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 type ScrollEvent = NativeSyntheticEvent<NativeScrollEvent>;
@@ -298,7 +299,10 @@ export default function WhyThalloScreen({ onBack, onLogin, onSignup }: WhyThallo
           >
             <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
           </TouchableOpacity>
-          <Image source={logo} style={styles.logo} resizeMode="contain" />
+          <View style={styles.topBrand}>
+            <BrandMark size={32} variant="tile" animated={false} style={styles.topBrandMark} />
+            <Image source={logo} style={styles.logo} resizeMode="contain" />
+          </View>
           <TouchableOpacity
             testID="why-thallo-login"
             activeOpacity={0.78}
@@ -461,9 +465,21 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.20)',
     backgroundColor: 'rgba(13,15,20,0.42)',
   },
+  topBrand: {
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  topBrandMark: {
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+  },
   logo: {
-    width: 118,
-    height: 38,
+    width: 128,
+    height: 30,
   },
   signInButton: {
     minHeight: 42,

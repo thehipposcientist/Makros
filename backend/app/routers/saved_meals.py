@@ -17,7 +17,7 @@ import secrets
 from datetime import datetime, date, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -606,6 +606,7 @@ def log_saved_meal(
     body: dict,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """Log a saved meal as a fresh Meal row on `meal_date` / `meal_type`
     provided in the body (default today / snack). Clones items so macro
@@ -763,13 +764,21 @@ def log_saved_meal(
         import re as _re
         def _norm(s: str) -> str:
             return _re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
-        # Load all foods matching ANY of the normalized variants.
-        normalized_targets = {_norm(n) for n in needed_names}
+        # Load only foods matching the incoming names. The previous
+        # full-table scan made quick-log latency grow with the catalog.
+        from app.services.nutrition.food_classifier import normalize_name
+        normalized_targets = {
+            key
+            for n in needed_names
+            for key in (_norm(n), normalize_name(n))
+            if key
+        }
         if normalized_targets:
-            rows = db.exec(select(Food)).all()
+            rows = db.exec(select(Food).where(Food.normalized_name.in_(normalized_targets))).all()
             for f in rows:
                 key = _norm(f.name or "")
-                if key and key in normalized_targets and key not in food_by_name:
+                normalized_key = normalize_name(f.name or "")
+                if key and (key in normalized_targets or normalized_key in normalized_targets) and key not in food_by_name:
                     food_by_name[key] = f.id
 
     def _upsert_food_from_saved_item(it: dict) -> tuple[int | None, float | None]:
@@ -810,7 +819,7 @@ def log_saved_meal(
         grams = _grams()
         unit_label = f"{it.get('quantity') or 1} {it.get('unit') or 'serving'}"
         if food is None:
-            cls = get_or_create_metadata(name, db=db, allow_ai=True)
+            cls = get_or_create_metadata(name, db=db, allow_ai=False)
             category = (
                 FoodCategory.FRUITS if getattr(cls, "fruit_flag", False)
                 else FoodCategory.VEGETABLES if getattr(cls, "vegetable_flag", False)
@@ -928,10 +937,15 @@ def log_saved_meal(
         raise
     db.refresh(meal)
 
-    # Refresh daily metrics so the new meal contributes immediately.
+    # Refresh daily metrics after the response. The meal row is committed; gut
+    # health/readiness are derived data and should not block quick logging.
     try:
-        from app.routers.meals import _refresh_daily_metrics  # noqa
-        _refresh_daily_metrics(db, current_user.id, meal.meal_date)
+        if background_tasks is None:
+            from app.routers.meals import _refresh_daily_metrics
+            _refresh_daily_metrics(db, current_user.id, meal.meal_date, force=True)
+        else:
+            from app.routers.meals import _queue_daily_metrics_refresh
+            _queue_daily_metrics_refresh(background_tasks, current_user.id, meal.meal_date, force=True)
     except Exception:
         pass
     return {"meal_id": meal.id, "saved_meal_id": saved.id, "times_logged": saved.times_logged}

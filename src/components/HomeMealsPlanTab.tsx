@@ -937,7 +937,6 @@ function HomeMealsPlanDayCardInner({
               savedMealNames={savedMealNames}
               onAddFromSaved={authToken ? (() => openAddFromSavedForDate(day.key)) : undefined}
               onToggleSave={authToken ? ((mealType, meal) => handleToggleSaveMeal(day.key, mealType, meal)) : undefined}
-              onMealRowExpand={(node) => scrollSubTabNodeToTop(node)}
               dailyCollagenG={day.key === todayKey() ? todayCollagenG : null}
               dailyProbioticCfuBillions={day.key === todayKey() ? todayProbioticCfu : null}
               dailyPrebioticG={day.key === todayKey() ? todayPrebioticG : null}

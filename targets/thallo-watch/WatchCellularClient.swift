@@ -60,14 +60,14 @@ final class WatchCellularClient {
         return true
     }
 
-    func sendCommand(_ commandBody: [String: Any], completion: @escaping (Bool) -> Void) {
+    func sendCommand(_ commandBody: [String: Any], completion: @escaping (Bool, [String: Any]?) -> Void) {
         guard let token = token(),
               let apiBaseUrl = UserDefaults.standard.string(forKey: apiBaseUrlKey),
               let url = URL(string: "\(apiBaseUrl)/watch/commands"),
               JSONSerialization.isValidJSONObject(commandBody),
               let data = try? JSONSerialization.data(withJSONObject: commandBody)
         else {
-            completion(false)
+            completion(false, nil)
             return
         }
 
@@ -76,15 +76,16 @@ final class WatchCellularClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.httpBody = data
-        URLSession.shared.dataTask(with: request) { _, response, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             guard error == nil,
                   let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode)
             else {
-                completion(false)
+                completion(false, nil)
                 return
             }
-            completion(true)
+            let dict = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            completion(true, dict?["result"] as? [String: Any])
         }.resume()
     }
 

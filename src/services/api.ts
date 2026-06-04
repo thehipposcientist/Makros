@@ -290,17 +290,15 @@ function cacheScopeFromToken(token?: string): string {
   return `u_${(hash >>> 0).toString(36)}`;
 }
 
-// Read-cache domains a given mutation should bust. A meal write refreshes meal
-// reads + the nutrition-derived surfaces (insights, calorie ranges, readiness
-// nutrition pillar, AI nutrition analyses) — but does NOT nuke unrelated
-// domains' caches, which previously forced a full refetch storm and made the
-// app feel frozen right after logging. Falls back to the mutated path's own
-// top-level segment for anything not explicitly mapped.
+// Read-cache domains a given mutation should bust. Meal writes invalidate meal
+// reads plus readiness, whose nutrition pillar depends on logged intake.
+// Heavier AI/profile/lifestyle surfaces can refresh on their own cadence; tying
+// them to every checkbox tap made meal logging feel frozen.
 function invalidationPrefixesForPath(path: string): string[] {
   const seg = '/' + (path.replace(/^\/+/, '').split(/[/?#]/)[0] || '');
   switch (seg) {
     case '/meals':
-      return ['/meals', '/profile', '/lifestyle', '/readiness', '/ai'];
+      return ['/meals', '/readiness'];
     case '/workouts':
       return ['/workouts', '/profile', '/readiness', '/ai'];
     case '/lifestyle':
