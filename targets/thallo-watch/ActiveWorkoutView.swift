@@ -1430,9 +1430,40 @@ private struct ExerciseTab: View {
         return 5
     }
 
-    private func isDumbbellLoadExercise(_ ex: WatchExercise) -> Bool {
-        let text = "\(ex.equipment ?? "") \(ex.name)".lowercased()
-        return text.range(of: "\\bdumbbell(s)?\\b|\\bdb\\b", options: .regularExpression) != nil
+    private func loadUnitDisplaySuffix(_ ex: WatchExercise) -> String {
+        if let raw = ex.loadUnit?.lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_") {
+            if ["total", "total_load", "single_implement", "single_dumbbell"].contains(raw) {
+                return ""
+            }
+            if ["per_dumbbell", "per_db", "per_hand", "dumbbell_each"].contains(raw) {
+                return " each"
+            }
+            if ["per_side", "per_arm", "per_leg", "per_handle", "single_side"].contains(raw) {
+                return " per side"
+            }
+        }
+        let name = "\(ex.name) \(ex.slug ?? "")"
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+        let text = "\(ex.equipment ?? "") \(name)".lowercased()
+        if text.range(of: "\\bdual[ _-]?cable[ _-]?station\\b|\\bdual cable\\b", options: .regularExpression) != nil {
+            return " per side"
+        }
+        if text.contains("cable") && name.range(of: "\\b(pallof|woodchop)\\b", options: .regularExpression) != nil {
+            return " per side"
+        }
+        if name.range(
+            of: "\\b(goblet|sumo\\s+squat|dumbbell\\s+hip\\s+thrust|dumbbell\\s+pullover|(dumbbell|weighted)\\s+(sit[- ]?up|crunch)|standing\\s+dumbbell\\s+triceps?\\s+extension|overhead\\s+dumbbell\\s+triceps?\\s+extension)\\b",
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
+        if name.contains("suitcase") && text.range(of: "\\bdumbbell(s)?\\b|\\bdb\\b", options: .regularExpression) != nil {
+            return " per side"
+        }
+        return text.range(of: "\\bdumbbell(s)?\\b|\\bdb\\b", options: .regularExpression) != nil ? " each" : ""
     }
 
     private func localRecommendationAfterWatchLog(
@@ -1464,7 +1495,7 @@ private struct ExerciseTab: View {
             } else {
                 cue = "Match your last set with clean form."
             }
-            let displayWeight = "\(formatWeight(nextWeight)) lb\(isDumbbellLoadExercise(ex) ? " each" : "")"
+            let displayWeight = "\(formatWeight(nextWeight)) lb\(loadUnitDisplaySuffix(ex))"
             return WatchLocalRecommendation(
                 text: "Set \(nextSetNumber): \(displayWeight) x \(targetReps) - \(cue)",
                 weightLbs: nextWeight,

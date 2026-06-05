@@ -1657,8 +1657,12 @@ def _estimated_template_nutrition_score(
         targets = template_out.get("targets") if isinstance(template_out.get("targets"), dict) else {}
         calories_target = float(targets.get("calories") or 0)
         protein_target = float(targets.get("protein") or targets.get("protein_g") or 0)
+        carbs_target = float(targets.get("carbs") or targets.get("carbs_g") or 0)
+        fat_target = float(targets.get("fat") or targets.get("fat_g") or 0)
         total_cal = sum(_macro_from_meal(meal, "calories") for meal in meals)
         total_pro = sum(_macro_from_meal(meal, "protein", "protein_g") for meal in meals)
+        total_carb = sum(_macro_from_meal(meal, "carbs", "carbs_g") for meal in meals)
+        total_fat = sum(_macro_from_meal(meal, "fat", "fat_g") for meal in meals)
         micros, food_count, foods_with_micros = _projected_micros(meals)
         quality = _projected_quality_signals(meals)
         score = compute_nutrition_score(
@@ -1667,6 +1671,10 @@ def _estimated_template_nutrition_score(
                 calories_target=calories_target,
                 protein_logged=total_pro,
                 protein_target=protein_target,
+                carbs_logged=total_carb,
+                carbs_target=carbs_target,
+                fat_logged=total_fat,
+                fat_target=fat_target,
                 fiber_g=micros.get("fiber_g", 0.0),
                 added_sugar_g=micros.get("added_sugar_g", 0.0),
                 saturated_fat_g=micros.get("saturated_fat_g", 0.0),

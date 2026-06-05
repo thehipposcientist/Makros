@@ -4664,12 +4664,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return byDate;
   }, [backendMealHistory]);
   const projectedNutritionScoreByDate = useMemo(() => {
-    const byDate = new Map<string, import('../services/api').NutritionScoreWeeklyDay>();
+    const byDate = new Map<string, any>();
     for (const day of nutritionScoreWeekly?.daily ?? []) {
       if (typeof day.score === 'number') byDate.set(day.date, day);
     }
+    const todayScore = nutritionScoreData as any;
+    if (todayScore && typeof todayScore.date === 'string' && typeof todayScore.score === 'number') {
+      byDate.set(todayScore.date, todayScore);
+    }
     return byDate;
-  }, [nutritionScoreWeekly]);
+  }, [nutritionScoreWeekly, nutritionScoreData]);
 
   // Meal-side day list mirrors the workout PlanWeek: 7 fixed dated days
   // (Mon-Sun anchor). Past days, today, and forward days are rendered
@@ -22045,7 +22049,7 @@ const styles = StyleSheet.create({
   headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
   headerLogo: { width: 280, height: 70 },
   headerLogoDark: { width: 280, height: 70 },
-  greeting:            { ...typography.hero, color: colors.textPrimary, marginBottom: 6 },
+  greeting:            { ...typography.brandTitle, color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary },
   goalBadgeText:   { fontSize: 11, color: colors.primary, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },

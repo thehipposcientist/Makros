@@ -3620,7 +3620,13 @@ def get_fatigue_score(
         from app.services.nutrition.score_builder import _get_profile_and_goal, _compute_targets
         avg = get_rolling_averages(current_user.id, window=3, db=db)
         profile, goal = _get_profile_and_goal(db, current_user.id)
-        _cal_target, pro_target, _goal_id, _sex = _compute_targets(profile, goal)
+        _cal_target, pro_target, _carbs_target, _fat_target, _goal_id, _sex, _resolved_targets = _compute_targets(
+            db,
+            current_user.id,
+            profile,
+            goal,
+            today,
+        )
         pro_target = max(1, pro_target)
 
         if avg and avg.get("days_with_data", 0) > 0:

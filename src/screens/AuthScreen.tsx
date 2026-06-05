@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, ImageBackground, Dimensions, Alert, Animated, Easing, useWindowDimensions,
+  Platform, Image, Dimensions, Alert, Animated, Easing, useWindowDimensions,
 } from 'react-native';
 import Constants from 'expo-constants';
 import * as AppleAuthentication from 'expo-apple-authentication';
@@ -10,7 +10,7 @@ import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion, loginWithApple, loginWithGoogle } from '../services/api';
+import { login, register, requestPasswordResetEmail, confirmPasswordResetEmail, loginWithApple, loginWithGoogle } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
 import LegalDisclosureModal from '../components/LegalDisclosureModal';
@@ -18,48 +18,12 @@ import BrandMark from '../components/BrandMark';
 import { LEGAL_VERSION, legalAcceptanceLabel } from '../constants/legal';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { SIGNUP_TRIAL_DAYS } from '../utils/subscription';
-import { pexelsPhoto } from '../constants/stockImages';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 const compactLogo = require('../../assets/images/thallo-logo-compact-white.png');
 
-const SIGNUP_FEATURE_PREVIEW: Array<{
-  key: string;
-  title: string;
-  body: string;
-  image: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  accent: string;
-}> = [
-  {
-    key: 'plan',
-    title: 'Plan your week',
-    body: 'Goal, schedule, gear, and recovery shape a stable 7-day plan.',
-    image: pexelsPhoto('5878699', { width: 520, height: 380 }),
-    icon: 'calendar-outline',
-    accent: '#15C7B8',
-  },
-  {
-    key: 'meals',
-    title: 'Track food faster',
-    body: 'Log meals, hydration, routines, supplements, and scans.',
-    image: pexelsPhoto('30635713', { width: 520, height: 380 }),
-    icon: 'restaurant-outline',
-    accent: '#7CFCB2',
-  },
-  {
-    key: 'signals',
-    title: 'Connect signals',
-    body: 'Use progress, readiness, body trends, and health data together.',
-    image: pexelsPhoto('32977239', { width: 520, height: 380 }),
-    icon: 'pulse-outline',
-    accent: '#40CCE8',
-  },
-];
-
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
-const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
 const GOOGLE_CLIENT_ID_RE = /^\d+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/;
 const GOOGLE_CLIENT_ID_PLACEHOLDER = 'missing-google-client-id.apps.googleusercontent.com';
 
@@ -92,21 +56,14 @@ interface AuthScreenProps {
 }
 
 export default function AuthScreen({ onAuthenticated, initialMode = 'login', onBack }: AuthScreenProps) {
-  // Reset flow is two-step: 'reset_email' (enter email + fetch question) → 'reset_answer' (answer + new password)
+  // Reset flow is two-step: request an email code, then confirm it with a new password.
   const [mode, setMode] = useState<'login' | 'signup' | 'reset_email' | 'reset_answer'>(initialMode);
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
-  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [recoveryQuestion, setRecoveryQuestionText] = useState('');
-  const [recoveryAnswer, setRecoveryAnswer] = useState('');
-  // Signup-only: user picks from a preset list for ease of recall.
-  const [signupRecoveryQuestion, setSignupRecoveryQuestion] = useState<string>(
-    "What was the name of your first pet?"
-  );
-  const [signupRecoveryAnswer, setSignupRecoveryAnswer] = useState('');
+  const [resetToken, setResetToken] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [acceptedLegal, setAcceptedLegal] = useState(false);
@@ -153,10 +110,9 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
   const firstNameRef       = useRef<TextInput>(null);
   const lastNameRef        = useRef<TextInput>(null);
   const emailRef           = useRef<TextInput>(null);
-  const usernameRef        = useRef<TextInput>(null);
+  const resetTokenRef      = useRef<TextInput>(null);
   const passwordRef        = useRef<TextInput>(null);
   const confirmPasswordRef = useRef<TextInput>(null);
-  const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
   const handledGoogleTokenRef = useRef<string | null>(null);
   const gradientShiftX = gradientAnim.interpolate({
@@ -279,8 +235,7 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
     setError('');
     setPassword('');
     setConfirmPassword('');
-    setRecoveryAnswer('');
-    if (next !== 'reset_answer') setRecoveryQuestionText('');
+    if (next !== 'reset_answer') setResetToken('');
     setShowPassword(false);
     setShowConfirmPassword(false);
   };
@@ -405,32 +360,31 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
 
   const handleSubmit = async () => {
     setError('');
-    // Reset step 1: look up question
+    // Reset step 1: send an email reset code.
     if (mode === 'reset_email') {
       if (!email.trim()) { setError('Enter your email'); return; }
       setLoading(true);
       try {
-        const { question } = await getRecoveryQuestion(email.trim());
-        setRecoveryQuestionText(question);
+        const response = await requestPasswordResetEmail(email.trim());
+        if (response.dev_token) setResetToken(response.dev_token);
         setMode('reset_answer');
       } catch (e: any) {
-        // Surface the backend's generic message — matches failed-answer case.
-        setError(e?.message ?? 'No recovery question available for that email');
+        setError(e?.message ?? 'Unable to send reset code');
       } finally {
         setLoading(false);
       }
       return;
     }
 
-    // Reset step 2: submit answer + new password
+    // Reset step 2: confirm code + new password.
     if (mode === 'reset_answer') {
-      if (!recoveryAnswer.trim()) { setError('Enter your answer'); return; }
+      if (!resetToken.trim()) { setError('Enter the reset code from your email'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
       if (!/\d/.test(password)) { setError('Password must include at least one number'); return; }
       if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       setLoading(true);
       try {
-        const { access_token } = await resetPassword(email.trim(), recoveryAnswer.trim(), password);
+        const { access_token } = await confirmPasswordResetEmail(email.trim(), resetToken.trim(), password);
         onAuthenticated(access_token, false);
       } catch (e: any) {
         setError(e?.message ?? 'Unable to reset password');
@@ -449,22 +403,15 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
       if (!EMAIL_RE.test(email.trim())) { setError('Enter a valid email address'); return; }
       if (!firstName.trim()) { setError('First name is required'); return; }
       if (!lastName.trim()) { setError('Last name is required'); return; }
-      if (!username.trim()) { setError('Username is required'); return; }
-      if (!USERNAME_RE.test(username.trim().toLowerCase())) { setError('Username must be 3-32 characters and use only letters, numbers, or underscores'); return; }
-      if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
       if (!/\d/.test(password)) { setError('Password must include at least one number'); return; }
       if (!acceptedLegal) { setError('Please accept the Terms, Privacy Policy, Health Disclaimer, and AI Disclosure'); return; }
-      if (!signupRecoveryAnswer.trim() || signupRecoveryAnswer.trim().length < 2) {
-        setError("Please answer your security question — you'll need it to reset your password");
-        return;
-      }
     }
     setLoading(true);
     try {
       const isNewUser = mode === 'signup';
       if (isNewUser) {
-        await register(email.trim(), username.trim().toLowerCase(), password, {
+        await register(email.trim(), password, {
           firstName: firstName.trim(),
           lastName: lastName.trim(),
           acceptedTerms: acceptedLegal,
@@ -475,17 +422,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
         });
       }
       const { access_token } = await login(email.trim(), password);
-      // Set the recovery question/answer right after signup so password
-      // reset works without a separate profile trip. Non-blocking — a
-      // failure here still lets the user into onboarding, and they can
-      // set it later from Profile.
-      if (isNewUser) {
-        try {
-          await setRecoveryQuestion(access_token, signupRecoveryQuestion, signupRecoveryAnswer.trim());
-        } catch (e) {
-          console.log('[auth] set recovery question failed:', e);
-        }
-      }
       onAuthenticated(access_token, isNewUser);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
@@ -731,48 +667,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
             </View>
           )}
 
-          {mode === 'signup' && (
-            <View style={styles.signupFeaturePanel}>
-              <View style={styles.signupFeatureHeader}>
-                <View>
-                  <Text style={styles.signupFeatureEyebrow}>After signup</Text>
-                  <Text style={styles.signupFeatureTitle}>What Thallo can do for you</Text>
-                </View>
-                <Ionicons name="sparkles-outline" size={18} color={colors.primary} />
-              </View>
-              <ScrollView
-                horizontal
-                decelerationRate="fast"
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.signupFeatureScrollerContent}
-                style={styles.signupFeatureScroller}
-              >
-                {SIGNUP_FEATURE_PREVIEW.map((feature) => (
-                  <ImageBackground
-                    key={feature.key}
-                    source={{ uri: feature.image }}
-                    resizeMode="cover"
-                    imageStyle={styles.signupFeatureImage}
-                    style={styles.signupFeatureCard}
-                  >
-                    <LinearGradient
-                      colors={['rgba(5,10,14,0.16)', 'rgba(5,10,14,0.72)']}
-                      locations={[0, 1]}
-                      style={StyleSheet.absoluteFill}
-                    />
-                    <View style={[styles.signupFeatureIcon, { backgroundColor: feature.accent + '2E' }]}>
-                      <Ionicons name={feature.icon} size={16} color="#FFFFFF" />
-                    </View>
-                    <View style={styles.signupFeatureCopy}>
-                      <Text style={styles.signupFeatureCardTitle} numberOfLines={1}>{feature.title}</Text>
-                      <Text style={styles.signupFeatureCardBody} numberOfLines={3}>{feature.body}</Text>
-                    </View>
-                  </ImageBackground>
-                ))}
-              </ScrollView>
-            </View>
-          )}
-
           {showSocialProviders && (
             <View style={styles.socialBlock}>
               <View style={styles.socialRow}>
@@ -863,7 +757,7 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
             </View>
           )}
 
-          {/* Email — hidden in reset_answer since the question is shown instead */}
+          {/* Email — hidden after the reset code is sent. */}
           {mode !== 'reset_answer' && (
             <>
               <TextInput
@@ -880,7 +774,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                 returnKeyType={mode === 'reset_email' ? 'go' : 'next'}
                 onSubmitEditing={() => {
                   if (mode === 'reset_email') handleSubmit();
-                  else if (mode === 'signup') usernameRef.current?.focus();
                   else passwordRef.current?.focus();
                 }}
                 blurOnSubmit={false}
@@ -893,39 +786,21 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
             </>
           )}
 
-          {/* Username (signup only) */}
-          {mode === 'signup' && (
-            <TextInput
-              testID="auth-username-input"
-              ref={usernameRef}
-              style={styles.input}
-              placeholder="Username"
-              placeholderTextColor={colors.textMuted}
-              value={username}
-              onChangeText={(t) => setUsername(t.replace(/\s/g, '').toLowerCase())}
-              autoCapitalize="none"
-              autoCorrect={false}
-              returnKeyType="next"
-              onSubmitEditing={() => passwordRef.current?.focus()}
-              blurOnSubmit={false}
-            />
-          )}
-
-          {/* Recovery question + answer (reset_answer only) */}
+          {/* Reset code (reset_answer only) */}
           {mode === 'reset_answer' && (
             <>
               <View style={styles.questionBox}>
-                <Text style={styles.questionLabel}>Recovery question</Text>
-                <Text style={styles.questionText}>{recoveryQuestion}</Text>
+                <Text style={styles.questionLabel}>Password reset</Text>
+                <Text style={styles.questionText}>Enter the code sent to {email.trim()}.</Text>
               </View>
               <TextInput
-                testID="auth-recovery-answer-input"
-                ref={answerRef}
+                testID="auth-reset-token-input"
+                ref={resetTokenRef}
                 style={styles.input}
-                placeholder="Your answer"
+                placeholder="Reset code"
                 placeholderTextColor={colors.textMuted}
-                value={recoveryAnswer}
-                onChangeText={setRecoveryAnswer}
+                value={resetToken}
+                onChangeText={setResetToken}
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="next"
@@ -947,8 +822,8 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword && !maestroTestAccount}
-                returnKeyType={mode === 'login' ? 'go' : 'next'}
-                onSubmitEditing={() => mode === 'login' ? handleSubmit() : confirmPasswordRef.current?.focus()}
+                returnKeyType={mode === 'reset_answer' ? 'next' : 'go'}
+                onSubmitEditing={() => mode === 'reset_answer' ? confirmPasswordRef.current?.focus() : handleSubmit()}
                 blurOnSubmit={false}
               />
               <TouchableOpacity testID="auth-password-toggle" style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowPassword(v => !v)}>
@@ -957,79 +832,25 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
             </View>
           )}
 
-          {/* Confirm password (signup + reset_answer) */}
-          {(mode === 'signup' || mode === 'reset_answer') && (
+          {/* Confirm password (reset only) */}
+          {mode === 'reset_answer' && (
             <View style={styles.passwordRow}>
               <TextInput
                 testID="auth-confirm-password-input"
                 ref={confirmPasswordRef}
                 style={[styles.input, styles.passwordInput]}
-                placeholder={mode === 'reset_answer' ? 'Confirm new password' : 'Confirm password'}
+                placeholder="Confirm new password"
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword && !maestroTestAccount}
-                returnKeyType="next"
-                onSubmitEditing={() => mode === 'signup' ? answerRef.current?.focus() : handleSubmit()}
+                returnKeyType="go"
+                onSubmitEditing={handleSubmit}
               />
               <TouchableOpacity testID="auth-confirm-password-toggle" style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowConfirmPassword(v => !v)}>
                 <Text style={styles.eyeText}>{showConfirmPassword ? 'Hide' : 'Show'}</Text>
               </TouchableOpacity>
             </View>
-          )}
-
-          {/* Recovery question — SIGNUP ONLY. Picked from a small preset
-              list so users don't compose something they'll forget. The
-              answer is required; password-reset uses this. */}
-          {mode === 'signup' && (
-            <>
-              <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 2, marginTop: 4 }}>
-                Security question · used to reset your password
-              </Text>
-              <Text style={{ fontSize: 10, color: colors.textMuted, marginBottom: 8, fontStyle: 'italic' }}>
-                You can change this later from your profile settings.
-              </Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-                {[
-                  "What was the name of your first pet?",
-                  "What city were you born in?",
-                  "What is your mother's maiden name?",
-                  "What was your first car?",
-                ].map(q => (
-                  <TouchableOpacity
-                    key={q}
-                    onPress={() => setSignupRecoveryQuestion(q)}
-                    style={{
-                      paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
-                      borderWidth: 1,
-                      borderColor: signupRecoveryQuestion === q ? colors.primary : colors.border,
-                      backgroundColor: signupRecoveryQuestion === q ? colors.primary + '22' : colors.surface,
-                    }}
-                  >
-                    <Text style={{
-                      fontSize: 11,
-                      fontWeight: signupRecoveryQuestion === q ? '700' : '500',
-                      color: signupRecoveryQuestion === q ? colors.primary : colors.textSecondary,
-                    }}>
-                      {q}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <TextInput
-                testID="auth-signup-recovery-answer-input"
-                ref={answerRef}
-                style={styles.input}
-                placeholder="Your answer"
-                placeholderTextColor={colors.textMuted}
-                value={signupRecoveryAnswer}
-                onChangeText={setSignupRecoveryAnswer}
-                autoCapitalize="none"
-                autoCorrect={false}
-                returnKeyType="go"
-                onSubmitEditing={handleSubmit}
-              />
-            </>
           )}
 
           {mode === 'signup' && (
@@ -1069,7 +890,7 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                   {mode === 'login'
                     ? 'Sign In'
                     : mode === 'reset_email'
-                      ? 'Next'
+                      ? 'Send Reset Code'
                       : mode === 'reset_answer'
                         ? 'Reset Password'
                         : 'Create Account'}
@@ -1391,83 +1212,6 @@ const styles = StyleSheet.create({
   },
   trialTitle: { fontSize: 13, fontWeight: '900', color: colors.textPrimary, marginBottom: 2 },
   trialText: { fontSize: 11, lineHeight: 15, color: colors.textSecondary },
-
-  signupFeaturePanel: {
-    gap: 10,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface + 'E6',
-    borderRadius: radius.md,
-    padding: 12,
-    overflow: 'hidden',
-  },
-  signupFeatureHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  signupFeatureEyebrow: {
-    fontSize: 10,
-    fontWeight: '900',
-    color: colors.primary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: 2,
-  },
-  signupFeatureTitle: {
-    fontSize: 14,
-    lineHeight: 18,
-    fontWeight: '900',
-    color: colors.textPrimary,
-  },
-  signupFeatureScroller: {
-    marginHorizontal: -12,
-  },
-  signupFeatureScrollerContent: {
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingBottom: 1,
-  },
-  signupFeatureCard: {
-    width: 158,
-    height: 138,
-    overflow: 'hidden',
-    borderRadius: radius.md,
-    justifyContent: 'space-between',
-    padding: 10,
-    backgroundColor: colors.surfaceRaised,
-  },
-  signupFeatureImage: {
-    borderRadius: radius.md,
-  },
-  signupFeatureIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.28)',
-  },
-  signupFeatureCopy: {
-    gap: 3,
-  },
-  signupFeatureCardTitle: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    lineHeight: 16,
-    fontWeight: '900',
-    textShadowColor: 'rgba(0,0,0,0.35)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 5,
-  },
-  signupFeatureCardBody: {
-    color: 'rgba(255,255,255,0.86)',
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '700',
-  },
 
   input: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,

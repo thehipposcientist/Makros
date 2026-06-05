@@ -45,15 +45,35 @@ const HOLD_NAME_RE =
 const LOADABLE_EQUIPMENT_RE =
   /\b(barbell|dumbbells?|adjustable[ _-]?dumbbells?|ez[ _-]?curl[ _-]?bar|kettlebells?|trap[ _-]?bar|weight[ _-]?plates?|weighted[ _-]?vest|sandbag|medicine[ _-]?ball|cable[ _-]?machine|smith[ _-]?machine|landmine[ _-]?attachment|sled|ruck[ _-]?pack)\b/i;
 
+export type ExerciseLoadUnit = 'total' | 'single_dumbbell' | 'per_dumbbell' | 'per_side';
+export type ExerciseCountUnit = 'reps' | 'steps';
+
+const SINGLE_DUMBBELL_TOTAL_RE =
+  /\b(goblet|sumo\s+squat|dumbbell\s+hip\s+thrust|dumbbell\s+pullover|(?:dumbbell|weighted)\s+(?:sit[-_ ]?up|crunch)|standing\s+dumbbell\s+triceps?\s+extension|overhead\s+dumbbell\s+triceps?\s+extension)\b/i;
+
+const PER_SIDE_CABLE_RE = /\b(pallof|woodchop)\b/i;
+
+const UNILATERAL_LOAD_RE =
+  /\b(single|one|uni(?:lateral)?|alt(?:ernating)?)\s*[-_ ]?(arm|leg|side|hand|sided)\b|\b(iso[-_ ]?lateral|suitcase)\b/i;
+
 /** A reps string that's actually a time target. Matches:
  *   "60s", "60 sec", "60 seconds"
  *   "60-90s", "30-60 sec"
  *   "3 min", "5-8 min", "25 minutes"
- *   "flow", "hold", "each side", "per side"
+ *   "flow", "hold"
  *   "amrap", "max time", "to failure" (really a duration or effort)
  */
 const TIMED_REPS_RE =
-  /(\b\d+\s*-?\s*\d*\s*s(ec|econds?)?\b)|(\b\d+\s*-?\s*\d*\s*m(in(ute)?s?)?\b)|flow|hold|each side|per side|amrap|max time|to failure/i;
+  /(\b\d+\s*-?\s*\d*\s*s(ec|econds?)?\b)|(\b\d+\s*-?\s*\d*\s*m(in(ute)?s?)?\b)|flow|hold|amrap|max time|to failure/i;
+
+const DISTANCE_TARGET_RE =
+  /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:yd|yds|yard|yards|m|meter|meters|metre|metres|ft|feet|km|mi|mile|miles)\b/i;
+
+const COUNT_TARGET_HAS_UNIT_RE =
+  /\b(reps?|steps?|rounds?|holds?|seconds?|secs?|mins?|minutes?|yards?|yds?|meters?|metres?|feet|ft|kilometers?|km|miles?|mi|calories?|cals?)\b|\b(?:each|per)\s+(?:side|way|direction)\b/i;
+
+const STEP_COUNT_NAME_RE =
+  /\b(monster\s+walks?|crab\s+walks?|(?:mini[-\s]?band|banded|band|resistance[-\s]?band)\s+(?:lateral\s+)?(?:walks?|steps?)|(?:lateral|side)\s+(?:mini[-\s]?band|band|resistance[-\s]?band)\s+(?:walks?|steps?)|(?:lateral|side)\s+(?:walks?|steps?))\b/i;
 
 /** Archetype tags emitted by the backend planner that mean "no weight,
  *  reps are time". Matched case-insensitively. Keep in sync with
@@ -157,6 +177,63 @@ function _finiteNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function _equipmentText(raw: unknown): string {
+  if (!raw) return '';
+  if (Array.isArray(raw)) {
+    return raw.map(item => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        return String((item as any).slug ?? (item as any).name ?? '');
+      }
+      return '';
+    }).join(' ');
+  }
+  return String(raw);
+}
+
+function _normalLoadUnit(value: unknown): ExerciseLoadUnit | null {
+  const raw = String(value ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (!raw) return null;
+  if (['single_dumbbell', 'one_dumbbell'].includes(raw)) return 'single_dumbbell';
+  if (['total', 'total_load', 'single_implement'].includes(raw)) return 'total';
+  if (['per_dumbbell', 'per_db', 'per_hand', 'dumbbell_each'].includes(raw)) return 'per_dumbbell';
+  if (['per_side', 'per_arm', 'per_leg', 'per_handle', 'single_side'].includes(raw)) return 'per_side';
+  return null;
+}
+
+export function exerciseLoadUnit(ex: any): ExerciseLoadUnit {
+  if (!ex) return 'total';
+  const explicit = _normalLoadUnit(ex.loadUnit ?? ex.load_unit ?? ex._load_unit ?? ex._loadUnit);
+  if (explicit) return explicit;
+
+  const equipment = _equipmentText(ex.equipment ?? ex.gear ?? ex.equipment_slugs ?? ex.equipmentSlugs);
+  const nameish = `${ex.name ?? ''} ${ex.slug ?? ex.exerciseSlug ?? ex._slug ?? ''}`.replace(/[_-]+/g, ' ');
+  const text = `${equipment} ${nameish}`.toLowerCase();
+  if (/\bdual[ _-]?cable[ _-]?station\b|\bdual cable\b/.test(text)) {
+    return 'per_side';
+  }
+  if (text.includes('cable') && PER_SIDE_CABLE_RE.test(nameish)) {
+    return 'per_side';
+  }
+  if (/\bdumbbell(s)?\b|\bdb\b/.test(text)) {
+    if (/\bsuitcase\b/i.test(nameish)) return 'per_side';
+    return SINGLE_DUMBBELL_TOTAL_RE.test(nameish) ? 'single_dumbbell' : 'per_dumbbell';
+  }
+  const laterality = String(ex.laterality ?? ex._laterality ?? '').trim().toLowerCase();
+  const unilateral = ['unilateral', 'alternating', 'single', 'single_side', 'single-sided'].includes(laterality)
+    || !!ex.is_unilateral
+    || !!ex.isUnilateral
+    || UNILATERAL_LOAD_RE.test(nameish);
+  if (unilateral && !/\b(bodyweight|body weight|none|bw)\b/.test(text) && /(cable|machine|plate_loaded|landmine|kettlebell|barbell|smith)/.test(text)) {
+    return 'per_side';
+  }
+  return 'total';
+}
+
+export function isPerDumbbellLoadExercise(ex: any): boolean {
+  return exerciseLoadUnit(ex) === 'per_dumbbell';
 }
 
 /** Tracking modes (`default_tracking_mode` on the Exercise schema)
@@ -299,6 +376,8 @@ export function shouldHideReps(ex: any): boolean {
   const archetype = String(ex._archetype ?? ex.archetype ?? '').toLowerCase();
   if (archetype && TIME_BASED_ARCHETYPES.has(archetype)) return true;
 
+  if (exerciseCountUnit(ex) === 'steps') return false;
+
   // Reps string that is actually a time target
   if (isTimeBasedReps(ex.reps ?? ex.targetReps)) return true;
 
@@ -314,4 +393,62 @@ export function formatDurationTarget(ex: any): string {
   const raw = ex?.reps ?? ex?.targetReps ?? '';
   const s = String(raw).trim();
   return s || '—';
+}
+
+function _targetAlreadyHasUnit(target: string): boolean {
+  return isTimeBasedReps(target) || DISTANCE_TARGET_RE.test(target) || COUNT_TARGET_HAS_UNIT_RE.test(target);
+}
+
+export function exerciseCountUnit(ex: any): ExerciseCountUnit {
+  if (!ex) return 'reps';
+  const target = String(ex.reps ?? ex.targetReps ?? '').trim();
+  if (/\bsteps?\b/i.test(target)) return 'steps';
+
+  const nameish = `${ex.name ?? ''} ${ex.slug ?? ex.exerciseSlug ?? ex._slug ?? ''}`.replace(/[_-]+/g, ' ');
+  const equipment = _equipmentText(ex.equipment ?? ex.gear ?? ex.equipment_slugs ?? ex.equipmentSlugs);
+  const hasBand = /resistance.?bands?\b|mini.?band|loop.?band|\bbands?\b/i.test(equipment);
+  const isStepWalk = STEP_COUNT_NAME_RE.test(nameish);
+  if (/\bmonster\s+walks?\b/i.test(nameish)) return 'steps';
+  if (isStepWalk && hasBand) return 'steps';
+  if (/\b(?:lateral|side)\s+(?:walks?|steps?)\b/i.test(nameish) && hasBand) return 'steps';
+  if (_targetAlreadyHasUnit(target)) return 'reps';
+  return 'reps';
+}
+
+export function exerciseCountUnitLabel(ex: any, value?: number | string | null): string {
+  const unit = exerciseCountUnit(ex);
+  const numeric = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? Number(value)
+      : NaN;
+  if (unit === 'steps') return Number.isFinite(numeric) && Math.round(numeric) === 1 ? 'step' : 'steps';
+  return Number.isFinite(numeric) && Math.round(numeric) === 1 ? 'rep' : 'reps';
+}
+
+export function formatCountTarget(
+  ex: any,
+  raw?: string | number | null,
+  options: { includeDefaultUnit?: boolean } = {},
+): string {
+  const value = raw ?? ex?.reps ?? ex?.targetReps ?? '';
+  const text = String(value).trim();
+  if (!text) return '—';
+  const unit = exerciseCountUnit({ ...(ex ?? {}), reps: value, targetReps: value });
+  if (unit === 'steps') {
+    const timedCount = text.match(/^(\d+(?:\s*[-–—]\s*\d+)?)(?:\s*s(?:ec|econds?)?)$/i);
+    if (timedCount) return `${timedCount[1].trim()} steps`;
+    const sideCount = text.match(/^(\d+(?:\s*[-–—]\s*\d+)?)(\s+(?:each|per)\s+(?:side|way|direction))$/i);
+    if (sideCount) return `${sideCount[1].trim()} steps${sideCount[2]}`;
+  }
+  if (_targetAlreadyHasUnit(text)) return text;
+  if (unit === 'steps') return `${text} steps`;
+  return options.includeDefaultUnit ? `${text} reps` : text;
+}
+
+export function formatLoggedCount(ex: any, value: number | string | null | undefined): string {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '—';
+  const rounded = Math.round(numeric);
+  return `${rounded} ${exerciseCountUnitLabel(ex, rounded)}`;
 }

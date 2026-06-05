@@ -1359,7 +1359,7 @@ def _equipment_label(
 _CANONICAL_PLANNED_EXERCISE_KEYS: tuple[str, ...] = (
     "name", "sets", "reps", "restSeconds", "equipment", "image_url", "video_id",
     "demo_exercise_db_id",
-    "targetWeightLbs",
+    "targetWeightLbs", "loadUnit",
     "weightRecommendationSource", "weightRecommendationConfidence", "weightRecommendationReason",
     "setScheme",
     "_slug", "_slot", "_role", "_rir_target",
@@ -1432,6 +1432,8 @@ def build_planner_exercise(
         `_primary_muscle`, `_secondary_muscles`, `_archetype`,
         `_training_type`) is always populated or None.
     """
+    from .recommendation import display_load_unit
+
     equipment_label = _equipment_label(
         exercise,
         owned_equipment_slugs=owned_equipment_slugs,
@@ -1449,6 +1451,7 @@ def build_planner_exercise(
         # the correct tracking UI (duration/speed/HR vs sets/reps).
         "prescriptionType": prescription.prescription_type,
         "cardioGuidance": prescription.cardio_guidance,
+        "loadUnit": display_load_unit(exercise),
         # Guided-flow ordering tag for stretches/yoga/foam-roll. The client
         # uses this to enable GuidedFlowView (auto-advance, transition cue)
         # and to filter same-category candidates when swapping a pose.

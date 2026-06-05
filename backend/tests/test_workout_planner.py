@@ -1581,6 +1581,122 @@ def test_dumbbell_compound_defaults_are_per_dumbbell() -> None:
     _ok(f"dumbbell row default={rec.weight_lbs} lb each")
 
 
+def test_single_dumbbell_movements_display_without_each_but_scale_like_dumbbells() -> None:
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.recommendation import display_load_unit, recommend_starting_weight
+
+    print("\n[test] single-dumbbell movements do not display as lb each")
+    by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+    single_dumbbell_slugs = [
+        "goblet_squat",
+        "sumo_squat",
+        "heel_elevated_goblet_squat",
+        "slant_board_goblet_squat",
+        "dumbbell_pullover",
+        "dumbbell_hip_thrust",
+        "overhead_tricep_extension",
+        "weighted_situp",
+    ]
+    for slug in single_dumbbell_slugs:
+        assert display_load_unit(by_slug[slug]) == "single_dumbbell", slug
+
+    rec = recommend_starting_weight(
+        by_slug["sumo_squat"],
+        profiles={},
+        all_exercises_by_slug=by_slug,
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert rec.source == "default", rec
+    assert 55.0 <= rec.weight_lbs <= 80.0, rec
+    _ok(f"sumo squat default={rec.weight_lbs} lb total single dumbbell")
+
+
+def test_cable_and_single_side_load_units_are_explicit() -> None:
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.recommendation import display_load_unit
+
+    print("\n[test] cable and one-side implements display the right load unit")
+    by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+    per_side_slugs = [
+        "cable_fly",
+        "low_to_high_cable_fly",
+        "high_to_low_cable_fly",
+        "cable_rear_delt_fly",
+        "bilateral_cable_chest_press",
+        "cable_woodchop",
+        "pallof_press",
+        "cable_pallof_hold",
+        "single_arm_cable_row",
+        "suitcase_carry",
+    ]
+    total_stack_slugs = [
+        "seated_cable_row",
+        "straight_arm_pulldown",
+        "face_pull",
+        "tricep_pushdown",
+        "rope_pushdown",
+        "cable_crunch",
+    ]
+    for slug in per_side_slugs:
+        assert display_load_unit(by_slug[slug]) == "per_side", slug
+    for slug in total_stack_slugs:
+        assert display_load_unit(by_slug[slug]) == "total", slug
+    _ok("dual-cable/side-handle moves are per side; single-stack bar/rope moves are total")
+
+
+def test_single_dumbbell_squat_transfers_to_and_from_barbell_total() -> None:
+    from datetime import date
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.performance import ExercisePerformance
+    from app.services.workout.recommendation import recommend_starting_weight
+
+    print("\n[test] single-dumbbell squat transfer normalizes against barbell total")
+    by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
+    bar_profile = ExercisePerformance(
+        slug="barbell_squat",
+        name="Barbell Squat",
+        session_count=2,
+        recent_top_weight_lbs=135.0,
+        recent_top_reps=8,
+        estimated_1rm_lbs=171.0,
+        recent_volume_load=2160.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    sumo_from_bar = recommend_starting_weight(
+        by_slug["sumo_squat"],
+        profiles={"barbell_squat": bar_profile},
+        all_exercises_by_slug=by_slug,
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert sumo_from_bar.source == "movement_pattern", sumo_from_bar
+    assert 45.0 <= sumo_from_bar.weight_lbs <= 70.0, sumo_from_bar
+
+    sumo_profile = ExercisePerformance(
+        slug="sumo_squat",
+        name="Sumo Squat",
+        session_count=2,
+        recent_top_weight_lbs=70.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=93.3,
+        recent_volume_load=1400.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    bar_from_sumo = recommend_starting_weight(
+        by_slug["barbell_squat"],
+        profiles={"sumo_squat": sumo_profile},
+        all_exercises_by_slug=by_slug,
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert bar_from_sumo.source == "movement_pattern", bar_from_sumo
+    assert bar_from_sumo.weight_lbs >= 115.0, bar_from_sumo
+    _ok(f"barbell 135 total -> sumo {sumo_from_bar.weight_lbs} total; sumo 70 -> barbell {bar_from_sumo.weight_lbs} total")
+
+
 def test_dumbbell_push_press_resolves_to_dumbbell_seed() -> None:
     from app.services.workout.exercise_metadata import (
         resolve_seed_exercise_slug,
@@ -1898,6 +2014,9 @@ if __name__ == "__main__":
         test_recommender_converts_single_arm_cable_row_per_side,
         test_recommender_converts_rdl_between_barbell_total_and_dumbbell_each,
         test_dumbbell_compound_defaults_are_per_dumbbell,
+        test_single_dumbbell_movements_display_without_each_but_scale_like_dumbbells,
+        test_cable_and_single_side_load_units_are_explicit,
+        test_single_dumbbell_squat_transfers_to_and_from_barbell_total,
         test_dumbbell_push_press_resolves_to_dumbbell_seed,
         test_dumbbell_push_press_default_is_conservative_each,
         test_dumbbell_push_press_transfers_from_dumbbell_shoulder_press_each,

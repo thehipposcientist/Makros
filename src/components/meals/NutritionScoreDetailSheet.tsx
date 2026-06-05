@@ -29,8 +29,8 @@ export type NutritionScoreDetail = {
   wins: string[];
   improvements: string[];
   likelyGaps: string[];
-  totals?: { calories?: number; protein_g?: number } | null;
-  targets?: { calories?: number; protein_g?: number } | null;
+  totals?: { calories?: number; protein_g?: number; carbs_g?: number; fat_g?: number } | null;
+  targets?: { calories?: number; protein_g?: number; carbs_g?: number; fat_g?: number } | null;
   indicators?: Record<string, any> | null;
   breakdowns: Array<{ title: string; items: NutritionScoreDetailBreakdownItem[] }>;
 };
@@ -116,6 +116,16 @@ export default function NutritionScoreDetailSheet({
     || typeof detail.targets?.protein_g === 'number'
     || typeof detail.indicators?.total_protein === 'number'
     || typeof detail.indicators?.target_protein === 'number';
+  const hasCarbs =
+    typeof detail.totals?.carbs_g === 'number'
+    || typeof detail.targets?.carbs_g === 'number'
+    || typeof detail.indicators?.total_carbs === 'number'
+    || typeof detail.indicators?.target_carbs === 'number';
+  const hasFat =
+    typeof detail.totals?.fat_g === 'number'
+    || typeof detail.targets?.fat_g === 'number'
+    || typeof detail.indicators?.total_fat === 'number'
+    || typeof detail.indicators?.target_fat === 'number';
   return (
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
       <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: '#00000088' }}>
@@ -176,7 +186,7 @@ export default function NutritionScoreDetailSheet({
               </View>
             )}
 
-            {(hasCalories || hasProtein) && (
+            {(hasCalories || hasProtein || hasCarbs || hasFat) && (
               <View style={{ marginTop: 12, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surfaceRaised }}>
                 <Text style={{ fontSize: 10, fontWeight: '900', color: tc.textMuted, letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 8 }}>
                   Today
@@ -187,8 +197,18 @@ export default function NutritionScoreDetailSheet({
                   </Text>
                 ) : null}
                 {hasProtein ? (
-                  <Text style={{ fontSize: 12, color: tc.textSecondary }}>
+                  <Text style={{ fontSize: 12, color: tc.textSecondary, marginBottom: hasCarbs || hasFat ? 4 : 0 }}>
                     Protein {Math.round(detail.totals?.protein_g ?? detail.indicators?.total_protein ?? 0)}g / {formatNutritionPrimaryTarget('protein', detail.targets?.protein_g ?? detail.indicators?.target_protein ?? 0)}
+                  </Text>
+                ) : null}
+                {hasCarbs ? (
+                  <Text style={{ fontSize: 12, color: tc.textSecondary, marginBottom: hasFat ? 4 : 0 }}>
+                    Carbs {Math.round(detail.totals?.carbs_g ?? detail.indicators?.total_carbs ?? 0)}g / {formatNutritionPrimaryTarget('carbs', detail.targets?.carbs_g ?? detail.indicators?.target_carbs ?? 0)}
+                  </Text>
+                ) : null}
+                {hasFat ? (
+                  <Text style={{ fontSize: 12, color: tc.textSecondary }}>
+                    Fat {Math.round(detail.totals?.fat_g ?? detail.indicators?.total_fat ?? 0)}g / {formatNutritionPrimaryTarget('fat', detail.targets?.fat_g ?? detail.indicators?.target_fat ?? 0)}
                   </Text>
                 ) : null}
               </View>

@@ -2,9 +2,11 @@ import { useEffect, useRef } from 'react';
 import { AppState, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useFonts } from 'expo-font';
 import { configureWorkoutNotifications } from '../src/utils/restNotifications';
 import { configureDynamicTypeDefaults } from '../src/utils/dynamicType';
 import OfflineBanner from '../src/components/OfflineBanner';
+import { fontAssets } from '../src/constants/fonts';
 
 configureDynamicTypeDefaults();
 
@@ -20,6 +22,7 @@ try {
 const HEALTH_REFRESH_THROTTLE_MS = 5 * 60_000;
 
 export default function RootLayout() {
+  const [fontsLoaded, fontError] = useFonts(fontAssets);
   const lastHealthRefreshMs = useRef(0);
 
   useEffect(() => {
@@ -63,6 +66,10 @@ export default function RootLayout() {
       sub.remove();
     };
   }, []);
+
+  if (!fontsLoaded && !fontError) {
+    return <View style={{ flex: 1, backgroundColor: '#0D0F14' }} />;
+  }
 
   return (
     <GestureWrapper style={{ flex: 1, backgroundColor: '#0D0F14' }}>

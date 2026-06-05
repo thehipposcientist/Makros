@@ -50,6 +50,11 @@ entries keep working without update.
                        carries ("distance"), etc.
   track_per_side:      bool — log each side independently. Defaults to
                        True for laterality in {unilateral, alternating}.
+  load_unit:           "total" | "single_dumbbell" | "per_dumbbell" | "per_side"
+                       How a numeric load should be displayed and transferred.
+                       Use "single_dumbbell" for one dumbbell held with both
+                       hands (goblet/sumo squat, DB pullover, DB hip thrust).
+                       Omit for the default inference.
   substitution_group:  short key shared across exercises that swap cleanly
                        (e.g. "horizontal_press_bilateral"). Used by the
                        planner's replace-exercise flow. Optional.
@@ -318,6 +323,7 @@ CHEST = [
         "is_machine": False,
         "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "substitution_group": "chest_fly_cable",
         "description": "Constant tension chest isolation on cable",
         "equipment": [
@@ -1221,6 +1227,8 @@ TRICEPS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "description": "Long head stretch with overhead dumbbell position",
         "equipment": [
             {"slug": "dumbbells", "role": "primary", "required": True},
@@ -1436,6 +1444,8 @@ QUADS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "description": "Beginner-friendly squat holding a dumbbell at chest",
         "equipment": [
             {"slug": "dumbbells", "role": "primary", "required": True},
@@ -1787,6 +1797,8 @@ ADDUCTORS = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
+        "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "description": "Wide-stance squat with toes flared — inner thigh and glutes",
         "equipment": [
             {"slug": "dumbbells", "role": "primary", "required": False},
@@ -2052,6 +2064,7 @@ CORE = [
         "is_machine": False,
         "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "substitution_group": "core_rotation",
         "description": "Rotational cable pull for anti-rotation and oblique strength",
         "equipment": [
@@ -2071,6 +2084,7 @@ CORE = [
         "is_machine": False,
         "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "substitution_group": "core_anti_rotation",
         "description": "Anti-rotation cable press — builds lateral core stability",
         "equipment": [
@@ -2713,6 +2727,8 @@ POWER = [
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": True,
+        "laterality": "unilateral",
+        "load_unit": "per_side",
         "default_tracking_mode": "distance",
         "description": "Unilateral loaded carry for anti-lateral flexion core strength",
         "equipment": [
@@ -3127,6 +3143,7 @@ _NEW_2026_04_13_PASS_2 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "substitution_group": "chest_fly_cable",
         "description": "Cable fly arcing from low pulley to upper chest height",
         "equipment": [
@@ -3144,6 +3161,7 @@ _NEW_2026_04_13_PASS_2 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "substitution_group": "chest_fly_cable",
         "description": "Cable fly arcing from high pulley down to belt height — lower chest emphasis",
         "equipment": [
@@ -3258,6 +3276,7 @@ _NEW_2026_04_13_PASS_2 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "substitution_group": "rear_delt",
         "description": "Cable cross-body rear delt fly with D-handles",
         "equipment": [
@@ -3448,6 +3467,7 @@ _NEW_2026_04_13_PASS_2 = [
         "exercise_type": "strength",
         "is_compound": True, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "difficulty": "beginner",
         "substitution_group": "squat_quad_dominant",
         "description": "Goblet squat with heels on plates for deeper knee flexion and quad emphasis",
@@ -4471,6 +4491,7 @@ _NEW_2026_04_27 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "difficulty": "intermediate",
         "substitution_group": "pullover",
         "description": "Stretch-focused chest and lat exercise performed over a bench",
@@ -4489,6 +4510,7 @@ _NEW_2026_04_27 = [
         "exercise_type": "strength",
         "is_compound": True, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "difficulty": "intermediate",
         "substitution_group": "horizontal_press_cable",
         "description": "Both arms press simultaneously from a cable stack",
@@ -5362,6 +5384,7 @@ _NEW_2026_04_27 = [
         "exercise_type": "strength",
         "is_compound": True, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "difficulty": "beginner",
         "substitution_group": "hip_thrust",
         "description": "Dumbbell or plate loaded hip thrust off a bench",
@@ -5428,10 +5451,10 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "glute_abductor",
         "description": "Forward and backward diagonal banded walk for glute activation",
-        # Tracked by time, not load — band-only glute activation.
-        # Without this tag the planner emits a rep target and the
-        # client requests a weight recommendation that has no meaning.
-        "default_tracking_mode": "time",
+        # Tracked by step count, not timed duration or load. The client
+        # stores the count in the existing reps field and labels it as
+        # steps for band-walk style movements.
+        "default_tracking_mode": "reps",
         "equipment": [{"slug": "resistance_bands", "role": "primary", "required": True}],
     },
     {
@@ -5594,7 +5617,7 @@ _NEW_2026_04_27 = [
         "difficulty": "intermediate",
         "power_type": "conditioning",
         "cardio_intensity": "intervals",
-        "default_tracking_mode": "time",
+        "default_tracking_mode": "reps",
         "substitution_group": "calf_raise_gastroc",
         "description": "Single-leg jump rope — calf power and coordination training",
         "equipment": [{"slug": "jump_rope", "role": "primary", "required": True}],
@@ -5671,6 +5694,7 @@ _NEW_2026_04_27 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "difficulty": "intermediate",
         "substitution_group": "core_flexion",
         "description": "Sit-up on a declined bench for increased ROM and load",
@@ -5809,6 +5833,7 @@ _NEW_2026_04_27 = [
         "exercise_type": "strength",
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "per_side",
         "difficulty": "beginner",
         "default_tracking_mode": "time",
         "substitution_group": "core_anti_rotation",
@@ -6669,7 +6694,7 @@ _NEW_2026_04_30 = [
         "difficulty": "beginner",
         "substitution_group": "glute_abductor",
         "description": "Forward and backward diagonal steps against loop-band tension",
-        "default_tracking_mode": "time",
+        "default_tracking_mode": "reps",
         "equipment": [{"slug": "mini_band", "role": "primary", "required": True}],
     },
     {
@@ -6888,6 +6913,7 @@ _NEW_2026_04_30 = [
         "exercise_type": "strength",
         "is_compound": True, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
+        "load_unit": "single_dumbbell",
         "difficulty": "intermediate",
         "substitution_group": "squat_dumbbell",
         "description": "Heel-elevated goblet squat using a slant board",

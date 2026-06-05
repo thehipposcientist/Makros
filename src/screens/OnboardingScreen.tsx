@@ -1898,18 +1898,20 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         </>
       )}
 
-      <View style={{ marginBottom: 18 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-          <Ionicons name="warning-outline" size={14} color={colors.warning ?? '#F59E0B'} />
-          <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0 }]}>
-            Anything to avoid?
+      {appFocus !== 'fitness' && (
+        <View style={{ marginBottom: 18 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <Ionicons name="warning-outline" size={14} color={colors.warning ?? '#F59E0B'} />
+            <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0 }]}>
+              Anything to avoid?
+            </Text>
+          </View>
+          <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+            Optional, but useful for meal suggestions.
           </Text>
+          {renderAllergyChips()}
         </View>
-        <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
-          Optional, but useful for meal suggestions.
-        </Text>
-        {renderAllergyChips()}
-      </View>
+      )}
     </View>
   );
 

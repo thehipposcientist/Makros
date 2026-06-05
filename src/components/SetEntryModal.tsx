@@ -29,6 +29,7 @@ interface Props {
   /** Greyed placeholder text used when the user hasn't typed anything. */
   fallbackWeight?: string;
   fallbackReps?: string;
+  countLabel?: string;
   /** Increments for the ± buttons in the user's chosen unit. */
   weightStep?: number;
   largeWeightStep?: number;
@@ -76,6 +77,7 @@ export default function SetEntryModal({
   initialReps,
   fallbackWeight,
   fallbackReps,
+  countLabel = 'Reps',
   weightStep = 5,
   largeWeightStep = 10,
   onOpenPlateCalc,
@@ -187,13 +189,13 @@ export default function SetEntryModal({
             {showReps && (
               <View style={styles.block}>
                 <View style={styles.labelRow}>
-                  <Text style={[styles.label, { color: colors.textMuted }]}>Reps</Text>
+                  <Text style={[styles.label, { color: colors.textMuted }]}>{countLabel}</Text>
                 </View>
                 <View style={styles.stepperRow}>
                   <TouchableOpacity
                     style={[styles.stepBtn, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}
                     onPress={() => setReps(prev => bumpNumeric(prev || fallbackReps || '0', -1, false, 0))}
-                    accessibilityLabel="Decrease reps">
+                    accessibilityLabel={`Decrease ${countLabel.toLowerCase()}`}>
                     <Ionicons name="remove" size={18} color={colors.textPrimary} />
                   </TouchableOpacity>
                   <TextInput
@@ -212,7 +214,7 @@ export default function SetEntryModal({
                   <TouchableOpacity
                     style={[styles.stepBtn, { borderColor: colors.border, backgroundColor: colors.surfaceRaised }]}
                     onPress={() => setReps(prev => bumpNumeric(prev || fallbackReps || '0', 1, false, 0))}
-                    accessibilityLabel="Increase reps">
+                    accessibilityLabel={`Increase ${countLabel.toLowerCase()}`}>
                     <Ionicons name="add" size={18} color={colors.textPrimary} />
                   </TouchableOpacity>
                 </View>

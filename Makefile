@@ -1,5 +1,5 @@
 .PHONY: start start-fresh tunnel stop reset-db wait-backend test dev maintenance seed-e2e seed-e2e-recovery-apply \
-        deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
+        deploy deploy-backend prepare-ios-build-version deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
         smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates \
         smoke-mobile-plan-adaptation smoke-mobile-android-platform smoke-mobile-preflight smoke-mobile-preflight-fast smoke-mobile-preflight-parallel
 
@@ -183,7 +183,14 @@ deploy-backend:
 # Builds on this machine — no EAS cloud build credits consumed.
 # Requires Xcode + valid Apple certs/provisioning in your keychain.
 # --auto-submit is not supported with --local, so submit runs separately.
-deploy-ios:
+prepare-ios-build-version:
+	@echo ""
+	@echo "Syncing native iOS targets to the next EAS build number..."
+	@IOS_BUILD_NUMBER=$$(eas build:version:get --platform ios --profile production --json --non-interactive 2>/dev/null \
+	  | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const version = JSON.parse(input); const next = Number(version.buildNumber) + 1; if (!Number.isInteger(next)) throw new Error(`Invalid iOS buildNumber: $${version.buildNumber}`); process.stdout.write(String(next)); });') \
+	  node scripts/sync-ios-build-versions.mjs
+
+deploy-ios: prepare-ios-build-version
 	@echo ""
 	@echo "Building iOS locally..."
 	@echo "(~15-25 min depending on machine. No EAS build credits used.)"
@@ -203,7 +210,7 @@ deploy-ios:
 # Use when entitlements changed (HealthKit, Push, etc.) or app.json
 # infoPlist keys changed. Required after any `ios.entitlements` or
 # capability edit in Apple Developer portal.
-deploy-ios-clean:
+deploy-ios-clean: prepare-ios-build-version
 	@echo ""
 	@echo "Building iOS locally with --clear-cache (fresh entitlements)..."
 	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"

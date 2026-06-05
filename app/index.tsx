@@ -587,7 +587,7 @@ import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
 import { SplashLoadingScreen } from '../src/components/SplashLoadingScreen';
 import BrandMark from '../src/components/BrandMark';
 import BottomSheetDismissHandle from '../src/components/BottomSheetDismissHandle';
-import { DEFAULT_THEME_NAME, colors, getContrastingTextColor, getTheme, radius } from '../src/constants/theme';
+import { DEFAULT_THEME_NAME, colors, getContrastingTextColor, getTheme, radius, typography } from '../src/constants/theme';
 import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, savePlanChange, todayKey } from '../src/utils/workoutHistory';
 import { nextPlanWeekStart, formatPlanStartDateShort } from '../src/utils/planEffectiveDate';
@@ -948,9 +948,9 @@ function createWebProgressStyles(c: ReturnType<typeof getTheme>['colors']) {
       minWidth: 0,
     },
     brandTitle: {
+      ...typography.brandButton,
       color: c.textPrimary,
       fontSize: 16,
-      fontWeight: '900',
       letterSpacing: 0,
     },
     brandSubtitle: {
@@ -978,9 +978,9 @@ function createWebProgressStyles(c: ReturnType<typeof getTheme>['colors']) {
       justifyContent: 'center',
     },
     accountPillLabel: {
+      ...typography.brandButton,
       color: c.textPrimary,
       fontSize: 11,
-      fontWeight: '900',
       letterSpacing: 0,
     },
     accountPillMeta: {
@@ -1002,9 +1002,9 @@ function createWebProgressStyles(c: ReturnType<typeof getTheme>['colors']) {
       backgroundColor: c.surfaceRaised,
     },
     signOutText: {
+      ...typography.brandButton,
       color: c.textPrimary,
       fontSize: 12,
-      fontWeight: '900',
       letterSpacing: 0,
     },
     progressHost: {
@@ -3299,6 +3299,7 @@ export function NativeIndex() {
           visible={showTutorial}
           tier={tierOf(userProfile)}
           themeName={userProfile.themePreference}
+          hiddenSurfaces={userProfile.hiddenSurfaces}
           onThemeChange={async (themePreference) => {
             const updated = { ...userProfile, themePreference };
             setUserProfile(updated);
@@ -3313,12 +3314,11 @@ export function NativeIndex() {
           }}
           onHealthSetup={handleTutorialHealthSetup}
           onUpgrade={tierOf(userProfile) === 'free' ? () => setShowAccount(true) : undefined}
-          onClose={async ({ completed, startLiveTutorial: shouldStartLiveTutorial }) => {
+          onClose={async ({ completed }) => {
             setShowTutorial(false);
             if (completed) {
               try { await AsyncStorage.setItem(TUTORIAL_COMPLETED_KEY, String(Date.now())); } catch {}
             }
-            if (shouldStartLiveTutorial) startLiveTutorial();
           }}
         />
       )}

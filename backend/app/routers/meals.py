@@ -2215,7 +2215,7 @@ def nutrition_score_endpoint(
     current_user: User = Depends(require_pro_feature("Nutrition scoring")),
     db: Session = Depends(get_session),
 ):
-    """Authoritative projected Nutrition Score for today + rolling window.
+    """Authoritative logged-first Nutrition Score for today + rolling window.
     This is the server-side source of truth; the client renders it verbatim."""
     from app.services.nutrition.score_builder import compute_today_score, compute_weekly_score
 

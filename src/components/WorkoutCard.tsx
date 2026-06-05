@@ -6,7 +6,7 @@ import { WorkoutDay, AppThemeName } from '../types';
 import { elevations, getTheme, radius, typography } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
-import { shouldHideWeight } from '../utils/exerciseDisplay';
+import { exerciseCountUnit, formatCountTarget, shouldHideWeight } from '../utils/exerciseDisplay';
 import { estimateWorkoutMinutes } from '../utils/workoutDurationEstimate';
 import FadeInView from './FadeInView';
 import ExerciseThumbMedia, { hasExerciseThumbMedia } from './ExerciseThumbMedia';
@@ -343,9 +343,9 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
             label={
               circuitMode
                 ? formatCircuitWorkLabel(exercise)
-                : shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(String(exercise.reps ?? ''))
+                : exerciseCountUnit(exercise) !== 'steps' && shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(String(exercise.reps ?? ''))
                   ? `${exercise.sets} × ${exercise.reps} hold`
-                  : `${exercise.sets} × ${exercise.reps}`
+                  : `${exercise.sets} × ${formatCountTarget(exercise, exercise.reps)}`
             }
             strong={section.strong}
             soft={section.soft}
@@ -465,10 +465,10 @@ export default WorkoutCard;
 function formatCircuitWorkLabel(exercise: WorkoutDay['exercises'][number]): string {
   const reps = String(exercise.reps ?? '').trim();
   if (!reps) return 'Each round';
-  if (shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(reps)) {
+  if (exerciseCountUnit(exercise) !== 'steps' && shouldHideWeight(exercise) && /^\d+\s*-?\s*\d*\s*s(ec)?$/i.test(reps)) {
     return `${reps} hold`;
   }
-  return reps;
+  return formatCountTarget(exercise, reps);
 }
 
 // ── Chip ──────────────────────────────────────────────────────────────────────

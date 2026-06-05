@@ -112,7 +112,7 @@ function withCurrentOption(values: readonly string[], current: string): string[]
 }
 
 function looksTimedTarget(value: unknown): boolean {
-  return /(\b\d+\s*-?\s*\d*\s*s(ec|econds?)?\b)|(\b\d+\s*-?\s*\d*\s*m(in(ute)?s?)?\b)|flow|hold|each side|per side/i
+  return /(\b\d+\s*-?\s*\d*\s*s(ec|econds?)?\b)|(\b\d+\s*-?\s*\d*\s*m(in(ute)?s?)?\b)|flow|hold/i
     .test(String(value ?? '').trim());
 }
 

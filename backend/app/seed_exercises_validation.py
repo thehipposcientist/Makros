@@ -22,7 +22,9 @@ Checks:
   9. power/plyometric movements that don't carry a `power_type`
  10. empty `equipment` list on entries whose name implies external
      equipment (barbell / dumbbell / machine / cable / kettlebell)
- 11. missing or empty descriptions
+ 11. invalid load-unit metadata
+ 12. missing or empty descriptions
+ 13. missing substitution groups for major strength families
 
 Warnings are not fatal — the seeder still runs. Intent is to keep
 problems visible so they get fixed.
@@ -88,6 +90,7 @@ _FREE_WEIGHT_NAME_TOKENS = (
 )
 
 _VALID_LATERALITIES = {"bilateral", "unilateral", "alternating", "either"}
+_VALID_LOAD_UNITS = {"total", "single_dumbbell", "per_dumbbell", "per_side"}
 
 
 @dataclass
@@ -103,6 +106,7 @@ class ExerciseValidationReport:
     missing_power_type: int = 0
     planner_unreachable_pattern: int = 0
     missing_equipment: int = 0
+    invalid_load_unit: int = 0
     missing_description: int = 0
     missing_substitution_group: int = 0
 
@@ -268,7 +272,14 @@ def validate_exercise_seed(
                 f"equipment list is empty"
             )
 
-    # ── 11. missing description ─────────────────────────────────────────
+    # ── 11. load-unit metadata ─────────────────────────────────────────
+    for e in entries:
+        load_unit = e.get("load_unit")
+        if load_unit is not None and load_unit not in _VALID_LOAD_UNITS:
+            report.invalid_load_unit += 1
+            report.warn(f"'{e.get('slug')}' has invalid load_unit '{load_unit}'")
+
+    # ── 12. missing description ─────────────────────────────────────────
     for e in entries:
         desc = (e.get("description") or "").strip()
         if not desc:
@@ -312,6 +323,7 @@ def validate_exercise_seed(
             f"dead_pattern={report.planner_unreachable_pattern} "
             f"no_power_type={report.missing_power_type} "
             f"no_eq={report.missing_equipment} "
+            f"bad_load_unit={report.invalid_load_unit} "
             f"no_desc={report.missing_description} "
             f"no_sub_group={report.missing_substitution_group}"
         )

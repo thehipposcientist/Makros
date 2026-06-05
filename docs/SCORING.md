@@ -133,13 +133,13 @@ Server readiness publishes a numeric score only when at least two real health pi
 
 **Question:** "How well did I eat today / this week?"
 **File:** `backend/app/services/nutrition/nutrition_score.py`, `score_builder.py`
-**Range:** 0–100. Server-authoritative for the projected day plan via `GET /meals/score`. See `NUTRITION_SCORING.md` for the full deep-dive.
+**Range:** 0-100. Server-authoritative for logged meals via `GET /meals/score`, with projected-plan fallback for unlogged planned days. See `NUTRITION_SCORING.md` for the full deep-dive.
 
 ### Three sub-scores, weighted by goal
 
 | Sub-score | Inputs | What full credit looks like |
 |---|---|---|
-| **Adherence** | calorie alignment + protein alignment | Calories within ±5% are on target, ±10% are close; protein ≥95% of target |
+| **Adherence** | calorie + protein + carbs + fat alignment | Calories within ±5% are on target, ±10% are close; protein ≥95%; carbs inside ±15%; fat at target floor |
 | **Food Quality** | 7 inputs: fiber density (14g/1000kcal), added sugar % cals, sat fat % cals, sodium, minimally-processed %, plant diversity, omega-3 signal | All 7 in target zones |
 | **Micronutrient Coverage** | Priority-6 micros: calcium, iron, potassium, magnesium, vitamin D, vitamin B12 | All 6 ≥ RDA |
 
@@ -152,7 +152,7 @@ Server readiness publishes a numeric score only when at least two real health pi
 - strength: 45 / 30 / 25
 
 ### Versioning
-`SCORE_VERSION=6`, `METRICS_VERSION=5`, `CLASSIFIER_VERSION=7`. Bumping any one invalidates cached score/classification assumptions on the next relevant write.
+`SCORE_VERSION=7`, `METRICS_VERSION=5`, `CLASSIFIER_VERSION=7`. Bumping any one invalidates cached score/classification assumptions on the next relevant write.
 
 ### Design rules
 - Protein gets full credit at ≥95% (not 100%) to avoid false penalties for hitting "close enough"

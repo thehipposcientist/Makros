@@ -87,6 +87,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let secondaryMuscles: [String]?
     let isCompound: Bool?
     let movementPattern: String?
+    let loadUnit: String?
     let plannedTargetWeightLbs: Double?
     let tracksWeight: Bool?
     let isTimed: Bool?
@@ -108,7 +109,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let swapOptions: [WatchSwapOption]
 
     enum CodingKeys: String, CodingKey {
-        case clientExerciseId, name, slug, sets, reps, restSeconds, equipment, primaryMuscle, secondaryMuscles, isCompound, movementPattern, plannedTargetWeightLbs, tracksWeight, isTimed, plannedDurationSeconds, recommendation, recommendedReps, completedSets, isDone, isGuide, slotRole, slotLabel, prescriptionType, swapOptions
+        case clientExerciseId, name, slug, sets, reps, restSeconds, equipment, primaryMuscle, secondaryMuscles, isCompound, movementPattern, loadUnit, plannedTargetWeightLbs, tracksWeight, isTimed, plannedDurationSeconds, recommendation, recommendedReps, completedSets, isDone, isGuide, slotRole, slotLabel, prescriptionType, swapOptions
     }
 
     init(
@@ -123,6 +124,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         secondaryMuscles: [String]? = nil,
         isCompound: Bool? = nil,
         movementPattern: String? = nil,
+        loadUnit: String? = nil,
         plannedTargetWeightLbs: Double?,
         tracksWeight: Bool? = nil,
         isTimed: Bool? = nil,
@@ -148,6 +150,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.secondaryMuscles = secondaryMuscles
         self.isCompound = isCompound
         self.movementPattern = movementPattern
+        self.loadUnit = loadUnit
         self.plannedTargetWeightLbs = plannedTargetWeightLbs
         self.tracksWeight = tracksWeight
         self.isTimed = isTimed
@@ -176,6 +179,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.secondaryMuscles = try? c.decodeIfPresent([String].self, forKey: .secondaryMuscles)
         self.isCompound = c.decodeFlexibleBoolIfPresent(forKey: .isCompound)
         self.movementPattern = c.decodeFlexibleStringIfPresent(forKey: .movementPattern)
+        self.loadUnit = c.decodeFlexibleStringIfPresent(forKey: .loadUnit)
         self.plannedTargetWeightLbs = c.decodeFlexibleDoubleIfPresent(forKey: .plannedTargetWeightLbs)
         self.tracksWeight = try? c.decodeIfPresent(Bool.self, forKey: .tracksWeight)
         self.isTimed = try? c.decodeIfPresent(Bool.self, forKey: .isTimed)

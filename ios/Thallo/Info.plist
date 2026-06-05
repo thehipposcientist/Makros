@@ -1,114 +1,114 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-  <dict>
-    <key>CADisableMinimumFrameDurationOnPhone</key>
-    <true/>
-    <key>CFBundleAllowMixedLocalizations</key>
-    <true/>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>$(DEVELOPMENT_LANGUAGE)</string>
-    <key>CFBundleDisplayName</key>
-    <string>Thallo</string>
-    <key>CFBundleExecutable</key>
-    <string>$(EXECUTABLE_NAME)</string>
-    <key>CFBundleIdentifier</key>
-    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>$(PRODUCT_NAME)</string>
-    <key>CFBundlePackageType</key>
-    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundleSignature</key>
-    <string>????</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-      <dict>
-        <key>CFBundleURLSchemes</key>
-        <array>
-          <string>thallo</string>
-          <string>com.thallo.app</string>
-        </array>
-      </dict>
-      <dict>
-        <key>CFBundleURLSchemes</key>
-        <array>
-          <string>exp+thallo</string>
-        </array>
-      </dict>
-    </array>
-    <key>CFBundleVersion</key>
-    <string>140</string>
-    <key>ITSAppUsesNonExemptEncryption</key>
-    <false/>
-    <key>LSApplicationQueriesSchemes</key>
-    <array>
-      <string>instagram</string>
-      <string>instagram-stories</string>
-    </array>
-    <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
-    <key>LSRequiresIPhoneOS</key>
-    <true/>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-      <key>NSAllowsArbitraryLoads</key>
-      <false/>
-      <key>NSAllowsLocalNetworking</key>
-      <true/>
-    </dict>
-    <key>NSCameraUsageDescription</key>
-    <string>Thallo uses the camera for barcode scans and optional food, supplement, equipment, form, body, and lab report photos you choose to capture.</string>
-    <key>NSFaceIDUsageDescription</key>
-    <string>Thallo uses Face ID to unlock the app quickly so you don't have to retype your password every session.</string>
-    <key>NSHealthShareUsageDescription</key>
-    <string>Thallo reads Apple Health categories you allow, including sleep, heart rate, HRV, steps, workouts and routes, weight, energy, VO2 max, respiratory rate, blood oxygen, wrist temperature, breathing disturbances, standing hours, mindful minutes, daylight time, menstrual-flow signals, and nutrition summaries so readiness, recovery, fueling, sun exposure, and progress trends work in the app.</string>
-    <key>NSHealthUpdateUsageDescription</key>
-    <string>Thallo writes completed workouts, calories, distances, and route data to Apple Health when you save a workout with those details.</string>
-    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-    <string>Thallo uses your location during active outdoor cardio, including when the screen locks, to track distance, pace, route, and elevation, and when you enable sun exposure estimates to estimate daylight, UV, and coarse area context.</string>
-    <key>NSLocationAlwaysUsageDescription</key>
-    <string>Thallo uses your location during active outdoor cardio, including when the screen locks, to track distance, pace, route, and elevation.</string>
-    <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Thallo uses your location during active outdoor cardio to track distance, pace, route, and elevation, and when you enable sun exposure estimates to estimate daylight, UV, and coarse area context.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Thallo uses the microphone for speech-to-meal voice entry so you can describe what you ate without typing.</string>
-    <key>NSMotionUsageDescription</key>
-    <string>Thallo uses motion data to suggest tracking walks, runs, and rides you appear to have started.</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Thallo accesses only the photos or videos you choose for meals, workout shares, body/form feedback, gear, equipment, supplement, and lab report features.</string>
-    <key>NSSupportsLiveActivities</key>
-    <true/>
-    <key>NSSupportsLiveActivitiesFrequentUpdates</key>
-    <true/>
-    <key>RCTNewArchEnabled</key>
-    <true/>
-    <key>UIBackgroundModes</key>
-    <array>
-      <string>audio</string>
-      <string>location</string>
-    </array>
-    <key>UILaunchStoryboardName</key>
-    <string>SplashScreen</string>
-    <key>UIRequiredDeviceCapabilities</key>
-    <array>
-      <string>arm64</string>
-    </array>
-    <key>UIRequiresFullScreen</key>
-    <false/>
-    <key>UIStatusBarStyle</key>
-    <string>UIStatusBarStyleDefault</string>
-    <key>UISupportedInterfaceOrientations</key>
-    <array>
-      <string>UIInterfaceOrientationPortrait</string>
-      <string>UIInterfaceOrientationPortraitUpsideDown</string>
-    </array>
-    <key>UIUserInterfaceStyle</key>
-    <string>Dark</string>
-    <key>UIViewControllerBasedStatusBarAppearance</key>
-    <false/>
-  </dict>
+<dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>CFBundleAllowMixedLocalizations</key>
+	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Thallo</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>thallo</string>
+				<string>com.thallo.app</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>exp+thallo</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>576</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>instagram</string>
+		<string>instagram-stories</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Thallo uses the camera for barcode scans and optional food, supplement, equipment, form, body, and lab report photos you choose to capture.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Thallo uses Face ID to unlock the app quickly so you don't have to retype your password every session.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Thallo reads Apple Health categories you allow, including sleep, heart rate, HRV, steps, workouts and routes, weight, energy, VO2 max, respiratory rate, blood oxygen, wrist temperature, breathing disturbances, standing hours, mindful minutes, daylight time, menstrual-flow signals, and nutrition summaries so readiness, recovery, fueling, sun exposure, and progress trends work in the app.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Thallo writes completed workouts, calories, distances, and route data to Apple Health when you save a workout with those details.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Thallo uses your location during active outdoor cardio, including when the screen locks, to track distance, pace, route, and elevation, and when you enable sun exposure estimates to estimate daylight, UV, and coarse area context.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Thallo uses your location during active outdoor cardio, including when the screen locks, to track distance, pace, route, and elevation.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Thallo uses your location during active outdoor cardio to track distance, pace, route, and elevation, and when you enable sun exposure estimates to estimate daylight, UV, and coarse area context.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Thallo uses the microphone for speech-to-meal voice entry so you can describe what you ate without typing.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Thallo uses motion data to suggest tracking walks, runs, and rides you appear to have started.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Thallo accesses only the photos or videos you choose for meals, workout shares, body/form feedback, gear, equipment, supplement, and lab report features.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
+	<key>RCTNewArchEnabled</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>location</string>
+	</array>
+	<key>UILaunchStoryboardName</key>
+	<string>SplashScreen</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<false/>
+	<key>UIStatusBarStyle</key>
+	<string>UIStatusBarStyleDefault</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+</dict>
 </plist>

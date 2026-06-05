@@ -42,7 +42,7 @@ def _register(body: UserCreate, session: Session):
 def _body(
     *,
     email: str = "unfinished@example.com",
-    username: str = "freshname",
+    username: str | None = "freshname",
     password: str = "newpass123",
 ) -> UserCreate:
     return UserCreate(
@@ -103,6 +103,29 @@ def test_register_recycles_unfinished_email_signup():
     print("PASS test_register_recycles_unfinished_email_signup")
 
 
+def test_register_generates_unique_username_when_omitted():
+    engine = _engine()
+    original_send = auth_router.send_verification_email
+    auth_router.send_verification_email = lambda _email, _token: True
+    try:
+        with Session(engine) as session:
+            session.add(User(email="taken@example.com", username="freshnamecoach", hashed_password="x"))
+            session.commit()
+
+            resp = _register(_body(email="fresh.name+coach@example.com", username=None), session)
+            created = session.exec(select(User).where(User.email == "fresh.name+coach@example.com")).first()
+
+            assert created is not None
+            assert resp.username == "freshnamecoach_1"
+            assert created.username == "freshnamecoach_1"
+            assert verify_password("newpass123", created.hashed_password)
+            assert len(session.exec(select(User)).all()) == 2
+    finally:
+        auth_router.send_verification_email = original_send
+        engine.dispose()
+    print("PASS test_register_generates_unique_username_when_omitted")
+
+
 def test_register_preserves_completed_account_email_lock():
     engine = _engine()
     original_send = auth_router.send_verification_email
@@ -140,6 +163,7 @@ def test_register_preserves_completed_account_email_lock():
 
 cases = [
     test_register_recycles_unfinished_email_signup,
+    test_register_generates_unique_username_when_omitted,
     test_register_preserves_completed_account_email_lock,
 ]
 

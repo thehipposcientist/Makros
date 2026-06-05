@@ -135,11 +135,50 @@ function curve(value: number, low: number, mid: number, target: number, outOf: n
   return outOf * 0.6 + outOf * 0.4 * (value - mid) / (target - mid);
 }
 
+function bandAlignment(
+  value: number,
+  target: number,
+  greenLow: number,
+  greenHigh: number,
+  yellowLow: number,
+  yellowHigh: number,
+): number {
+  if (target <= 0) return 0.5;
+  const ratio = value / target;
+  if (ratio >= greenLow && ratio <= greenHigh) return 1.0;
+  if (ratio >= yellowLow && ratio < greenLow) return 0.75 + ((ratio - yellowLow) / (greenLow - yellowLow)) * 0.25;
+  if (ratio > greenHigh && ratio <= yellowHigh) return 0.75 + ((yellowHigh - ratio) / (yellowHigh - greenHigh)) * 0.25;
+  if (ratio < yellowLow) return Math.max(0, 0.75 * (ratio / yellowLow));
+  return Math.max(0, 0.75 * (1 - ((ratio - yellowHigh) / 0.50)));
+}
+
+function floorAlignment(value: number, target: number, closeFloor = 0.90): number {
+  if (target <= 0) return 0.5;
+  const ratio = value / target;
+  if (ratio >= 1.0) return 1.0;
+  if (ratio >= closeFloor) return 0.75 + ((ratio - closeFloor) / (1 - closeFloor)) * 0.25;
+  return Math.max(0, 0.75 * (ratio / closeFloor));
+}
+
 function collectAllItems(plan: DailyNutritionPlan): MealItem[] {
   const removed = new Set(plan.removedMealIds ?? []);
   return plan.meals
     .filter((_, i) => !removed.has(String(i)))
     .flatMap(m => m.items ?? []);
+}
+
+function mealMacro(meal: MealSuggestion, key: 'calories' | 'protein' | 'carbs' | 'fat', alias?: string): number {
+  const direct = Number((meal as any)[key] ?? 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  if (alias) {
+    const aliased = Number((meal as any)[alias] ?? 0);
+    if (Number.isFinite(aliased) && aliased > 0) return aliased;
+  }
+  return (meal.items ?? []).reduce((sum, item) => {
+    const itemDirect = Number((item as any)[key] ?? 0);
+    const itemAliased = alias ? Number((item as any)[alias] ?? 0) : 0;
+    return sum + (Number.isFinite(itemDirect) && itemDirect > 0 ? itemDirect : (Number.isFinite(itemAliased) ? itemAliased : 0));
+  }, 0);
 }
 
 export function computePlanGutHealth(
@@ -210,13 +249,19 @@ export function computeNutritionScore(
   if (sex && sex.toLowerCase() === 'male') effectiveRDA.iron = 8;
 
   const targets = plan.targets;
+  const targetCalories = Number((targets as any).calories ?? 0);
+  const targetProtein = Number((targets as any).protein ?? (targets as any).protein_g ?? 0);
+  const targetCarbs = Number((targets as any).carbs ?? (targets as any).carbs_g ?? 0);
+  const targetFat = Number((targets as any).fat ?? (targets as any).fat_g ?? 0);
   const removed = new Set(plan.removedMealIds ?? []);
   const activeMeals = plan.meals.filter((_, i) => !removed.has(String(i)));
   if (!activeMeals.length) return empty;
   const items = collectAllItems(plan);
 
-  const totalCal = activeMeals.reduce((s, m) => s + (m.calories || 0), 0);
-  const totalPro = activeMeals.reduce((s, m) => s + (m.protein || 0), 0);
+  const totalCal = activeMeals.reduce((s, m) => s + mealMacro(m, 'calories'), 0);
+  const totalPro = activeMeals.reduce((s, m) => s + mealMacro(m, 'protein', 'protein_g'), 0);
+  const totalCarbs = activeMeals.reduce((s, m) => s + mealMacro(m, 'carbs', 'carbs_g'), 0);
+  const totalFat = activeMeals.reduce((s, m) => s + mealMacro(m, 'fat', 'fat_g'), 0);
   if (totalCal <= 0 && totalPro <= 0) return empty;
 
   const micros: Record<string, number> = {};
@@ -270,29 +315,55 @@ export function computeNutritionScore(
   const upfPct = totalClassified > 0 ? (upf / totalClassified) * 100 : 0;
 
   // Adherence
-  const calAlignment = targets.calories > 0
+  const calAlignment = targetCalories > 0
     ? (() => {
-        const dev = Math.abs(1 - totalCal / targets.calories);
+        const dev = Math.abs(1 - totalCal / targetCalories);
         if (dev <= 0.05) return 1.0;
         if (dev <= 0.10) return 0.75 + ((0.10 - dev) / 0.05) * 0.25;
         return Math.max(0, 0.75 * (1 - (dev - 0.10) / 0.30));
       })()
     : 0.5;
-  const proRatio = targets.protein > 0 ? totalPro / targets.protein : 0.5;
+  const proRatio = targetProtein > 0 ? totalPro / targetProtein : 0.5;
   const proAlignment = proRatio >= 0.95 ? 1.0 : Math.max(0, proRatio / 0.95);
-  const calorieRange = nutritionTargetRange('calories', targets.calories);
-  const calorieGreenRange = nutritionTargetRange('calories', targets.calories, 'green');
-  const proteinRange = nutritionTargetRange('protein', targets.protein, 'green');
-  const calorieDeviation = targets.calories > 0 ? Math.abs(1 - totalCal / targets.calories) : null;
+  const carbRatio = targetCarbs > 0 ? totalCarbs / targetCarbs : 0;
+  const carbAlignment = bandAlignment(totalCarbs, targetCarbs, 0.85, 1.15, 0.75, 1.25);
+  const fatRatio = targetFat > 0 ? totalFat / targetFat : 0;
+  const fatAlignment = floorAlignment(totalFat, targetFat);
+  const calorieRange = nutritionTargetRange('calories', targetCalories);
+  const calorieGreenRange = nutritionTargetRange('calories', targetCalories, 'green');
+  const proteinRange = nutritionTargetRange('protein', targetProtein, 'green');
+  const carbsRange = nutritionTargetRange('carbs', targetCarbs);
+  const carbsGreenRange = nutritionTargetRange('carbs', targetCarbs, 'green');
+  const fatRange = nutritionTargetRange('fat', targetFat, 'yellow');
+  const calorieDeviation = targetCalories > 0 ? Math.abs(1 - totalCal / targetCalories) : null;
   const caloriesOnTarget = calorieDeviation !== null && calorieDeviation <= 0.05;
   const caloriesClose = calorieDeviation !== null && calorieDeviation <= 0.10;
-  const proteinMinHit = targets.protein > 0 && proRatio >= 0.95;
+  const proteinMinHit = targetProtein > 0 && proRatio >= 0.95;
+  const carbsOnTarget = targetCarbs > 0 && carbRatio >= 0.85 && carbRatio <= 1.15;
+  const carbsClose = targetCarbs > 0 && carbRatio >= 0.75 && carbRatio <= 1.25;
+  const fatFloorHit = targetFat > 0 && fatRatio >= 1.0;
+  const fatClose = targetFat > 0 && fatRatio >= 0.90;
 
-  const adherence = Math.round(Math.min(100, calAlignment * 40 + proAlignment * 60));
+  const adherenceComponents = [
+    { weight: 40, alignment: calAlignment, enabled: targetCalories > 0 },
+    { weight: 30, alignment: proAlignment, enabled: targetProtein > 0 },
+    { weight: 15, alignment: carbAlignment, enabled: targetCarbs > 0 },
+    { weight: 15, alignment: fatAlignment, enabled: targetFat > 0 },
+  ].filter(component => component.enabled);
+  const adherenceWeight = adherenceComponents.reduce((sum, component) => sum + component.weight, 0);
+  const adherence = adherenceWeight > 0
+    ? Math.round(Math.min(100, adherenceComponents.reduce((sum, component) => sum + component.weight * component.alignment, 0) / adherenceWeight * 100))
+    : 0;
   const adherence_breakdown: NutritionScoreBreakdownItem[] = [
-    bd('Calories', calAlignment * 100, totalCal, targets.calories, 'kcal', caloriesOnTarget, calorieRange),
-    bd('Protein', proAlignment * 100, totalPro, targets.protein, 'g', proteinMinHit, proteinRange),
+    bd('Calories', calAlignment * 100, totalCal, targetCalories, 'kcal', caloriesOnTarget, calorieRange),
+    bd('Protein', proAlignment * 100, totalPro, targetProtein, 'g', proteinMinHit, proteinRange),
   ];
+  if (targetCarbs > 0) {
+    adherence_breakdown.push(bd('Carbs', carbAlignment * 100, totalCarbs, targetCarbs, 'g', carbsOnTarget, carbsRange));
+  }
+  if (targetFat > 0) {
+    adherence_breakdown.push(bd('Fat', fatAlignment * 100, totalFat, targetFat, 'g', fatFloorHit, fatRange));
+  }
 
   // Food Quality — 7 inputs
   const fiberDensity = totalCal > 0 ? (fiber_g / totalCal) * 1000 : 0;
@@ -426,7 +497,7 @@ export function computeNutritionScore(
   const tags: string[] = [];
   const wins: string[] = [];
   const improvements: string[] = [];
-  const calRatio = targets.calories > 0 ? totalCal / targets.calories : 1;
+  const calRatio = targetCalories > 0 ? totalCal / targetCalories : 1;
 
   if (caloriesOnTarget) {
     tags.push('Calories on target'); wins.push('Calories on target');
@@ -440,8 +511,20 @@ export function computeNutritionScore(
 
   if (proteinMinHit) { tags.push('Protein target met'); wins.push('Protein target met'); }
   else if (totalPro > 0) {
-    const proteinGap = Math.round(targets.protein - totalPro);
+    const proteinGap = Math.round(targetProtein - totalPro);
     if (proteinGap > 0) improvements.push(`Protein ${proteinGap}g below target`);
+  }
+
+  if (targetCarbs > 0) {
+    if (carbsOnTarget) tags.push('Carbs in range');
+    else if (totalCarbs > 0 && !carbsClose) {
+      improvements.push(carbRatio < 0.75 ? 'Carbs below target range' : 'Carbs above target range');
+    }
+  }
+
+  if (targetFat > 0) {
+    if (fatFloorHit) tags.push('Fat target met');
+    else if (totalFat > 0 && !fatClose) improvements.push('Fat below target floor');
   }
 
   if (fiberPts >= 14) { tags.push('Fiber on track'); wins.push('Fiber on track'); }
@@ -470,12 +553,20 @@ export function computeNutritionScore(
     indicators: {
       calories_alignment: Math.round(calAlignment * 100) / 100,
       protein_alignment: Math.round(proAlignment * 100) / 100,
+      carbs_alignment: Math.round(carbAlignment * 100) / 100,
+      fat_alignment: Math.round(fatAlignment * 100) / 100,
       target_calories_green_min: calorieGreenRange?.min ?? null,
       target_calories_green_max: calorieGreenRange?.max ?? null,
       target_calories_min: calorieRange?.min ?? null,
       target_calories_max: calorieRange?.max ?? null,
       target_protein_min: proteinRange?.min ?? null,
       target_protein_max: proteinRange?.max ?? null,
+      target_carbs_green_min: carbsGreenRange?.min ?? null,
+      target_carbs_green_max: carbsGreenRange?.max ?? null,
+      target_carbs_min: carbsRange?.min ?? null,
+      target_carbs_max: carbsRange?.max ?? null,
+      target_fat_min: fatRange?.min ?? null,
+      target_fat_max: fatRange?.max ?? null,
       fiber_density: Math.round(fiberDensity * 10) / 10,
       added_sugar_pct_cals: Math.round(addedSugarPct * 10) / 10,
       sat_fat_pct_cals: Math.round(satFatPct * 10) / 10,
@@ -488,9 +579,13 @@ export function computeNutritionScore(
       logging_completeness: Math.round(loggingCompleteness * 100) / 100,
       micro_confidence: microConfidence,
       total_calories: totalCal,
-      target_calories: targets.calories,
+      target_calories: targetCalories,
       total_protein: totalPro,
-      target_protein: targets.protein,
+      target_protein: targetProtein,
+      total_carbs: totalCarbs,
+      target_carbs: targetCarbs,
+      total_fat: totalFat,
+      target_fat: targetFat,
     },
   };
 }

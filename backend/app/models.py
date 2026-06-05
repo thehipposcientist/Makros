@@ -2674,7 +2674,7 @@ class TrainerClientNote(SQLModel, table=True):
 
 class UserCreate(SQLModel):
     email: str
-    username: str
+    username: str | None = Field(default=None)
     first_name: str | None = Field(default=None)
     last_name: str | None = Field(default=None)
     # Pydantic-level floor. Router `_validate_password` enforces the full

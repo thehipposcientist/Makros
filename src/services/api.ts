@@ -543,9 +543,9 @@ function normalizeWindowOptions(input: number | ListWindowOptions | undefined, d
 
 export async function register(
   email: string,
-  username: string,
   password: string,
   opts?: {
+    username?: string | null;
     firstName?: string;
     lastName?: string;
     legalVersion?: string;
@@ -559,7 +559,7 @@ export async function register(
     method: 'POST',
     body: JSON.stringify({
       email,
-      username,
+      username: opts?.username ?? undefined,
       password,
       first_name: opts?.firstName,
       last_name: opts?.lastName,
@@ -570,7 +570,7 @@ export async function register(
       legal_version: opts?.legalVersion,
     }),
   });
-  recordTelemetryEvent('signup_completed', { has_legal_acceptance: true });
+  recordTelemetryEvent('signup_complete', { has_legal_acceptance: true });
   return result;
 }
 
@@ -1875,7 +1875,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
       },
     }),
   });
-  recordTelemetryEvent('onboarding_completed', {
+  recordTelemetryEvent('onboarding_complete', {
     goal: profile.goal,
     days_per_week: profile.daysPerWeek,
   }, token);
@@ -4859,7 +4859,7 @@ export async function getProteinBreakdown(token: string): Promise<ProteinBreakdo
   });
 }
 
-// Unified Nutrition Score — server-side authority for the projected day plan.
+// Unified Nutrition Score — server-side authority for logged meals.
 export interface NutritionScoreBreakdownItem {
   label: string;
   value_pct: number;     // 0-100 for bar
@@ -4903,8 +4903,8 @@ export interface NutritionScoreToday {
   adherence_breakdown: NutritionScoreBreakdownItem[];
   quality_breakdown: NutritionScoreBreakdownItem[];
   micro_breakdown: NutritionScoreBreakdownItem[];
-  targets: { calories: number; protein_g: number };
-  totals: { calories: number; protein_g: number };
+  targets: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+  totals: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
   goal: string;
   score_version: number;
 }

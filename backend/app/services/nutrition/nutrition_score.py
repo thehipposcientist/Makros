@@ -1,7 +1,7 @@
 """Daily Nutrition Score — unified scoring pipeline.
 
 Produces a single 0-100 Nutrition Score from three sub-scores:
-  1. Adherence (30-45%): calorie + protein alignment against targets
+  1. Adherence (30-45%): calorie + macro alignment against targets
   2. Food Quality (30-40%): fiber, added sugar, sat fat, sodium, processing,
      plant diversity, omega-3 signal
   3. Micronutrient Coverage (20-30%): priority-6 micros (D, calcium, iron,
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Any
 
-SCORE_VERSION = 6   # v6 tightens calorie adherence: ±5 on-target, ±10 close
+SCORE_VERSION = 7   # v7 scores logged meals first + full macro adherence
 
 
 # ─── RDA targets (adults, general) ───────────────────────────────────────────
@@ -63,6 +63,40 @@ KEY_MICROS = [
 RESILIENCE_MICROS = ["magnesium_mg", "zinc_mg", "vitamin_d_mcg", "selenium_mcg", "copper_mg"]
 
 
+def _band_alignment(
+    value: float,
+    target: float,
+    *,
+    green_low: float,
+    green_high: float,
+    yellow_low: float,
+    yellow_high: float,
+) -> float:
+    if target <= 0:
+        return 0.5
+    ratio = value / target
+    if green_low <= ratio <= green_high:
+        return 1.0
+    if yellow_low <= ratio < green_low:
+        return 0.75 + ((ratio - yellow_low) / (green_low - yellow_low)) * 0.25
+    if green_high < ratio <= yellow_high:
+        return 0.75 + ((yellow_high - ratio) / (yellow_high - green_high)) * 0.25
+    if ratio < yellow_low:
+        return max(0.0, 0.75 * (ratio / yellow_low))
+    return max(0.0, 0.75 * (1.0 - ((ratio - yellow_high) / 0.50)))
+
+
+def _floor_alignment(value: float, target: float, *, close_floor: float = 0.90) -> float:
+    if target <= 0:
+        return 0.5
+    ratio = value / target
+    if ratio >= 1.0:
+        return 1.0
+    if ratio >= close_floor:
+        return 0.75 + ((ratio - close_floor) / (1.0 - close_floor)) * 0.25
+    return max(0.0, 0.75 * (ratio / close_floor))
+
+
 # ─── Daily nutrition indicators ──────────────────────────────────────────────
 
 @dataclass
@@ -79,6 +113,10 @@ class NutritionIndicators:
     calories_target: float = 0
     protein_logged: float = 0
     protein_target: float = 0
+    carbs_logged: float = 0
+    carbs_target: float = 0
+    fat_logged: float = 0
+    fat_target: float = 0
     # Food Quality inputs
     fiber_g: float = 0
     added_sugar_g: float = 0
@@ -126,6 +164,23 @@ class NutritionIndicators:
         if ratio >= 0.95:
             return 1.0
         return max(0.0, ratio / 0.95)
+
+    @property
+    def carbs_alignment(self) -> float:
+        """Flexible carb band: full inside ±15%, close through ±25%."""
+        return _band_alignment(
+            self.carbs_logged,
+            self.carbs_target,
+            green_low=0.85,
+            green_high=1.15,
+            yellow_low=0.75,
+            yellow_high=1.25,
+        )
+
+    @property
+    def fat_alignment(self) -> float:
+        """Fat is treated as a floor. Being over target is handled by calories."""
+        return _floor_alignment(self.fat_logged, self.fat_target)
 
     @property
     def fiber_density(self) -> float:
@@ -229,8 +284,12 @@ def _target_range(kind: str, target: float | int | None) -> tuple[int, int] | No
         low_pct, high_pct = 0.90, 1.10
     elif kind == "protein":
         low_pct, high_pct = 0.95, 1.00
+    elif kind == "carbs_green":
+        low_pct, high_pct = 0.85, 1.15
+    elif kind == "carbs":
+        low_pct, high_pct = 0.75, 1.25
     elif kind == "fat":
-        low_pct, high_pct = 1.00, 1.00
+        low_pct, high_pct = 0.90, 1.00
     else:
         low_pct, high_pct = 0.75, 1.25
     midpoint = int(round(t))
@@ -283,9 +342,14 @@ def compute_nutrition_score(
     # ── Adherence (0-100) ────────────────────────────────────────────
     cal_align = indicators.calorie_alignment
     pro_align = indicators.protein_alignment
+    carb_align = indicators.carbs_alignment
+    fat_align = indicators.fat_alignment
     calorie_range = _target_range("calories", indicators.calories_target)
     calorie_green_range = _target_range("calories_green", indicators.calories_target)
     protein_range = _target_range("protein", indicators.protein_target)
+    carbs_range = _target_range("carbs", indicators.carbs_target)
+    carbs_green_range = _target_range("carbs_green", indicators.carbs_target)
+    fat_range = _target_range("fat", indicators.fat_target)
     calorie_deviation = (
         abs(1.0 - (indicators.calories_logged / indicators.calories_target))
         if indicators.calories_target > 0
@@ -299,9 +363,33 @@ def compute_nutrition_score(
         else 0.0
     )
     protein_min_hit = protein_ratio >= 0.95
-    cal_pts = cal_align * 40
-    pro_pts = pro_align * 60
-    adherence = round(min(100, cal_pts + pro_pts))
+    carbs_ratio = (
+        indicators.carbs_logged / indicators.carbs_target
+        if indicators.carbs_target > 0
+        else 0.0
+    )
+    carbs_on_target = indicators.carbs_target > 0 and 0.85 <= carbs_ratio <= 1.15
+    carbs_close = indicators.carbs_target > 0 and 0.75 <= carbs_ratio <= 1.25
+    fat_ratio = (
+        indicators.fat_logged / indicators.fat_target
+        if indicators.fat_target > 0
+        else 0.0
+    )
+    fat_floor_hit = indicators.fat_target > 0 and fat_ratio >= 1.0
+    fat_close = indicators.fat_target > 0 and fat_ratio >= 0.90
+    adherence_components = [
+        (40.0, cal_align, indicators.calories_target > 0),
+        (30.0, pro_align, indicators.protein_target > 0),
+        (15.0, carb_align, indicators.carbs_target > 0),
+        (15.0, fat_align, indicators.fat_target > 0),
+    ]
+    active_adherence = [(weight, align) for weight, align, enabled in adherence_components if enabled]
+    adherence_weight = sum(weight for weight, _ in active_adherence)
+    adherence = (
+        round(min(100, sum(weight * align for weight, align in active_adherence) / adherence_weight * 100))
+        if adherence_weight > 0
+        else 0
+    )
 
     adherence_breakdown = [
         _bd(
@@ -325,6 +413,32 @@ def compute_nutrition_score(
             target_max=protein_range[1] if protein_range else None,
         ),
     ]
+    if indicators.carbs_target > 0:
+        adherence_breakdown.append(
+            _bd(
+                "Carbs",
+                int(carb_align * 100),
+                indicators.carbs_logged,
+                indicators.carbs_target,
+                "g",
+                carbs_on_target,
+                target_min=carbs_range[0] if carbs_range else None,
+                target_max=carbs_range[1] if carbs_range else None,
+            )
+        )
+    if indicators.fat_target > 0:
+        adherence_breakdown.append(
+            _bd(
+                "Fat",
+                int(fat_align * 100),
+                indicators.fat_logged,
+                indicators.fat_target,
+                "g",
+                fat_floor_hit,
+                target_min=fat_range[0] if fat_range else None,
+                target_max=fat_range[1] if fat_range else None,
+            )
+        )
 
     # ── Food Quality (0-100) ─────────────────────────────────────────
     # 7-input model. Each input contributes its own max points.
@@ -484,6 +598,10 @@ def compute_nutrition_score(
         "calorie_on_track": calories_on_target,
         "calorie_close": calories_close,
         "protein_on_track": protein_min_hit,
+        "carbs_on_track": carbs_on_target,
+        "carbs_close": carbs_close,
+        "fat_on_track": fat_floor_hit,
+        "fat_close": fat_close,
         "fiber_on_track": fiber_pts >= 14,
         "added_sugar_on_track": added_sugar_pts >= 12,
         "sat_fat_on_track": sat_fat_pts >= 12,
@@ -513,6 +631,21 @@ def compute_nutrition_score(
         gap = int(round(indicators.protein_target - indicators.protein_logged))
         if gap > 0:
             improvements.append(f"Protein {gap}g below target")
+
+    if indicators.carbs_target > 0:
+        if flags["carbs_on_track"]:
+            tags.append("Carbs in range")
+        elif indicators.carbs_logged > 0 and not flags["carbs_close"]:
+            if carbs_ratio < 0.75:
+                improvements.append("Carbs below target range")
+            elif carbs_ratio > 1.25:
+                improvements.append("Carbs above target range")
+
+    if indicators.fat_target > 0:
+        if flags["fat_on_track"]:
+            tags.append("Fat target met")
+        elif indicators.fat_logged > 0 and not flags["fat_close"]:
+            improvements.append("Fat below target floor")
 
     if flags["fiber_on_track"]:
         tags.append("Fiber on track"); wins.append("Fiber on track")
@@ -572,12 +705,20 @@ def compute_nutrition_score(
         indicators={
             "calories_alignment": round(cal_align, 2),
             "protein_alignment": round(pro_align, 2),
+            "carbs_alignment": round(carb_align, 2),
+            "fat_alignment": round(fat_align, 2),
             "target_calories_green_min": calorie_green_range[0] if calorie_green_range else None,
             "target_calories_green_max": calorie_green_range[1] if calorie_green_range else None,
             "target_calories_min": calorie_range[0] if calorie_range else None,
             "target_calories_max": calorie_range[1] if calorie_range else None,
             "target_protein_min": protein_range[0] if protein_range else None,
             "target_protein_max": protein_range[1] if protein_range else None,
+            "target_carbs_green_min": carbs_green_range[0] if carbs_green_range else None,
+            "target_carbs_green_max": carbs_green_range[1] if carbs_green_range else None,
+            "target_carbs_min": carbs_range[0] if carbs_range else None,
+            "target_carbs_max": carbs_range[1] if carbs_range else None,
+            "target_fat_min": fat_range[0] if fat_range else None,
+            "target_fat_max": fat_range[1] if fat_range else None,
             "fiber_density": round(fiber_density, 1),
             "added_sugar_pct_cals": round(added_sugar_pct, 1),
             "sat_fat_pct_cals": round(sat_fat_pct, 1),
@@ -589,6 +730,14 @@ def compute_nutrition_score(
             "seafood_servings_weekly": round(indicators.seafood_servings_weekly, 1),
             "logging_completeness": round(indicators.logging_completeness, 2),
             "micro_confidence": micro_conf,
+            "total_calories": round(indicators.calories_logged),
+            "target_calories": round(indicators.calories_target),
+            "total_protein": round(indicators.protein_logged, 1),
+            "target_protein": round(indicators.protein_target, 1),
+            "total_carbs": round(indicators.carbs_logged, 1),
+            "target_carbs": round(indicators.carbs_target, 1),
+            "total_fat": round(indicators.fat_logged, 1),
+            "target_fat": round(indicators.fat_target, 1),
         },
     )
 

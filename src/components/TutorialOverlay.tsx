@@ -1,7 +1,6 @@
 // Post-onboarding tutorial — the first thing a user sees after they
-// finish the onboarding form. Tier-aware: free and pro users see
-// different step content (free leans on what's available + a soft
-// upgrade hint; pro leans on the AI-powered features they unlocked).
+// finish the onboarding form. Keep it short: orient the user, then let
+// the real dashboard carry the next action.
 //
 // Auto-shows once via AsyncStorage flag (`tutorial_v1_completed`).
 // Can be replayed manually from Account → "Show tutorial" by clearing
@@ -33,11 +32,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { APP_THEMES, THEME_PICKER_ORDER, getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { pexelsPhoto } from '../constants/stockImages';
-import {
-  HEALTH_PLATFORM_LABEL,
-  HEALTH_PLATFORM_PRO_COPY,
-  HEALTH_PLATFORM_STATUS_COPY,
-} from '../constants/platformHealth';
+import { HEALTH_PLATFORM_LABEL } from '../constants/platformHealth';
 import type { AppThemeName } from '../types';
 import DeviceSyncMockup from './DeviceSyncMockup';
 
@@ -47,10 +42,14 @@ interface Props {
   visible: boolean;
   tier: TutorialTier;
   themeName?: AppThemeName;
+  hiddenSurfaces?: {
+    workouts?: boolean;
+    meals?: boolean;
+  };
   /** Fires when the user taps Skip OR Done. Caller should mark the
    *  AsyncStorage flag completed in BOTH cases — once the user has
    *  seen the tutorial we don't want to re-prompt. */
-  onClose: (result: { completed: boolean; startLiveTutorial?: boolean }) => void;
+  onClose: (result: { completed: boolean }) => void;
   onThemeChange?: (themeName: AppThemeName) => void | Promise<void>;
   onHealthSetup?: () => void | Promise<void>;
   /** Optional — fires when a free user taps the upsell CTA. Caller
@@ -91,28 +90,16 @@ const WELCOME_HERO_IMAGES: ImageSourcePropType[] = [
   { uri: pexelsPhoto('30635713', { width: 900, height: 900 }) },
   { uri: pexelsPhoto('32977239', { width: 900, height: 900 }) },
 ];
-const WORKOUT_HERO_IMAGES: ImageSourcePropType[] = [
-  { uri: pexelsPhoto('13993018', { width: 900, height: 900 }) },
-  { uri: pexelsPhoto('5878699', { width: 900, height: 900 }) },
-];
-const MEAL_HERO_IMAGES: ImageSourcePropType[] = [
-  { uri: pexelsPhoto('30635713', { width: 900, height: 900 }) },
-  { uri: pexelsPhoto('30635717', { width: 900, height: 900 }) },
-];
-const PROGRESS_HERO_IMAGES: ImageSourcePropType[] = [
-  { uri: pexelsPhoto('32977239', { width: 900, height: 900 }) },
-  { uri: pexelsPhoto('3999644', { width: 900, height: 900 }) },
-];
 
 export default function TutorialOverlay({
-  visible, tier, themeName, onClose, onThemeChange, onHealthSetup,
+  visible, tier, themeName, hiddenSurfaces, onClose, onThemeChange, onHealthSetup,
   onUpgrade,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const styles = useMemo(() => createStyles(tc), [tc]);
 
-  const steps = useMemo(() => buildSteps(tier, tc), [tier, tc]);
+  const steps = useMemo(() => buildSteps(tier, tc, hiddenSurfaces), [tier, tc, hiddenSurfaces]);
 
   const [index, setIndex] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
@@ -148,7 +135,7 @@ export default function TutorialOverlay({
     if (index >= steps.length - 1) {
       // Last step — Done button completes.
       try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
-      onClose({ completed: true, startLiveTutorial: true });
+      onClose({ completed: true });
       return;
     }
     const next = index + 1;
@@ -234,7 +221,7 @@ export default function TutorialOverlay({
             onPress={goNext}
             activeOpacity={0.85}>
             <Text style={styles.primaryBtnText}>
-              {isLast ? 'Start live tour' : 'Next'}
+              {isLast ? 'Done' : 'Next'}
             </Text>
             {!isLast && (
               <Ionicons name="chevron-forward" size={16} color="#fff" style={{ marginLeft: 4 }} />
@@ -480,163 +467,71 @@ function CrossfadeHero({
 
 // ── Step content ──────────────────────────────────────────────────
 //
-// Free and pro share the same short structure: welcome, theme, health
-// setup. The copy branches so Free users see manual-tracking language
-// while Pro users see generated-plan and connected-health language.
+// Free and pro share a short structure: welcome, Today, first action.
+// The copy branches by visible surfaces so workout-only and nutrition-only
+// users do not get coached toward tabs they intentionally hid.
 
-function buildSteps(tier: TutorialTier, tc: any): Step[] {
-  const planCopy = tier === 'pro'
-    ? 'Your full system is ready. Pick your look, connect optional health signals, then we will walk through Today, workouts, meals, progress, and the ways you can customize the app.'
-    : 'Free is ready for workouts, nutrition, or both. Pick your look, review optional health setup, then we will walk through Today, workouts, meals, and progress.';
+function buildSteps(
+  tier: TutorialTier,
+  tc: any,
+  hiddenSurfaces: Props['hiddenSurfaces'] = {},
+): Step[] {
+  const showWorkouts = hiddenSurfaces.workouts !== true;
+  const showMeals = hiddenSurfaces.meals !== true;
+  const focusCopy = showWorkouts && showMeals
+    ? 'workouts, meals, hydration, progress, and recovery'
+    : showWorkouts
+      ? 'training, progress, and recovery'
+      : showMeals
+        ? 'meals, hydration, body trends, and nutrition progress'
+        : 'your daily health history';
+  const welcomeBullets: BulletItem[] = [
+    ...(showWorkouts
+      ? [{ icon: 'barbell-outline' as const, text: tier === 'pro' ? 'Follow the generated week or log your own workout.' : 'Start custom strength or cardio workouts whenever you train.', tint: tc.primary }]
+      : []),
+    ...(showMeals
+      ? [{ icon: 'restaurant-outline' as const, text: tier === 'pro' ? 'Use meal guidance, food logs, hydration, and routines together.' : 'Log meals, hydration, supplements, and weight manually.', tint: tc.success }]
+      : []),
+    { icon: 'analytics-outline', text: 'Progress fills in as you log real days.', tint: tc.warning },
+  ];
   const welcomeStep: Step = {
     heroImages: WELCOME_HERO_IMAGES,
     title: 'Welcome to Thallo',
-    body: `${planCopy} Thallo can be a complete strength, cardio, nutrition, recovery, supplement, and health dashboard, or a focused tracker for the pieces you actually use.`,
-    bullets: tier === 'pro'
-      ? [
-        { icon: 'calendar-outline', text: 'Follow the guided PlanWeek, log your own program, or mix both.', tint: tc.primary },
-        { icon: 'restaurant-outline', text: 'Use meal guidance, manual food logs, hydration, routines, and supplements together.', tint: tc.success },
-        { icon: 'options-outline', text: 'Prefer only workouts or only nutrition? Your dashboard can hide the rest.', tint: tc.warning },
-      ]
-      : [
-        { icon: 'play-outline', text: 'Start custom strength or cardio workouts and save repeat sessions as templates.', tint: tc.primary },
-        { icon: 'restaurant-outline', text: 'Log meals, hydration, supplements, weight, and progress manually.', tint: tc.success },
-        { icon: 'options-outline', text: 'Use workouts only, nutrition only, or both from Settings.', tint: tc.warning },
-      ],
+    body: `Your setup is ready. Thallo starts focused on ${focusCopy}, and you can change that focus later from settings.`,
+    bullets: welcomeBullets,
   };
   const todayStep: Step = {
     icon: 'home-outline',
     iconColor: tc.primary,
     title: 'Today is your home base',
-    body: tier === 'pro'
-      ? 'The Today page gives you the next workout action, current macro targets, hydration, sleep, goal, nutrition, and readiness without digging through every tab.'
-      : 'The Today page still works in manual mode: start a custom workout, log a meal, add water, and see your macro goals from one clean daily view.',
-    bullets: tier === 'pro'
-      ? [
-        { icon: 'barbell-outline', text: 'Start or resume today’s planned workout from the top card.', tint: tc.primary },
-        { icon: 'restaurant-outline', text: 'Log meals and see the same adjusted macro goals used by Meals.', tint: tc.success },
-        { icon: 'moon-outline', text: 'Tap sleep or readiness when you want the deeper Progress context.', tint: tc.warning },
-      ]
-      : [
-        { icon: 'add-circle-outline', text: 'Free and manual accounts get a custom-workout start point instead of an empty plan card.', tint: tc.primary },
-        { icon: 'restaurant-outline', text: 'Use Log meal and quick water from Today before opening the full Meals tab.', tint: tc.success },
-        { icon: 'analytics-outline', text: 'Macro targets stay visible even when you are logging everything manually.', tint: tc.warning },
-      ],
-  };
-  const workoutStep: Step = {
-    heroImages: WORKOUT_HERO_IMAGES,
-    title: tier === 'pro' ? 'Guided plan or your own program' : 'Workouts stay flexible',
-    body: tier === 'pro'
-      ? 'Thallo builds a structured 7-day PlanWeek from your goal, schedule, equipment, and limits. You can follow it, run custom strength or cardio sessions, assign templates, swap exercises, or keep your own routine.'
-      : 'Free gives you the workout tracker first: start custom strength or cardio sessions, save and share templates, import detected workouts, and build useful history before turning on generated planning.',
-    bullets: tier === 'pro'
-      ? [
-        { icon: 'calendar-number-outline', text: 'Past days show done or skipped; future days stay queued until the week renews.', tint: tc.primary },
-        { icon: 'bookmark-outline', text: 'Create templates, assign them to the week, or share template codes and bundles.', tint: tc.warning },
-        { icon: 'timer-outline', text: 'Rest timers, set logging, warmups, cardio, and workout resume all live in the same flow.', tint: tc.success },
-      ]
-      : [
-        { icon: 'create-outline', text: 'Log your own program with sets, reps, weight, notes, and timers.', tint: tc.primary },
-        { icon: 'albums-outline', text: 'Save repeated workouts as templates, then reuse or share them.', tint: tc.success },
-        { icon: 'trending-up-outline', text: 'Progress history starts filling in as soon as you log sessions.', tint: tc.warning },
-      ],
-  };
-  const mealStep: Step = {
-    heroImages: MEAL_HERO_IMAGES,
-    title: tier === 'pro' ? 'Nutrition can stand alone' : 'Meals are easy to log',
-    body: tier === 'pro'
-      ? 'Use generated meal guidance, photo scans, food search, hydration, supplements, routines, and scoring to understand how today supports your goal. If you only want nutrition, hide workouts and keep the food tools front and center.'
-      : 'Manual meal logging, hydration, supplements, favorites, routines, and weight tracking are available right away. Pro adds generated nutrition guidance, photo scans, and meal scoring.',
-    bullets: tier === 'pro'
-      ? [
-        { icon: 'scan-outline', text: 'Scan food photos when typing would slow you down.', tint: tc.primary },
-        { icon: 'water-outline', text: 'Hydration, saved meals, grocery lists, supplements, and routines sit beside the daily plan.', tint: tc.success },
-        { icon: 'analytics-outline', text: 'Meal scores show how logged food supports your goal for the day.', tint: tc.warning },
-      ]
-      : [
-        { icon: 'restaurant-outline', text: 'Track meals, hydration, supplements, and body weight manually.', tint: tc.success },
-        { icon: 'bookmark-outline', text: 'Reuse favorites and common meals to keep logging quick.', tint: tc.primary },
-        { icon: 'lock-closed-outline', text: 'Pro unlocks generated nutrition guidance, scans, and meal scores.', tint: tc.warning },
-      ],
-    upgradeActionLabel: tier === 'free' ? 'See Pro options' : undefined,
-  };
-  const progressStep: Step = {
-    heroImages: PROGRESS_HERO_IMAGES,
-    title: 'Progress has context',
-    body: tier === 'pro'
-      ? 'Recovery, readiness, health signals, body trends, strength, cardio, nutrition, and weekly reviews help explain what changed instead of just showing another chart.'
-      : 'Progress starts with the workouts, meals, weight, and body entries you log. Pro layers in readiness, Apple Health signals, scans, and deeper insight cards.',
+    body: 'Open Today first. It keeps the next useful action visible without making you hunt through every tab.',
     bullets: [
-      { icon: 'body-outline', text: 'Muscle recovery shows which areas are ready, loaded, or due for lighter work.', tint: tc.primary },
-      { icon: 'pulse-outline', text: 'Sleep, HRV, resting heart rate, steps, and activity can support readiness when connected.', tint: tc.success },
-      { icon: 'people-outline', text: 'Friends only see workout activity you share, never calories, macros, or weight.', tint: tc.warning },
+      ...(showWorkouts
+        ? [{ icon: 'play-outline' as const, text: tier === 'pro' ? 'Start or resume the planned workout from the top card.' : 'Start a custom workout from the top card.', tint: tc.primary }]
+        : []),
+      ...(showMeals
+        ? [{ icon: 'water-outline' as const, text: 'Log food and water from the same daily view.', tint: tc.success }]
+        : []),
+      { icon: 'pulse-outline', text: 'Sleep, readiness, weight, and trends stay nearby when you want context.', tint: tc.warning },
     ],
-    upgradeActionLabel: tier === 'free' ? 'Explore Pro insights' : undefined,
   };
-  const watchStep: Step | null = Platform.OS === 'ios'
-    ? {
-      deviceShowcase: true,
-      iconColor: tc.primary,
-      title: 'iPhone and Apple Watch stay together',
-      body: tier === 'pro'
-        ? 'Start on your phone or wrist, then keep workouts, rest timers, meals, hydration, sleep, readiness, and quick actions in sync when a compatible Apple Watch is paired.'
-        : 'Manual tracking starts on your phone. When you use Thallo with a compatible Apple Watch, core workout and quick-log surfaces can mirror the day without turning the Watch into the source of truth.',
-      bullets: [
-        { icon: 'phone-portrait-outline', text: 'The phone remains the main dashboard for planning, editing, history, and review.', tint: tc.primary },
-        { icon: 'watch-outline', text: 'The Watch companion keeps active workouts, rest, hydration, meals, and readiness close by.', tint: tc.success },
-        { icon: 'sync-outline', text: 'Phone data wins on conflicts, so the weekly plan and logs stay consistent.', tint: tc.warning },
-      ],
-    }
-    : null;
-  const themeStep: Step = {
-    icon: 'color-palette-outline',
-    title: 'Choose your theme',
-    body: 'Pick the look you want before you start. You can change this later from Account and Settings.',
-    themePicker: true,
-  };
-  const healthStep: Step = {
-    icon: Platform.OS === 'android' ? 'fitness-outline' : 'heart-outline',
-    iconColor: tc.success,
-    title: Platform.OS === 'android' ? 'Set Up Health Connect' : 'Connect Apple Health',
-    body: tier === 'free'
-      ? `Free works with manual logs and in-app tracking. ${HEALTH_PLATFORM_PRO_COPY}`
-      : Platform.OS === 'android'
-        ? HEALTH_PLATFORM_STATUS_COPY
-        : 'Apple Health is optional. Connect it now or later when you want available iPhone, Apple Watch, or source-app data to help power recovery and progress.',
-    bullets: tier === 'free'
-      ? [
-        { icon: 'create-outline', text: 'Manual workouts, meals, weight, and body history still work normally.', tint: tc.primary },
-        { icon: 'lock-closed-outline', text: HEALTH_PLATFORM_PRO_COPY, tint: tc.warning },
-        { icon: 'settings-outline', text: `Find ${HEALTH_PLATFORM_LABEL} from Account and Settings later.`, tint: tc.textMuted },
-      ]
-      : Platform.OS === 'android'
-        ? [
-          { icon: 'fitness-outline', text: 'Health Connect is the Android path for sleep, activity, weight, and nutrition signals.', tint: tc.primary },
-          { icon: 'construct-outline', text: 'Android health sync is planned; manual logs and in-app workouts still keep Thallo useful today.', tint: tc.warning },
-          { icon: 'settings-outline', text: `Check ${HEALTH_PLATFORM_LABEL} status from Account and Settings.`, tint: tc.textMuted },
-        ]
-        : [
-          { icon: 'moon-outline', text: 'Sleep, HRV, resting heart rate, steps, and activity appear only when Apple Health has samples for them.', tint: tc.primary },
-          { icon: 'fitness-outline', text: 'Imported workouts and completed Thallo sessions can sync with Apple Health.', tint: tc.success },
-          { icon: 'shield-checkmark-outline', text: 'Raw samples stay on device; daily summaries may sync for trends across devices.', tint: tc.warning },
-        ],
-    healthSetup: true,
-    healthActionLabel: tier === 'free'
-      ? 'Review health features'
-      : Platform.OS === 'android'
-        ? 'View Health Connect'
-        : 'Connect Apple Health',
-  };
-  return [
-    welcomeStep,
-    todayStep,
-    workoutStep,
-    mealStep,
-    progressStep,
-    ...(watchStep ? [watchStep] : []),
-    themeStep,
-    healthStep,
+  const firstActionBullets: BulletItem[] = [
+    ...(showWorkouts
+      ? [{ icon: 'timer-outline' as const, text: 'Finish one workout log before tuning templates or settings.', tint: tc.primary }]
+      : []),
+    ...(showMeals
+      ? [{ icon: 'add-circle-outline' as const, text: 'Log one normal meal before optimizing the whole day.', tint: tc.success }]
+      : []),
+    { icon: 'settings-outline', text: 'Theme, health connections, tutorial replay, and the live tour live in Account.', tint: tc.textMuted },
   ];
+  const firstActionStep: Step = {
+    icon: 'checkmark-circle-outline',
+    iconColor: tc.success,
+    title: 'Start with one log',
+    body: 'The app gets clearer after the first real entry. Do one useful thing today, then let the rest of the system fill in gradually.',
+    bullets: firstActionBullets,
+  };
+  return [welcomeStep, todayStep, firstActionStep];
 }
 
 

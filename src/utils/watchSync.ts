@@ -323,6 +323,7 @@ export type WatchExerciseClient = {
   secondaryMuscles?: string[] | null;
   isCompound?: boolean | null;
   movementPattern?: string | null;
+  loadUnit?: string | null;
   plannedTargetWeightLbs?: number | null;
   tracksWeight?: boolean;
   isTimed?: boolean;
@@ -458,6 +459,7 @@ export function buildWatchWorkoutPayload(
           ? e.is_compound
           : null,
       movementPattern: nullableString(e.movementPattern ?? e.movement_pattern),
+      loadUnit: nullableString(e.loadUnit ?? e.load_unit ?? e._load_unit),
       plannedTargetWeightLbs: tracksWeight ? watchExerciseTargetWeightLbs(e) : null,
       tracksWeight,
       isTimed: timed,

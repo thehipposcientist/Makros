@@ -13,7 +13,7 @@ import { elevations, getContrastingTextColor, getTheme, radius, typography } fro
 import { ensureItems, formatItemAmount, macroTotalsFromMeal, type MealMacroTotals } from '../utils/mealItems';
 import { computeProteinBreakdown } from '../utils/proteinBreakdown';
 import { computeDayInsights } from '../utils/nutritionLayers';
-import { computeNutritionScore, computePlanGutHealth } from '../utils/nutritionScore';
+import { computeNutritionScore, computePlanGutHealth, type NutritionScoreBreakdownItem } from '../utils/nutritionScore';
 import { formatNutritionPrimaryTarget } from '../utils/nutritionTargetRanges';
 import { creditedMicrosFromContent } from '../utils/supplementFacts';
 import { resolveSupplementSlug } from '../utils/supplementNameMatch';
@@ -411,6 +411,18 @@ interface NutritionCardProps {
     adherence?: number | null;
     quality?: number | null;
     micro?: number | null;
+    confidence?: string | null;
+    wins?: string[] | null;
+    improvements?: string[] | null;
+    tags?: string[] | null;
+    likely_gaps?: string[] | null;
+    indicators?: Record<string, any> | null;
+    adherence_breakdown?: NutritionScoreBreakdownItem[] | null;
+    quality_breakdown?: NutritionScoreBreakdownItem[] | null;
+    micro_breakdown?: NutritionScoreBreakdownItem[] | null;
+    cap_reasons?: string[] | null;
+    totals?: { calories?: number | null; protein_g?: number | null; carbs_g?: number | null; fat_g?: number | null } | null;
+    targets?: { calories?: number | null; protein_g?: number | null; carbs_g?: number | null; fat_g?: number | null } | null;
   } | null;
   /** True while a recent meal write is still inside the server's
    *  recompute debounce window, so the displayed score may briefly
@@ -514,12 +526,55 @@ function NutritionCardInner({
       return { ...planPreviewScore, score: 0 };
     }
     if (!authoritativeScore) return planPreviewScore;
+    const indicatorNumber = (...values: unknown[]): number | undefined => {
+      for (const value of values) {
+        const n = typeof value === 'number' ? value : Number(value);
+        if (Number.isFinite(n)) return n;
+      }
+      return undefined;
+    };
+    const serverIndicators = authoritativeScore.indicators ?? {};
+    const totalCalories = indicatorNumber(authoritativeScore.totals?.calories, serverIndicators.total_calories);
+    const targetCalories = indicatorNumber(authoritativeScore.targets?.calories, serverIndicators.target_calories);
+    const totalProtein = indicatorNumber(authoritativeScore.totals?.protein_g, serverIndicators.total_protein);
+    const targetProtein = indicatorNumber(authoritativeScore.targets?.protein_g, serverIndicators.target_protein);
+    const totalCarbs = indicatorNumber(authoritativeScore.totals?.carbs_g, serverIndicators.total_carbs);
+    const targetCarbs = indicatorNumber(authoritativeScore.targets?.carbs_g, serverIndicators.target_carbs);
+    const totalFat = indicatorNumber(authoritativeScore.totals?.fat_g, serverIndicators.total_fat);
+    const targetFat = indicatorNumber(authoritativeScore.targets?.fat_g, serverIndicators.target_fat);
+    const minimallyProcessedPct = indicatorNumber(serverIndicators.minimally_processed_pct, serverIndicators.whole_food_pct);
+    const indicators = {
+      ...planPreviewScore.indicators,
+      ...serverIndicators,
+      ...(totalCalories !== undefined ? { total_calories: totalCalories } : {}),
+      ...(targetCalories !== undefined ? { target_calories: targetCalories } : {}),
+      ...(totalProtein !== undefined ? { total_protein: totalProtein } : {}),
+      ...(targetProtein !== undefined ? { target_protein: targetProtein } : {}),
+      ...(totalCarbs !== undefined ? { total_carbs: totalCarbs } : {}),
+      ...(targetCarbs !== undefined ? { target_carbs: targetCarbs } : {}),
+      ...(totalFat !== undefined ? { total_fat: totalFat } : {}),
+      ...(targetFat !== undefined ? { target_fat: targetFat } : {}),
+      ...(minimallyProcessedPct !== undefined ? {
+        minimally_processed_pct: minimallyProcessedPct,
+        whole_food_pct: minimallyProcessedPct,
+      } : {}),
+    };
     return {
       ...planPreviewScore,
       score: authoritativeScore.score,
       adherence: authoritativeScore.adherence ?? planPreviewScore.adherence,
       quality: authoritativeScore.quality ?? planPreviewScore.quality,
       micro: authoritativeScore.micro ?? planPreviewScore.micro,
+      confidence: authoritativeScore.confidence ?? planPreviewScore.confidence,
+      wins: Array.isArray(authoritativeScore.wins) ? authoritativeScore.wins : planPreviewScore.wins,
+      improvements: Array.isArray(authoritativeScore.improvements) ? authoritativeScore.improvements : planPreviewScore.improvements,
+      tags: Array.isArray(authoritativeScore.tags) ? authoritativeScore.tags : planPreviewScore.tags,
+      likely_gaps: Array.isArray(authoritativeScore.likely_gaps) ? authoritativeScore.likely_gaps : planPreviewScore.likely_gaps,
+      adherence_breakdown: Array.isArray(authoritativeScore.adherence_breakdown) ? authoritativeScore.adherence_breakdown : planPreviewScore.adherence_breakdown,
+      quality_breakdown: Array.isArray(authoritativeScore.quality_breakdown) ? authoritativeScore.quality_breakdown : planPreviewScore.quality_breakdown,
+      micro_breakdown: Array.isArray(authoritativeScore.micro_breakdown) ? authoritativeScore.micro_breakdown : planPreviewScore.micro_breakdown,
+      cap_reasons: Array.isArray(authoritativeScore.cap_reasons) ? authoritativeScore.cap_reasons : planPreviewScore.cap_reasons,
+      indicators,
     };
   }, [authoritativeScore, planPreviewScore]);
   const visibleDayScore = hidePlanScore && (!authoritativeScore || authoritativeScore.score <= 0)
@@ -675,6 +730,9 @@ function NutritionCardInner({
 
   const overviewScoreColor = visibleDayScore.score >= 70 ? colors.success : visibleDayScore.score >= 45 ? colors.warning : colors.error;
   const overviewScoreLabel = visibleDayScore.score >= 70 ? 'Great' : visibleDayScore.score >= 45 ? 'Good progress' : 'Needs attention';
+  const wholeFoodPct = Number.isFinite(Number(visibleDayScore.indicators?.whole_food_pct ?? visibleDayScore.indicators?.minimally_processed_pct))
+    ? Number(visibleDayScore.indicators?.whole_food_pct ?? visibleDayScore.indicators?.minimally_processed_pct)
+    : null;
   const calorieTargetLabel = formatNutritionPrimaryTarget('calories', targets.calories, { includeUnit: false });
   const proteinTargetLabel = formatNutritionPrimaryTarget('protein', targets.protein, { includeUnit: false });
   const overviewStats = [
@@ -698,7 +756,7 @@ function NutritionCardInner({
     },
     {
       label: 'Whole foods',
-      value: visibleDayScore.indicators?.whole_food_pct != null ? `${Math.round(visibleDayScore.indicators.whole_food_pct)}` : '0',
+      value: wholeFoodPct != null ? `${Math.round(wholeFoodPct)}` : '0',
       unit: '%',
       color: '#22C55E',
     },
@@ -911,9 +969,9 @@ function NutritionCardInner({
                               <Text style={styles.scoreSignalLabel}>protein</Text>
                             </View>
                           )}
-                          {sc.indicators.whole_food_pct > 0 && (
+                          {wholeFoodPct != null && wholeFoodPct > 0 && (
                             <View style={styles.scoreSignalChip}>
-                              <Text style={styles.scoreSignalValue}>{sc.indicators.whole_food_pct}%</Text>
+                              <Text style={styles.scoreSignalValue}>{Math.round(wholeFoodPct)}%</Text>
                               <Text style={styles.scoreSignalLabel}>whole foods</Text>
                             </View>
                           )}
@@ -1562,16 +1620,16 @@ function NutritionCardInner({
         iconColor={colors.primary}
         themeName={themeName}>
         <ScoreInfoBody themeName={themeName}>
-          A 0–100 read of today's food choices, computed server-side
-          from what you've logged. It blends how close you are to your
-          daily calorie and macro ranges with quality measures like fiber,
-          plants, and added-sugar restraint.
+          A 0-100 read of today's nutrition, computed server-side from
+          logged meals. If no logged meal items exist, the server falls
+          back to the active day plan. It blends calorie and macro
+          alignment with quality measures like fiber, plants, and
+          added-sugar restraint.
         </ScoreInfoBody>
         <ScoreInfoSection title="What goes in" themeName={themeName}>
-          <ScoreInfoRow label="Adherence" value="calories + protein vs daily ranges" themeName={themeName} />
+          <ScoreInfoRow label="Adherence" value="calories, protein, carbs, fat" themeName={themeName} />
           <ScoreInfoRow label="Quality" value="fiber, plants, whole foods" themeName={themeName} />
           <ScoreInfoRow label="Micronutrients" value="key vitamins + minerals" themeName={themeName} />
-          <ScoreInfoRow label="Hydration" value="logged water + water-rich foods" themeName={themeName} />
         </ScoreInfoSection>
         <ScoreInfoSection title="Rating bands" themeName={themeName}>
           <ScoreInfoRow label="70+" value="In range" valueColor={colors.success} themeName={themeName} />
@@ -1579,9 +1637,9 @@ function NutritionCardInner({
           <ScoreInfoRow label="Below 45" value="Off track today" valueColor={colors.error} themeName={themeName} />
         </ScoreInfoSection>
         <ScoreInfoBody themeName={themeName} muted>
-          The score only counts food you've actually logged. Days with
-          no meals logged stay at 0 — they don't count against your
-          weekly average.
+          Logged days use meal history; unlogged planned days use the
+          active plan. Days with no plan or meals stay at 0 and do not
+          count against the weekly average.
         </ScoreInfoBody>
       </ScoreInfoModal>
     </View>

@@ -320,9 +320,9 @@ def test_score_zero_calories_no_crash():
     _ok(f"zero cals → {score.total}/100, no crash")
 
 
-def test_score_builder_prefers_projected_plan_over_logged_meals():
-    """/meals/score should score the projected day plan, not logged rows."""
-    print("\n[test] score builder: projected plan wins over logged meals")
+def test_score_builder_prefers_logged_meals_over_projected_plan():
+    """/meals/score should score logged rows before projected fallback."""
+    print("\n[test] score builder: logged meals win over projected plan")
     from datetime import date
     from sqlalchemy.pool import StaticPool
     from sqlmodel import SQLModel, Session, create_engine
@@ -437,12 +437,31 @@ def test_score_builder_prefers_projected_plan_over_logged_meals():
         s.commit()
 
         payload = compute_today_score(s, user.id, today)
-        assert payload["source"] == "projected", payload
-        assert payload["totals"]["calories"] == 2000, payload["totals"]
-        assert payload["totals"]["protein_g"] == 150, payload["totals"]
+        assert payload["source"] == "logged", payload
+        assert payload["totals"]["calories"] == 300, payload["totals"]
+        assert payload["totals"]["protein_g"] == 5, payload["totals"]
+        assert payload["totals"]["carbs_g"] == 40, payload["totals"]
+        assert payload["totals"]["fat_g"] == 5, payload["totals"]
         assert payload["targets"]["calories"] == 2000, payload["targets"]
-        assert payload["score_version"] == 6, payload
-    _ok("projected totals are scored instead of logged meal rows")
+        assert payload["score_version"] == 7, payload
+    _ok("logged totals are scored before projected fallback")
+
+
+def test_score_builder_projected_plan_reads_macro_aliases():
+    """Projected fallback must read top-level protein_g/carbs_g/fat_g."""
+    print("\n[test] score builder: projected macro aliases are read")
+    from app.services.nutrition.score_builder import _macro_from_meal
+
+    meal = {
+        "calories": 600,
+        "protein_g": 45,
+        "carbs_g": 70,
+        "fat_g": 18,
+    }
+    assert _macro_from_meal(meal, "protein", "protein_g") == 45
+    assert _macro_from_meal(meal, "carbs", "carbs_g") == 70
+    assert _macro_from_meal(meal, "fat", "fat_g") == 18
+    _ok("top-level *_g macro aliases count toward projected totals")
 
 
 def test_score_builder_credits_custom_fish_oil():
@@ -693,7 +712,8 @@ cases = [
     test_score_sex_aware_iron_rda,
     test_score_low_confidence_reduces_total,
     test_score_zero_calories_no_crash,
-    test_score_builder_prefers_projected_plan_over_logged_meals,
+    test_score_builder_prefers_logged_meals_over_projected_plan,
+    test_score_builder_projected_plan_reads_macro_aliases,
     test_score_builder_credits_custom_fish_oil,
     test_score_builder_preserves_fish_oil_identity_after_rename,
     # Calorie calculator

@@ -943,12 +943,7 @@ function HomeMealsPlanDayCardInner({
               proteinBreakdown={day.key === todayKey() ? proteinBreakdown : null}
               todaySupplements={day.key === todayKey() ? todaySupplementMicros : null}
               glp1Support={userProfile.glp1Support}
-              authoritativeScore={typeof authoritativeNutritionScore?.score === 'number' ? {
-                score: authoritativeNutritionScore.score,
-                adherence: authoritativeNutritionScore.adherence,
-                quality: authoritativeNutritionScore.quality,
-                micro: authoritativeNutritionScore.micro,
-              } : null}
+              authoritativeScore={typeof authoritativeNutritionScore?.score === 'number' ? authoritativeNutritionScore : null}
               scoreUpdating={day.key === todayKey() && nutritionScoreUpdating}
               hidePlanScore={isPast}
             />

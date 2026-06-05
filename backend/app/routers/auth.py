@@ -400,14 +400,15 @@ def _clean_optional_name(value: str | None) -> str | None:
     return cleaned[:80]
 
 
-def _oauth_username_seed(email: str) -> str:
-    local = email.split("@", 1)[0]
-    seed = re.sub(r"[^a-zA-Z0-9_]+", "", local).lower()
-    return (seed or "apple")[:24]
+def _generated_username_seed(raw: str, fallback: str = "user") -> str:
+    seed = re.sub(r"[^a-zA-Z0-9_]+", "", raw).lower()
+    if len(seed) < 3:
+        seed = fallback
+    return seed[:24]
 
 
-def _unique_oauth_username(session: Session, email: str) -> str:
-    base = _oauth_username_seed(email)
+def _unique_generated_username(session: Session, seed: str) -> str:
+    base = _generated_username_seed(seed)
     candidate = base
     suffix = 1
     while session.exec(select(User).where(User.username == candidate)).first():
@@ -415,6 +416,14 @@ def _unique_oauth_username(session: Session, email: str) -> str:
         candidate = f"{base[: max(1, 32 - len(tail))]}{tail}"
         suffix += 1
     return candidate
+
+
+def _oauth_username_seed(email: str) -> str:
+    return email.split("@", 1)[0]
+
+
+def _unique_oauth_username(session: Session, email: str) -> str:
+    return _unique_generated_username(session, _oauth_username_seed(email))
 
 
 def _is_recyclable_email_signup(session: Session, user: User) -> bool:
@@ -481,7 +490,12 @@ def _reset_recycled_signup(
 @limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
     email = body.email.strip().lower()
-    username = _validate_username(body.username)
+    requested_username = (body.username or "").strip()
+    username = (
+        _validate_username(requested_username)
+        if requested_username
+        else _unique_generated_username(session, email.split("@", 1)[0])
+    )
     first_name = _validate_name("First name", body.first_name)
     last_name = _validate_name("Last name", body.last_name)
     _validate_email(email)

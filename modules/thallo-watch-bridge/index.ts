@@ -40,6 +40,7 @@ export type WatchExercise = {
   secondaryMuscles?: string[] | null;
   isCompound?: boolean | null;
   movementPattern?: string | null;
+  loadUnit?: string | null;
   plannedTargetWeightLbs?: number | null;
   tracksWeight?: boolean;
   isTimed?: boolean;

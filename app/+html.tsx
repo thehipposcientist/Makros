@@ -3,7 +3,7 @@ import { ScrollViewStyleReset } from 'expo-router/html';
 
 const title = 'Thallo - Total health, training, nutrition, and recovery';
 const description = 'Thallo brings training, nutrition, recovery, and health signals into one stable weekly plan.';
-const siteUrl = 'https://thallo.app';
+const siteUrl = 'https://thallofitness.com';
 const socialImage = `${siteUrl}/thallo-social-card.png`;
 
 export default function RootHtml({ children }: PropsWithChildren) {

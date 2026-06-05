@@ -79,8 +79,7 @@
         "com.apple.developer.applesignin": [
           "Default"
         ]
-      },
-      "buildNumber": "140"
+      }
     },
     "android": {
       "package": "com.thallo.app",

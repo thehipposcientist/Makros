@@ -95,7 +95,7 @@ def _equipment_text(exercise: dict | None) -> str:
     if not isinstance(exercise, dict):
         return ""
     parts: list[str] = []
-    for key in ("equipment_bucket", "equipment", "name", "slug", "laterality"):
+    for key in ("equipment_bucket", "equipment", "name", "slug", "laterality", "load_unit"):
         value = exercise.get(key)
         if isinstance(value, list):
             for item in value:
@@ -138,48 +138,96 @@ def _is_unilateral_only(exercise: dict | None) -> bool:
     return _laterality(exercise) in {"unilateral", "alternating"}
 
 
+_SINGLE_DUMBBELL_TOTAL_RE = re.compile(
+    r"\b(goblet|sumo\s+squat|dumbbell\s+hip\s+thrust|dumbbell\s+pullover|"
+    r"(?:dumbbell|weighted)\s+(?:sit[-_ ]?up|crunch)|"
+    r"standing\s+dumbbell\s+triceps?\s+extension|"
+    r"overhead\s+dumbbell\s+triceps?\s+extension)\b"
+)
+_PER_SIDE_CABLE_RE = re.compile(r"\b(pallof|woodchop)\b")
+
+
+def display_load_unit(exercise: dict | None) -> str:
+    """Return the user-visible unit represented by a logged/recommended load.
+
+    `total` is the whole implement/stack load. `single_dumbbell` is also
+    displayed as a total, but transfers/defaults against barbell-style totals
+    with a dumbbell-sized scaling factor. `per_dumbbell` means the number is
+    one dumbbell, even when both hands are moving. `per_side` means one cable
+    handle/machine side/unilateral implement.
+    """
+    if not isinstance(exercise, dict):
+        return "total"
+    explicit = str(
+        exercise.get("load_unit")
+        or exercise.get("loadUnit")
+        or exercise.get("_load_unit")
+        or ""
+    ).strip().lower()
+    explicit = explicit.replace("-", "_").replace(" ", "_")
+    if explicit in {"single_dumbbell", "one_dumbbell"}:
+        return "single_dumbbell"
+    if explicit in {"total", "total_load", "single_implement"}:
+        return "total"
+    if explicit in {"per_dumbbell", "per_db", "per_hand", "dumbbell_each"}:
+        return "per_dumbbell"
+    if explicit in {"per_side", "per_arm", "per_leg", "per_handle", "single_side"}:
+        return "per_side"
+
+    text = _equipment_text(exercise)
+    nameish = f"{exercise.get('name') or ''} {exercise.get('slug') or ''}".lower().replace("_", " ")
+    if "dual_cable_station" in text or "dual cable" in text:
+        return "per_side"
+    if "cable" in text and _PER_SIDE_CABLE_RE.search(nameish):
+        return "per_side"
+    if "dumbbell" in text or "_db_" in f"_{text}_":
+        if _SINGLE_DUMBBELL_TOTAL_RE.search(nameish):
+            return "single_dumbbell"
+        if "suitcase" in nameish:
+            return "per_side"
+        return "per_dumbbell"
+    if _is_unilateral_only(exercise):
+        if "bodyweight" in text or "body_weight" in text:
+            return "total"
+        if any(
+            token in text
+            for token in (
+                "cable",
+                "machine",
+                "plate_loaded",
+                "landmine",
+                "kettlebell",
+                "barbell",
+                "smith",
+            )
+        ):
+            return "per_side"
+    return "total"
+
+
 def _uses_per_dumbbell_load(exercise: dict | None) -> bool:
     """Whether logged/recommended load is one dumbbell, not the pair total."""
-    text = _equipment_text(exercise)
-    return "dumbbell" in text or "_db_" in f"_{text}_"
+    return display_load_unit(exercise) == "per_dumbbell"
 
 
 def _uses_per_side_load(exercise: dict | None) -> bool:
     """Whether displayed load is one side/handle rather than bilateral total."""
-    if _uses_per_dumbbell_load(exercise):
-        return True
-    if not _is_unilateral_only(exercise):
-        return False
-    text = _equipment_text(exercise)
-    if "bodyweight" in text or "body_weight" in text:
-        return False
-    return any(
-        token in text
-        for token in (
-            "cable",
-            "machine",
-            "plate_loaded",
-            "landmine",
-            "kettlebell",
-            "barbell",
-            "smith",
-        )
-    )
+    return display_load_unit(exercise) in {"per_dumbbell", "per_side"}
 
 
 def _display_to_total_factor(exercise: dict | None) -> float:
-    return 2.0 if _uses_per_side_load(exercise) else 1.0
+    return 2.0 if display_load_unit(exercise) in {"per_dumbbell", "per_side", "single_dumbbell"} else 1.0
 
 
 def _load_unit_transfer_factor(source_exercise: dict | None, target_exercise: dict | None) -> float:
     """Convert a source profile's displayed load into target display units.
 
-    Dumbbell and explicitly unilateral cable/machine movements are logged as
-    one side/handle. Barbell, T-bar, bilateral cable, and bilateral machine
-    movements are logged as total implement/stack load. Normalize through a
-    rough total-load equivalent so a 110 lb seated cable row does not become a
-    110 lb single-arm cable row, and a 50 lb single-arm row does not become a
-    50 lb bilateral row.
+    Dumbbell, dual-cable, and explicitly unilateral cable/machine movements are
+    logged as one side/handle. Barbell, T-bar, single-stack bar/rope cable, and
+    bilateral machine movements are logged as total implement/stack load.
+    Normalize through a rough total-load equivalent so a 110 lb seated cable
+    row does not become a 110 lb single-arm cable row, and a 50 lb single-arm
+    row does not become a 50 lb bilateral row.
     """
     return _display_to_total_factor(source_exercise) / _display_to_total_factor(target_exercise)
 
@@ -585,7 +633,7 @@ def recommend_starting_weight(
     if exp_key not in ("beginner", "intermediate", "advanced"):
         exp_key = "intermediate"
     weight = _CATEGORY_DEFAULTS.get((cat, exp_key), 45.0)
-    if _uses_per_side_load(target_exercise) and cat in (
+    if display_load_unit(target_exercise) in {"per_dumbbell", "per_side", "single_dumbbell"} and cat in (
         "horizontal_push",
         "vertical_push",
         "upper_push",

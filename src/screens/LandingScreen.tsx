@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, hitSlop, radius } from '../constants/theme';
+import { colors, hitSlop, radius, typography } from '../constants/theme';
 import BrandMark from '../components/BrandMark';
 
 const logo = require('../../assets/images/thallo-logo-compact-white.png');
@@ -345,9 +345,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 15,
   },
   topLoginText: {
+    ...typography.brandButton,
     color: colors.textPrimary,
     fontSize: 13,
-    fontWeight: '800',
   },
   heroBlock: {
     flex: 1,
@@ -361,18 +361,17 @@ const styles = StyleSheet.create({
     paddingBottom: 16,
   },
   kicker: {
+    ...typography.brandLabel,
     color: colors.primaryLight,
     fontSize: 13,
-    fontWeight: '900',
     letterSpacing: 0,
-    textTransform: 'uppercase',
     marginBottom: 10,
   },
   title: {
+    ...typography.brandHero,
     color: colors.textPrimary,
     fontSize: 42,
     lineHeight: 47,
-    fontWeight: '900',
     letterSpacing: 0,
   },
   titleNarrow: {
@@ -405,9 +404,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   valuePillText: {
+    ...typography.brandButton,
     color: colors.textPrimary,
     fontSize: 12,
-    fontWeight: '800',
   },
   actionBlock: {
     alignSelf: 'center',
@@ -432,9 +431,10 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   primaryButtonText: {
+    ...typography.brandButton,
     color: colors.background,
-    fontSize: 17,
-    fontWeight: '900',
+    fontSize: 16,
+    lineHeight: 20,
   },
   secondaryButton: {
     minHeight: 52,
@@ -447,9 +447,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   secondaryButtonText: {
+    ...typography.brandButton,
     color: colors.textPrimary,
     fontSize: 15,
-    fontWeight: '800',
+    lineHeight: 19,
   },
   whyButton: {
     minHeight: 38,
@@ -460,8 +461,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   whyButtonText: {
+    ...typography.brandButton,
     color: colors.primaryLight,
     fontSize: 13,
-    fontWeight: '900',
   },
 });

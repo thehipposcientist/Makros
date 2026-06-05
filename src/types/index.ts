@@ -1136,6 +1136,8 @@ export interface SessionExercise {
    *  history-aware). Forwarded to the weight-recommendation endpoint as
    *  `plannedTargetWeightLbs` so recs stay grounded in the session plan. */
   targetWeightLbs?: number | null;
+  loadUnit?: 'total' | 'single_dumbbell' | 'per_dumbbell' | 'per_side' | string | null;
+  load_unit?: 'total' | 'single_dumbbell' | 'per_dumbbell' | 'per_side' | string | null;
   /** Per-set programming emitted by the planner. Active workout keeps
    *  this so live recommendations can honor top-set/backoff intent. */
   setScheme?: PlannedSet[] | null;

@@ -2,16 +2,16 @@
 
 This is the server-side authority for the unified score. The client used
 to recompute it per-render; now it just reads from this pipeline via
-/meals/score. The score is based on the projected day plan so checking or
-unchecking meals does not move the headline number away from the plan.
+/meals/score. Logged meal items win; projected plan data is only the
+fallback for days without logged meal items.
 
 Flow:
-  1. Load today's projected nutrition plan from UserDayState / PlanDay
-  2. Aggregate planned macros + micronutrients
-  3. Fall back to logged meals only when no projected plan exists
-  4. Pull the already-computed DailyNutritionMetrics row for logged fallback
+  1. Load today's logged meals when they exist
+  2. Fall back to the projected nutrition plan from UserDayState / PlanDay
+  3. Aggregate macros + micronutrients
+  4. Pull the already-computed DailyNutritionMetrics row for logged scoring
      mix, plant diversity, fermented/omega-3 servings, added sugar, etc.
-  5. Load profile + active goal → compute calorie + protein targets
+  5. Load profile + active goal → compute calorie + macro targets
   6. Build NutritionIndicators, feed compute_nutrition_score
 """
 from __future__ import annotations
@@ -49,10 +49,10 @@ def _compute_targets(
     profile: UserProfile | None,
     goal: UserGoal | None,
     target_date: date,
-) -> tuple[int, int, str, str | None, ResolvedNutritionTargets | None]:
-    """Return (calorie_target, protein_target_g, goal_id, sex, resolved)."""
+) -> tuple[int, int, int, int, str, str | None, ResolvedNutritionTargets | None]:
+    """Return (calorie_target, protein_target_g, carbs_target_g, fat_target_g, goal_id, sex, resolved)."""
     if not profile:
-        return 2000, 120, "body_recomp", None, None
+        return 2000, 120, 0, 0, "body_recomp", None, None
     goal_id = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else str(goal.goal_type) if goal else "body_recomp")
     sex = (profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender) if profile.gender else None)
     try:
@@ -63,10 +63,10 @@ def _compute_targets(
             health_activity_as_of=target_date - timedelta(days=1),
         )
         if not targets:
-            return 2000, 120, goal_id, sex, None
-        return targets.calories, targets.protein_g, goal_id, sex, targets
+            return 2000, 120, 0, 0, goal_id, sex, None
+        return targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g, goal_id, sex, targets
     except Exception:
-        return 2000, 120, goal_id, sex, None
+        return 2000, 120, 0, 0, goal_id, sex, None
 
 
 def _activity_adjusted_calorie_target(
@@ -290,6 +290,10 @@ def _macro_from_meal(meal: dict, key: str, item_key: str | None = None) -> float
     value = _num(meal.get(key))
     if value > 0:
         return value
+    if item_key:
+        value = _num(meal.get(item_key))
+        if value > 0:
+            return value
     raw_items = meal.get("items")
     if not isinstance(raw_items, list):
         return 0.0
@@ -417,6 +421,8 @@ def _build_projected_indicators(
     *,
     calorie_target: int,
     protein_target: int,
+    carbs_target: int,
+    fat_target: int,
     goal_id: str | None,
     resolved_targets: ResolvedNutritionTargets | None,
 ) -> NutritionIndicators | None:
@@ -442,9 +448,21 @@ def _build_projected_indicators(
         or _num(targets.get("protein_g"), 0.0)
         or protein_target
     )
+    plan_carbs_target = (
+        _num(targets.get("carbs"), 0.0)
+        or _num(targets.get("carbs_g"), 0.0)
+        or carbs_target
+    )
+    plan_fat_target = (
+        _num(targets.get("fat"), 0.0)
+        or _num(targets.get("fat_g"), 0.0)
+        or fat_target
+    )
 
     total_cal = sum(_macro_from_meal(m, "calories") for m in meals)
     total_pro = sum(_macro_from_meal(m, "protein", "protein_g") for m in meals)
+    total_carb = sum(_macro_from_meal(m, "carbs", "carbs_g") for m in meals)
+    total_fat = sum(_macro_from_meal(m, "fat", "fat_g") for m in meals)
     micros, food_count, foods_with_micros = _projected_micros(meals)
     quality = _projected_quality_signals(meals)
     seafood_week = _projected_seafood_servings_window(db, user_id, target_date, days=7)
@@ -454,6 +472,10 @@ def _build_projected_indicators(
         calories_target=plan_calorie_target,
         protein_logged=total_pro,
         protein_target=plan_protein_target,
+        carbs_logged=total_carb,
+        carbs_target=plan_carbs_target,
+        fat_logged=total_fat,
+        fat_target=plan_fat_target,
         fiber_g=micros.get("fiber_g", 0.0),
         added_sugar_g=micros.get("added_sugar_g", 0.0),
         saturated_fat_g=micros.get("saturated_fat_g", 0.0),
@@ -842,7 +864,7 @@ def build_indicators(
 ) -> tuple[NutritionIndicators, str, str | None]:
     """Assemble today's NutritionIndicators. Returns (indicators, goal_id, sex)."""
     profile, goal = _get_profile_and_goal(db, user_id)
-    cal_target, pro_target, goal_id, sex, resolved_targets = _compute_targets(
+    cal_target, pro_target, carbs_target, fat_target, goal_id, sex, resolved_targets = _compute_targets(
         db,
         user_id,
         profile,
@@ -850,18 +872,6 @@ def build_indicators(
         target_date,
     )
     base_cal_target = cal_target
-
-    projected = _build_projected_indicators(
-        db,
-        user_id,
-        target_date,
-        calorie_target=base_cal_target,
-        protein_target=pro_target,
-        goal_id=goal_id,
-        resolved_targets=resolved_targets,
-    )
-    if projected is not None:
-        return projected, goal_id, sex
 
     cal_target = int(round(_activity_adjusted_calorie_target(
         db,
@@ -896,6 +906,23 @@ def build_indicators(
 
     total_cal = sum(float(i.calories or 0) for i in items)
     total_pro = sum(float(i.protein_g or 0) for i in items)
+    total_carb = sum(float(i.carbs_g or 0) for i in items)
+    total_fat = sum(float(i.fat_g or 0) for i in items)
+
+    if not items:
+        projected = _build_projected_indicators(
+            db,
+            user_id,
+            target_date,
+            calorie_target=base_cal_target,
+            protein_target=pro_target,
+            carbs_target=carbs_target,
+            fat_target=fat_target,
+            goal_id=goal_id,
+            resolved_targets=resolved_targets,
+        )
+        if projected is not None:
+            return projected, goal_id, sex
 
     micros, food_count, foods_with_micros = _aggregate_micros(db, items)
     # Credit logged supplement doses toward the micro pool (vitamin D3,
@@ -947,6 +974,10 @@ def build_indicators(
         calories_target=cal_target,
         protein_logged=total_pro,
         protein_target=pro_target,
+        carbs_logged=total_carb,
+        carbs_target=carbs_target,
+        fat_logged=total_fat,
+        fat_target=fat_target,
         fiber_g=float(metrics.fiber_total_g) if metrics else (micros.get("fiber_g", 0.0)),
         added_sugar_g=float(getattr(metrics, "added_sugar_g", 0) or 0) if metrics else 0,
         saturated_fat_g=float(metrics.saturated_fat_g) if metrics else 0,
@@ -1000,10 +1031,14 @@ def compute_today_score(db: Any, user_id: int, target_date: date | None = None) 
             "targets": {
                 "calories": indicators.calories_target,
                 "protein_g": indicators.protein_target,
+                "carbs_g": indicators.carbs_target,
+                "fat_g": indicators.fat_target,
             },
             "totals": {
                 "calories": 0,
                 "protein_g": 0,
+                "carbs_g": 0,
+                "fat_g": 0,
             },
             "goal": goal_id,
             "score_version": SCORE_VERSION,
@@ -1031,10 +1066,14 @@ def compute_today_score(db: Any, user_id: int, target_date: date | None = None) 
         "targets": {
             "calories": indicators.calories_target,
             "protein_g": indicators.protein_target,
+            "carbs_g": indicators.carbs_target,
+            "fat_g": indicators.fat_target,
         },
         "totals": {
             "calories": round(indicators.calories_logged),
             "protein_g": round(indicators.protein_logged, 1),
+            "carbs_g": round(indicators.carbs_logged, 1),
+            "fat_g": round(indicators.fat_logged, 1),
         },
         "goal": goal_id,
         "score_version": score.score_version,

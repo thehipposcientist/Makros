@@ -260,6 +260,7 @@ def set_programming_exercise_metadata(
         "equipment_bucket": equipment_bucket,
         "equipment": (seed_row or {}).get("equipment"),
         "load_semantics": (seed_row or {}).get("load_semantics"),
+        "load_unit": (seed_row or {}).get("load_unit"),
         "default_tracking_mode": (seed_row or {}).get("default_tracking_mode"),
         "is_compound": is_compound,
         "movement_pattern": movement_pattern,

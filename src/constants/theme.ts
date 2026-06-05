@@ -1,4 +1,5 @@
 import { Platform, TextStyle, ViewStyle } from 'react-native';
+import { fontFamilies } from './fonts';
 
 export type AppThemeName =
   | 'midnight' | 'ocean'    | 'amethyst'
@@ -1343,6 +1344,37 @@ const FONT_SANS_BOLD = Platform.select({
 });
 
 export const typography = {
+  brandHero: {
+    fontFamily: fontFamilies.brandExtraBold,
+    fontSize: 42,
+    lineHeight: 48,
+    letterSpacing: 0,
+  } satisfies TextStyle,
+  brandTitle: {
+    fontFamily: fontFamilies.brandExtraBold,
+    fontSize: 28,
+    lineHeight: 34,
+    letterSpacing: 0,
+  } satisfies TextStyle,
+  brandSectionTitle: {
+    fontFamily: fontFamilies.brandBold,
+    fontSize: 24,
+    lineHeight: 30,
+    letterSpacing: 0,
+  } satisfies TextStyle,
+  brandLabel: {
+    fontFamily: fontFamilies.brandBold,
+    fontSize: 11,
+    lineHeight: 14,
+    letterSpacing: 0,
+    textTransform: 'uppercase',
+  } satisfies TextStyle,
+  brandButton: {
+    fontFamily: fontFamilies.brandBold,
+    fontSize: 14,
+    lineHeight: 18,
+    letterSpacing: 0,
+  } satisfies TextStyle,
   hero: {
     fontFamily: FONT_SANS_BOLD,
     fontSize: 28,

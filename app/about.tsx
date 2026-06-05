@@ -18,7 +18,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import DeviceSyncMockup from '../src/components/DeviceSyncMockup';
 import ScrollRevealView, { useScrollReveal } from '../src/components/ScrollRevealView';
-import BrandMark from '../src/components/BrandMark';
 import {
   THEME_PICKER_ORDER,
   colors,
@@ -26,11 +25,20 @@ import {
   getTheme,
   hitSlop,
   radius,
+  typography,
   type AppThemeName,
 } from '../src/constants/theme';
 import { SUPPORT_EMAIL } from '../src/constants/legal';
+import {
+  FREE_MEAL_ROUTINE_LIMIT,
+  FREE_TIER_SUMMARY,
+  FREE_WORKOUT_TEMPLATE_LIMIT,
+  PRO_TIER_SUMMARY,
+  SIGNUP_TRIAL_DAYS,
+} from '../src/utils/subscriptionCore';
 
 const logo = require('../assets/images/thallo-logo-compact-white.png');
+const heroLogo = require('../assets/images/thallo-logo-white-transparent-New.png');
 const auroraScreen = require('../assets/images/product-screenshots/thallo-today-home-aurora.png');
 const roseScreen = require('../assets/images/product-screenshots/thallo-today-home-rose.png');
 const paperScreen = require('../assets/images/product-screenshots/thallo-today-home-paper.png');
@@ -41,6 +49,7 @@ const mealPhoto = require('../assets/images/card-backgrounds/meal-card-plant-bas
 const recoveryPhoto = require('../assets/images/landing-photos/pexels-sauna-seated.jpg');
 const watchPhoto = require('../assets/images/landing-photos/pexels-smartwatch-couple-5038816.jpg');
 const watchPhotoCompact = require('../assets/images/landing-photos/pexels-smartwatch-couple-5038816-mobile.jpg');
+const HERO_LOGO_ASPECT_RATIO = 1420 / 474;
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 type AboutSystemSection = {
@@ -60,6 +69,22 @@ type ThemeShowcaseItem = {
   context: string;
   icon: IconName;
   screen: any;
+};
+
+type TierStoryItem = {
+  eyebrow: string;
+  title: string;
+  body: string;
+  icon: IconName;
+  accent: string;
+  points: string[];
+};
+
+type FeatureStoryItem = {
+  title: string;
+  body: string;
+  icon: IconName;
+  accent: string;
 };
 
 const trustItems: { icon: IconName; title: string; body: string; accent: string }[] = [
@@ -117,6 +142,54 @@ const themeShowcaseItems: ThemeShowcaseItem[] = [
     context: 'Flame dark',
     icon: 'flame-outline',
     screen: emberScreen,
+  },
+];
+
+const tierStoryItems: TierStoryItem[] = [
+  {
+    eyebrow: 'Free',
+    title: 'A complete tracker without a paywall.',
+    body: FREE_TIER_SUMMARY,
+    icon: 'barbell-outline',
+    accent: '#59D98E',
+    points: [
+      'Manual strength, cardio, meal, hydration, supplement, and body tracking',
+      `${FREE_WORKOUT_TEMPLATE_LIMIT} workout templates, unlimited saved meals, and ${FREE_MEAL_ROUTINE_LIMIT} meal routines`,
+      'Basic progress history and workout-only social setup',
+    ],
+  },
+  {
+    eyebrow: 'Pro',
+    title: 'The guided system for planning and deeper signals.',
+    body: PRO_TIER_SUMMARY,
+    icon: 'sparkles-outline',
+    accent: colors.primary,
+    points: [
+      'Generated 7-day PlanWeeks, AI meal planning, scans, and coach chat',
+      'Set feedback, weight recommendations, readiness, scoring, and health context',
+      `${SIGNUP_TRIAL_DAYS}-day Pro trial for new accounts`,
+    ],
+  },
+];
+
+const featureStoryItems: FeatureStoryItem[] = [
+  {
+    title: 'Live workout guidance',
+    body: 'Active sessions keep rest timers, set logging, and completion synced while weight-based lifts can surface next-load guidance from training history.',
+    icon: 'timer-outline',
+    accent: '#F59E0B',
+  },
+  {
+    title: 'Cardio is handled directly',
+    body: 'Strength plans can include conditioning work, cardio goals get cardio-led weeks, and outdoor sessions can capture time, distance, pace, and route context.',
+    icon: 'bicycle-outline',
+    accent: '#60B8F0',
+  },
+  {
+    title: 'Social sharing stays bounded',
+    body: 'Friends can see workout activity, streaks, exercises, set load, time, and distance; calories, macros, weight, route maps, and body metrics stay private.',
+    icon: 'people-outline',
+    accent: '#A78BFA',
   },
 ];
 
@@ -215,6 +288,43 @@ function TrustCard({ item }: { item: typeof trustItems[number] }) {
       </View>
       <Text style={styles.trustTitle}>{item.title}</Text>
       <Text style={styles.trustBody}>{item.body}</Text>
+    </View>
+  );
+}
+
+function TierStoryCard({ item }: { item: TierStoryItem }) {
+  return (
+    <View style={styles.tierCard}>
+      <View style={styles.tierCardTop}>
+        <View style={[styles.tierIcon, { backgroundColor: `${item.accent}18`, borderColor: `${item.accent}55` }]}>
+          <Ionicons name={item.icon} size={19} color={item.accent} />
+        </View>
+        <View style={styles.tierTitleWrap}>
+          <Text style={[styles.tierEyebrow, { color: item.accent }]}>{item.eyebrow}</Text>
+          <Text style={styles.tierTitle}>{item.title}</Text>
+        </View>
+      </View>
+      <Text style={styles.tierBody}>{item.body}</Text>
+      <View style={styles.tierPointList}>
+        {item.points.map(point => (
+          <View key={point} style={styles.tierPointRow}>
+            <Ionicons name="checkmark-circle-outline" size={16} color={item.accent} />
+            <Text style={styles.tierPointText}>{point}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function FeatureStoryCard({ item }: { item: FeatureStoryItem }) {
+  return (
+    <View style={styles.featureStoryCard}>
+      <View style={[styles.featureStoryIcon, { backgroundColor: `${item.accent}18`, borderColor: `${item.accent}55` }]}>
+        <Ionicons name={item.icon} size={18} color={item.accent} />
+      </View>
+      <Text style={styles.featureStoryTitle}>{item.title}</Text>
+      <Text style={styles.featureStoryBody}>{item.body}</Text>
     </View>
   );
 }
@@ -369,9 +479,10 @@ export default function AboutPage() {
   const reveal = useScrollReveal();
   const { height, width } = useWindowDimensions();
   const compact = width < 760;
-  const desktop = width >= 1020;
   const heroMinHeight = compact ? Math.max(660, height * 0.86) : Math.max(640, height * 0.88);
   const contentWidth = Math.max(280, Math.min(1180, width - 44));
+  const heroLogoWidth = compact ? Math.min(360, Math.max(260, contentWidth - 16)) : 520;
+  const heroLogoHeight = Math.round(heroLogoWidth / HERO_LOGO_ASPECT_RATIO);
 
   useEffect(() => {
     if (Platform.OS === 'web') {
@@ -408,16 +519,6 @@ export default function AboutPage() {
 
           <SafeAreaView style={styles.heroSafe}>
             <View style={styles.navBar}>
-              <TouchableOpacity
-                activeOpacity={0.78}
-                style={styles.logoButton}
-                onPress={() => router.push('/')}
-                accessibilityLabel="Open Thallo app"
-              >
-                <BrandMark size={34} variant="tile" animated={false} style={styles.logoMark} />
-                <Image source={logo} style={styles.logo} resizeMode="contain" />
-              </TouchableOpacity>
-
               <View style={styles.navActions}>
                 <TouchableOpacity
                   activeOpacity={0.78}
@@ -443,15 +544,12 @@ export default function AboutPage() {
 
             <View style={[styles.heroContent, compact && styles.heroContentCompact]}>
               <View style={[styles.heroCopy, compact && styles.heroCopyCompact, compact && { maxWidth: contentWidth }]}>
-                <Text style={styles.heroKicker}>Total health</Text>
-                <Text
-                  style={[styles.heroTitle, compact && styles.heroTitleCompact]}
-                  numberOfLines={desktop ? 2 : 3}
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.78}
-                >
-                  Thallo
-                </Text>
+                <Image
+                  source={heroLogo}
+                  resizeMode="contain"
+                  accessibilityLabel="Thallo"
+                  style={[styles.heroLogo, { width: heroLogoWidth, height: heroLogoHeight }]}
+                />
                 <Text style={[
                   styles.heroSubtitle,
                   compact && styles.heroSubtitleCompact,
@@ -518,6 +616,42 @@ export default function AboutPage() {
           viewportHeight={reveal.viewportHeight}
           index={2}
           revealDistance={24}
+          style={styles.accessBand}
+        >
+          <View style={styles.sectionInner}>
+            <View style={[styles.accessHeader, compact && styles.accessHeaderCompact]}>
+              <View style={styles.accessHeaderCopy}>
+                <Text style={styles.sectionEyebrow}>Why Thallo</Text>
+                <Text style={styles.largeTitle}>Free tracking stays useful. Pro adds the guided engine.</Text>
+                <Text style={styles.largeBody}>
+                  Thallo is clear about the split: everyday logging and workout history are available for free, while Pro unlocks generated weeks, richer AI help, readiness, scoring, and deeper trend context.
+                </Text>
+              </View>
+              <View style={styles.accessBadge}>
+                <Ionicons name="shield-checkmark-outline" size={17} color={colors.primaryLight} />
+                <Text style={styles.accessBadgeText}>Private by default</Text>
+              </View>
+            </View>
+
+            <View style={[styles.tierGrid, compact && styles.tierGridCompact]}>
+              {tierStoryItems.map(item => (
+                <TierStoryCard key={item.eyebrow} item={item} />
+              ))}
+            </View>
+
+            <View style={[styles.featureStoryGrid, compact && styles.featureStoryGridCompact]}>
+              {featureStoryItems.map(item => (
+                <FeatureStoryCard key={item.title} item={item} />
+              ))}
+            </View>
+          </View>
+        </ScrollRevealView>
+
+        <ScrollRevealView
+          scrollY={reveal.scrollY}
+          viewportHeight={reveal.viewportHeight}
+          index={3}
+          revealDistance={24}
           style={styles.themeBand}
         >
           <View style={styles.sectionInner}>
@@ -547,7 +681,7 @@ export default function AboutPage() {
             key={section.title}
             scrollY={reveal.scrollY}
             viewportHeight={reveal.viewportHeight}
-            index={index + 3}
+            index={index + 4}
             revealDistance={28}
             style={[
               styles.systemBandSegment,
@@ -569,7 +703,7 @@ export default function AboutPage() {
         <ScrollRevealView
           scrollY={reveal.scrollY}
           viewportHeight={reveal.viewportHeight}
-          index={6}
+          index={7}
           revealDistance={26}
           style={styles.watchBand}
         >
@@ -623,7 +757,7 @@ export default function AboutPage() {
         <ScrollRevealView
           scrollY={reveal.scrollY}
           viewportHeight={reveal.viewportHeight}
-          index={7}
+          index={8}
           revealDistance={22}
           style={styles.ctaBand}
         >
@@ -687,25 +821,8 @@ const styles = StyleSheet.create({
     minHeight: 70,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     gap: 16,
-  },
-  logoButton: {
-    minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    justifyContent: 'center',
-  },
-  logoMark: {
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
-  },
-  logo: {
-    width: 146,
-    height: 34,
   },
   navActions: {
     flexDirection: 'row',
@@ -734,9 +851,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   navButtonText: {
+    ...typography.brandButton,
     color: colors.background,
     fontSize: 13,
-    fontWeight: '900',
   },
   heroContent: {
     flex: 1,
@@ -764,24 +881,8 @@ const styles = StyleSheet.create({
     width: '100%',
     alignSelf: 'center',
   },
-  heroKicker: {
-    color: colors.primaryLight,
-    fontSize: 13,
-    fontWeight: '900',
-    letterSpacing: 0,
-    textTransform: 'uppercase',
-    marginBottom: 12,
-  },
-  heroTitle: {
-    color: colors.textPrimary,
-    fontSize: 88,
-    lineHeight: 94,
-    fontWeight: '900',
-    letterSpacing: 0,
-  },
-  heroTitleCompact: {
-    fontSize: 58,
-    lineHeight: 64,
+  heroLogo: {
+    maxWidth: '100%',
   },
   heroSubtitle: {
     color: colors.textSecondary,
@@ -831,9 +932,9 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.2)',
   },
   buttonText: {
+    ...typography.brandButton,
     color: colors.textPrimary,
     fontSize: 15,
-    fontWeight: '900',
   },
   primaryButtonText: {
     color: colors.background,
@@ -924,8 +1025,158 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 18,
   },
-  themeBand: {
+  accessBand: {
     backgroundColor: '#0B1017',
+    paddingVertical: 72,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.04)',
+  },
+  accessHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: 24,
+    marginBottom: 28,
+  },
+  accessHeaderCompact: {
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+  },
+  accessHeaderCopy: {
+    flex: 1,
+    maxWidth: 820,
+  },
+  accessBadge: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: 'rgba(110,231,220,0.24)',
+    backgroundColor: 'rgba(21,199,184,0.08)',
+    paddingHorizontal: 14,
+  },
+  accessBadgeText: {
+    color: colors.textPrimary,
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '900',
+  },
+  tierGrid: {
+    flexDirection: 'row',
+    gap: 14,
+  },
+  tierGridCompact: {
+    flexDirection: 'column',
+  },
+  tierCard: {
+    flex: 1,
+    minWidth: 0,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    padding: 20,
+  },
+  tierCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 16,
+  },
+  tierIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tierTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  tierEyebrow: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+    marginBottom: 3,
+  },
+  tierTitle: {
+    color: colors.textPrimary,
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: '900',
+  },
+  tierBody: {
+    color: colors.textSecondary,
+    fontSize: 15,
+    lineHeight: 23,
+    fontWeight: '600',
+  },
+  tierPointList: {
+    gap: 10,
+    marginTop: 18,
+  },
+  tierPointRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 9,
+  },
+  tierPointText: {
+    flex: 1,
+    minWidth: 0,
+    color: colors.textPrimary,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '800',
+  },
+  featureStoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    marginTop: 14,
+  },
+  featureStoryGridCompact: {
+    flexDirection: 'column',
+  },
+  featureStoryCard: {
+    flexGrow: 1,
+    flexBasis: 300,
+    minHeight: 206,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: '#10141B',
+    padding: 18,
+  },
+  featureStoryIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  featureStoryTitle: {
+    color: colors.textPrimary,
+    fontSize: 18,
+    lineHeight: 23,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  featureStoryBody: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    lineHeight: 21,
+    fontWeight: '600',
+  },
+  themeBand: {
+    backgroundColor: colors.background,
     paddingVertical: 72,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255,255,255,0.04)',
@@ -1164,10 +1415,10 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   sectionTitle: {
+    ...typography.brandSectionTitle,
     color: colors.textPrimary,
     fontSize: 34,
     lineHeight: 40,
-    fontWeight: '900',
     letterSpacing: 0,
   },
   sectionBody: {

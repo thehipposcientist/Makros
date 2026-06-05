@@ -171,10 +171,10 @@ def test_credited_micros_garbage_input():
 # ─── nutrition_score wiring ─────────────────────────────────────────────────
 
 def test_score_version_bumped():
-    print("\n[test] nutrition_score: SCORE_VERSION bumped to 6")
+    print("\n[test] nutrition_score: SCORE_VERSION bumped to 7")
     from app.services.nutrition.nutrition_score import SCORE_VERSION
-    assert SCORE_VERSION == 6, f"expected 6, got {SCORE_VERSION}"
-    _ok("SCORE_VERSION == 6")
+    assert SCORE_VERSION == 7, f"expected 7, got {SCORE_VERSION}"
+    _ok("SCORE_VERSION == 7")
 
 
 def test_trace_minerals_display_only():
