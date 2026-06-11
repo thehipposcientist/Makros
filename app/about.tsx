@@ -231,8 +231,20 @@ function imageFocus(position: string) {
 }
 
 function openMail() {
-  const subject = encodeURIComponent('Thallo beta access');
-  Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}`).catch(() => undefined);
+  const subject = encodeURIComponent('Thallo beta access request');
+  const body = encodeURIComponent([
+    'I would like beta access to Thallo.',
+    '',
+    'I am most interested in:',
+    '- Training plans',
+    '- Meal / macro tracking',
+    '- Recovery and health signals',
+    '- Apple Watch workout flow',
+    '- Web review dashboard',
+    '',
+    'My current fitness or nutrition setup:',
+  ].join('\n'));
+  Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`).catch(() => undefined);
 }
 
 function openApp(router: ReturnType<typeof useRouter>) {

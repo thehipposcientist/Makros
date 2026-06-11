@@ -555,15 +555,23 @@ function GearFormModal({
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onCancel}>
-      <View style={[styles.modal, { backgroundColor: tc.background }]}>
+      <View testID="gear-form-modal" style={[styles.modal, { backgroundColor: tc.background }]}>
         <View style={styles.modalHeader}>
-          <TouchableOpacity onPress={onCancel}>
+          <TouchableOpacity
+            onPress={onCancel}
+            testID="gear-form-cancel"
+            accessibilityRole="button"
+            accessibilityLabel="Cancel gear form">
             <Text style={[styles.modalCancel, { color: tc.textSecondary }]}>Cancel</Text>
           </TouchableOpacity>
           <Text style={[styles.modalTitle, { color: tc.textPrimary }]}>
             {initial ? 'Edit Gear' : 'Add Gear'}
           </Text>
-          <TouchableOpacity onPress={handleSave}>
+          <TouchableOpacity
+            onPress={handleSave}
+            testID="gear-form-save"
+            accessibilityRole="button"
+            accessibilityLabel="Save gear">
             <Text style={[styles.modalSave, { color: tc.primary }]}>Save</Text>
           </TouchableOpacity>
         </View>
@@ -649,6 +657,8 @@ function GearFormModal({
 
           <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>NAME</Text>
           <TextInput
+            testID="gear-name-input"
+            accessibilityLabel="Gear name"
             style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
             value={name}
             onChangeText={setName}
@@ -916,11 +926,16 @@ export default function GearScreen({ authToken, themeName = DEFAULT_THEME_NAME, 
   const retiring = gear.filter(g => g.pct_used !== null && g.pct_used >= 0.85);
 
   return (
-    <View style={[styles.container, { backgroundColor: tc.background, paddingTop: insets.top }]}>
+    <View testID="gear-tracker-screen" style={[styles.container, { backgroundColor: tc.background, paddingTop: insets.top }]}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: tc.border }]}>
         {onBack && (
-          <TouchableOpacity onPress={onBack} style={styles.backBtn}>
+          <TouchableOpacity
+            onPress={onBack}
+            style={styles.backBtn}
+            testID="gear-back"
+            accessibilityRole="button"
+            accessibilityLabel="Back from gear tracker">
             <Ionicons name="chevron-back" size={24} color={tc.textPrimary} />
           </TouchableOpacity>
         )}
@@ -928,6 +943,9 @@ export default function GearScreen({ authToken, themeName = DEFAULT_THEME_NAME, 
         <TouchableOpacity
           onPress={() => { setEditTarget(null); setShowForm(true); }}
           style={[styles.addBtn, { backgroundColor: tc.primary }]}
+          testID="gear-add-button"
+          accessibilityRole="button"
+          accessibilityLabel="Add gear"
         >
           <Ionicons name="add" size={20} color={onPrimary} />
         </TouchableOpacity>
@@ -938,7 +956,7 @@ export default function GearScreen({ authToken, themeName = DEFAULT_THEME_NAME, 
           <ActivityIndicator color={tc.primary} />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}>
+        <ScrollView testID="gear-tracker-content" contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}>
           {retiring.length > 0 && (
             <View style={[styles.alertBanner, { backgroundColor: '#F97316' + '22', borderColor: '#F97316' }]}>
               <Ionicons name="warning-outline" size={16} color="#F97316" />
@@ -952,7 +970,7 @@ export default function GearScreen({ authToken, themeName = DEFAULT_THEME_NAME, 
 
           {gear.length > 0 && <GearHero />}
 
-          <View style={[styles.infoBanner, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+          <View testID="gear-info-banner" style={[styles.infoBanner, { backgroundColor: tc.surface, borderColor: tc.border }]}>
             <Ionicons name="information-circle-outline" size={16} color={tc.textSecondary} />
             <Text style={[styles.infoText, { color: tc.textSecondary }]}>
               Gear Tracker is for wear-based items like shoes, bikes, belts, wraps, and gloves. Workout equipment like adjustable dumbbells belongs in your workout equipment profile.
@@ -980,6 +998,9 @@ export default function GearScreen({ authToken, themeName = DEFAULT_THEME_NAME, 
               <TouchableOpacity
                 onPress={() => { setEditTarget(null); setShowForm(true); }}
                 style={[styles.emptyBtn, { backgroundColor: tc.primary }]}
+                testID="gear-empty-add-button"
+                accessibilityRole="button"
+                accessibilityLabel="Add gear"
               >
                 <Text style={{ color: onPrimary, fontWeight: '700' }}>Add Gear</Text>
               </TouchableOpacity>

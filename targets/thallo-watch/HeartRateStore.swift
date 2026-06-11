@@ -11,7 +11,8 @@
 //   • Cycling:         distanceCycling — outdoor uses GPS; indoor has
 //                     no auto distance and relies on the user manually
 //                     setting `manualDistanceMeters`.
-//   • Swimming/rower:  no auto distance source today (manual override)
+//   • Swimming:        distanceSwimming; pool swims set a lap length
+//   • Rower:           no auto distance source today (manual override)
 //   • Lifting:         heart rate only (no distance / calories tile)
 //
 // Zone math:
@@ -38,6 +39,13 @@ struct WatchRouteCoord: Equatable {
 }
 
 final class HeartRateStore: NSObject, ObservableObject {
+    private typealias ResolvedActivity = (
+        type: HKWorkoutActivityType,
+        location: HKWorkoutSessionLocationType,
+        swimmingLocation: HKWorkoutSwimmingLocationType?,
+        lapLengthMeters: Double?
+    )
+
     @Published var heartRate: Int? = nil
     @Published var zone: Int? = nil           // 1-5, nil before first sample
     @Published private(set) var zones: [WatchHRZone] = []
@@ -66,6 +74,8 @@ final class HeartRateStore: NSObject, ObservableObject {
     /// distance quantity is collected and which UI tab the user sees.
     @Published var activityType: HKWorkoutActivityType = .traditionalStrengthTraining
     @Published var locationType: HKWorkoutSessionLocationType = .indoor
+    @Published var swimmingLocationType: HKWorkoutSwimmingLocationType = .unknown
+    @Published var swimPoolLengthMeters: Double? = nil
 
     /// Distance shown in the UI — native if the session collects it,
     /// otherwise the manual override. Pace + downstream HK writes both
@@ -87,6 +97,22 @@ final class HeartRateStore: NSObject, ObservableObject {
         let d = displayDistanceMeters
         guard d >= 30, elapsedSeconds > 0 else { return nil }
         return Double(elapsedSeconds) / (d / 1000.0)
+    }
+
+    var swimLapCount: Int? {
+        guard activityType == .swimming,
+              swimmingLocationType == .pool,
+              let poolLength = swimPoolLengthMeters,
+              poolLength > 0,
+              displayDistanceMeters > 0
+        else { return nil }
+        return max(1, Int((displayDistanceMeters / poolLength).rounded()))
+    }
+
+    var swimPaceSecPer100Meters: Double? {
+        let d = displayDistanceMeters
+        guard activityType == .swimming, d >= 30, elapsedSeconds > 0 else { return nil }
+        return Double(elapsedSeconds) / (d / 100.0)
     }
 
     /// True when the resolved activity should render the cardio tab
@@ -278,6 +304,8 @@ final class HeartRateStore: NSObject, ObservableObject {
         elapsedSeconds = 0
         stepCount = 0
         elevationGainFeet = 0
+        swimPoolLengthMeters = nil
+        swimmingLocationType = .unknown
         routeCoords = []
         currentLocation = nil
         lastAcceptedLocation = nil
@@ -287,6 +315,8 @@ final class HeartRateStore: NSObject, ObservableObject {
         let assignResolvedActivity = {
             self.activityType = resolved.type
             self.locationType = resolved.location
+            self.swimmingLocationType = resolved.swimmingLocation ?? .unknown
+            self.swimPoolLengthMeters = resolved.lapLengthMeters
         }
         if Thread.isMainThread {
             assignResolvedActivity()
@@ -310,19 +340,12 @@ final class HeartRateStore: NSObject, ObservableObject {
     }
 
     private func beginSession(
-        activity: (type: HKWorkoutActivityType, location: HKWorkoutSessionLocationType),
+        activity: ResolvedActivity,
         onReady: (() -> Void)? = nil
     ) {
         Self.saveDiag("beginSession type=\(activity.type.rawValue) loc=\(activity.location.rawValue)")
         let config = HKWorkoutConfiguration()
-        config.activityType = activity.type
-        config.locationType = activity.location
-        // Swimming needs a swimming-location enum (pool vs open water).
-        // Default to pool so HK's auto-lap detection turns on. Open-water
-        // swims would need a separate code path — out of Cut 1 scope.
-        if activity.type == .swimming {
-            config.swimmingLocationType = .pool
-        }
+        Self.configureWorkout(config, activity: activity)
         do {
             let sess = try HKWorkoutSession(healthStore: store, configuration: config)
             Self.saveDiag("session created")
@@ -421,21 +444,21 @@ final class HeartRateStore: NSObject, ObservableObject {
         elapsedSeconds = 0
         stepCount = 0
         elevationGainFeet = 0
+        swimPoolLengthMeters = nil
+        swimmingLocationType = .unknown
         routeCoords = []
         currentLocation = nil
         lastAcceptedLocation = nil
         lastAcceptedAltitudeM = nil
 
         let config = HKWorkoutConfiguration()
-        config.activityType = resolved.type
-        config.locationType = resolved.location
-        if resolved.type == .swimming {
-            config.swimmingLocationType = .pool
-        }
+        Self.configureWorkout(config, activity: resolved)
         let start = Date()
         metricWindowStartedAt = start
         activityType = resolved.type
         locationType = resolved.location
+        swimmingLocationType = resolved.swimmingLocation ?? .unknown
+        swimPoolLengthMeters = resolved.lapLengthMeters
         bld.dataSource = HKLiveWorkoutDataSource(healthStore: store, workoutConfiguration: config)
         sess.beginNewActivity(configuration: config, date: start, metadata: nil)
         startPedometerUpdatesIfNeeded(from: start)
@@ -503,7 +526,7 @@ final class HeartRateStore: NSObject, ObservableObject {
     }
 
     private func startPedometerUpdatesIfNeeded(from start: Date) {
-        guard isCardio, CMPedometer.isStepCountingAvailable() else { return }
+        guard isCardio, activityType != .swimming, CMPedometer.isStepCountingAvailable() else { return }
         pedometer.startUpdates(from: start) { [weak self] data, _ in
             guard let self, let data else { return }
             let steps = data.numberOfSteps.intValue
@@ -598,66 +621,96 @@ final class HeartRateStore: NSObject, ObservableObject {
     // would have used if started there. Any new sport should be added
     // in BOTH places (and both should map to the same HKWorkoutActivityType).
 
-    private static func resolveActivity(focus: String?) -> (type: HKWorkoutActivityType, location: HKWorkoutSessionLocationType) {
+    private static let defaultPoolLengthMeters: Double = 25.0
+
+    private static func resolveActivity(focus: String?) -> ResolvedActivity {
         let s = (focus ?? "").lowercased()
         if isMixedStrengthCardioFocus(focus) {
-            return (.traditionalStrengthTraining, .indoor)
+            return (.traditionalStrengthTraining, .indoor, nil, nil)
         }
         // Outdoor activity types — watch GPS auto-feeds distance into
         // the live builder when locationType is .outdoor.
         if s.contains("run") {
             let loc: HKWorkoutSessionLocationType = s.contains("treadmill") || s.contains("indoor") ? .indoor : .outdoor
-            return (.running, loc)
+            return (.running, loc, nil, nil)
         }
         if s.contains("walk") {
             let loc: HKWorkoutSessionLocationType = s.contains("indoor") || s.contains("treadmill") ? .indoor : .outdoor
-            return (.walking, loc)
+            return (.walking, loc, nil, nil)
         }
-        if s.contains("hike") { return (.hiking, .outdoor) }
+        if s.contains("hike") { return (.hiking, .outdoor, nil, nil) }
         if s.contains("bike") || s.contains("cycl") || s == "ride" || s == "spin" {
             let loc: HKWorkoutSessionLocationType = s.contains("indoor") || s.contains("stationary") || s.contains("spin") ? .indoor : .outdoor
-            return (.cycling, loc)
+            return (.cycling, loc, nil, nil)
         }
         if s.contains("swim") || s.contains("open water") || s.contains("pool") {
             let loc: HKWorkoutSessionLocationType = s.contains("open water") || s.contains("outdoor") ? .outdoor : .indoor
-            return (.swimming, loc)
+            let swimLocation: HKWorkoutSwimmingLocationType = loc == .outdoor ? .openWater : .pool
+            let lapLength = swimLocation == .pool ? parsePoolLengthMeters(from: s) ?? defaultPoolLengthMeters : nil
+            return (.swimming, loc, swimLocation, lapLength)
         }
         if s.contains("row") {
             let loc: HKWorkoutSessionLocationType = s.contains("outdoor") || s.contains("water") ? .outdoor : .indoor
-            return (.rowing, loc)
+            return (.rowing, loc, nil, nil)
         }
-        if s.contains("ellipt") { return (.elliptical, .indoor) }
-        if s.contains("stair") { return (.stairClimbing, .indoor) }
-        if s.contains("climb") || s.contains("boulder") { return (.climbing, .indoor) }
-        if s.contains("hiit") || s.contains("bootcamp") || s.contains("boot camp") || s.contains("boot-camp") || s.contains("interval") || s.contains("tabata") { return (.highIntensityIntervalTraining, .indoor) }
-        if s.contains("zone") || s.contains("cardio") || s.contains("conditioning") || s.contains("tempo") { return (.mixedCardio, .indoor) }
-        if s.contains("yoga") { return (.yoga, s.contains("outdoor") ? .outdoor : .indoor) }
-        if s.contains("pilates") { return (.pilates, .indoor) }
-        if s.contains("circuit") || s.contains("cross") { return (.crossTraining, .indoor) }
-        if s.contains("core") { return (.coreTraining, .indoor) }
-        if s.contains("mobility") || s.contains("stretch") || s.contains("flex") { return (.flexibility, .indoor) }
-        if s.contains("dance") || s.contains("spin") { return (.cardioDance, .indoor) }
-        if s.contains("boxing") || s.contains("kickbox") || s.contains("martial") || s.contains("mma") { return (.boxing, .indoor) }
+        if s.contains("ellipt") { return (.elliptical, .indoor, nil, nil) }
+        if s.contains("stair") { return (.stairClimbing, .indoor, nil, nil) }
+        if s.contains("climb") || s.contains("boulder") { return (.climbing, .indoor, nil, nil) }
+        if s.contains("hiit") || s.contains("bootcamp") || s.contains("boot camp") || s.contains("boot-camp") || s.contains("interval") || s.contains("tabata") { return (.highIntensityIntervalTraining, .indoor, nil, nil) }
+        if s.contains("zone") || s.contains("cardio") || s.contains("conditioning") || s.contains("tempo") { return (.mixedCardio, .indoor, nil, nil) }
+        if s.contains("yoga") { return (.yoga, s.contains("outdoor") ? .outdoor : .indoor, nil, nil) }
+        if s.contains("pilates") { return (.pilates, .indoor, nil, nil) }
+        if s.contains("circuit") || s.contains("cross") { return (.crossTraining, .indoor, nil, nil) }
+        if s.contains("core") { return (.coreTraining, .indoor, nil, nil) }
+        if s.contains("mobility") || s.contains("stretch") || s.contains("flex") { return (.flexibility, .indoor, nil, nil) }
+        if s.contains("dance") || s.contains("spin") { return (.cardioDance, .indoor, nil, nil) }
+        if s.contains("boxing") || s.contains("kickbox") || s.contains("martial") || s.contains("mma") { return (.boxing, .indoor, nil, nil) }
         if s.contains("soccer") || s.contains("futsal") {
-            return (.soccer, s.contains("indoor") || s.contains("futsal") ? .indoor : .outdoor)
+            return (.soccer, s.contains("indoor") || s.contains("futsal") ? .indoor : .outdoor, nil, nil)
         }
         if s.contains("basket") {
-            return (.basketball, s.contains("outdoor") ? .outdoor : .indoor)
+            return (.basketball, s.contains("outdoor") ? .outdoor : .indoor, nil, nil)
         }
         if s.contains("tennis") {
-            return (.tennis, s.contains("indoor") ? .indoor : .outdoor)
+            return (.tennis, s.contains("indoor") ? .indoor : .outdoor, nil, nil)
         }
         if s.contains("pickle") {
-            return (.pickleball, s.contains("indoor") ? .indoor : .outdoor)
+            return (.pickleball, s.contains("indoor") ? .indoor : .outdoor, nil, nil)
         }
-        if s.contains("golf") { return (.golf, .outdoor) }
-        if s.contains("volley") { return (.volleyball, s.contains("beach") || s.contains("outdoor") ? .outdoor : .indoor) }
+        if s.contains("golf") { return (.golf, .outdoor, nil, nil) }
+        if s.contains("volley") { return (.volleyball, s.contains("beach") || s.contains("outdoor") ? .outdoor : .indoor, nil, nil) }
         // Lift fallbacks
-        if s.contains("lift") || s.contains("weight") || s.contains("strength") { return (.traditionalStrengthTraining, .indoor) }
+        if s.contains("lift") || s.contains("weight") || s.contains("strength") { return (.traditionalStrengthTraining, .indoor, nil, nil) }
         if ["push", "pull", "legs", "upper", "lower", "full body", "full_body"].contains(where: s.contains) {
-            return (.traditionalStrengthTraining, .indoor)
+            return (.traditionalStrengthTraining, .indoor, nil, nil)
         }
-        return (.functionalStrengthTraining, .indoor)
+        return (.functionalStrengthTraining, .indoor, nil, nil)
+    }
+
+    private static func parsePoolLengthMeters(from text: String) -> Double? {
+        let pattern = #"(\d+(?:\.\d+)?)\s*(yd|yds|yard|yards|m|meter|meters|metre|metres)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsrange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: nsrange),
+              match.numberOfRanges >= 3,
+              let valueRange = Range(match.range(at: 1), in: text),
+              let unitRange = Range(match.range(at: 2), in: text),
+              let value = Double(text[valueRange])
+        else { return nil }
+        let unit = text[unitRange].lowercased()
+        let meters = unit.hasPrefix("yd") || unit.hasPrefix("yard") ? value * 0.9144 : value
+        guard meters >= 5, meters <= 150 else { return nil }
+        return meters
+    }
+
+    private static func configureWorkout(_ config: HKWorkoutConfiguration, activity: ResolvedActivity) {
+        config.activityType = activity.type
+        config.locationType = activity.location
+        guard activity.type == .swimming else { return }
+        config.swimmingLocationType = activity.swimmingLocation ?? (activity.location == .outdoor ? .openWater : .pool)
+        if config.swimmingLocationType == .pool, let lapLength = activity.lapLengthMeters {
+            config.lapLength = HKQuantity(unit: .meter(), doubleValue: lapLength)
+        }
     }
 
     static func isMixedStrengthCardioFocus(_ focus: String?) -> Bool {
@@ -841,7 +894,12 @@ extension HeartRateStore: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDelegate
                 guard let self else { return }
                 self.session = nil
                 self.builder = nil
-                let resolved = (type: self.activityType, location: self.locationType)
+                let resolved = (
+                    type: self.activityType,
+                    location: self.locationType,
+                    swimmingLocation: self.activityType == .swimming ? self.swimmingLocationType : nil,
+                    lapLengthMeters: self.swimPoolLengthMeters
+                )
                 self.beginSession(activity: resolved)
             }
         }

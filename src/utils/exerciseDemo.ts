@@ -1,32 +1,41 @@
-// Helpers for bundled exercise form previews.
-//
-// Frames are bundled into the app under assets/exercise-demos/<id>/{0,1}.jpg
-// and exposed through the generated require() map at exerciseDemoAssets.ts.
-// Move Kit MP4s are bundled under assets/exercise-videos/move-kit and exposed
-// through moveKitExerciseVideos.ts.
-// We previously hot-linked from raw.githubusercontent.com — that worked in
-// Expo Go but failed in production builds (GH throttles non-browser traffic
-// and silent <Image> errors meant the cards just didn't appear). Bundling
-// trades ~21 MB of ipa size for offline-clean, zero-cost form demos.
-//
-// To add new ids: drop them into the seed, run scripts/sync-exercise-demos.sh.
+import type { ImageSourcePropType } from 'react-native';
 
-import { ImageSourcePropType } from 'react-native';
-import { DEMO_FRAMES } from './exerciseDemoAssets';
 import {
   MOVE_KIT_VIDEO_BY_DEMO_ID,
   MOVE_KIT_VIDEO_BY_EXERCISE_KEY,
-  type MoveKitExerciseVideo,
 } from './moveKitExerciseVideos';
 
-export type DemoFrame = 0 | 1;
+type MoveKitDemoVideo = {
+  source: any;
+};
 
-const MOVE_KIT_BY_DEMO_ID: Readonly<Record<string, MoveKitExerciseVideo>> = MOVE_KIT_VIDEO_BY_DEMO_ID;
-const MOVE_KIT_BY_EXERCISE_KEY: Readonly<Record<string, MoveKitExerciseVideo>> = MOVE_KIT_VIDEO_BY_EXERCISE_KEY;
+const COMMON_MOVE_KIT_ALIASES: Record<string, string> = {
+  'bench press': 'barbell bench press',
+  'barbell press': 'barbell bench press',
+  'squat': 'barbell squat',
+  'back squat': 'barbell squat',
+  'deadlift': 'barbell deadlift',
+  'conventional deadlift': 'barbell deadlift',
+  'military press': 'barbell overhead press',
+  'shoulder press': 'dumbbell shoulder press',
+  'bicep curl': 'dumbbell curl',
+  'biceps curl': 'dumbbell curl',
+  'curl': 'dumbbell curl',
+  'tricep extension': 'dumbbell seated overhead tricep extension',
+  'triceps extension': 'dumbbell seated overhead tricep extension',
+  'tricep pushdown': 'cable bar pushdown',
+  'triceps pushdown': 'cable bar pushdown',
+  'row': 'dumbbell row',
+  'seated row': 'machine seated cable row',
+  'chest press': 'machine chest press',
+  'lat pull down': 'lat pulldown',
+  'pulldown': 'lat pulldown',
+};
 
-function exerciseVideoKey(value: string | null | undefined): string | null {
+function normalizeDemoKey(value?: string | null): string | null {
   const key = String(value ?? '')
     .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
     .replace(/&/g, ' and ')
     .replace(/[_-]+/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
@@ -52,41 +61,39 @@ function exerciseVideoKey(value: string | null | undefined): string | null {
   return key || null;
 }
 
-/** Returns a bundled Move Kit video for this exercise. Exercise name wins
- *  over the old free-exercise-db id because several legacy ids are generic
- *  fallbacks shared by different equipment variants. */
 export function moveKitDemoVideo(
-  demoExerciseDbId: string | null | undefined,
-  exerciseName?: string | null,
-): MoveKitExerciseVideo | null {
-  const nameKey = exerciseVideoKey(exerciseName);
-  if (nameKey && MOVE_KIT_BY_EXERCISE_KEY[nameKey]) {
-    return MOVE_KIT_BY_EXERCISE_KEY[nameKey];
+  demoExerciseDbId?: string | null,
+  exerciseName?: string | null
+): MoveKitDemoVideo | null {
+  const videoByExerciseKey = MOVE_KIT_VIDEO_BY_EXERCISE_KEY as Record<string, MoveKitDemoVideo>;
+  const videoByDemoId = MOVE_KIT_VIDEO_BY_DEMO_ID as Record<string, MoveKitDemoVideo>;
+  const exerciseKey = normalizeDemoKey(exerciseName);
+  if (exerciseKey && videoByExerciseKey[exerciseKey]) {
+    return videoByExerciseKey[exerciseKey];
   }
-  if (demoExerciseDbId && MOVE_KIT_BY_DEMO_ID[demoExerciseDbId]) {
-    return MOVE_KIT_BY_DEMO_ID[demoExerciseDbId];
+  const aliasKey = exerciseKey ? COMMON_MOVE_KIT_ALIASES[exerciseKey] : null;
+  if (aliasKey && videoByExerciseKey[aliasKey]) {
+    return videoByExerciseKey[aliasKey];
   }
-  const demoKey = exerciseVideoKey(demoExerciseDbId);
-  return demoKey ? MOVE_KIT_BY_EXERCISE_KEY[demoKey] ?? null : null;
+  if (demoExerciseDbId && videoByDemoId[demoExerciseDbId]) {
+    return videoByDemoId[demoExerciseDbId];
+  }
+  const demoKey = normalizeDemoKey(demoExerciseDbId);
+  if (!demoKey) return null;
+  const demoAliasKey = COMMON_MOVE_KIT_ALIASES[demoKey];
+  return videoByExerciseKey[demoKey] ?? (demoAliasKey ? videoByExerciseKey[demoAliasKey] ?? null : null);
 }
 
-/** Returns an Image `source` prop for the requested frame, or null when
- *  the id is unknown / unbundled. Callers should pass it directly into
- *  `<Image source={...} />` rather than wrapping in `{ uri }`. */
 export function demoFrameSource(
-  demoExerciseDbId: string | null | undefined,
-  frame: DemoFrame = 1,
+  demoExerciseDbId?: string | null,
+  frame = 1
 ): ImageSourcePropType | null {
-  if (!demoExerciseDbId) return null;
-  const pair = DEMO_FRAMES[demoExerciseDbId];
-  if (!pair) return null;
-  return pair[frame];
+  void demoExerciseDbId;
+  void frame;
+  return null;
 }
 
-/** Lockout / end-position frame — the single most recognizable still
- *  for any lift, used as the static thumbnail throughout the app. */
-export function demoLockoutSource(
-  demoExerciseDbId: string | null | undefined,
-): ImageSourcePropType | null {
-  return demoFrameSource(demoExerciseDbId, 1);
+export function demoLockoutSource(demoExerciseDbId?: string | null): ImageSourcePropType | null {
+  void demoExerciseDbId;
+  return null;
 }

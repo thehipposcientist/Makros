@@ -58,8 +58,6 @@ interface AuthScreenProps {
 export default function AuthScreen({ onAuthenticated, initialMode = 'login', onBack }: AuthScreenProps) {
   // Reset flow is two-step: request an email code, then confirm it with a new password.
   const [mode, setMode] = useState<'login' | 'signup' | 'reset_email' | 'reset_answer'>(initialMode);
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -107,8 +105,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
     selectAccount: true,
   });
 
-  const firstNameRef       = useRef<TextInput>(null);
-  const lastNameRef        = useRef<TextInput>(null);
   const emailRef           = useRef<TextInput>(null);
   const resetTokenRef      = useRef<TextInput>(null);
   const passwordRef        = useRef<TextInput>(null);
@@ -401,8 +397,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
     }
     if (mode === 'signup') {
       if (!EMAIL_RE.test(email.trim())) { setError('Enter a valid email address'); return; }
-      if (!firstName.trim()) { setError('First name is required'); return; }
-      if (!lastName.trim()) { setError('Last name is required'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
       if (!/\d/.test(password)) { setError('Password must include at least one number'); return; }
       if (!acceptedLegal) { setError('Please accept the Terms, Privacy Policy, Health Disclaimer, and AI Disclosure'); return; }
@@ -412,8 +406,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
       const isNewUser = mode === 'signup';
       if (isNewUser) {
         await register(email.trim(), password, {
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
           acceptedTerms: acceptedLegal,
           acceptedPrivacy: acceptedLegal,
           acceptedHealthDisclaimer: acceptedLegal,
@@ -549,7 +541,7 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
         showsVerticalScrollIndicator={false}>
 
         <View style={[webMode && styles.webShell, webCompact && styles.webShellCompact]}>
-          {webMode && !webCompact ? (
+          {webMode && !webCompact && mode !== 'signup' ? (
             <View style={styles.webIntroPanel}>
               <Text style={styles.webEyebrow}>Thallo web</Text>
               <Text style={styles.webIntroTitle}>Review the week without opening the phone app.</Text>
@@ -608,9 +600,9 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                 style={[styles.logo, onBack && styles.logoCompact, webMode && styles.webLogo]}
                 resizeMode="contain"
               />
-              {onBack ? (
+              {onBack || mode === 'signup' ? (
                 <Text style={[styles.authTitle, webMode && styles.webAuthTitle]}>
-                  {mode === 'signup' ? 'Create your Thallo account' : 'Welcome back'}
+                  {mode === 'signup' ? 'Create account' : 'Welcome back'}
                 </Text>
               ) : (
                 <>
@@ -660,9 +652,7 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
               </View>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={styles.trialTitle}>{SIGNUP_TRIAL_DAYS}-day Pro trial included</Text>
-                <Text style={styles.trialText}>
-                  Generated plans, coach chat, scans, readiness, and nutrition scoring unlock after account creation. No payment at signup.
-                </Text>
+                <Text style={styles.trialText}>No payment at signup.</Text>
               </View>
             </View>
           )}
@@ -712,8 +702,8 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
               <TouchableOpacity onPress={() => setShowLegal(true)} activeOpacity={0.75}>
                 <Text style={styles.socialLegalText}>
                   {mode === 'signup'
-                    ? `To create an account with ${socialLegalProviders}, review and accept Thallo's Terms, Privacy Policy, Health Disclaimer, and AI Disclosure below.`
-                    : `Existing accounts can sign in with ${socialLegalProviders}. New accounts require legal acceptance on the Create Account tab.`}
+                    ? `Accept terms below to use ${socialLegalProviders}.`
+                    : `Existing accounts can sign in with ${socialLegalProviders}.`}
                 </Text>
               </TouchableOpacity>
               <View style={styles.orRow}>
@@ -721,39 +711,6 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                 <Text style={styles.orText}>or</Text>
                 <View style={styles.orLine} />
               </View>
-            </View>
-          )}
-
-          {mode === 'signup' && (
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <TextInput
-                testID="auth-first-name-input"
-                ref={firstNameRef}
-                style={[styles.input, { flex: 1 }]}
-                placeholder="First name"
-                placeholderTextColor={colors.textMuted}
-                value={firstName}
-                onChangeText={setFirstName}
-                autoCapitalize="words"
-                autoCorrect={false}
-                returnKeyType="next"
-                onSubmitEditing={() => lastNameRef.current?.focus()}
-                blurOnSubmit={false}
-              />
-              <TextInput
-                testID="auth-last-name-input"
-                ref={lastNameRef}
-                style={[styles.input, { flex: 1 }]}
-                placeholder="Last name"
-                placeholderTextColor={colors.textMuted}
-                value={lastName}
-                onChangeText={setLastName}
-                autoCapitalize="words"
-                autoCorrect={false}
-                returnKeyType="next"
-                onSubmitEditing={() => emailRef.current?.focus()}
-                blurOnSubmit={false}
-              />
             </View>
           )}
 
@@ -867,7 +824,7 @@ export default function AuthScreen({ onAuthenticated, initialMode = 'login', onB
                 <Text style={styles.legalText}>{legalAcceptanceLabel()}</Text>
               </TouchableOpacity>
               <TouchableOpacity onPress={() => setShowLegal(true)} style={styles.legalLinkBtn}>
-                <Text style={styles.legalLink}>Read Terms, Privacy, Health, and AI disclosures</Text>
+                <Text style={styles.legalLink}>Read disclosures</Text>
               </TouchableOpacity>
               <Text style={styles.passwordHint}>Password must be at least 8 characters and include a number.</Text>
             </View>

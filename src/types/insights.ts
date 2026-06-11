@@ -115,6 +115,17 @@ export interface DailyFeatureSet {
   sleepConsistencyScore?: number | null;
   restingHeartRate?: number | null;
   hrv?: number | null;
+  respiratoryRate?: number | null;
+  oxygenSaturation?: number | null;
+  wristTemperatureC?: number | null;
+  sleepBreathingDisturbances?: number | null;
+  sleepBreathingDisturbancesElevated?: boolean | null;
+  walkingStepLengthM?: number | null;
+  runningStrideLengthM?: number | null;
+  walkingSteadinessPct?: number | null;
+  walkingAsymmetryPct?: number | null;
+  walkingDoubleSupportPct?: number | null;
+  sixMinuteWalkDistanceM?: number | null;
   workoutLoad?: number | null;
   recoveryScore?: number | null;
   socialActivityCount?: number | null;

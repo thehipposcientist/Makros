@@ -563,7 +563,6 @@ import AuthScreen from '../src/screens/AuthScreen';
 import { useRouter } from 'expo-router';
 import AboutPage from './about';
 import LandingScreen from '../src/screens/LandingScreen';
-import WhyThalloScreen from '../src/screens/WhyThalloScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
@@ -1019,7 +1018,7 @@ export function NativeIndex() {
   const router = useRouter();
   const [isLoading, setIsLoading]         = useState(true);
   const [authToken, setAuthToken]         = useState<string | null>(null);
-  const [authEntryMode, setAuthEntryMode] = useState<'landing' | 'why-thallo' | 'login' | 'signup'>(Platform.OS === 'web' ? 'login' : 'landing');
+  const [authEntryMode, setAuthEntryMode] = useState<'landing' | 'login' | 'signup'>(Platform.OS === 'web' ? 'login' : 'landing');
   const authTokenRef = useRef<string | null>(null);
   const authRestoreRetryNeededRef = useRef(false);
   const authRestoreInFlightRef = useRef(false);
@@ -2994,16 +2993,6 @@ export function NativeIndex() {
     if (authEntryMode === 'landing') {
       return (
         <LandingScreen
-          onLogin={() => setAuthEntryMode('login')}
-          onSignup={() => setAuthEntryMode('signup')}
-          onWhyThallo={() => setAuthEntryMode('why-thallo')}
-        />
-      );
-    }
-    if (authEntryMode === 'why-thallo') {
-      return (
-        <WhyThalloScreen
-          onBack={() => setAuthEntryMode('landing')}
           onLogin={() => setAuthEntryMode('login')}
           onSignup={() => setAuthEntryMode('signup')}
         />

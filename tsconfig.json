@@ -42,6 +42,11 @@
   ],
   "exclude": [
     "node_modules",
+    "node_modules.deploy-stale-*",
+    "ios",
+    "android",
+    "dist",
+    "dist-web",
     "**/*.spec.ts",
     "**/__tests__/**",
     "**/*.test.ts",

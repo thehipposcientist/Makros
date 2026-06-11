@@ -341,6 +341,13 @@ export type WatchProgress = {
   /** Average pace seconds per kilometer. Computed on the watch from
    *  distance + elapsed; sent as-is so phone + watch never drift. */
   paceSecPerKm?: number | null;
+  /** Swim-only derived fields. Pool length and laps make Thallo summaries
+   *  read like a swim workout instead of generic cardio. */
+  swimDistanceMeters?: number | null;
+  swimPoolLengthMeters?: number | null;
+  swimLapCount?: number | null;
+  swimPaceSecPer100m?: number | null;
+  swimLocation?: 'pool' | 'open_water' | null;
 };
 
 // Loose typing on the native module — Expo's NativeModule generic

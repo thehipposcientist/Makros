@@ -113,7 +113,10 @@ export default function SetEntryModal({
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           pointerEvents="box-none"
           style={styles.wrap}>
-          <View style={[styles.sheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View
+            testID="set-entry-modal"
+            accessibilityLabel="set-entry-modal"
+            style={[styles.sheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             <View style={styles.header}>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={[styles.eyebrow, { color: colors.textMuted }]} numberOfLines={1}>
@@ -158,6 +161,8 @@ export default function SetEntryModal({
                     <Ionicons name="remove" size={18} color={colors.textPrimary} />
                   </TouchableOpacity>
                   <TextInput
+                    testID="set-entry-weight-input"
+                    accessibilityLabel="set-entry-weight-input"
                     style={[styles.valueInput, {
                       borderColor: colors.primary + '66',
                       backgroundColor: colors.surfaceRaised,
@@ -199,6 +204,8 @@ export default function SetEntryModal({
                     <Ionicons name="remove" size={18} color={colors.textPrimary} />
                   </TouchableOpacity>
                   <TextInput
+                    testID="set-entry-reps-input"
+                    accessibilityLabel="set-entry-reps-input"
                     style={[styles.valueInput, {
                       borderColor: colors.primary + '66',
                       backgroundColor: colors.surfaceRaised,
@@ -222,6 +229,8 @@ export default function SetEntryModal({
             )}
 
             <TouchableOpacity
+              testID="set-entry-log"
+              accessibilityLabel="set-entry-log"
               style={[styles.logBtn, { backgroundColor: colors.primary, opacity: hasAny ? 1 : 0.55 }]}
               disabled={!hasAny}
               onPress={handleLog}>

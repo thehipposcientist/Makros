@@ -3,6 +3,7 @@ import type {
   SunExposureCorrectionOption,
   SunExposureDailySummary,
   SunExposurePreferences,
+  SunExposureSegment,
 } from '../types';
 
 export const DEFAULT_SUN_EXPOSURE_PREFERENCES: SunExposurePreferences = {
@@ -22,6 +23,19 @@ const VALID_LOCATION_MODES = new Set([
   'coarse_location',
   'precise_during_active_workout',
 ]);
+
+const CURRENT_UV_SEGMENT_MAX_AGE_MS = 30 * 60 * 1000;
+const CURRENT_UV_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+
+export type CurrentUvGuidanceLevel = 'low' | 'moderate' | 'high' | 'very_high';
+
+export interface CurrentUvGuidance {
+  uvIndex: number;
+  level: CurrentUvGuidanceLevel;
+  title: string;
+  detail: string;
+  segmentEndTime?: string;
+}
 
 export function normalizeSunExposurePreferences(value: Partial<SunExposurePreferences> | null | undefined): SunExposurePreferences {
   const incoming = value && typeof value === 'object' ? value : {};
@@ -49,6 +63,85 @@ export function formatLux(value: number | null | undefined): string {
   if (!Number.isFinite(lux) || lux <= 0) return '-';
   if (lux >= 1000) return `${Math.round(lux / 100) / 10}k lux`;
   return `${Math.round(lux)} lux`;
+}
+
+export function formatUvIndex(value: number | null | undefined): string {
+  const uv = Number(value ?? 0);
+  if (!Number.isFinite(uv) || uv <= 0) return '0';
+  const rounded = Math.round(uv * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+export function currentUvGuidanceForIndex(value: number | null | undefined): CurrentUvGuidance | null {
+  const uv = Number(value);
+  if (!Number.isFinite(uv) || uv < 0) return null;
+  const uvIndex = Math.max(0, Math.min(20, Math.round(uv * 10) / 10));
+  if (uvIndex >= 8) {
+    return {
+      uvIndex,
+      level: 'very_high',
+      title: `UV ${formatUvIndex(uvIndex)} now`,
+      detail: 'Very high UV. Avoid unnecessary direct sun right now; use shade, coverage, or wait for a lower-UV window.',
+    };
+  }
+  if (uvIndex >= 6) {
+    return {
+      uvIndex,
+      level: 'high',
+      title: `UV ${formatUvIndex(uvIndex)} now`,
+      detail: 'High UV. Choose shade or move outdoor time later if flexible.',
+    };
+  }
+  if (uvIndex >= 3) {
+    return {
+      uvIndex,
+      level: 'moderate',
+      title: `UV ${formatUvIndex(uvIndex)} now`,
+      detail: 'Protection recommended if you head outside.',
+    };
+  }
+  return {
+    uvIndex,
+    level: 'low',
+    title: `UV ${formatUvIndex(uvIndex)} now`,
+    detail: 'Good window for daylight if you are heading out.',
+  };
+}
+
+function segmentUvIndex(segment: SunExposureSegment): number | null {
+  const maxUv = Number(segment.uvIndexMax);
+  const avgUv = Number(segment.uvIndexAverage);
+  const uv = Math.max(
+    Number.isFinite(maxUv) ? maxUv : -Infinity,
+    Number.isFinite(avgUv) ? avgUv : -Infinity,
+  );
+  return Number.isFinite(uv) && uv >= 0 ? uv : null;
+}
+
+export function currentUvGuidanceFromSegments(
+  segments: SunExposureSegment[] | null | undefined,
+  now: Date = new Date(),
+): CurrentUvGuidance | null {
+  const nowMs = now.getTime();
+  if (!Array.isArray(segments) || !Number.isFinite(nowMs)) return null;
+
+  let latest: { segment: SunExposureSegment; endMs: number; uvIndex: number } | null = null;
+  for (const segment of segments) {
+    if (!segment.daylight) continue;
+    const endMs = Date.parse(segment.endTime);
+    if (!Number.isFinite(endMs)) continue;
+    const ageMs = nowMs - endMs;
+    if (ageMs > CURRENT_UV_SEGMENT_MAX_AGE_MS || ageMs < -CURRENT_UV_FUTURE_TOLERANCE_MS) continue;
+    const uvIndex = segmentUvIndex(segment);
+    if (uvIndex == null) continue;
+    if (!latest || endMs > latest.endMs) {
+      latest = { segment, endMs, uvIndex };
+    }
+  }
+
+  if (!latest) return null;
+  const guidance = currentUvGuidanceForIndex(latest.uvIndex);
+  return guidance ? { ...guidance, segmentEndTime: latest.segment.endTime } : null;
 }
 
 export function estimatedOutdoorDaylightMinutes(summary: SunExposureDailySummary | null | undefined): number {

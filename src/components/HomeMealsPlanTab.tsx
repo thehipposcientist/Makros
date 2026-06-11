@@ -684,8 +684,8 @@ function HomeMealsPlanDayCardInner({
                       paddingHorizontal: 5,
                       paddingVertical: 1,
                     }}>
-                      <Text style={[{ fontSize: 9, fontWeight: '800', color: mealPhotoTextPrimary, letterSpacing: 0.4 }, mealPhotoTextShadow]}>
-                        ✓ {displayLoggedCount} LOGGED
+                      <Text style={[{ fontSize: 10, fontWeight: '700', color: mealPhotoTextPrimary }, mealPhotoTextShadow]}>
+                        ✓ {displayLoggedCount} logged
                       </Text>
                     </View>
                   )}
@@ -698,14 +698,14 @@ function HomeMealsPlanDayCardInner({
                       paddingHorizontal: 5,
                       paddingVertical: 1,
                     }}>
-                      <Text style={[{ fontSize: 9, fontWeight: '800', color: mealPhotoTextPrimary, letterSpacing: 0.4 }, mealPhotoTextShadow]}>
-                        SKIPPED
+                      <Text style={[{ fontSize: 10, fontWeight: '700', color: mealPhotoTextPrimary }, mealPhotoTextShadow]}>
+                        Skipped
                       </Text>
                     </View>
                   )}
                   {!isPast && !isToday && (
                     <View style={{ backgroundColor: mealPhotoChipBackground, borderRadius: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: mealPhotoChipBorder, paddingHorizontal: 5, paddingVertical: 1 }}>
-                      <Text style={[{ fontSize: 9, fontWeight: '700', color: mealPhotoTextPrimary, letterSpacing: 0.4 }, mealPhotoTextShadow]}>PLANNED</Text>
+                      <Text style={[{ fontSize: 10, fontWeight: '700', color: mealPhotoTextPrimary }, mealPhotoTextShadow]}>Planned</Text>
                     </View>
                   )}
                 </View>
@@ -798,8 +798,6 @@ function HomeMealsPlanDayCardInner({
                   onDelta={(oz: number) => handleHydrationDelta(oz, day.key)}
                   onSet={(oz: number) => handleHydrationSet(oz, day.key)}
                 />
-                {/* Life events lives on the Home (Today) tab now — surfaced
-                    to every user every day instead of being buried here. */}
               </View>
             )}
           </View>

@@ -83,7 +83,7 @@ export async function scheduleRestNotifications(params: {
   // foregrounded. Foreground delivery is muted by the handler above so it
   // cannot double with the in-app chime.
   const settings = await loadSettings();
-  const playCompletionSound = settings.soundsEnabled;
+  const playCompletionSound = settings.restSoundEnabled !== false;
   const completeChannelId = playCompletionSound ? REST_TIMER_CHANNEL_ID : REST_TIMER_SILENT_CHANNEL_ID;
   const aiLine = params.aiCue ? `\n${params.aiCue}` : '';
   const endTime = new Date(Date.now() + params.seconds * 1000);

@@ -32,7 +32,16 @@ interface WorkoutCardProps {
    *  Used to cap the estimated time display so stale cache or unusual
    *  reps strings can't produce nonsensical values like 246 min. */
   sessionMinutes?: number;
-  onOpenExerciseVideo?: (exerciseName: string) => void;
+  authToken?: string | null;
+  onOpenExerciseVideo?: (
+    exerciseName: string,
+    context?: {
+      equipment?: string | null;
+      primary_muscle?: string | null;
+      movement_pattern?: string | null;
+      demo_exercise_db_id?: string | null;
+    },
+  ) => void;
   /** Open the swap picker for the exercise at this index. Enables a
    *  swap button on each exercise row so plan-view swaps use the same
    *  overlap-ranked alternatives as the live Switch Exercise feature. */
@@ -46,7 +55,7 @@ interface WorkoutCardProps {
   embedded?: boolean;
 }
 
-function WorkoutCardInner({ workout, themeName, sessionMinutes, onOpenExerciseVideo, onSwapExercise, onViewExercise, embedded = false }: WorkoutCardProps) {
+function WorkoutCardInner({ workout, themeName, sessionMinutes, authToken, onOpenExerciseVideo, onSwapExercise, onViewExercise, embedded = false }: WorkoutCardProps) {
   const theme  = getTheme(themeName);
   const c      = theme.colors;
   const s      = theme.sections.workout;
@@ -132,6 +141,7 @@ function WorkoutCardInner({ workout, themeName, sessionMinutes, onOpenExerciseVi
                     section={s}
                     c={c}
                     styles={styles}
+                    authToken={authToken}
                     onOpenVideo={onOpenExerciseVideo}
                     onSwap={onSwapExercise}
                     onView={onViewExercise}
@@ -172,6 +182,7 @@ function WorkoutCardInner({ workout, themeName, sessionMinutes, onOpenExerciseVi
                         section={s}
                         c={c}
                         styles={styles}
+                        authToken={authToken}
                         onOpenVideo={onOpenExerciseVideo}
                         onSwap={onSwapExercise}
                         onView={onViewExercise}
@@ -209,20 +220,36 @@ function StatItem({ icon, value, color, testID }: {
 
 // ── ExerciseRow ───────────────────────────────────────────────────────────────
 
-function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap, onView, circuitMode, circuitStep }: {
+function ExerciseRow({ index, exercise, isLast, section, c, styles, authToken, onOpenVideo, onSwap, onView, circuitMode, circuitStep }: {
   index: number;
   exercise: WorkoutDay['exercises'][number];
   isLast: boolean;
   section: ReturnType<typeof getTheme>['sections']['workout'];
   c: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
-  onOpenVideo?: (name: string) => void;
+  authToken?: string | null;
+  onOpenVideo?: (
+    name: string,
+    context?: {
+      equipment?: string | null;
+      primary_muscle?: string | null;
+      movement_pattern?: string | null;
+      demo_exercise_db_id?: string | null;
+    },
+  ) => void;
   onSwap?: (exerciseIndex: number, exerciseName: string) => void;
   onView?: (name: string) => void;
   circuitMode?: boolean;
   circuitStep?: number;
 }) {
   const stepLabel = circuitMode && circuitStep ? `A${circuitStep}` : String(index + 1).padStart(2, '0');
+  const demoExerciseDbId = (exercise as any).demo_exercise_db_id ?? null;
+  const videoContext = {
+    equipment: (exercise as any).equipment ?? null,
+    primary_muscle: (exercise as any).primary_muscle ?? null,
+    movement_pattern: (exercise as any).movement_pattern ?? null,
+    demo_exercise_db_id: demoExerciseDbId,
+  };
   return (
     <View style={[
       styles.exRow,
@@ -246,14 +273,13 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
         </View>
       </View>
       <View style={styles.exRowMain}>
-      {/* Thumbnail — YouTube video frame when available, numbered tile
+      {/* Thumbnail — bundled/static/hosted demo media when available
           otherwise. Tapping the thumbnail launches the form-video modal
           (separate hit target from the whole row so an accidental tap
           while scrolling the plan doesn't open video). */}
       {(() => {
         const thumbSrc = exerciseThumbSmall(exercise as any);
-        const demoExerciseDbId = (exercise as any).demo_exercise_db_id ?? null;
-        if (!hasExerciseThumbMedia({ exerciseName: exercise.name, demoExerciseDbId, fallbackSource: thumbSrc })) {
+        if (!hasExerciseThumbMedia({ exerciseName: exercise.name, demoExerciseDbId, fallbackSource: thumbSrc, authToken, allowHostedFallback: true })) {
           return null;
         }
         const inner = (
@@ -280,16 +306,24 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
               width: '100%', height: '100%', borderRadius: 8,
               overflow: 'hidden',
             }}>
-            {/* Always cover — the demo photos are 3:2 gym shots; contain
-                in a 46x46 tile shrinks the figure into an unreadable blob
-                with white margins. Cover clips the sides and keeps the
-                figure full-height in the tile. */}
+            {/* Static fallbacks cover the square tile; hosted WorkoutX
+                GIFs keep the component default contain mode so the full
+                movement remains readable. */}
             <ExerciseThumbMedia
               exerciseName={exercise.name}
               demoExerciseDbId={demoExerciseDbId}
               fallbackSource={thumbSrc}
+              authToken={authToken}
+              equipment={(exercise as any).equipment ?? null}
+              primaryMuscle={(exercise as any).primary_muscle ?? null}
+              movementPattern={(exercise as any).movement_pattern ?? null}
               style={{ width: '100%', height: '100%' }}
               shouldPlayVideo={false}
+              placeholder={(
+                <View style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+                  <Ionicons name="barbell-outline" size={20} color={c.textMuted} />
+                </View>
+              )}
             />
             {/* Brightness lift — both YouTube thumbnails and the demo
                 photos benefit from a subtle white wash on dark themes. */}
@@ -318,7 +352,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
             accessibilityRole="button"
             accessibilityLabel={`Play form video for ${exercise.name}`}
             activeOpacity={0.7}
-            onPress={() => onOpenVideo(exercise.name)}
+            onPress={() => onOpenVideo(exercise.name, videoContext)}
             hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           >
             {inner}
@@ -419,7 +453,7 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
                 { borderColor: section.strong, backgroundColor: pressed ? section.strong + '28' : section.strong + '12' },
               ]}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              onPress={() => onOpenVideo(exercise.name)}>
+              onPress={() => onOpenVideo(exercise.name, videoContext)}>
               <Ionicons name="open-outline" size={11} color={section.strong} />
               <Text style={[styles.videoChipText, { color: section.strong }]}>Form</Text>
             </Pressable>

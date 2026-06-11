@@ -164,6 +164,12 @@ const SNAPSHOT_SOURCE_FIELD_MAP = [
   ['wrist_temperature_c', 'wristTemperatureC'],
   ['sleep_breathing_disturbances', 'sleepBreathingDisturbances'],
   ['sleep_breathing_disturbances_elevated', 'sleepBreathingDisturbancesElevated'],
+  ['walking_step_length_m', 'walkingStepLengthM'],
+  ['running_stride_length_m', 'runningStrideLengthM'],
+  ['walking_steadiness_pct', 'walkingSteadinessPct'],
+  ['walking_asymmetry_pct', 'walkingAsymmetryPct'],
+  ['walking_double_support_pct', 'walkingDoubleSupportPct'],
+  ['six_minute_walk_distance_m', 'sixMinuteWalkDistanceM'],
   ['weight_lbs', 'weightLbs'],
 ] as const satisfies ReadonlyArray<readonly [string, keyof DailySnapshot]>;
 
@@ -286,6 +292,12 @@ async function pushDailyHealthSnapshotsToBackend(opts: { includeYesterday: boole
         wrist_temperature_c: d.wristTemperatureC,
         sleep_breathing_disturbances: d.sleepBreathingDisturbances,
         sleep_breathing_disturbances_elevated: d.sleepBreathingDisturbancesElevated,
+        walking_step_length_m: d.walkingStepLengthM,
+        running_stride_length_m: d.runningStrideLengthM,
+        walking_steadiness_pct: d.walkingSteadinessPct,
+        walking_asymmetry_pct: d.walkingAsymmetryPct,
+        walking_double_support_pct: d.walkingDoubleSupportPct,
+        six_minute_walk_distance_m: d.sixMinuteWalkDistanceM,
         weight_lbs: d.weightLbs,
         source,
         source_details: sourceDetailsForDailySnapshot(d, source),
@@ -316,12 +328,20 @@ function _hasAnyValue(d: {
   wristTemperatureC?: number | null;
   sleepBreathingDisturbances?: number | null;
   sleepBreathingDisturbancesElevated?: boolean | null;
+  walkingStepLengthM?: number | null;
+  runningStrideLengthM?: number | null;
+  walkingSteadinessPct?: number | null;
+  walkingAsymmetryPct?: number | null;
+  walkingDoubleSupportPct?: number | null;
+  sixMinuteWalkDistanceM?: number | null;
 }): boolean {
   return d.steps != null || d.activeEnergyKcal != null || d.basalEnergyKcal != null || d.workoutMinutes != null
     || d.cardioMinutes != null || d.zone2Minutes != null
     || d.restingHr != null || d.hrv != null || d.weightLbs != null || d.vo2Max != null
     || d.respiratoryRate != null || d.oxygenSaturation != null || d.wristTemperatureC != null
-    || d.sleepBreathingDisturbances != null || d.sleepBreathingDisturbancesElevated != null;
+    || d.sleepBreathingDisturbances != null || d.sleepBreathingDisturbancesElevated != null
+    || d.walkingStepLengthM != null || d.runningStrideLengthM != null || d.walkingSteadinessPct != null
+    || d.walkingAsymmetryPct != null || d.walkingDoubleSupportPct != null || d.sixMinuteWalkDistanceM != null;
 }
 
 /** Batch-push the last `days` daily snapshots. Called once after the
@@ -381,6 +401,12 @@ export async function backfillSnapshotsToBackend(
           wrist_temperature_c: d.wristTemperatureC,
           sleep_breathing_disturbances: d.sleepBreathingDisturbances,
           sleep_breathing_disturbances_elevated: d.sleepBreathingDisturbancesElevated,
+          walking_step_length_m: d.walkingStepLengthM,
+          running_stride_length_m: d.runningStrideLengthM,
+          walking_steadiness_pct: d.walkingSteadinessPct,
+          walking_asymmetry_pct: d.walkingAsymmetryPct,
+          walking_double_support_pct: d.walkingDoubleSupportPct,
+          six_minute_walk_distance_m: d.sixMinuteWalkDistanceM,
           weight_lbs: d.weightLbs,
           source,
           source_details: sourceDetailsForDailySnapshot(d, source),

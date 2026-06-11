@@ -18,10 +18,8 @@ export interface ExerciseLibraryItem {
   exercise_type?: string | null;
   movement_pattern?: string | null;
   cardio_intensity?: string | null;
-  /** free-exercise-db identifier (e.g. "Barbell_Bench_Press_-_Medium_Grip").
-   *  Resolved server-side at seed time. When present the client renders
-   *  the bundled photo demo via `demoFrameSource()`; when null the form
-   *  preview falls back to the YouTube thumbnail. */
+  /** Legacy demo identifier. Resolved server-side at seed time and retained
+   *  so older payloads can still match bundled Move Kit videos. */
   demo_exercise_db_id?: string | null;
 }
 

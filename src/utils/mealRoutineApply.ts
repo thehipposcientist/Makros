@@ -104,6 +104,7 @@ export function mealFromRoutine(routine: MealRoutineEntry, fallback?: MealSugges
 export function applyRoutines(
   plan: DailyNutritionPlan,
   routines: MealRoutineEntry[],
+  dateKey?: string | null,
 ): DailyNutritionPlan {
   const incoming = migrateNutritionPlanShape(plan) as DailyNutritionPlan;
   const existingMeals = (incoming.meals ?? []).slice();
@@ -119,6 +120,7 @@ export function applyRoutines(
   const activeRoutines = activeMealRoutinesForPlan(
     { ...incoming, suppressedRoutineIds: Array.from(suppressedRoutineIds) },
     routines,
+    { date: dateKey },
   );
   const routineOrderById = new Map(activeRoutines.map((r, i) => [r.id, routineDisplayOrder(r, i)]));
   // Re-discover untagged routine meals by NAME, not name+item-count. A
@@ -230,10 +232,21 @@ export function applyRoutines(
     //     below AND the unplaced routine would re-prepend = the "creating a
     //     routine duplicates the meal" bug that only an app restart cleared.
     const mealItemCount = (m.items?.length ?? m.foods?.length ?? 0);
+    const hasConcreteMealIdentity = !!(
+      (m as any)._localId
+      || (m as any)._loggedMealId != null
+      || (m as any).logged_meal_id != null
+      || (m as any)._savedMealId
+      || (m as any).saved_meal_id
+    );
+    const canAdoptByName = hasRoutineIdentity || !hasConcreteMealIdentity;
     // Prefer the not-yet-placed same-named routine; if several share the name,
-    // disambiguate by item count so two same-named routines stay distinct.
-    const nameCandidates = (activeRoutinesByName.get(normName(m.meal)) ?? [])
-      .filter(r => !placedRoutineIds.has(r.id));
+    // disambiguate by item count so two same-named routines stay distinct. Do
+    // not name-adopt a separate manual/favorite/logged row just because the
+    // user ate something with the same title as a routine.
+    const nameCandidates = canAdoptByName
+      ? (activeRoutinesByName.get(normName(m.meal)) ?? []).filter(r => !placedRoutineIds.has(r.id))
+      : [];
     const matchingRoutine = nameCandidates.length <= 1
       ? nameCandidates[0]
       : (nameCandidates.find(r => routineItemCount(r) === mealItemCount) ?? nameCandidates[0]);
@@ -357,7 +370,7 @@ export function applyRoutinesToAll(
 ): Record<string, DailyNutritionPlan> {
   const out: Record<string, DailyNutritionPlan> = {};
   for (const [k, p] of Object.entries(plansByDate)) {
-    out[k] = applyRoutines(p, routines);
+    out[k] = applyRoutines(p, routines, k);
   }
   return out;
 }
@@ -380,7 +393,7 @@ export function realignFutureRoutinesWithToday(
   for (const [date, plan] of Object.entries(plansByDate)) {
     if (!plan || date <= todayKey) continue;
     const intermediate = { ...plan, suppressedRoutineIds: [...todaySuppressed] };
-    out[date] = applyRoutines(intermediate, routines);
+    out[date] = applyRoutines(intermediate, routines, date);
   }
   return out;
 }
@@ -391,9 +404,10 @@ export function realignFutureRoutinesWithToday(
 export function applyRoutinesWithShift(
   plan: DailyNutritionPlan,
   routines: MealRoutineEntry[],
+  dateKey?: string | null,
 ): { plan: DailyNutritionPlan; prependedCount: number } {
   const before = (plan.meals ?? []).length;
-  const next = applyRoutines(plan, routines);
+  const next = applyRoutines(plan, routines, dateKey);
   const after = (next.meals ?? []).length;
   // The only path that adds rows is the prepend at the front, so the delta is
   // the prepended count. Negative is impossible — clamp defensively.
@@ -416,7 +430,7 @@ export function applyRoutinesToAllWithChecks(
   for (const [k, p] of Object.entries(plansByDate)) {
     const keyedPlan = ensureMealClientKeys(p);
     const normalizedBefore = normalizeMealChecksForPlan(keyedPlan, checksByDate[k] ?? {});
-    const { plan: nextPlan } = applyRoutinesWithShift(keyedPlan, routines);
+    const { plan: nextPlan } = applyRoutinesWithShift(keyedPlan, routines, k);
     outPlans[k] = nextPlan;
     if (checksByDate[k]) {
       outChecks[k] = normalizeMealChecksForPlan(nextPlan, normalizedBefore);

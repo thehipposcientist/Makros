@@ -16,6 +16,8 @@ export function normalizeExerciseHistoryName(raw: string): string {
   return String(raw ?? '')
     .toLowerCase()
     .replace(/[_-]+/g, ' ')
+    .replace(/\bpull\s+downs?\b/g, 'pulldown')
+    .replace(/\bpulldowns\b/g, 'pulldown')
     .replace(/[^a-z0-9 ]+/g, ' ')
     .replace(/\b(?:barbell|dumbbell|dumbbells|machine|cable|smith|bodyweight|weighted)\b/g, ' ')
     .replace(/\s+/g, ' ')
@@ -79,6 +81,32 @@ function hasLateralityToken(input: ExerciseHistoryMatchInput): boolean {
   return LATERALITY_RE.test(_looseLower(exerciseHistoryInputName(input)));
 }
 
+function latPulldownVariantSignature(input: ExerciseHistoryMatchInput): string | null {
+  const lower = _looseLower(exerciseHistoryInputName(input))
+    .replace(/\bpull\s+downs?\b/g, 'pulldown')
+    .replace(/\bpulldowns\b/g, 'pulldown');
+  if (!/\bpulldown\b/.test(lower)) return null;
+  const modifiers = new Set<string>();
+  if (/\bwide\b/.test(lower)) modifiers.add('wide');
+  if (/\b(?:close|narrow)\b/.test(lower)) modifiers.add('close');
+  if (/\bneutral\b/.test(lower)) modifiers.add('neutral');
+  if (/\b(?:reverse|underhand|supinated)\b/.test(lower)) modifiers.add('underhand');
+  if (/\b(?:overhand|pronated)\b/.test(lower)) modifiers.add('overhand');
+  if (/\bkneeling\b/.test(lower)) modifiers.add('kneeling');
+  if (/\b(?:straight|stiff)\s+arm\b/.test(lower)) modifiers.add('straight_arm');
+  if (hasLateralityToken(input)) modifiers.add('unilateral');
+  return [...modifiers].sort().join('|');
+}
+
+function hasLatPulldownVariantConflict(
+  a: ExerciseHistoryMatchInput,
+  b: ExerciseHistoryMatchInput,
+): boolean {
+  const variantA = latPulldownVariantSignature(a);
+  const variantB = latPulldownVariantSignature(b);
+  return variantA !== null && variantB !== null && variantA !== variantB;
+}
+
 export function exerciseHistoryEntriesMatch(
   a: ExerciseHistoryMatchInput,
   b: ExerciseHistoryMatchInput,
@@ -94,6 +122,7 @@ export function exerciseHistoryEntriesMatch(
   if (equipA && equipB && equipA !== equipB) return false;
 
   if (hasLateralityToken(a) !== hasLateralityToken(b)) return false;
+  if (hasLatPulldownVariantConflict(a, b)) return false;
   if (exactA === exactB) return true;
 
   const normA = normalizeExerciseHistoryName(nameA);

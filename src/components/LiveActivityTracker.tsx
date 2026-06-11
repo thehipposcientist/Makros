@@ -38,7 +38,7 @@ function fmtDistanceMi(meters: number): string {
   return mi < 100 ? `${mi.toFixed(2)}` : `${mi.toFixed(0)}`;
 }
 import {
-  AppState, Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet, ImageBackground,
+  AppState, Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet, ImageBackground, TextInput,
 } from 'react-native';
 import type { ImageSourcePropType } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -102,6 +102,38 @@ interface Props {
 }
 
 type Phase = 'pick' | 'running' | 'paused' | 'finishing';
+type QuickStartFilterKey = 'all' | 'strength' | 'cardio' | 'sport' | 'mobility' | 'indoor' | 'outdoor';
+
+const QUICK_START_FILTERS: Array<{ key: QuickStartFilterKey; label: string; icon: string }> = [
+  { key: 'all', label: 'All', icon: 'apps-outline' },
+  { key: 'strength', label: 'Strength', icon: 'barbell-outline' },
+  { key: 'cardio', label: 'Cardio', icon: 'speedometer-outline' },
+  { key: 'sport', label: 'Sport', icon: 'tennisball-outline' },
+  { key: 'mobility', label: 'Mobility', icon: 'body-outline' },
+  { key: 'outdoor', label: 'Outdoor', icon: 'sunny-outline' },
+  { key: 'indoor', label: 'Indoor', icon: 'home-outline' },
+];
+
+const QUICK_START_SEARCH_ALIASES: Partial<Record<string, string>> = {
+  lift: 'weights lifting gym barbell dumbbell',
+  full_body: 'full body total body',
+  powerlifting: 'power lifting squat bench deadlift',
+  crossfit: 'functional fitness wod metcon',
+  run: 'running jog jogging treadmill',
+  walk: 'walking steps treadmill',
+  hike: 'hiking trail',
+  ride: 'bike bicycle cycling cycle',
+  spin: 'stationary bike indoor bike cycling',
+  swim: 'swimming pool open water',
+  row: 'rowing erg rower',
+  stair: 'stairs stairmaster stair climber',
+  hiit: 'intervals bootcamp boot camp',
+  martial_arts: 'martial arts mma boxing',
+  beach_volleyball: 'beach volleyball',
+  yoga: 'flow mobility',
+  pilates: 'core reformer',
+  stretching: 'stretch mobility recovery',
+};
 
 const QUICK_START_IMAGES: Record<string, ImageSourcePropType> = {
   'strength:lift': require('../../assets/images/card-backgrounds/workout-card-free-weights-day-male.jpg'),
@@ -157,6 +189,44 @@ const QUICK_START_IMAGES: Record<string, ImageSourcePropType> = {
 
 const QUICK_START_FALLBACK_IMAGE = require('../../assets/images/card-backgrounds/workout-card-generic-gym-day-neutral.jpg');
 
+function normalizeQuickStartText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function quickStartVenue(option: LiveActivityQuickStartOption): ActivityVenue | null {
+  if (option.venue) return option.venue;
+  if (option.category === 'strength') return null;
+  return defaultVenueForActivity(option.category, option.subtype);
+}
+
+function quickStartMatchesFilter(option: LiveActivityQuickStartOption, filter: QuickStartFilterKey): boolean {
+  switch (filter) {
+    case 'all':
+      return true;
+    case 'indoor':
+    case 'outdoor':
+      return quickStartVenue(option) === filter;
+    default:
+      return option.category === filter;
+  }
+}
+
+function quickStartSearchText(option: LiveActivityQuickStartOption): string {
+  const venue = quickStartVenue(option);
+  return normalizeQuickStartText([
+    option.label,
+    option.category,
+    option.subtype,
+    option.cardioStyle,
+    venue,
+    QUICK_START_SEARCH_ALIASES[option.subtype],
+  ].filter(Boolean).join(' '));
+}
+
 function fmtElapsed(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -183,6 +253,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   const [hrZones, setHrZones] = useState<HRZone[]>([]);
   const [prefill, setPrefill] = useState<LogActivityPrefill | null>(null);
   const [logModalVisible, setLogModalVisible] = useState(false);
+  const [activitySearch, setActivitySearch] = useState('');
+  const [activityFilter, setActivityFilter] = useState<QuickStartFilterKey>('all');
 
   // ── Live GPS tracking (outdoor cardio only) ──────────────────────
   // Activated when the user picks an outdoor cardio (Run/Walk/Bike/
@@ -222,6 +294,17 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   const canUseHealthKit = enableHealthKit && isHealthKitAvailable();
   const liveZone = zoneForHeartRate(hr, hrZones);
   const liveZoneColor = hrZoneColorHex(liveZone?.zone, tc.primary);
+  const filteredQuickStartOptions = useMemo(() => {
+    const query = normalizeQuickStartText(activitySearch);
+    const terms = query.split(' ').filter(Boolean);
+    return LIVE_ACTIVITY_QUICK_START.filter((option) => {
+      if (!quickStartMatchesFilter(option, activityFilter)) return false;
+      if (terms.length === 0) return true;
+      const haystack = quickStartSearchText(option);
+      return terms.every(term => haystack.includes(term));
+    });
+  }, [activityFilter, activitySearch]);
+  const hasQuickStartFilters = activityFilter !== 'all' || activitySearch.trim().length > 0;
 
   const endWorkoutLiveActivity = useCallback(() => {
     liveActivityGenerationRef.current += 1;
@@ -273,6 +356,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     setHrN(0);
     setPrefill(null);
     setLogModalVisible(false);
+    setActivitySearch('');
+    setActivityFilter('all');
     clearManagedInterval(timerRef);
     clearManagedInterval(hrIntervalRef);
     void stopGpsTracker();
@@ -693,8 +778,82 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                   ? "Pick a type. We'll time it and use Apple Health heart-rate samples when available."
                   : "Pick a type. We'll time it and save the activity to your log."}
               </Text>
+              <View style={styles.quickControls}>
+                <View style={[styles.quickSearchBox, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+                  <Ionicons name="search" size={16} color={tc.textMuted} />
+                  <TextInput
+                    testID="live-quickstart-search"
+                    accessibilityLabel="Search start activities"
+                    value={activitySearch}
+                    onChangeText={setActivitySearch}
+                    placeholder="Search activities"
+                    placeholderTextColor={tc.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="search"
+                    style={[styles.quickSearchInput, { color: tc.textPrimary }]}
+                  />
+                  {activitySearch.length > 0 && (
+                    <TouchableOpacity
+                      accessibilityLabel="Clear activity search"
+                      onPress={() => setActivitySearch('')}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Ionicons name="close-circle" size={18} color={tc.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.quickFilterScroller}>
+                  {QUICK_START_FILTERS.map(filter => {
+                    const active = activityFilter === filter.key;
+                    return (
+                      <TouchableOpacity
+                        key={filter.key}
+                        testID={`live-quickstart-filter-${filter.key}`}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        accessibilityLabel={`Filter start activities by ${filter.label}`}
+                        onPress={() => setActivityFilter(active ? 'all' : filter.key)}
+                        style={[
+                          styles.quickFilterChip,
+                          {
+                            backgroundColor: active ? tc.primary + '18' : tc.surface,
+                            borderColor: active ? tc.primary : tc.border,
+                          },
+                        ]}>
+                        <Ionicons name={filter.icon as any} size={13} color={active ? tc.primary : tc.textMuted} />
+                        <Text style={[styles.quickFilterText, { color: active ? tc.primary : tc.textSecondary }]}>
+                          {filter.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
               <ScrollView contentContainerStyle={styles.quickGrid} showsVerticalScrollIndicator={false}>
-                {LIVE_ACTIVITY_QUICK_START.map((c) => {
+                {filteredQuickStartOptions.length === 0 ? (
+                  <View style={[styles.quickEmptyState, { borderColor: tc.border, backgroundColor: tc.surface }]}>
+                    <Ionicons name="search" size={28} color={tc.textMuted} />
+                    <Text style={[styles.quickEmptyTitle, { color: tc.textPrimary }]}>No matches</Text>
+                    <Text style={[styles.quickEmptyBody, { color: tc.textMuted }]}>
+                      Try a different activity name or clear the filter.
+                    </Text>
+                    {hasQuickStartFilters && (
+                      <TouchableOpacity
+                        accessibilityRole="button"
+                        accessibilityLabel="Clear start activity filters"
+                        onPress={() => {
+                          setActivitySearch('');
+                          setActivityFilter('all');
+                        }}
+                        style={[styles.quickEmptyClear, { borderColor: tc.primary + '66', backgroundColor: tc.primary + '12' }]}>
+                        <Text style={[styles.quickEmptyClearText, { color: tc.primary }]}>Clear</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                ) : filteredQuickStartOptions.map((c) => {
                   const quickKey = liveActivityQuickStartKey(c);
                   const testKey = quickKey.replace(/:/g, '-');
                   return (
@@ -906,6 +1065,45 @@ const styles = StyleSheet.create({
   },
   headerBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { fontSize: 16, fontWeight: '800' },
+  quickControls: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    gap: 8,
+  },
+  quickSearchBox: {
+    minHeight: 42,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  quickSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0,
+    paddingVertical: 9,
+  },
+  quickFilterScroller: {
+    gap: 8,
+    paddingRight: 16,
+  },
+  quickFilterChip: {
+    minHeight: 32,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  quickFilterText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
   quickGrid: {
     padding: 16,
     paddingBottom: 28,
@@ -921,6 +1119,38 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     overflow: 'hidden',
     backgroundColor: '#111827',
+  },
+  quickEmptyState: {
+    width: '100%',
+    minHeight: 180,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 22,
+    gap: 8,
+  },
+  quickEmptyTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  quickEmptyBody: {
+    maxWidth: 240,
+    textAlign: 'center',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  quickEmptyClear: {
+    marginTop: 4,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  quickEmptyClearText: {
+    fontSize: 12,
+    fontWeight: '900',
   },
   quickImage: { minHeight: 124, justifyContent: 'space-between' },
   quickImageStyle: { borderRadius: radius.lg },

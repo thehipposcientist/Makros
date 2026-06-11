@@ -25,7 +25,7 @@ export const PLATFORM_HEALTH_PERMISSION_COPY = Platform.OS === 'android'
       title: 'Connect Health Connect?',
       body:
         'Health Connect is optional.\n\n' +
-        'When Android health sync is available, Thallo will ask only for health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, nutrition summaries, and cycle data when you choose to share it.\n\n' +
+        'When Android health sync is available, Thallo will ask only for health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, mobility trends, nutrition summaries, and cycle data when you choose to share it.\n\n' +
         'This build does not include the native Health Connect reader yet. Thallo will keep using manual logs, in-app workouts, meal data, and recovery check-ins.',
       denied: HEALTH_PLATFORM_STATUS_COPY,
     }

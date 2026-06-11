@@ -6,7 +6,7 @@
 //
 // No hormone names. No scores. Ever.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, Modal, ScrollView, Platform, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
@@ -68,7 +68,11 @@ function PulsingDot({ color }: { color: string }) {
   );
 }
 
-export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn, variant = 'card', overPhoto = false, photoTone = 'dark' }: Props) {
+// All props are primitives, so memo fully shields this card (and its
+// network fetch + animation loop) from HomeScreen's frequent re-renders.
+export default memo(FuelingRecoveryCard);
+
+function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn, variant = 'card', overPhoto = false, photoTone = 'dark' }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
 

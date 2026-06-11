@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
 import BarcodeScannerModal from './BarcodeScannerModal';
+import ScanHudOverlay from './ScanHudOverlay';
 import MealTimeSelector, { parseMealDateTime } from './MealTimeSelector';
 import MacroDonutRow from './MacroDonutRow';
 import MealThumbnail from './MealThumbnail';
@@ -1245,7 +1246,6 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const handleBarcodeScan = async (barcode: string) => {
     if (!authToken || !barcode.trim() || barcodeLock.current) return;
     barcodeLock.current = true;
-    setBarcodeScanning(false);
     setScanLoading(true);
     try {
       const { lookupBarcode } = await import('../services/api');
@@ -1264,6 +1264,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setTimeout(() => searchInputRef.current?.focus(), 80);
     } finally {
       setScanLoading(false);
+      setBarcodeScanning(false);
       barcodeLock.current = false;
     }
   };
@@ -1900,6 +1901,28 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 </View>
                 {pendingFoodScan && (
                   <View style={s.photoScanPanel}>
+                    <View style={s.photoScanPreview}>
+                      {pendingFoodScan.imageUri ? (
+                        <Image source={{ uri: pendingFoodScan.imageUri }} style={s.photoScanPreviewImage} resizeMode="cover" />
+                      ) : (
+                        <View style={s.photoScanPreviewFallback}>
+                          <Ionicons name="image-outline" size={28} color="rgba(255,255,255,0.72)" />
+                        </View>
+                      )}
+                      <ScanHudOverlay
+                        mode="food"
+                        active={scanLoading}
+                        status={scanLoading ? undefined : 'Ready for AI scan'}
+                        accentColor="#FFFFFF"
+                        textColor="#FFFFFF"
+                        mutedTextColor="rgba(255,255,255,0.76)"
+                        surfaceColor="rgba(3,7,18,0.48)"
+                        compact
+                        reticleWidth={204}
+                        reticleHeight={106}
+                        style={s.photoScanHud}
+                      />
+                    </View>
                     <View style={s.photoScanHeader}>
                       {pendingFoodScan.imageUri ? (
                         <Image source={{ uri: pendingFoodScan.imageUri }} style={s.photoScanThumb} resizeMode="cover" />
@@ -1934,6 +1957,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                       onChangeText={setScanContext}
                       placeholder="e.g. large portion · cooked in olive oil · restaurant name"
                       placeholderTextColor={colors.textMuted}
+                      editable={!scanLoading}
                       returnKeyType="done"
                       onSubmitEditing={() => Keyboard.dismiss()}
                     />
@@ -2346,6 +2370,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           visible={barcodeScanning}
           onClose={() => setBarcodeScanning(false)}
           onScan={handleBarcodeScan}
+          processing={scanLoading && barcodeScanning}
         />
     </Modal>
     <Modal
@@ -2724,6 +2749,30 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderWidth: 1,
     borderColor: colors.primary + '55',
     backgroundColor: colors.primary + '0D',
+  },
+  photoScanPreview: {
+    height: 168,
+    marginBottom: 12,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    backgroundColor: '#050A14',
+    borderWidth: 1,
+    borderColor: colors.primary + '33',
+  },
+  photoScanPreviewImage: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+  },
+  photoScanPreviewFallback: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#101827',
+  },
+  photoScanHud: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: radius.md,
   },
   photoScanHeader: {
     flexDirection: 'row',

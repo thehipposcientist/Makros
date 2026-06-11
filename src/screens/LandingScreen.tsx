@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, hitSlop, radius, typography } from '../constants/theme';
+import { colors, radius, typography } from '../constants/theme';
 import BrandMark from '../components/BrandMark';
 
 const logo = require('../../assets/images/thallo-logo-compact-white.png');
@@ -23,7 +23,6 @@ const landingPhotos = [
   { key: 'pexels-training-woman-lift', label: 'Training', source: require('../../assets/images/landing-photos/pexels-training-woman-lift.jpg') },
   { key: 'meal-chicken-rice', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-chicken-rice.jpg') },
   { key: 'pexels-hiking-forest-woman-close', label: 'Hiking', source: require('../../assets/images/landing-photos/pexels-hiking-forest-woman-close.jpg') },
-  { key: 'pexels-sauna-couple', label: 'Sauna', source: require('../../assets/images/landing-photos/pexels-sauna-couple.jpg') },
   { key: 'pexels-zeal-creative-studios-training', label: 'Training', source: require('../../assets/images/landing-photos/pexels-zeal-creative-studios-58866141-34043597.jpg') },
   { key: 'meal-salmon', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-salmon.jpg') },
   { key: 'pexels-mykhailo-petrenko-training', label: 'Training', source: require('../../assets/images/landing-photos/pexels-mykhailo-petrenko-2152927294-32521594.jpg') },
@@ -31,7 +30,6 @@ const landingPhotos = [
   { key: 'pexels-aleksey-bystrov-training', label: 'Training', source: require('../../assets/images/landing-photos/pexels-aleksey-bystrov-276309422-14209250.jpg') },
   { key: 'swimming', label: 'Swimming', source: require('../../assets/images/landing-photos/swimming.jpg') },
   { key: 'meal-breakfast', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-breakfast.jpg') },
-  { key: 'pexels-sauna-seated', label: 'Sauna', source: require('../../assets/images/landing-photos/pexels-sauna-seated.jpg') },
   { key: 'weightlifting', label: 'Training', source: require('../../assets/images/landing-photos/weightlifting.jpg') },
   { key: 'cycling', label: 'Cycling', source: require('../../assets/images/landing-photos/cycling.jpg') },
   { key: 'meal-burrito', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-burrito.jpg') },
@@ -43,7 +41,6 @@ const landingPhotos = [
   { key: 'meal-salad', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-salad.jpg') },
   { key: 'weightlifting-squat-male', label: 'Training', source: require('../../assets/images/landing-photos/weightlifting-squat-male.jpg') },
   { key: 'meal-mediterranean', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-mediterranean.jpg') },
-  { key: 'pexels-sauna-women', label: 'Sauna', source: require('../../assets/images/landing-photos/pexels-sauna-women.jpg') },
   { key: 'meal-steak', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-steak.jpg') },
   { key: 'meal-prep', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-prep.jpg') },
   { key: 'meal-plant-based', label: 'Nutrition', source: require('../../assets/images/landing-photos/meal-plant-based.jpg') },
@@ -58,16 +55,9 @@ type LandingLayer = {
 type LandingScreenProps = {
   onLogin: () => void;
   onSignup: () => void;
-  onWhyThallo: () => void;
 };
 
-const valuePills = [
-  { icon: 'barbell-outline', label: 'Training' },
-  { icon: 'restaurant-outline', label: 'Meals' },
-  { icon: 'pulse-outline', label: 'Recovery' },
-] as const;
-
-export default function LandingScreen({ onLogin, onSignup, onWhyThallo }: LandingScreenProps) {
+export default function LandingScreen({ onLogin, onSignup }: LandingScreenProps) {
   const { height, width } = useWindowDimensions();
   const compact = height < 720;
   const narrow = width < 380;
@@ -235,26 +225,15 @@ export default function LandingScreen({ onLogin, onSignup, onWhyThallo }: Landin
           </View>
 
           <View style={[styles.heroBlock, compact && styles.heroBlockCompact]}>
-            <Text style={styles.kicker}>Total health</Text>
+            <Text style={styles.kicker}>Thallo</Text>
             <Text
               style={[styles.title, narrow && styles.titleNarrow]}
               numberOfLines={3}
               adjustsFontSizeToFit
               minimumFontScale={0.86}
             >
-              Training, nutrition, and recovery built around your real week.
+              Fitness and nutrition, set up your way.
             </Text>
-            <Text style={styles.subtitle}>
-              Get a plan that respects your schedule, equipment, food preferences, health signals, and recovery.
-            </Text>
-            <View style={styles.pillRow}>
-              {valuePills.map(({ icon, label }) => (
-                <View key={label} style={styles.valuePill}>
-                  <Ionicons name={icon} size={14} color={colors.primaryLight} />
-                  <Text style={styles.valuePillText}>{label}</Text>
-                </View>
-              ))}
-            </View>
           </View>
 
           <View style={styles.actionBlock}>
@@ -274,16 +253,6 @@ export default function LandingScreen({ onLogin, onSignup, onWhyThallo }: Landin
               onPress={onLogin}
             >
               <Text style={styles.secondaryButtonText}>I already have an account</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              testID="landing-why-thallo"
-              activeOpacity={0.78}
-              style={styles.whyButton}
-              hitSlop={hitSlop.chip}
-              onPress={onWhyThallo}
-            >
-              <Text style={styles.whyButtonText}>Why Thallo?</Text>
-              <Ionicons name="chevron-forward" size={16} color={colors.primaryLight} />
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -378,36 +347,6 @@ const styles = StyleSheet.create({
     fontSize: 38,
     lineHeight: 43,
   },
-  subtitle: {
-    color: colors.textSecondary,
-    fontSize: 16,
-    lineHeight: 23,
-    fontWeight: '600',
-    marginTop: 14,
-    maxWidth: 470,
-  },
-  pillRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 18,
-  },
-  valuePill: {
-    minHeight: 34,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-    backgroundColor: 'rgba(13,15,20,0.42)',
-    paddingHorizontal: 12,
-  },
-  valuePillText: {
-    ...typography.brandButton,
-    color: colors.textPrimary,
-    fontSize: 12,
-  },
   actionBlock: {
     alignSelf: 'center',
     width: '100%',
@@ -451,18 +390,5 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: 15,
     lineHeight: 19,
-  },
-  whyButton: {
-    minHeight: 38,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    paddingHorizontal: 12,
-  },
-  whyButtonText: {
-    ...typography.brandButton,
-    color: colors.primaryLight,
-    fontSize: 13,
   },
 });

@@ -323,11 +323,14 @@ final class ActiveWorkoutState: ObservableObject {
 
     private func applyProgress(_ info: [AnyHashable: Any]) {
         guard acceptProgress(info) else { return }
+        let completedFromProgress = watchCompletedExerciseIndexes(from: info["completedExerciseIndexes"])
+            .union(watchCompletedExerciseIndexes(from: info["exerciseCompletion"]))
+        let previousExerciseIndex = exerciseIndex
+        var exerciseChanged = false
         if let idx = Self.flexibleInt(info["exerciseIndex"]) {
             if idx != exerciseIndex {
-                currentRecommendation = nil
-                liveRecommendedWeightLbs = nil
-                liveRecommendedReps = nil
+                clearLiveRecommendation()
+                exerciseChanged = true
             }
             exerciseIndex = idx
         }
@@ -338,21 +341,44 @@ final class ActiveWorkoutState: ObservableObject {
         } else if info.keys.contains("restRemainingSec") {
             clearRest()
         }
-        if let rec = info["recommendation"] as? String {
+        if let rec = Self.flexibleString(info["recommendation"]) {
             currentRecommendation = rec
             applyLiveRecommendationFields(info, fallbackText: rec)
         } else if info.keys.contains("recommendation") {
-            currentRecommendation = nil
-            liveRecommendedWeightLbs = nil
-            liveRecommendedReps = nil
+            let incomingExerciseIndex = Self.flexibleInt(info["exerciseIndex"]) ?? previousExerciseIndex
+            if shouldClearLiveRecommendation(
+                exerciseChanged: exerciseChanged,
+                incomingExerciseIndex: incomingExerciseIndex,
+                completedFromProgress: completedFromProgress
+            ) {
+                clearLiveRecommendation()
+            } else {
+                applyLiveRecommendationFields(info, fallbackText: nil)
+            }
         } else {
             applyLiveRecommendationFields(info, fallbackText: nil)
         }
-        let completedFromProgress = watchCompletedExerciseIndexes(from: info["completedExerciseIndexes"])
-            .union(watchCompletedExerciseIndexes(from: info["exerciseCompletion"]))
         if info.keys.contains("completedExerciseIndexes") || info.keys.contains("exerciseCompletion") {
             completedExerciseIndexes = completedFromProgress
         }
+    }
+
+    private func shouldClearLiveRecommendation(
+        exerciseChanged: Bool,
+        incomingExerciseIndex: Int,
+        completedFromProgress: Set<Int>
+    ) -> Bool {
+        if exerciseChanged { return true }
+        if completedFromProgress.contains(incomingExerciseIndex) { return true }
+        return currentRecommendation == nil
+            && liveRecommendedWeightLbs == nil
+            && liveRecommendedReps == nil
+    }
+
+    private func clearLiveRecommendation() {
+        currentRecommendation = nil
+        liveRecommendedWeightLbs = nil
+        liveRecommendedReps = nil
     }
 
     private func applyLiveRecommendationFields(_ info: [AnyHashable: Any], fallbackText: String?) {
@@ -940,7 +966,7 @@ struct ActiveWorkoutView: View {
                             onCancelWorkout()
                         },
                     )
-                    HeartRateTab(hr: hr)
+                    HeartRateTab(hr: hr, showsElapsedTime: true)
                     // The live route map used to live here as a third
                     // tab for outdoor cardio. Removed because MapKit's
                     // pan gesture ate the page swipe-back, trapping the
@@ -1384,6 +1410,14 @@ private struct ExerciseTab: View {
 
     private func setTargetText(for ex: WatchExercise) -> String {
         isTimedExercise(ex) ? durationTargetText(for: ex) : ex.reps
+    }
+
+    private func liveRecommendationText(for ex: WatchExercise) -> String? {
+        guard !isGuideExercise(ex), !isTimedExercise(ex) else { return nil }
+        let live = state.currentRecommendation?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let live, !live.isEmpty { return live }
+        let planned = ex.recommendation?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return planned?.isEmpty == false ? planned : nil
     }
 
     private func targetRepMax(_ raw: String) -> Int? {
@@ -1927,7 +1961,7 @@ private struct ExerciseTab: View {
                         .cornerRadius(4)
                 }
             }
-            if !isGuideExercise(ex), !timed, let rec = (state.currentRecommendation ?? ex.recommendation) {
+            if let rec = liveRecommendationText(for: ex) {
                 Text(rec)
                     .font(.system(size: 11))
                     .foregroundColor(theme.primary)
@@ -2415,6 +2449,9 @@ private struct ExerciseTab: View {
             if state.setNumber > ex.sets, let next = nextExercise {
                 Text("Up next: \(next.name) · \(next.sets) × \(setTargetText(for: next))")
                     .lineLimit(2)
+            } else if let rec = liveRecommendationText(for: ex) {
+                Text("Up next: \(rec)")
+                    .lineLimit(3)
             } else {
                 let setLabel = isTimedExercise(ex) ? "round" : "set"
                 Text("Up next: \(setLabel) \(displaySetNumber(for: ex)) of \(ex.sets) · \(setTargetText(for: ex))")
@@ -2662,8 +2699,12 @@ private struct ExerciseTab: View {
     private var cardioMetricsPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                metricPill(title: "TIME", value: formatElapsed(cardioMetricsElapsedSeconds), accent: theme.primary)
                 metricPill(title: "HR", value: hr.heartRate.map { "\($0)" } ?? "—", accent: hrChipColor)
+                metricPill(
+                    title: "CAL",
+                    value: hr.activeCalories > 0 ? "\(Int(hr.activeCalories.rounded()))" : "—",
+                    accent: theme.warning
+                )
             }
             if hr.displayDistanceMeters > 0 || hr.needsManualDistance {
                 HStack(spacing: 6) {
@@ -2671,11 +2712,6 @@ private struct ExerciseTab: View {
                     metricPill(title: "PACE", value: compactPaceLabel, accent: theme.primary)
                 }
             }
-            metricPill(
-                title: "CAL",
-                value: hr.activeCalories > 0 ? "\(Int(hr.activeCalories.rounded()))" : "—",
-                accent: theme.warning
-            )
         }
         .padding(8)
         .background(theme.surface)
@@ -3389,11 +3425,13 @@ private struct SwapExerciseSheet: View {
                                     }
                                 }
                                 HStack(spacing: 5) {
+                                    if let overlap = option.overlap {
+                                        swapOverlapBadge(overlap)
+                                    }
                                     if let equipment = option.equipment {
                                         Text(equipment)
-                                    }
-                                    if let overlap = option.overlap {
-                                        Text("\(overlap)% match")
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.75)
                                     }
                                 }
                                 .font(.system(size: 10, weight: .semibold))
@@ -3416,16 +3454,37 @@ private struct SwapExerciseSheet: View {
             }
         }
     }
+
+    private func swapOverlapBadge(_ overlap: Int) -> some View {
+        let color = swapOverlapColor(overlap)
+        return Text("\(overlap)% overlap")
+            .font(.system(size: 10, weight: .heavy))
+            .foregroundColor(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.16))
+            .cornerRadius(6)
+            .lineLimit(1)
+            .layoutPriority(1)
+    }
+
+    private func swapOverlapColor(_ overlap: Int) -> Color {
+        if overlap >= 80 { return theme.success }
+        if overlap >= 60 { return theme.warning }
+        return theme.error
+    }
 }
 
 // ─── Heart rate tab ────────────────────────────────────────────────
 
 private struct HeartRateTab: View {
     @ObservedObject var hr: HeartRateStore
+    var showsElapsedTime: Bool = false
     @EnvironmentObject var theme: ThemeStore
     @Environment(\.isLuminanceReduced) private var dim
 
     var body: some View {
+        let showElapsed = showsElapsedTime || hr.isCardio
         ZStack {
             // Themed background with a subtle accent glow behind the
             // bpm readout so dark themes get a pop of color without
@@ -3447,9 +3506,24 @@ private struct HeartRateTab: View {
                     .tracking(1)
                     .foregroundColor(theme.primary)
 
+                if showElapsed {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(formatElapsed(hr.elapsedSeconds))
+                            .font(.system(size: 17, weight: .heavy, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    .foregroundColor(theme.textPrimary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(theme.surface)
+                    .cornerRadius(8)
+                }
+
                 HStack(alignment: .lastTextBaseline, spacing: 4) {
                     Text(hr.heartRate.map { "\($0)" } ?? "—")
-                        .font(.system(size: 56, weight: .black, design: .rounded))
+                        .font(.system(size: showElapsed ? 50 : 56, weight: .black, design: .rounded))
                         .foregroundColor(zoneColor)
                         .shadow(color: zoneColor.opacity(0.45), radius: 6)
                         // Always-on dim: drop opacity to keep the

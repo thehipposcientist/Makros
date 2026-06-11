@@ -219,7 +219,7 @@ export async function playRestTimerDone() {
   if (s.vibrationEnabled && s.restHapticEnabled) {
     Vibration.vibrate([0, 200, 100, 200, 100, 400]);
   }
-  if (!s.soundsEnabled || !s.restSoundEnabled) return;
+  if (!s.restSoundEnabled) return;
   try {
     const Audio = await getAudio();
     if (!Audio) return;
@@ -258,7 +258,7 @@ let _keepaliveSound: import('expo-av').Audio.Sound | null = null;
 export async function startRestTimerKeepalive(): Promise<void> {
   try {
     const s = await loadSettings();
-    if (!s.soundsEnabled || !s.restNotificationSoundEnabled) {
+    if (!s.restNotificationSoundEnabled) {
       await stopRestTimerKeepalive();
       return;
     }

@@ -4,49 +4,48 @@ import { ResizeMode, Video } from 'expo-av';
 
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
-import { demoFrameSource, moveKitDemoVideo } from '../utils/exerciseDemo';
+import { moveKitDemoVideo } from '../utils/exerciseDemo';
 
 interface Props {
-  /** free-exercise-db identifier — used for old frame fallback and some Move Kit matches. */
+  /** Legacy demo identifier, retained as a Move Kit lookup key. */
   demoExerciseDbId: string | null | undefined;
   /** Display name wins for Move Kit because some legacy demo ids are shared fallbacks. */
   exerciseName?: string | null;
+  /** Hosted WorkoutX GIF. Used whenever no Move Kit video exists. */
+  workoutxGifUrl?: string | null;
+  workoutxLabel?: string | null;
   themeName?: AppThemeName;
-  /** Cycle interval (ms) between bottom and top frame. Defaults to 900ms
-   *  which matches a comfortable rep cadence. */
-  cycleMs?: number;
+  onDemoUnavailable?: (kind: 'moveKit' | 'workoutx') => void;
 }
 
-export default function ExerciseDemoCard({ demoExerciseDbId, exerciseName, themeName, cycleMs = 900 }: Props) {
+export default function ExerciseDemoCard({
+  demoExerciseDbId,
+  exerciseName,
+  workoutxGifUrl,
+  workoutxLabel,
+  themeName,
+  onDemoUnavailable,
+}: Props) {
   const tc = getTheme(themeName).colors;
   const accent = tc.primary;
   const muted = tc.textMuted;
 
-  const [frame, setFrame] = useState<0 | 1>(0);
-  const [loaded, setLoaded] = useState(false);
-  const [errored, setErrored] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
   const [videoErrored, setVideoErrored] = useState(false);
+  const [workoutxLoaded, setWorkoutxLoaded] = useState(false);
+  const [workoutxErrored, setWorkoutxErrored] = useState(false);
 
   useEffect(() => {
-    setFrame(0);
-    setLoaded(false);
-    setErrored(false);
     setVideoReady(false);
     setVideoErrored(false);
-  }, [demoExerciseDbId, exerciseName]);
-
-  useEffect(() => {
-    if (!demoExerciseDbId || !loaded) return;
-    const t = setInterval(() => setFrame(f => (f === 0 ? 1 : 0)), cycleMs);
-    return () => clearInterval(t);
-  }, [demoExerciseDbId, loaded, cycleMs]);
+    setWorkoutxLoaded(false);
+    setWorkoutxErrored(false);
+  }, [demoExerciseDbId, exerciseName, workoutxGifUrl]);
 
   const video = moveKitDemoVideo(demoExerciseDbId, exerciseName);
   const useVideo = !!video && !videoErrored;
-  const src0 = demoFrameSource(demoExerciseDbId, 0);
-  const src1 = demoFrameSource(demoExerciseDbId, 1);
-  if (!useVideo && (!demoExerciseDbId || !src0 || !src1)) return null;
+  const useWorkoutX = !useVideo && !!workoutxGifUrl && !workoutxErrored;
+  if (!useVideo && !useWorkoutX) return null;
 
   return (
     <View style={{
@@ -66,14 +65,14 @@ export default function ExerciseDemoCard({ demoExerciseDbId, exerciseName, theme
           backgroundColor: accent + '1F', borderWidth: 1, borderColor: accent + '44',
         }}>
           <Text style={{ fontSize: 9, fontWeight: '800', color: accent, letterSpacing: 0.5 }}>
-            {useVideo ? 'MOVE KIT VIDEO' : (frame === 0 ? 'BOTTOM POSITION' : 'TOP / LOCKOUT')}
+            {useVideo ? 'MOVE KIT VIDEO' : 'WORKOUTX GIF'}
           </Text>
         </View>
       </View>
 
       <View style={{
         width: '100%',
-        aspectRatio: useVideo ? 16 / 9 : 3 / 2,
+        aspectRatio: useVideo || useWorkoutX ? 16 / 9 : 3 / 2,
         backgroundColor: useVideo ? '#000000' : '#FFFFFF',
         borderRadius: radius.md,
         overflow: 'hidden',
@@ -93,53 +92,33 @@ export default function ExerciseDemoCard({ demoExerciseDbId, exerciseName, theme
               isLooping
               isMuted
               onReadyForDisplay={() => setVideoReady(true)}
-              onError={() => setVideoErrored(true)}
+              onError={() => {
+                setVideoErrored(true);
+                onDemoUnavailable?.('moveKit');
+              }}
             />
           </>
-        ) : (
+        ) : useWorkoutX ? (
           <>
-            {!loaded && !errored && <ActivityIndicator color={accent} />}
-            {errored ? (
-              <View style={{ padding: 20, alignItems: 'center' }}>
-                <Text style={{ fontSize: 12, color: muted, textAlign: 'center' }}>
-                  Couldn't load the demo image. Check your connection.
-                </Text>
-              </View>
-            ) : (
-              <>
-                {/* Explicit width/height + position:absolute. The previous
-                    shape (top/left/right/bottom: 0, no width/height) caused
-                    the New Architecture image renderer to fall back to the
-                    source's intrinsic 850x567 dimensions, which got clipped
-                    by the smaller parent — looked like a heavy zoom-in. */}
-                <Image
-                  source={src0!}
-                  style={{
-                    position: 'absolute', top: 0, left: 0,
-                    width: '100%', height: '100%',
-                    opacity: frame === 0 ? 1 : 0,
-                  }}
-                  resizeMode="cover"
-                  onLoad={() => setLoaded(true)}
-                  onError={() => setErrored(true)}
-                />
-                <Image
-                  source={src1!}
-                  style={{
-                    position: 'absolute', top: 0, left: 0,
-                    width: '100%', height: '100%',
-                    opacity: frame === 1 ? 1 : 0,
-                  }}
-                  resizeMode="cover"
-                />
-              </>
-            )}
+            {!workoutxLoaded && !workoutxErrored && <ActivityIndicator color={accent} />}
+            <Image
+              source={{ uri: workoutxGifUrl! }}
+              style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+              resizeMode="contain"
+              onLoad={() => setWorkoutxLoaded(true)}
+              onError={() => {
+                setWorkoutxErrored(true);
+                onDemoUnavailable?.('workoutx');
+              }}
+            />
           </>
-        )}
+        ) : null}
       </View>
 
       <Text style={{ fontSize: 10, color: muted, textAlign: 'center', lineHeight: 14 }}>
-        {useVideo ? 'Looping demo via Move Kit. Watch a tutorial below for coaching context.' : 'Two-frame demo via free-exercise-db. Watch a video below for full motion.'}
+        {useVideo
+          ? 'Looping demo via Move Kit.'
+          : `Hosted movement demo via WorkoutX${workoutxLabel ? `: ${workoutxLabel}` : ''}.`}
       </Text>
     </View>
   );

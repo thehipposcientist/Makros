@@ -94,6 +94,9 @@ export interface ManualActivityDetails {
   poolLengthMeters?: number;
   swimStroke?: 'freestyle' | 'backstroke' | 'breaststroke' | 'butterfly' | 'mixed';
   laps?: number;
+  swimDistanceMeters?: number;
+  swimPaceSecPer100Meters?: number;
+  swimLocation?: 'pool' | 'open_water';
 
   // ── Cardio (run / ride / hike) ─────────────────────────────
   terrain?: 'road' | 'trail' | 'treadmill' | 'track' | 'indoor';
@@ -1045,6 +1048,13 @@ export interface MealRoutineEntry {
   /** Account-wide display order for routine-backed meals. Reordering two
    *  routine rows updates this order and is reflected across every day. */
   displayOrder?: number;
+  /** Backend schedule metadata. daysOfWeek uses Monday=0..Sunday=6; an empty
+   *  array means every day. */
+  daysOfWeek?: number[];
+  defaultTime?: string | null;     // "HH:MM" local clock time
+  startDate?: string | null;       // YYYY-MM-DD
+  endDate?: string | null;         // YYYY-MM-DD
+  active?: boolean;
   name: string;               // e.g. "High Protein Breakfast"
   mealType?: string;          // breakfast | lunch | dinner | snack | custom
   foods: MealRoutineFood[];
@@ -1125,11 +1135,9 @@ export interface SessionExercise {
   aiRecommendation?: string;
   image_url?: string;
   video_id?: string | null;
-  /** free-exercise-db identifier — drives the form-demo thumbnail in
-   *  the active-workout exercise row + the cycling demo card inside
-   *  FormVideoModal. Resolved server-side at seed time, also looked
-   *  up from the loaded library by name when a stale plan didn't
-   *  carry the field. */
+  /** Legacy demo identifier. Retained for Move Kit video matching and
+   *  looked up from the loaded library by name when a stale plan did
+   *  not carry the field. */
   demo_exercise_db_id?: string | null;
   demoExerciseDbId?: string | null;
   /** Anchor target weight emitted by the deterministic planner (already

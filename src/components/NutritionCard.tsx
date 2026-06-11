@@ -1558,6 +1558,7 @@ function NutritionCardInner({
                 mealAccent={section}
                 isSaved={isSaved}
                 isLast={i === visibleMeals.length - 1}
+                flushEdges={embedded}
               />
               </FadeInView>
             );
@@ -1669,6 +1670,7 @@ function MealRow({
   mealAccent,
   isSaved,
   isLast,
+  flushEdges,
 }: {
   emoji?: string;  // unused — kept on the type for back-compat with callers
   mealType: string;
@@ -1692,6 +1694,7 @@ function MealRow({
   /** True when this meal's name matches one of the user's Saved Meals. */
   isSaved?: boolean;
   isLast?: boolean;
+  flushEdges?: boolean;
 }) {
   const [itemsExpanded, setItemsExpanded] = useState(false);
   const [checkBurstKey, setCheckBurstKey] = useState(0);
@@ -1746,7 +1749,7 @@ function MealRow({
 
   const rowFlashBg = rowFlash.interpolate({
     inputRange: [0, 1],
-    outputRange: [checked ? mealAccent.strong + '10' : 'rgba(0,0,0,0)', mealAccent.strong + '24'],
+    outputRange: ['rgba(0,0,0,0)', mealAccent.strong + '20'],
   });
   const withItems = ensureItems(meal);
   const mealImageSpec = useMemo(() => resolveMealImage(meal as any), [meal]);
@@ -1813,7 +1816,7 @@ function MealRow({
   return (
     <View ref={rowRef} collapsable={false}>
       <SwipeableRow actions={swipeActions}>
-        <Animated.View testID={`meal-row-${mealType}`} style={[styles.mealItem, isLast && styles.mealItemLast, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
+        <Animated.View testID={`meal-row-${mealType}`} style={[styles.mealItem, flushEdges && styles.mealItemFlush, isLast && styles.mealItemLast, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
           <View style={styles.mealTimeline}>
             {showCheckBurst && (
               <CompletionBurst
@@ -2337,6 +2340,10 @@ const createStyles = (
     gap: 10,
     position: 'relative',
     overflow: 'hidden',
+  },
+  mealItemFlush: {
+    marginHorizontal: -16,
+    paddingHorizontal: 16,
   },
   mealItemLast: {
     borderBottomWidth: 0,

@@ -21,8 +21,7 @@ export interface ExerciseLibraryItem {
   description?: string | null;
   image_url?: string | null;
   video_id?: string | null;
-  /** free-exercise-db identifier — drives the 2-frame demo card in
-   *  FormVideoModal / ExerciseDemoCard. Null when no upstream match. */
+  /** Legacy demo identifier retained for Move Kit video matching. */
   demo_exercise_db_id?: string | null;
   is_custom?: boolean;
   aliases?: string[] | null;

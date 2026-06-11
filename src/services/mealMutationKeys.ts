@@ -109,11 +109,20 @@ export function planLogIdempotencyKey(
  *  has neither id form populated. */
 export function addSavedMutationKey(
   date: string,
-  saved: { id?: number | null; _optimisticId?: number | string; name?: string | null; total_calories?: number | null } | null | undefined,
+  saved: {
+    id?: number | null;
+    _optimisticId?: number | string;
+    name?: string | null;
+    total_calories?: number | null;
+    items?: unknown[] | null;
+  } | null | undefined,
 ): string {
   const id = saved?.id ?? saved?._optimisticId;
   if (id != null && id !== '') return `addSaved:${date}:${id}`;
   const name = (saved?.name ?? '').toLowerCase().trim();
   const cals = Math.round(Number(saved?.total_calories ?? 0) || 0);
-  return `addSaved:${date}:sig:${name}|${cals}`;
+  const itemHash = Array.isArray(saved?.items) && saved.items.length > 0
+    ? stableJsonHash(saved.items.map(item => stableJsonHash(item)).sort())
+    : 'no_items';
+  return `addSaved:${date}:sig:${name}|${cals}|${itemHash}`;
 }

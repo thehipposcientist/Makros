@@ -94,7 +94,10 @@ function RestTimerPanel({
   const [cueExpanded, setCueExpanded] = useState(false);
 
   return (
-    <View style={[styles.headerRestPanel, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '33' }]}>
+    <View
+      testID="rest-timer-panel"
+      accessibilityLabel="rest-timer-panel"
+      style={[styles.headerRestPanel, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '33' }]}>
       <View style={styles.headerRestMainRow}>
         <View style={styles.headerRestCircle}>
           <Svg width={ringSize} height={ringSize} style={{ position: 'absolute' }}>
@@ -122,12 +125,18 @@ function RestTimerPanel({
             />
           </Svg>
           <Text style={[styles.headerRestCircleLabel, { color: workoutPalette.text }]}>Rest</Text>
-          <Text style={[styles.headerRestCircleValue, { color: isLowTime ? themeColors.warning : workoutPalette.strong }]}>
+          <Text
+            testID="rest-timer-value"
+            style={[styles.headerRestCircleValue, { color: isLowTime ? themeColors.warning : workoutPalette.strong }]}>
             {formatTime(seconds)}
           </Text>
         </View>
         <View style={styles.headerRestCopy}>
-          {restForExercise ? <Text style={styles.headerRestExercise} numberOfLines={1}>{restForExercise}</Text> : null}
+          {restForExercise ? (
+            <Text testID="rest-timer-exercise" style={styles.headerRestExercise} numberOfLines={1}>
+              {restForExercise}
+            </Text>
+          ) : null}
           {restNextTarget || restRecommendationLoading ? (
             <View style={styles.headerRestRecommendation}>
               <View style={styles.headerRestInfoRow}>
@@ -149,7 +158,7 @@ function RestTimerPanel({
                 ) : null}
               </View>
               {restNextTarget ? (
-                <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]}>{restNextTarget}</Text>
+                <Text testID="rest-timer-next-target" style={[styles.headerRestTarget, { color: workoutPalette.strong }]}>{restNextTarget}</Text>
               ) : (
                 <Text style={[styles.headerRestTarget, { color: themeColors.textSecondary }]}>Updating next set...</Text>
               )}
@@ -181,13 +190,14 @@ function RestTimerPanel({
         </View>
       </View>
       <View style={styles.headerRestActions}>
-        <TouchableOpacity style={styles.headerRestBtn} onPress={() => onAdjust(-15)}>
+        <TouchableOpacity testID="rest-timer-minus-15" style={styles.headerRestBtn} onPress={() => onAdjust(-15)}>
           <Text style={styles.headerRestBtnText}>-15</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.headerRestBtn} onPress={() => onAdjust(15)}>
+        <TouchableOpacity testID="rest-timer-plus-15" style={styles.headerRestBtn} onPress={() => onAdjust(15)}>
           <Text style={styles.headerRestBtnText}>+15</Text>
         </TouchableOpacity>
         <TouchableOpacity
+          testID="rest-timer-skip"
           style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]}
           onPress={onSkip}>
           <Text style={[styles.headerRestBtnText, { color: themeColors.background }]}>Skip</Text>

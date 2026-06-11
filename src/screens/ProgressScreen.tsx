@@ -5,6 +5,8 @@ import {
   InteractionManager,
   type ImageSourcePropType,
   type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from 'react-native';
 // Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
 const ImagePicker: typeof import('expo-image-picker') = (() => {
@@ -39,7 +41,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult, HealthPillarKey, SleepScore, SleepStageTimeline, WeightEntry } from '../types';
 import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import type { StalenessWatch } from '../utils/stalenessReminders';
-import type { ThalloScoreAverage } from '../utils/thalloScoreHistory';
 import {
   APPLE_HEALTH_PERMISSION_COPY,
   readHealthSummary,
@@ -72,7 +73,6 @@ import HealthLabsCard from '../components/HealthLabsCard';
 import MetabolicSignalsCard from '../components/MetabolicSignalsCard';
 import SunExposureHealthCard from '../components/SunExposureHealthCard';
 import TrendsOverviewCard from '../components/TrendsOverviewCard';
-import { RECOVERY_LABELS, calculateHealthScore } from '../utils/healthScore';
 import {
   getHealthSummarySignalAvailability,
   hasDisplayableHealthSummaryData,
@@ -201,6 +201,7 @@ interface ProgressScreenProps {
   focusTarget?: ProgressFocusTarget | null;
   focusTargetToken?: number;
   onRequestPreviousSurface?: () => void;
+  onChromeScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
 }
 
 type ProgressSurfaceVisibility = {
@@ -223,12 +224,6 @@ const NUTRITION_GUT_FACTS_IMAGE = progressPexelsPhoto('3851075');
 // label (e.g. "Advanced" / "Building base"), not the accent color.
 const STRENGTH_PROFILE_COLOR = '#6366F1'; // indigo
 const CARDIO_PROFILE_COLOR = '#06B6D4';   // teal
-
-// Thallo Score is removed from the UI for now. This flag keeps the dormant
-// score-card builder from computing each render. Full re-enable also needs the
-// Today-tab card render block + the explainer modal restored (see git history).
-// Typed `boolean` (not literal `false`) so flow-narrowing in the builder holds.
-const THALLO_SCORE_ENABLED: boolean = false;
 
 type EditVisibilitySection = { id: string; label: string; desc: string };
 
@@ -2639,6 +2634,22 @@ type ProgressMilestone = {
 
 type PlateauEntry = import('../services/api').PlateauEntry;
 
+function plateauSuggestionTitle(suggestion: PlateauEntry['suggestion']): string {
+  if (suggestion === 'swap') return 'Swap';
+  if (suggestion === 'add_volume') return 'Add volume';
+  return 'Deload';
+}
+
+function plateauSuggestionDetail(entry: PlateauEntry): string {
+  if (entry.suggestion === 'swap') {
+    return 'Try a close variation next block.';
+  }
+  if (entry.suggestion === 'add_volume') {
+    return 'Recent set volume dipped. Add 2-3 targeted hard sets if recovery is good.';
+  }
+  return 'Cut volume 30-40% for one week, then rebuild.';
+}
+
 type ProgressAnalyticsItem = {
   key: string;
   label: string;
@@ -3119,13 +3130,13 @@ function WeightBodyFatTrendChart({
   bodyScanHistory,
   weightUnit,
   tc,
-  styles,
+  targetWeightLbs = null,
 }: {
   weightEntries: WeightEntry[];
   bodyScanHistory: BodyScanEntry[];
   weightUnit: WeightUnit;
   tc: ReturnType<typeof getTheme>['colors'];
-  styles: ReturnType<typeof createStyles>;
+  targetWeightLbs?: number | null;
 }) {
   const weights = weightEntries
     .map(entry => ({ date: entry.date.slice(0, 10), value: Number(entry.weightLbs) }))
@@ -3157,7 +3168,15 @@ function WeightBodyFatTrendChart({
       max: rawMax + span * 0.25,
     };
   };
-  const weightRange = rangeFor(weights.map(p => p.value), 4);
+  const weightValues = weights.map(p => p.value);
+  const weightRawMin = Math.min(...weightValues);
+  const weightRawMax = Math.max(...weightValues);
+  // Draw the goal line only when the target sits near the plotted data —
+  // a far-away target would flatten the line into noise.
+  const goalInView = targetWeightLbs != null
+    && Number.isFinite(targetWeightLbs)
+    && Math.abs(targetWeightLbs - (weightRawMin + weightRawMax) / 2) <= Math.max(10, (weightRawMax - weightRawMin) * 2);
+  const weightRange = rangeFor(goalInView ? [...weightValues, targetWeightLbs as number] : weightValues, 4);
   const bodyFatRange = bodyFat.length >= 2 ? rangeFor(bodyFat.map(p => p.value), 2) : null;
   const toX = (date: string) => {
     const idx = dateIndex.get(date) ?? 0;
@@ -3178,40 +3197,47 @@ function WeightBodyFatTrendChart({
         `${bodyFatPoints[bodyFatPoints.length - 1].x},${chartH - padB}`,
       ].join(' ')
     : '';
-  const weightDelta = weights.length >= 2 ? weights[weights.length - 1].value - weights[0].value : 0;
+  const weightArea = weightPoints.length >= 2
+    ? [
+        `${weightPoints[0].x},${chartH - padB}`,
+        ...weightPoints.map(p => `${p.x},${p.y}`),
+        `${weightPoints[weightPoints.length - 1].x},${chartH - padB}`,
+      ].join(' ')
+    : '';
   const bodyFatDelta = bodyFat.length >= 2 ? bodyFat[bodyFat.length - 1].value - bodyFat[0].value : 0;
   const bodyFatColor = tc.warning ?? '#F59E0B';
   const dateLabels = dates.length <= 10 ? dates : [dates[0], dates[dates.length - 1]];
+  const goalY = goalInView ? toY(targetWeightLbs as number, weightRange) : null;
+  const lastWeightPoint = weightPoints.length >= 2 ? weightPoints[weightPoints.length - 1] : null;
 
   return (
-    <View style={[styles.graphCard, { marginBottom: 10 }]}>
-      <View style={styles.graphHeader}>
-        <Text style={styles.graphTitle} numberOfLines={1}>Weight + body fat</Text>
-        <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted }}>
-          {formatSignedWeightDelta(weightDelta, weightUnit)}
-        </Text>
-      </View>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 4 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-          <View style={{ width: 18, height: 3, borderRadius: 2, backgroundColor: tc.primary }} />
-          <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>Weight</Text>
-        </View>
-        {bodyFatPoints.length >= 2 && (
+    <View style={{ marginBottom: 10 }}>
+      {bodyFatPoints.length >= 2 && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 2 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            <View style={{ width: 18, height: 3, borderRadius: 2, backgroundColor: tc.primary }} />
+            <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>Weight</Text>
+          </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
             <View style={{ width: 18, height: 3, borderRadius: 2, backgroundColor: bodyFatColor }} />
-            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>
+            <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>
               Body fat {bodyFatDelta > 0 ? '+' : ''}{Math.round(bodyFatDelta * 10) / 10}%
             </Text>
           </View>
-        )}
-      </View>
-      <View style={{ alignItems: 'center', marginTop: 8 }}>
+        </View>
+      )}
+      <View style={{ alignItems: 'center', marginTop: 6 }}>
         <Svg width={chartW} height={chartH}>
           <Defs>
+            <SvgLinearGradient id="weightAreaGradient" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0%" stopColor={tc.primary} stopOpacity="0.18" />
+              <Stop offset="62%" stopColor={tc.primary} stopOpacity="0.07" />
+              <Stop offset="100%" stopColor={tc.primary} stopOpacity="0.01" />
+            </SvgLinearGradient>
             <SvgLinearGradient id="weightBodyFatAreaGradient" x1="0" y1="0" x2="0" y2="1">
-              <Stop offset="0%" stopColor={bodyFatColor} stopOpacity="0.22" />
-              <Stop offset="62%" stopColor={bodyFatColor} stopOpacity="0.10" />
-              <Stop offset="100%" stopColor={bodyFatColor} stopOpacity="0.02" />
+              <Stop offset="0%" stopColor={bodyFatColor} stopOpacity="0.16" />
+              <Stop offset="62%" stopColor={bodyFatColor} stopOpacity="0.07" />
+              <Stop offset="100%" stopColor={bodyFatColor} stopOpacity="0.01" />
             </SvgLinearGradient>
           </Defs>
           {[0, 1, 2].map(i => {
@@ -3235,8 +3261,20 @@ function WeightBodyFatTrendChart({
             </>
           )}
           {bodyFatArea && <Polygon points={bodyFatArea} fill="url(#weightBodyFatAreaGradient)" />}
+          {weightArea && <Polygon points={weightArea} fill="url(#weightAreaGradient)" />}
+          {goalY != null && (
+            <>
+              <Line x1={padL} y1={goalY} x2={chartW - padR} y2={goalY} stroke={tc.textMuted} strokeWidth={1} strokeDasharray="5,5" opacity={0.85} />
+              <SvgText x={chartW - padR} y={goalY - 4} fontSize={9} fill={tc.textMuted} textAnchor="end">
+                goal {weightChartValue(targetWeightLbs as number, weightUnit)}
+              </SvgText>
+            </>
+          )}
           {weightPoints.length >= 2 && <Polyline points={weightLine} fill="none" stroke={tc.primary} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />}
           {bodyFatPoints.length >= 2 && <Polyline points={bodyFatLine} fill="none" stroke={bodyFatColor} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />}
+          {lastWeightPoint && (
+            <Circle cx={lastWeightPoint.x} cy={lastWeightPoint.y} r={9} fill={tc.primary} opacity={0.16} />
+          )}
           {weightPoints.map((p, i) => (
             <Circle key={`w${p.date}`} cx={p.x} cy={p.y} r={i === weightPoints.length - 1 ? 4.5 : 3} fill={tc.primary} stroke={tc.surface} strokeWidth={1.25} />
           ))}
@@ -4435,12 +4473,38 @@ function externalSourceIdFromLocalId(id?: string | null): string | undefined {
   return value;
 }
 
-function workoutCompletionKey(dateISO?: string | null, focus?: string | null, externalSourceId?: string | null): string | null {
+function workoutSourceKey(externalSourceId?: string | null): string | null {
   const sourceKey = typeof externalSourceId === 'string' ? externalSourceId.trim() : '';
-  if (sourceKey) return `source|${sourceKey}`;
+  return sourceKey ? `source|${sourceKey}` : null;
+}
+
+function workoutDateFocusKey(dateISO?: string | null, focus?: string | null): string | null {
   const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
   const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
   return date && focusKey ? `${date}|${focusKey}` : null;
+}
+
+function workoutCompletionKey(dateISO?: string | null, focus?: string | null, externalSourceId?: string | null): string | null {
+  return workoutSourceKey(externalSourceId) ?? workoutDateFocusKey(dateISO, focus);
+}
+
+function workoutIdentitiesMatch(
+  aSource: string | null,
+  aDateFocus: string | null,
+  bSource: string | null,
+  bDateFocus: string | null,
+): boolean {
+  if (aSource && bSource) return aSource === bSource;
+  return !!aDateFocus && aDateFocus === bDateFocus;
+}
+
+function workoutSessionsMatch(a: WorkoutSession, b: WorkoutSession): boolean {
+  return workoutIdentitiesMatch(
+    workoutSourceKey(externalSourceIdFromLocalId(a.id)),
+    workoutDateFocusKey(a.date, a.focus),
+    workoutSourceKey(externalSourceIdFromLocalId(b.id)),
+    workoutDateFocusKey(b.date, b.focus),
+  );
 }
 
 function workoutSessionCompletionKey(session: WorkoutSession): string | null {
@@ -4588,7 +4652,7 @@ function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
     };
   });
   return {
-    id: `server-session-${row.id}`,
+    id: row.external_source_id?.trim() || `server-session-${row.id}`,
     date: row.completed_at ?? `${row.workout_date}T12:00:00.000Z`,
     focus: row.focus,
     durationSeconds: 0,
@@ -4600,24 +4664,25 @@ function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
 }
 
 function mergeWorkoutSessionSources(localHistory: WorkoutSession[], serverRows: WorkoutSessionRecord[] | null): WorkoutSession[] {
-  if (!serverRows) return localHistory;
-  const byKey = new Map<string, WorkoutSession>();
-  for (const session of localHistory) {
-    const key = workoutSessionCompletionKey(session);
-    if (key) byKey.set(key, session);
-  }
-  for (const row of serverRows) {
-    const session = workoutSessionFromServer(row);
-    const key = workoutSessionCompletionKey(session);
-    if (!key) continue;
-    const existing = byKey.get(key);
-    const existingSetCount = existing?.exercises?.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0) ?? 0;
-    const serverSetCount = session.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
-    if (!existing || (existingSetCount === 0 && serverSetCount > 0)) {
-      byKey.set(key, session);
+  const merged: WorkoutSession[] = [];
+  const upsert = (incoming: WorkoutSession) => {
+    const existingIndex = merged.findIndex(session => workoutSessionsMatch(session, incoming));
+    if (existingIndex < 0) {
+      merged.push(incoming);
+      return;
     }
-  }
-  return Array.from(byKey.values()).sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+    const existing = merged[existingIndex];
+    const existingSetCount = existing.exercises?.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0) ?? 0;
+    const incomingSetCount = incoming.exercises?.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0) ?? 0;
+    const existingHasSource = !!workoutSourceKey(externalSourceIdFromLocalId(existing.id));
+    const incomingHasSource = !!workoutSourceKey(externalSourceIdFromLocalId(incoming.id));
+    if ((!existingHasSource && incomingHasSource) || (existingSetCount === 0 && incomingSetCount > 0)) {
+      merged[existingIndex] = incoming;
+    }
+  };
+  localHistory.forEach(upsert);
+  (serverRows ?? []).map(workoutSessionFromServer).forEach(upsert);
+  return merged.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
 }
 
 function reconcileWorkoutProgressData(
@@ -5114,26 +5179,6 @@ function HealthDataImageCard({
   );
 }
 
-type ThalloPillarMeta = {
-  key: HealthPillarKey;
-  label: string;
-  shortLabel: string;
-  color: string;
-  icon: ComponentProps<typeof Ionicons>['name'];
-  weight: number;
-};
-
-type ThalloScorePillar = ThalloPillarMeta & {
-  score: number;
-  shareRatio: number;
-  sharePct: number;
-  contributionPoints: number;
-  why: string;
-  improve: string[];
-  dataUsed: string[];
-  missing: string[];
-};
-
 type RadarMetric = {
   key: string;
   label: string;
@@ -5453,6 +5498,14 @@ function TrendsRadarCard({
   const chartSize = compact ? 122 : 188;
   const axes = radarAxesFromMetrics(metrics);
   const insight = deriveRadarInsights(axes);
+  // Header pill shows a tier word, not the raw 0-100 — the number still
+  // backs the accessibility label and the tap-through detail view. Keeps
+  // the Trends tab from stacking competing numerals.
+  const scoreTier = score == null ? '—'
+    : score >= 80 ? 'Strong'
+    : score >= 60 ? 'Solid'
+    : score >= 40 ? 'Building'
+    : 'Early';
   return (
     <TouchableOpacity
       testID={testID}
@@ -5489,7 +5542,7 @@ function TrendsRadarCard({
           { backgroundColor: color + '16', borderColor: color + '45' },
         ]}>
           <Text style={[styles.trendsRadarScoreText, compact && styles.trendsRadarScoreTextCompact, { color }]} numberOfLines={1}>
-            {score == null ? '--' : score}
+            {scoreTier}
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={15} color={tc.textMuted} />
@@ -5531,271 +5584,6 @@ function TrendsRadarCard({
         ) : null}
       </View>
     </TouchableOpacity>
-  );
-}
-
-const THALLO_SCORE_WEIGHTS: Record<HealthPillarKey, number> = {
-  recovery: 25,
-  training: 20,
-  nutrition: 20,
-  cardio: 10,
-  strength: 10,
-  activity: 5,
-  gutSupport: 10,
-};
-
-function thalloPillarMetas(tc: ThemeColors): ThalloPillarMeta[] {
-  return [
-    { key: 'recovery', label: 'Recovery', shortLabel: 'Rec', color: '#22C55E', icon: 'moon-outline', weight: THALLO_SCORE_WEIGHTS.recovery },
-    { key: 'training', label: 'Training', shortLabel: 'Train', color: tc.primary, icon: 'barbell-outline', weight: THALLO_SCORE_WEIGHTS.training },
-    { key: 'nutrition', label: 'Nutrition', shortLabel: 'Fuel', color: '#84CC16', icon: 'restaurant-outline', weight: THALLO_SCORE_WEIGHTS.nutrition },
-    { key: 'cardio', label: 'Cardio', shortLabel: 'Cardio', color: '#06B6D4', icon: 'heart-outline', weight: THALLO_SCORE_WEIGHTS.cardio },
-    { key: 'strength', label: 'Strength', shortLabel: 'Power', color: '#A78BFA', icon: 'flash-outline', weight: THALLO_SCORE_WEIGHTS.strength },
-    { key: 'activity', label: 'Activity', shortLabel: 'Move', color: '#F59E0B', icon: 'walk-outline', weight: THALLO_SCORE_WEIGHTS.activity },
-    { key: 'gutSupport', label: 'Gut support', shortLabel: 'Gut', color: '#10B981', icon: 'leaf-outline', weight: THALLO_SCORE_WEIGHTS.gutSupport },
-  ];
-}
-
-function buildThalloScorePillars(hs: HealthScoreResult, tc: ThemeColors): ThalloScorePillar[] {
-  const metas = thalloPillarMetas(tc).filter(meta => hs.subScores[meta.key] != null);
-  const availableWeight = metas.reduce((sum, meta) => sum + meta.weight, 0) || 1;
-  return metas.map(meta => {
-    const score = Math.max(0, Math.min(100, hs.subScores[meta.key] ?? 0));
-    const missing = hs.missingByPillar[meta.key] ?? [];
-    return {
-      ...meta,
-      score,
-      shareRatio: meta.weight / availableWeight,
-      sharePct: Math.round((meta.weight / availableWeight) * 100),
-      contributionPoints: Math.round(score * (meta.weight / availableWeight)),
-      why: thalloPillarWhy(hs, meta, score),
-      improve: thalloPillarImprove(meta.key, score, missing),
-      dataUsed: thalloPillarDataUsed(hs, meta.key),
-      missing,
-    };
-  });
-}
-
-function thalloPillarWhy(hs: HealthScoreResult, meta: ThalloPillarMeta, score: number): string {
-  const prefix = `${meta.label}:`;
-  const explicit = hs.explanation.find(line => line.toLowerCase().startsWith(prefix.toLowerCase()));
-  if (explicit) return explicit.slice(prefix.length).trim();
-
-  if (meta.key === 'training') {
-    return 'Based on completed Thallo workouts over the last 14 days against your weekly target.';
-  }
-  if (meta.key === 'nutrition') {
-    return hs.pillarSources.nutritionScoreSource === 'server'
-      ? 'Using the server weekly nutrition score from logged meal days.'
-      : 'Using calorie, protein, macro, and fiber adherence from recent logs.';
-  }
-  if (meta.key === 'activity') {
-    return 'Based on daily steps and active energy when those signals are available.';
-  }
-
-  if (score >= 85) return `${meta.label} is a strong contributor right now.`;
-  if (score >= 70) return `${meta.label} is helping the score, with room to tighten the details.`;
-  if (score >= 55) return `${meta.label} is mixed today, so a few better signals can move it quickly.`;
-  return `${meta.label} is pulling the score down today.`;
-}
-
-function thalloPillarImprove(key: HealthPillarKey, score: number, missing: string[]): string[] {
-  const actions: Record<HealthPillarKey, string[]> = {
-    recovery: [
-      'Keep sleep consistent and protect a 7-9 hour window when possible.',
-      'Stack hard training after better sleep days and use easy/recovery days when RHR or HRV looks strained.',
-    ],
-    training: [
-      'Finish the planned sessions for this week and log them in Thallo.',
-      'Keep weekly cadence close to target instead of clustering all sessions into one or two days.',
-    ],
-    nutrition: [
-      'Log meals on at least 3 days this week so the weekly score stabilizes.',
-      'Prioritize protein and calorie target first, then use fiber-rich foods to lift quality.',
-    ],
-    cardio: [
-      'Add Zone 2 work toward 90-150 minutes per week.',
-      'Log cardio sessions or connect wearable VO2/RHR data so the trend has more signal.',
-    ],
-    strength: [
-      'Progress main lifts with small load or rep wins while keeping form consistent.',
-      'Log working sets so PR cadence and tonnage trends can be measured.',
-    ],
-    activity: [
-      'Build a repeatable walking baseline on non-training days.',
-      'Connect step and active-energy data for a cleaner movement read.',
-    ],
-    gutSupport: [
-      'Add plants, legumes, whole grains, or berries to raise fiber and variety.',
-      'Pair hydration with meals and include fermented foods a few times per week if they agree with you.',
-    ],
-  };
-  const result = [...actions[key]];
-  if (score >= 85) {
-    result[0] = 'Keep the current rhythm; this pillar is already doing real work for the score.';
-  }
-  if (missing.length > 0) {
-    result.push(`Improve accuracy: add ${missing.slice(0, 2).join(', ')}.`);
-  }
-  return result.slice(0, 3);
-}
-
-function thalloPillarDataUsed(hs: HealthScoreResult, key: HealthPillarKey): string[] {
-  const sources = hs.pillarSources;
-  switch (key) {
-    case 'recovery':
-      return sources.recoverySignalsUsed.map(signal => ({
-        sleep: 'Sleep score',
-        rhr: 'Resting HR',
-        hrv: 'HRV',
-        load: 'Training load',
-      }[signal]));
-    case 'training':
-      return ['Thallo workouts', 'Weekly target'];
-    case 'nutrition':
-      if (sources.nutritionScoreSource === 'server') return ['Server weekly score', 'Meal logs'];
-      if (sources.nutritionScoreSource === 'clientFallback') return ['Calories', 'Protein', 'Macros', 'Fiber'];
-      return [];
-    case 'cardio':
-      return sources.cardioSignalsUsed.map(signal => ({
-        vo2Max: 'VO2 max',
-        zone2Minutes: 'Zone 2 minutes',
-        cardioSessions: 'Cardio sessions',
-        rhrTrend: 'RHR trend',
-        hrRecovery: 'HR recovery',
-      }[signal]));
-    case 'strength':
-      return sources.strengthSignalsUsed.map(signal => ({
-        e1rmPRs: 'e1RM PRs',
-        volumePRs: 'Volume PRs',
-        repPRs: 'Rep PRs',
-        tonnageTrend: 'Tonnage trend',
-      }[signal]));
-    case 'activity':
-      return sources.activitySignalsUsed.map(signal => ({
-        steps: 'Steps',
-        activeEnergy: 'Active energy',
-      }[signal]));
-    case 'gutSupport':
-      return sources.gutSignalsUsed.map(signal => ({
-        fiber: 'Fiber',
-        plantVariety: 'Plant variety',
-        hydration: 'Hydration',
-        fermentedDays: 'Fermented foods',
-        giFlag: 'GI check-in',
-      }[signal]));
-  }
-}
-
-function defaultThalloPillarKey(pillars: ThalloScorePillar[]): HealthPillarKey | null {
-  const sorted = pillars.slice().sort((a, b) => a.score - b.score || b.weight - a.weight);
-  return sorted[0]?.key ?? null;
-}
-
-function ThalloScoreDonut({
-  score,
-  pillars,
-  size,
-  strokeWidth,
-  trackColor,
-  textColor,
-  mutedColor,
-  selectedKey = null,
-  onPillarPress,
-}: {
-  score: number | null;
-  pillars: ThalloScorePillar[];
-  size: number;
-  strokeWidth: number;
-  trackColor: string;
-  textColor: string;
-  mutedColor: string;
-  selectedKey?: HealthPillarKey | null;
-  onPillarPress?: (key: HealthPillarKey) => void;
-}) {
-  const reducedMotion = useReducedMotion();
-  const center = size / 2;
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const active = pillars.filter(p => p.shareRatio > 0);
-  const gap = active.length > 1 ? Math.min(6, circumference * 0.014) : 0;
-  let cursor = 0;
-  const segments = active.map(pillar => {
-    const share = pillar.shareRatio;
-    const slotLength = Math.max(0, circumference * share - gap);
-    const earnedLength = slotLength * (pillar.score / 100);
-    const dashOffset = -cursor;
-    cursor += circumference * share;
-    return { pillar, slotLength, earnedLength, dashOffset };
-  });
-
-  return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={StyleSheet.absoluteFill}>
-        <Circle
-          cx={center}
-          cy={center}
-          r={radius}
-          stroke={trackColor}
-          strokeWidth={strokeWidth}
-          fill="none"
-        />
-        {segments.map(({ pillar, slotLength, dashOffset }) => (
-          <Circle
-            key={`${pillar.key}-slot`}
-            cx={center}
-            cy={center}
-            r={radius}
-            stroke={pillar.color}
-            strokeWidth={selectedKey === pillar.key ? strokeWidth + 1 : strokeWidth}
-            strokeLinecap="round"
-            strokeDasharray={`${slotLength} ${circumference - slotLength}`}
-            strokeDashoffset={dashOffset}
-            transform={`rotate(-90 ${center} ${center})`}
-            opacity={selectedKey == null || selectedKey === pillar.key ? 0.22 : 0.10}
-            fill="none"
-            onPress={onPillarPress ? () => onPillarPress(pillar.key) : undefined}
-          />
-        ))}
-        {segments.map(({ pillar, earnedLength, dashOffset }) => (
-          <Circle
-            key={`${pillar.key}-earned`}
-            cx={center}
-            cy={center}
-            r={radius}
-            stroke={pillar.color}
-            strokeWidth={selectedKey === pillar.key ? strokeWidth + 2 : strokeWidth}
-            strokeLinecap="round"
-            strokeDasharray={`${earnedLength} ${circumference - earnedLength}`}
-            strokeDashoffset={dashOffset}
-            transform={`rotate(-90 ${center} ${center})`}
-            opacity={selectedKey == null || selectedKey === pillar.key ? 1 : 0.34}
-            fill="none"
-            onPress={onPillarPress ? () => onPillarPress(pillar.key) : undefined}
-          />
-        ))}
-      </Svg>
-      {score == null ? (
-        <Text
-          style={{ fontSize: 32, lineHeight: size >= 120 ? 44 : 28, fontWeight: '900', color: textColor }}
-          numberOfLines={1}
-          adjustsFontSizeToFit
-          minimumFontScale={0.68}>
-          —
-        </Text>
-      ) : (
-        <AnimatedNumber
-          value={score}
-          from={0}
-          animateOnMount={!reducedMotion}
-          duration={760}
-          style={{ fontSize: size >= 120 ? 40 : 24, lineHeight: size >= 120 ? 44 : 28, fontWeight: '900', color: textColor }}
-        />
-      )}
-      <Text style={{ fontSize: size >= 120 ? 10 : 8, lineHeight: 12, fontWeight: '900', color: mutedColor }}>
-        /100
-      </Text>
-    </View>
   );
 }
 
@@ -7657,7 +7445,7 @@ function AnimatedPressable({
   );
 }
 
-function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout, showWorkoutProgress: showWorkoutProgressProp, showMealProgress: showMealProgressProp, webMode = false, resetToTodayToken = 0, focusTarget = null, focusTargetToken = 0, onRequestPreviousSurface }: ProgressScreenProps) {
+function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout, showWorkoutProgress: showWorkoutProgressProp, showMealProgress: showMealProgressProp, webMode = false, resetToTodayToken = 0, focusTarget = null, focusTargetToken = 0, onRequestPreviousSurface, onChromeScroll }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc, webMode), [themeName, webMode]);
   const { width: screenWidth } = useWindowDimensions();
@@ -7704,6 +7492,9 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
       if (scrollToTodaySleep(true)) pendingFocusTargetRef.current = null;
     });
   }, [scrollToTodaySleep]);
+  const handleProgressChromeScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    onChromeScroll?.(event);
+  }, [onChromeScroll]);
   useEffect(() => {
     if (!resetToTodayToken) return;
     selectProgressTab('today');
@@ -7863,10 +7654,6 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
   // Detail sheets for the Trends-tab summary rows.
   const [strengthTrendDetailOpen, setStrengthTrendDetailOpen] = useState(false);
   const [volumeDetailMode, setVolumeDetailMode] = useState<VolumeDetailMode | null>(null);
-  // The Thallo Score is shown as a trailing 28-day average of the daily
-  // score, not just today's reading. `null` until the first sample loads.
-  const [thalloScoreAverage, setThalloScoreAverage] = useState<ThalloScoreAverage | null>(null);
-  const [dailyThalloScoreResult, setDailyThalloScoreResult] = useState<HealthScoreResult | null>(null);
   const [dailyRecompForecast, setDailyRecompForecast] = useState<{ scopeKey: string; forecast: GoalForecastModel } | null>(null);
   const [goalScore, setGoalScore] = useState<GoalScoreResult | null>(null);
   const [recordsDetailOpen, setRecordsDetailOpen] = useState(false);
@@ -7982,8 +7769,6 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
   // `info` icon next to the title — testers kept asking what the
   // number meant and where it came from, and the locked-state copy
   // alone wasn't enough.
-  const [healthScoreExplainOpen, setHealthScoreExplainOpen] = useState(false);
-  const [selectedHealthScorePillar, setSelectedHealthScorePillar] = useState<HealthPillarKey | null>(null);
   const [sleepScoreExplainOpen, setSleepScoreExplainOpen] = useState(false);
   const [selectedBiometric, setSelectedBiometric] = useState<HealthBiometricKey | null>(null);
   const [biometricHistoryOpen, setBiometricHistoryOpen] = useState(false);
@@ -8000,6 +7785,7 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
   const [weightInputValue, setWeightInputValue] = useState('');
   const [weightInputError, setWeightInputError] = useState('');
   const [weightCardExpanded, setWeightCardExpanded] = useState(false);
+  const [weightChartRange, setWeightChartRange] = useState<'30d' | '90d' | 'all'>('90d');
   const [measurementsModalVisible, setMeasurementsModalVisible] = useState(false);
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
@@ -8276,144 +8062,6 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
     [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, weightUnit],
   );
 
-  // Comprehensive Health Score — modular pillar blend powered by
-  // src/utils/healthScore.ts. Builds the four optional contexts the
-  // scorer accepts (nutrition, gutSupport, strength, baselines) from
-  // data that's already loaded on this screen, then calls the
-  // shared scorer. Pillars without backing data are excluded; the
-  // returned `dataCoverage` + `confidence` tell us how complete the
-  // read is.
-  const comprehensiveHealthScore = useMemo(() => {
-    // ── Nutrition context — prefer the server's pre-computed weekly
-    //    score (richer than ratios alone). Fall back to ratio-based
-    //    scoring when the weekly score isn't available. ────────────
-    const nutritionCtx: HealthNutritionContext | null = nutritionScoreWeekly
-      ? {
-          weeklyNutritionScore: nutritionScoreWeekly.avg_score,
-          weeklyDaysWithData: nutritionScoreWeekly.days_with_data,
-          fiberGramsPerDay: gutHealthWindow?.avg_fiber_g ?? null,
-          goal: userProfile?.goal ?? null,
-        }
-      : null;
-
-    // ── Gut support — fiber + plant variety from the gut window.
-    //    Hydration / fermented are not always available client-side
-    //    so they're omitted (the pillar handles missing fields). ──
-    const gutCtx: HealthGutContext | null = gutHealthWindow
-      ? {
-          fiberGramsPerDay: gutHealthWindow.avg_fiber_g,
-          plantVariety7d: gutHealthWindow.distinct_plant_foods_week,
-          // Average fermented servings per day (window-normalized) →
-          // approximate "days with at least one fermented food" by
-          // capping at 7. Imperfect but better than dropping the
-          // signal entirely.
-          fermentedFoodDays7d: Math.min(
-            7,
-            Math.round((gutHealthWindow.avg_fermented_servings ?? 0) * 7),
-          ),
-        }
-      : null;
-
-    // ── Strength context — count established PRs in the last 28 days.
-    //    `derivePersonalRecords` returns one heaviest-set record per
-    //    exercise with no `kind` tag, so we feed every recent PR into
-    //    the e1RM bucket (it's the heaviest-loaded-set dimension).
-    //    Using `establishedRecentPrs` keeps this consistent with the
-    //    Trends tab's "Records" tile, which filters out first-session
-    //    PRs so brand-new exercises don't inflate the count.
-    const cutoff28d = Date.now() - 28 * 86400000;
-    const recentEstablishedPrs = establishedRecentPrs(history, prs ?? [], cutoff28d);
-    const e1rmPrs = recentEstablishedPrs.length;
-    // hasRecentStrengthWork: any logged set in last 14d on a
-    // non-cardio exercise. We already have `history` shaped this way.
-    const cutoff14d = Date.now() - 14 * 86400000;
-    let hasRecentStrengthWork = false;
-    for (const session of history) {
-      if (!session.completed || session.skipped) continue;
-      const t = +new Date(session.date);
-      if (t < cutoff14d) continue;
-      for (const exercise of session.exercises ?? []) {
-        const sets = (exercise.sets ?? []).filter(
-          (s: any) => Number(s?.weightLbs ?? s?.weight_lbs ?? 0) > 0
-            && Number(s?.reps ?? 0) > 0,
-        );
-        if (sets.length > 0) {
-          hasRecentStrengthWork = true;
-          break;
-        }
-      }
-      if (hasRecentStrengthWork) break;
-    }
-    const strengthCtx: HealthStrengthContext = {
-      e1rmPrs28d: e1rmPrs,
-      hasRecentStrengthWork,
-    };
-
-    // ── Personal RHR / HRV baselines from the persisted nightly
-    //    sleep history. Median is more robust than mean against
-    //    one-off outlier readings. ───────────────────────────────
-    const median = (xs: number[]): number | null => {
-      const valid = xs.filter(v => Number.isFinite(v) && v > 0).slice().sort((a, b) => a - b);
-      if (valid.length === 0) return null;
-      const mid = Math.floor(valid.length / 2);
-      return valid.length % 2 === 0 ? (valid[mid - 1] + valid[mid]) / 2 : valid[mid];
-    };
-    const recent = sleepHistory.slice(-30);
-    const last7 = sleepHistory.slice(-7);
-    const baselines = {
-      rhrMedian7d: median(last7.map(n => Number(n.restingHr ?? 0))),
-      rhrMedian30d: median(recent.map(n => Number(n.restingHr ?? 0))),
-      hrvMedian7d: median(last7.map(n => Number(n.hrv ?? 0))),
-      hrvMedian30d: median(recent.map(n => Number(n.hrv ?? 0))),
-    };
-    const rhrTrendBpm7dVs30d = baselines.rhrMedian7d != null && baselines.rhrMedian30d != null
-      ? Math.round((baselines.rhrMedian7d - baselines.rhrMedian30d) * 10) / 10
-      : null;
-
-    // ── Cardio context — combines wearable VO2, in-app pace/distance,
-    //    HR-zone minutes, and personal RHR trend so cardio-focused users
-    //    get a real read without hiding it from strength users.
-    const hasCardioSignals = healthSummary?.vo2Max != null
-      || cardioTrendSummary.zone2Minutes7d > 0
-      || cardioTrendSummary.cardioSessions7d > 0
-      || rhrTrendBpm7dVs30d != null;
-    const cardioCtx: HealthCardioContext | null = hasCardioSignals
-      ? {
-          vo2Max: healthSummary?.vo2Max ?? null,
-          zone2Minutes7d: cardioTrendSummary.zone2Minutes7d > 0 ? cardioTrendSummary.zone2Minutes7d : null,
-          cardioSessions7d: cardioTrendSummary.cardioSessions7d > 0 ? cardioTrendSummary.cardioSessions7d : null,
-          rhrTrendBpm7dVs30d,
-        }
-      : null;
-
-    const ctx: HealthScoreContext = {
-      appWorkouts14d: history.filter(s => {
-        if (!s.completed || s.skipped) return false;
-        const t = +new Date(s.date);
-        return t >= Date.now() - 14 * 86400000;
-      }).length,
-      targetDaysPerWeek: userProfile?.daysPerWeek ?? 4,
-      health: healthSummary,
-      nutrition: nutritionCtx,
-      gutSupport: gutCtx,
-      cardio: cardioCtx,
-      strength: strengthCtx,
-      baselines,
-    };
-
-    return calculateHealthScore(ctx);
-  }, [
-    history,
-    prs,
-    nutritionScoreWeekly,
-    gutHealthWindow,
-    healthSummary,
-    cardioTrendSummary,
-    sleepHistory,
-    userProfile?.goal,
-    userProfile?.daysPerWeek,
-  ]);
-
   const progressAnalytics = useMemo(
     () => showWorkoutProgress ? buildProgressAnalytics(history, prs, plateaus, weightUnit, distanceUnit, cardioTrendSummary, progressWeekWindow) : [],
     [cardioTrendSummary, distanceUnit, history, plateaus, progressWeekWindow, prs, showWorkoutProgress, weightUnit],
@@ -8584,105 +8232,6 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
     }),
     [bodyScanHistory, distanceUnit, goalForecast, goalVo2Points, history, mealHistory, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, tc, todayTrack, userProfile, weightEntries, weightUnit],
   );
-  // Lock today's computed Thallo Score to the first valid read of the
-  // local day, then show the trailing 28-day average. Later meal,
-  // workout, sleep, or wearable syncs can update tomorrow's snapshot
-  // but do not move the displayed score throughout the day.
-  useEffect(() => {
-    let cancelled = false;
-    if (loading) {
-      return () => { cancelled = true; };
-    }
-    import('../utils/thalloScoreHistory').then(m => {
-      if (cancelled) return;
-      m.getStableDailyThalloScore(comprehensiveHealthScore).then(snapshot => {
-        if (cancelled) return;
-        setDailyThalloScoreResult(snapshot.result);
-        setThalloScoreAverage(snapshot.average);
-      }).catch(() => {});
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [comprehensiveHealthScore, loading]);
-  const displayedThalloScore = dailyThalloScoreResult ?? comprehensiveHealthScore;
-  // Thallo Score removed for now — card + explainer modal no longer rendered.
-  // THALLO_SCORE_ENABLED is false, so this dormant builder short-circuits each
-  // render; flip it to re-enable. (Typed `boolean`, not literal `false`, so
-  // flow-narrowing inside the IIFE stays valid for the type checker.)
-  const thalloScoreCard = THALLO_SCORE_ENABLED && isProTier && showWorkoutProgress && showMealProgress ? (() => {
-    const hs = displayedThalloScore;
-    // Headline = trailing 28-day average of the daily score (falls back
-    // to today's value before any history exists).
-    const overall = thalloScoreAverage != null ? thalloScoreAverage.average : hs.overallScore;
-    const pillars = buildThalloScorePillars(hs, tc);
-    const defaultPillar = defaultThalloPillarKey(pillars);
-    const topPillars = pillars
-      .slice()
-      .sort((a, b) => b.contributionPoints - a.contributionPoints || b.score - a.score)
-      .slice(0, 3);
-    const coveragePct = Math.round(hs.dataCoverage * 100);
-    const scoreColor = overall == null ? tc.textMuted
-      : overall >= 80 ? '#22C55E'
-      : overall >= 65 ? '#84CC16'
-      : overall >= 45 ? '#F59E0B'
-      : '#EF4444';
-    const scoreStatus = overall == null ? 'Building'
-      : overall >= 80 ? 'Strong'
-      : overall >= 65 ? 'Balanced'
-      : overall >= 45 ? 'Needs signal'
-      : 'Watch';
-    const leadPillar = topPillars[0] ?? null;
-    const supportLabel = leadPillar ? `Top support: ${leadPillar.label}` : `${coveragePct}% data coverage`;
-
-    return (
-      <TouchableOpacity
-        testID="progress-thallo-score-card"
-        activeOpacity={0.85}
-        accessibilityRole="button"
-        accessibilityLabel={`${hs.scoreLabel}: ${overall ?? 'building'}. Open score breakdown.`}
-        onPress={() => {
-          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-          setSelectedHealthScorePillar(defaultPillar);
-          setHealthScoreExplainOpen(true);
-        }}
-        style={[
-          styles.thalloScoreFloat,
-          { borderColor: scoreColor + '44', backgroundColor: tc.surface + 'F2' },
-        ]}
-      >
-        <View style={[styles.thalloScoreFloatHalo, { backgroundColor: scoreColor + '12' }]}>
-          <ThalloScoreDonut
-            score={overall}
-            pillars={pillars}
-            size={58}
-            strokeWidth={6}
-            trackColor={tc.border}
-            textColor={scoreColor}
-            mutedColor={tc.textMuted}
-            onPillarPress={key => {
-              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-              setSelectedHealthScorePillar(key);
-              setHealthScoreExplainOpen(true);
-            }}
-          />
-        </View>
-        <View style={styles.thalloScoreFloatCopy}>
-          <Text style={[styles.thalloScoreTodayEyebrow, { color: scoreColor }]}>28d Thallo Score</Text>
-          <Text style={[styles.thalloScoreFloatTitle, { color: tc.textPrimary }]} numberOfLines={1}>
-            {overall == null ? hs.scoreLabel : `${overall} · ${scoreStatus}`}
-          </Text>
-          <Text style={[styles.thalloScoreFloatSubtitle, { color: tc.textMuted }]} numberOfLines={1}>
-            {supportLabel}
-          </Text>
-        </View>
-        <View style={styles.thalloScoreFloatRight}>
-          <View style={[styles.thalloScoreTodayStatusPill, { borderColor: scoreColor + '55', backgroundColor: scoreColor + '18' }]}>
-            <Text style={[styles.thalloScoreTodayStatusText, { color: scoreColor }]} numberOfLines={1}>{coveragePct}%</Text>
-          </View>
-          <Ionicons name="chevron-forward" size={15} color={tc.textMuted} />
-        </View>
-      </TouchableOpacity>
-    );
-  })() : null;
   const bedtimeWindow = useMemo(
     () => bedtimeWindowFromHistory(sleepHistory.map(n => n.bedtimeMinutes ?? -1)),
     [sleepHistory],
@@ -8713,6 +8262,102 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
         setSleepHistoryOpen(true);
       } : undefined}
     />
+  ) : null;
+  const plateauAlertCard = showWorkoutProgress && plateaus.length > 0 && !plateauDismissed ? (
+    <FadeInView delay={20} duration={TIMING_STANDARD.duration} slideDistance={6}>
+      <View
+        testID="progress-plateau-alert-card"
+        style={{
+          marginBottom: 12,
+          backgroundColor: tc.surface,
+          borderRadius: radius.lg,
+          borderWidth: 1.5,
+          borderColor: '#F59E0B88',
+          padding: 14,
+          overflow: 'hidden',
+        }}
+      >
+        <ProgressCardWash color="#F59E0B" intensity="soft" cornerRadius={radius.lg} />
+        <TouchableOpacity
+          testID="progress-plateau-alert-open"
+          accessibilityRole="button"
+          accessibilityLabel={`${plateaus.length} plateaued exercise${plateaus.length === 1 ? '' : 's'}. Review plateau recommendations.`}
+          onPress={() => {
+            import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+            setPlateauModalVisible(true);
+          }}
+          activeOpacity={0.82}
+          style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}
+        >
+          <View style={{
+            width: 34,
+            height: 34,
+            borderRadius: 17,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: '#F59E0B22',
+          }}>
+            <Ionicons name="trending-up-outline" size={18} color="#D97706" />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={{ fontSize: 10, fontWeight: '900', color: '#D97706', letterSpacing: 0.5 }}>
+              PLATEAU WATCH
+            </Text>
+            <Text style={{ fontSize: 15, fontWeight: '900', color: tc.textPrimary, marginTop: 2 }} numberOfLines={2}>
+              {plateaus.length} exercise{plateaus.length === 1 ? '' : 's'} need a progression check
+            </Text>
+            <View style={{ marginTop: 8, gap: 5 }}>
+              {plateaus.slice(0, 3).map((p, index) => (
+                <View
+                  key={`${p.exercise_name}-${index}`}
+                  testID={`progress-plateau-alert-row-${index}`}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}
+                >
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#F59E0B' }} />
+                  <Text style={{ flex: 1, minWidth: 0, fontSize: 12, color: tc.textSecondary }} numberOfLines={1}>
+                    {p.exercise_name} · {plateauSuggestionTitle(p.suggestion)} · {p.weeks_stuck}w flat
+                  </Text>
+                </View>
+              ))}
+              {plateaus.length > 3 && (
+                <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>
+                  +{plateaus.length - 3} more
+                </Text>
+              )}
+            </View>
+          </View>
+          <Ionicons name="chevron-forward" size={17} color={tc.textMuted} style={{ marginTop: 7 }} />
+        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+          <TouchableOpacity
+            testID="progress-plateau-review-button"
+            accessibilityRole="button"
+            accessibilityLabel="Review plateau recommendations"
+            onPress={() => {
+              import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+              setPlateauModalVisible(true);
+            }}
+            activeOpacity={0.86}
+            style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 9, backgroundColor: '#F59E0B' }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: '900', color: '#111827' }}>Review</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="progress-plateau-dismiss"
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss plateau watch"
+            onPress={() => {
+              AsyncStorage.setItem('plateauDismissedAt', String(Date.now())).catch(() => {});
+              setPlateauDismissed(true);
+            }}
+            activeOpacity={0.82}
+            style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 9, borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surface }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textSecondary }}>Dismiss</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </FadeInView>
   ) : null;
   const openBiometricHistory = useCallback((key: HealthBiometricKey) => {
     import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
@@ -10572,7 +10217,11 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
         ) : (
         <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
         {tab === 'today' ? (
-        <ScrollView ref={todayScrollRef} contentContainerStyle={styles.content}>
+        <ScrollView
+          ref={todayScrollRef}
+          contentContainerStyle={styles.content}
+          onScroll={handleProgressChromeScroll}
+          scrollEventThrottle={16}>
           <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6}>
             <AnimatedPressable
               testID="progress-today-how-am-i-doing-card"
@@ -10799,7 +10448,10 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
           )}
         </ScrollView>
       ) : tab === 'trends' && showWorkoutProgress ? (
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          onScroll={handleProgressChromeScroll}
+          scrollEventThrottle={16}>
           <View style={{ alignItems: 'flex-end', marginBottom: 8 }}>
             <TouchableOpacity
               testID="progress-edit-trends"
@@ -10826,6 +10478,8 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
               </TouchableOpacity>
             </View>
           )}
+
+          {plateauAlertCard}
 
           {/* Lead with actual trends: weekly training-volume + recent PRs,
               above the snapshot radars below. */}
@@ -11667,1400 +11321,14 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
           days={14}
           embedded
           showHeader={false}
+          onChromeScroll={handleProgressChromeScroll}
         />
-      ) : false ? (
-        /* Legacy catch-all Insights view disabled; the dedicated Insights tab above is the active surface. */
-        <ScrollView contentContainerStyle={styles.content} style={!noHeader ? { backgroundColor: tc.background } : undefined}>
-          {coachInsightVisuals.length > 0 && (
-            <View style={styles.insightsCard}>
-              <View style={styles.insightsHeader}>
-                <Ionicons name="sparkles-outline" size={16} color={tc.primary} />
-                <Text style={styles.insightsTitle}>Coach Insights</Text>
-              </View>
-              <View style={styles.coachInsightGrid}>
-                {coachInsightVisuals.map((item, index) => (
-                  <FadeInView
-                    key={item.key}
-                    delay={staggerDelay(index, 45)}
-                    duration={TIMING_STANDARD.duration}
-                    slideDistance={5}
-                    style={styles.coachInsightTile}
-                  >
-                    <View style={[styles.coachInsightIcon, { backgroundColor: item.color + '1F' }]}>
-                      <Ionicons name={item.icon} size={15} color={item.color} />
-                    </View>
-                    <Text style={styles.coachInsightLabel} numberOfLines={1}>{item.label}</Text>
-                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                      <Text style={[styles.coachInsightValue, { color: item.color }]} numberOfLines={1}>{item.value}</Text>
-                    </PulseOnChange>
-                    <Text style={styles.coachInsightDetail} numberOfLines={2}>{item.detail}</Text>
-                  </FadeInView>
-                ))}
-              </View>
-            </View>
-          )}
-
-          {/* Weight tracking moved to Body Check tab */}
-
-          {plateaus.length > 0 && !plateauDismissed && (
-            <View style={{
-              marginBottom: 16,
-              backgroundColor: tc.surfaceRaised,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: '#F59E0B55',
-              padding: 14,
-            }}>
-              <TouchableOpacity
-                onPress={() => setPlateauModalVisible(true)}
-                activeOpacity={0.7}
-                style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                <Ionicons name="alert-circle-outline" size={20} color="#F59E0B" />
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                    {plateaus.length} exercise{plateaus.length === 1 ? '' : 's'} plateaued
-                  </Text>
-                </View>
-                <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
-              </TouchableOpacity>
-              <View style={{ marginTop: 10, gap: 4 }}>
-                {plateaus.slice(0, 3).map((p, i) => (
-                  <Text key={i} style={{ fontSize: 12, color: tc.textSecondary }}>
-                    {p.exercise_name} — flat for {p.weeks_stuck} week{p.weeks_stuck === 1 ? '' : 's'}
-                  </Text>
-                ))}
-                {plateaus.length > 3 && (
-                  <Text style={{ fontSize: 11, color: tc.textMuted }}>
-                    +{plateaus.length - 3} more
-                  </Text>
-                )}
-              </View>
-              {plateaus.some(p => p.suggestion === 'deload') && (
-                <Text style={{ fontSize: 12, color: '#F59E0B', marginTop: 8, lineHeight: 17 }}>
-                  Consider a deload week — reduce weights by 40% for one week to recover.
-                </Text>
-              )}
-              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                <TouchableOpacity
-                  onPress={() => {
-                    AsyncStorage.setItem('plateauDismissedAt', String(Date.now())).catch(() => {});
-                    setPlateauDismissed(true);
-                  }}
-                  style={{
-                    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
-                    borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surface,
-                  }}>
-                  <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>Dismiss</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {progressMilestones.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={styles.sectionLabel}>Progress Milestones</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {progressMilestones.map((item, index) => (
-                  <FadeInView
-                    key={item.key}
-                    testID={`progress-milestone-${item.key}`}
-                    delay={staggerDelay(index, 45)}
-                    duration={TIMING_STANDARD.duration}
-                    slideDistance={6}
-                    style={{
-                      flexGrow: 1,
-                      flexBasis: '47%',
-                      minHeight: 112,
-                      backgroundColor: tc.surfaceRaised,
-                      borderRadius: 12,
-                      borderWidth: 1,
-                      borderColor: tc.border,
-                      padding: 12,
-                    }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                      <View style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '20' }}>
-                        <Ionicons name={item.icon} size={16} color={item.color} />
-                      </View>
-                      <Text style={{ flex: 1, fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.3, textTransform: 'uppercase' }} numberOfLines={2}>
-                        {item.title}
-                      </Text>
-                    </View>
-                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                      <Text style={{ fontSize: 22, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
-                    </PulseOnChange>
-                    <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4, lineHeight: 15 }} numberOfLines={2}>
-                      {item.detail}
-                    </Text>
-                  </FadeInView>
-                ))}
-              </View>
-            </View>
-          )}
-
-          {progressAnalytics.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={styles.sectionLabel}>Trend Summary</Text>
-              <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-                {progressAnalytics.map((item, index) => {
-                  const onTap = item.key === 'strength-index'
-                    ? () => setStrengthTrendDetailOpen(true)
-                    : item.key === 'recent-records'
-                      ? () => setRecordsDetailOpen(true)
-                      : item.key === 'load-balance'
-                        ? () => setVolumeDetailMode('balance')
-                        : item.key === 'volume-trend'
-                          ? () => setVolumeDetailMode('workload')
-                        : null;
-                  return (
-                    <FadeInView key={item.key} delay={staggerDelay(index, 35)} duration={TIMING_STANDARD.duration} slideDistance={4}>
-                    <TouchableOpacity
-                      activeOpacity={onTap ? 0.85 : 1}
-                      disabled={!onTap}
-                      onPress={onTap ? () => {
-                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                        onTap();
-                      } : undefined}
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                      <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
-                        <Ionicons name={item.icon} size={16} color={item.color} />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                          {item.label}
-                        </Text>
-                        <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
-                          {item.detail}
-                        </Text>
-                      </View>
-                      <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                        <Text
-                          style={{ fontSize: 19, fontWeight: '900', color: item.color }}
-                          numberOfLines={1}
-                          adjustsFontSizeToFit
-                          minimumFontScale={0.72}>
-                          {item.value}
-                        </Text>
-                      </PulseOnChange>
-                      {onTap && <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />}
-                    </TouchableOpacity>
-                    </FadeInView>
-                  );
-                })}
-              </View>
-            </View>
-          )}
-
-          <View style={{ marginBottom: 16 }}>
-            <Text style={styles.sectionLabel}>Training Signals</Text>
-            <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-              {trainingSignals.map((item, index) => (
-                <FadeInView key={item.key} delay={staggerDelay(index, 35)} duration={TIMING_STANDARD.duration} slideDistance={4}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                  <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
-                    <Ionicons name={item.icon} size={16} color={item.color} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                      {item.label}
-                    </Text>
-                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
-                      {item.detail}
-                    </Text>
-                  </View>
-                  <Text style={{ fontSize: 16, fontWeight: '900', color: item.color, textAlign: 'right', maxWidth: 92 }} numberOfLines={2}>
-                    {item.value}
-                  </Text>
-                </View>
-                </FadeInView>
-              ))}
-            </View>
-          </View>
-
-          {/* Cardio PRs — best distance, pace, and output per exercise type */}
-          {cardioBestsMemo.length > 0 && (
-              <View style={{ marginBottom: 16 }}>
-                <Text style={styles.sectionLabel}>Cardio Bests</Text>
-                <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-                  {cardioBestsMemo.map(pr => (
-                    <View key={pr.name}>
-                      <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary, marginBottom: 4 }}>{pr.name}</Text>
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                        {pr.bestDist != null && (
-                          <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
-                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{formatDistance(pr.bestDist, distanceUnit)}</Text>
-                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>BEST DIST</Text>
-                          </View>
-                        )}
-                        {pr.lastPace && (
-                          <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
-                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{pr.lastPace}</Text>
-                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>LAST PACE</Text>
-                          </View>
-                        )}
-                        {pr.bestDur != null && (
-                          <View style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
-                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>
-                              {pr.bestDur >= 3600
-                                ? `${Math.floor(pr.bestDur / 3600)}h ${Math.floor((pr.bestDur % 3600) / 60)}m`
-                                : `${Math.floor(pr.bestDur / 60)}m`}
-                            </Text>
-                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>BEST DUR</Text>
-                          </View>
-                        )}
-                        {Object.entries(pr.extraBests).slice(0, 2).map(([k, v]) => (
-                          <View key={k} style={{ backgroundColor: tc.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
-                            <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{v}</Text>
-                            <Text style={{ fontSize: 9, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.3 }}>{k.toUpperCase()}</Text>
-                          </View>
-                        ))}
-                      </View>
-                      <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>{pr.sessionCount} session{pr.sessionCount !== 1 ? 's' : ''} logged</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-          )}
-
-          {/* Estimated 1RM showcase — deterministic Epley estimates
-              from recent logged sessions for the main compound lifts.
-              Hidden when the user has no recent compound-lift data. */}
-          {displayedOneRepMaxLifts.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
-              {(() => {
-                const maxOneRepMax = Math.max(...displayedOneRepMaxLifts.map(lift => lift.oneRepMaxLbs), 1);
-                return (
-                  <View style={{
-                    backgroundColor: tc.surfaceRaised,
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: tc.border,
-                    padding: 14,
-                    gap: 10,
-                  }}>
-                    {displayedOneRepMaxLifts.map(lift => {
-                      const fillPct = Math.max(0.18, lift.oneRepMaxLbs / maxOneRepMax);
-                      return (
-                        <View key={lift.slug} style={{ gap: 6 }}>
-                          <View style={{
-                            flexDirection: 'row',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 12,
-                          }}>
-                            <View style={{ flex: 1 }}>
-                              <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
-                                {lift.name}
-                              </Text>
-                              <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
-                                Top set: {lift.topWeightLbs} lb × {lift.topReps}
-                                {' · '}{lift.sessionCount} session{lift.sessionCount !== 1 ? 's' : ''}
-                              </Text>
-                            </View>
-                            <View style={{ alignItems: 'flex-end' }}>
-                              <Text style={{ fontSize: 20, fontWeight: '900', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any }}>
-                                {Math.round(lift.oneRepMaxLbs)}
-                              </Text>
-                              <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: -2 }}>lb 1RM</Text>
-                            </View>
-                          </View>
-                          <View style={{
-                            height: 10,
-                            borderRadius: 999,
-                            backgroundColor: tc.surface,
-                            overflow: 'hidden',
-                          }}>
-                            <AnimatedProgressFill
-                              pct={Math.round(fillPct * 100)}
-                              minPct={18}
-                              color={tc.primary}
-                              delay={120}
-                              style={{ height: '100%', borderRadius: 999 }}
-                            />
-                          </View>
-                        </View>
-                      );
-                    })}
-                    <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginTop: 2 }}>
-                      Epley estimates from your recent logged sets. Gets sharper as you log more sessions.
-                    </Text>
-                  </View>
-                );
-              })()}
-
-              {/* 1RM trend chart for the top lift — only renders when there
-                  are 3+ data points. Pure SVG sparkline, matches the body-
-                  fat timeline pattern below for visual consistency. */}
-              {(() => {
-                const topLiftTrend = topLiftHistory!;
-                if (!topLiftHistory || topLiftTrend.points.length < 3) return null;
-                return (
-                  <View style={{ marginTop: 14 }}>
-                    <OneRepMaxTrendCard
-                      title={`${topLiftTrend.name} · 1RM trend`}
-                      subtitle="Rolling estimated 1-rep max from logged working sets"
-                      points={topLiftTrend.points}
-                      weightUnit={weightUnit}
-                      tc={tc}
-                      styles={styles}
-                    />
-                  </View>
-                );
-              })()}
-            </View>
-          )}
-
-          {prs.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Ionicons name="trophy-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
-              <Text style={styles.emptyTitle}>No PRs yet</Text>
-              <Text style={styles.emptyBody}>Complete a workout and log your sets to start tracking personal records.</Text>
-            </View>
-          ) : (() => {
-            return (
-              <>
-                <TextInput
-                  style={styles.prSearchInput}
-                  value={prSearch}
-                  onChangeText={setPrSearch}
-                  placeholder="Search exercises..."
-                  placeholderTextColor={tc.textMuted}
-                  autoCorrect={false}
-                  autoCapitalize="none"
-                />
-                {prFocusOptions.length > 1 && (
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.prFilterRow}>
-                    <TouchableOpacity
-                      style={[styles.prFilterChip, prFocusFilter === null && styles.prFilterChipActive]}
-                      onPress={() => setPrFocusFilter(null)}>
-                      <Text style={[styles.prFilterChipText, prFocusFilter === null && styles.prFilterChipTextActive]}>
-                        All
-                      </Text>
-                    </TouchableOpacity>
-                    {prFocusOptions.map(focus => {
-                      const active = prFocusFilter === focus;
-                      return (
-                        <TouchableOpacity
-                          key={focus}
-                          style={[styles.prFilterChip, active && styles.prFilterChipActive]}
-                          onPress={() => setPrFocusFilter(active ? null : focus)}>
-                          <Text style={[styles.prFilterChipText, active && styles.prFilterChipTextActive]}>
-                            {focus}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                )}
-                <Text style={styles.sectionLabel}>
-                  {filteredPrsForTab.length} of {prs.length} exercises tracked
-                </Text>
-                {filteredPrsForTab.length === 0 ? (
-                  <View style={styles.emptyBox}>
-                    <Text style={styles.emptyBody}>No exercises match your search.</Text>
-                  </View>
-                ) : visiblePrsForTab.map((pr, i) => {
-                  const prWeightLabel = formatWeight(pr.weightLbs, weightUnit, { suffix: false });
-                  return (
-                    <FadeInView key={i} delay={Math.min(i * 35, 350)} duration={260} slideDistance={6}>
-                    <View testID={`progress-pr-card-${i}`} style={styles.prCard}>
-                      <View style={styles.prLeft}>
-                        <Text style={styles.prName}>{pr.exerciseName}</Text>
-                        <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
-                      </View>
-                      <View style={styles.prRight}>
-                        <Text style={styles.prWeight}>{prWeightLabel}</Text>
-                        <Text style={styles.prUnit}>{weightUnit}</Text>
-                        <Text style={styles.prReps}>{pr.reps} reps</Text>
-                      </View>
-                    </View>
-                    </FadeInView>
-                  );
-                })}
-                {filteredPrsForTab.length > visiblePrsForTab.length && (
-                  <TouchableOpacity
-                    onPress={() => setVisiblePrCount(c => c + 40)}
-                    activeOpacity={0.85}
-                    style={{
-                      backgroundColor: tc.surface,
-                      borderRadius: 12,
-                      paddingVertical: 12,
-                      borderWidth: 1,
-                      borderColor: tc.border,
-                      alignItems: 'center',
-                      marginTop: 4,
-                    }}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                      Load {Math.min(40, filteredPrsForTab.length - visiblePrsForTab.length)} more records
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              </>
-            );
-          })()}
-        </ScrollView>
-      ) : false ? (
-        /* History tab removed — duplicates the Workout → History tab on
-           Home. Kept disabled instead of deleted to preserve git blame
-           on the legacy month-calendar / streak / share / session-card
-           code; that view still lives on the Home Workout tab. */
-        <ScrollView contentContainerStyle={styles.content}>
-          {/* Month calendar — standard Sun-Sat grid for current month */}
-          {(() => {
-            const today = new Date();
-            const year = today.getFullYear();
-            const month = today.getMonth();
-            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-            const daysInMonth = new Date(year, month + 1, 0).getDate();
-            const firstDow = new Date(year, month, 1).getDay(); // 0=Sun
-
-            const toDateKey = (d: string) => {
-              if (!d) return '';
-              const p = new Date(d);
-              if (isNaN(p.getTime())) return d.slice(0, 10);
-              return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}-${String(p.getDate()).padStart(2, '0')}`;
-            };
-            const completedDates = new Set([
-              ...history.filter(s => s.date && !s.skipped).map(s => toDateKey(s.date)),
-              ...summaries.filter(s => s.date).map(s => toDateKey(s.date)),
-            ]);
-            const skippedDates = new Set(
-              history.filter(s => s.skipped && s.date).map(s => toDateKey(s.date))
-            );
-
-            // Build grid: 6 rows × 7 cols, empty cells for padding
-            const cells: Array<{ day: number; key: string; status: 'done' | 'skipped' | 'rest' | 'future' | 'empty' }> = [];
-            for (let i = 0; i < firstDow; i++) cells.push({ day: 0, key: `pad-${i}`, status: 'empty' });
-            for (let d = 1; d <= daysInMonth; d++) {
-              const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-              const isFuture = d > today.getDate();
-              const status = isFuture ? 'future' : completedDates.has(key) ? 'done' : skippedDates.has(key) ? 'skipped' : 'rest';
-              cells.push({ day: d, key, status });
-            }
-            while (cells.length % 7 !== 0) cells.push({ day: 0, key: `pad-end-${cells.length}`, status: 'empty' });
-
-            const rows: typeof cells[] = [];
-            for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7));
-
-            const doneCount = [...completedDates].filter(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).length;
-            const skippedCount = [...skippedDates].filter(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).length;
-
-            return (
-              <View style={{ marginBottom: 16, backgroundColor: tc.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: tc.border }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>{monthNames[month]} {year}</Text>
-                  <View style={{ flexDirection: 'row', gap: 10 }}>
-                    {doneCount > 0 && <Text style={{ fontSize: 12, color: tc.primary, fontWeight: '600' }}>{doneCount} done</Text>}
-                    {skippedCount > 0 && <Text style={{ fontSize: 12, color: '#F59E0B', fontWeight: '600' }}>{skippedCount} skipped</Text>}
-                  </View>
-                </View>
-                {/* Day headers */}
-                <View style={{ flexDirection: 'row', marginBottom: 6 }}>
-                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
-                    <Text key={d} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: '600', color: tc.textMuted }}>{d}</Text>
-                  ))}
-                </View>
-                {/* Calendar grid — rows stagger in */}
-                {rows.map((row, ri) => (
-                  <FadeInView key={ri} delay={ri * 40} style={{ flexDirection: 'row', marginBottom: 4 }}>
-                    {row.map(cell => {
-                      const isToday = cell.day === today.getDate() && cell.status !== 'empty';
-                      return (
-                        <View key={cell.key} style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
-                          {cell.status === 'empty' ? (
-                            <View style={{ width: 32, height: 32 }} />
-                          ) : (
-                            <View style={{
-                              width: 32, height: 32, borderRadius: 16,
-                              alignItems: 'center', justifyContent: 'center',
-                              backgroundColor:
-                                cell.status === 'done' ? tc.primary :
-                                cell.status === 'skipped' ? '#F59E0B' + '33' :
-                                cell.status === 'future' ? 'transparent' :
-                                'transparent',
-                              borderWidth: isToday ? 2 : 0,
-                              borderColor: isToday ? tc.primary : 'transparent',
-                            }}>
-                              <Text style={{
-                                fontSize: 13, fontWeight: isToday ? '800' : cell.status === 'done' ? '700' : '400',
-                                color: cell.status === 'done' ? getContrastingTextColor(tc.primary)
-                                  : cell.status === 'skipped' ? '#F59E0B'
-                                  : cell.status === 'future' ? tc.textMuted + '55'
-                                  : tc.textSecondary,
-                              }}>{cell.day}</Text>
-                            </View>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </FadeInView>
-                ))}
-              </View>
-            );
-          })()}
-
-          {history.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Ionicons name="calendar-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
-              <Text style={styles.emptyTitle}>No workouts yet</Text>
-              <Text style={styles.emptyBody}>Start from Workouts {'->'} Plan or log a custom activity. Your calendar, streak, and session details will appear here.</Text>
-            </View>
-          ) : (() => {
-            const loweredHistoryQuery = historyQuery.trim().toLowerCase();
-            const matchedHistory = filterWorkoutHistory(history, {
-              query: historyQuery,
-              dateFilter: historyDateFilter,
-              typeFilter: historyTypeFilter,
-            });
-            const shownHistory = matchedHistory.slice(0, visibleWorkoutCount);
-            const hasHistoryFilters = historyDateFilter !== 'all' || historyTypeFilter !== 'all';
-            // History is newest-first, so the first match is the most recent.
-            const lastMatchDate = loweredHistoryQuery && matchedHistory.length > 0
-              ? matchedHistory[0].date
-              : '';
-            const lastMatchLabel = lastMatchDate
-              ? `Last logged ${formatDate(lastMatchDate)} · ${workoutHistoryDaysAgoLabel(lastMatchDate)}`
-              : '';
-            const queryAlreadyWatched = loweredHistoryQuery !== ''
-              && stalenessWatches.some(w => w.term.toLowerCase() === loweredHistoryQuery);
-            return (
-            <>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <Text style={styles.sectionLabel}>
-                  {loweredHistoryQuery || hasHistoryFilters
-                    ? `${matchedHistory.length} match${matchedHistory.length !== 1 ? 'es' : ''}`
-                    : `${history.length} workout${history.length !== 1 ? 's' : ''}`}
-                  {matchedHistory.length > visibleWorkoutCount ? ` · showing ${visibleWorkoutCount}` : ''}
-                </Text>
-                <View style={{ flexDirection: 'row', gap: 6 }}>
-                  <TouchableOpacity
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border }}
-                    onPress={async () => {
-                      try {
-                        const { exportWorkoutHistory } = await import('../utils/dataExport');
-                        const uname = await AsyncStorage.getItem('user_username').catch(() => null);
-                        await exportWorkoutHistory(uname || undefined);
-                      } catch (e: any) { Alert.alert('Export failed', e.message ?? 'Could not export'); }
-                    }}>
-                    <Ionicons name="share-outline" size={14} color={tc.textSecondary} />
-                    <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>Share</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: tc.primary + '15' }}
-                    onPress={() => setShowLogActivity(true)}>
-                    <Ionicons name="add-circle-outline" size={16} color={tc.primary} />
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: tc.primary }}>Log Activity</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-              <View style={{
-                flexDirection: 'row', alignItems: 'center', gap: 8,
-                backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
-                borderRadius: 10, paddingHorizontal: 10, marginBottom: 8,
-              }}>
-                <Ionicons name="search" size={15} color={tc.textMuted} />
-                <TextInput
-                  value={historyQuery}
-                  onChangeText={setHistoryQuery}
-                  placeholder="Search exercises, focus, activities…"
-                  placeholderTextColor={tc.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  returnKeyType="search"
-                  style={{ flex: 1, fontSize: 13, color: tc.textPrimary, paddingVertical: 8 }}
-                />
-                {historyQuery.length > 0 && (
-                  <TouchableOpacity onPress={() => setHistoryQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Ionicons name="close-circle" size={16} color={tc.textMuted} />
-                  </TouchableOpacity>
-                )}
-              </View>
-              <View style={styles.historyFilterGroup}>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.historyFilterScroller}>
-                  {HISTORY_DATE_FILTER_OPTIONS.map(opt => {
-                    const active = historyDateFilter === opt.key;
-                    return (
-                      <AnimatedPressable
-                        key={opt.key}
-                        onPress={() => setHistoryDateFilter(opt.key)}
-                        scaleDown={0.95}
-                        accessibilityRole="button"
-                        accessibilityState={{ selected: active }}
-                        style={[
-                          styles.historyFilterChip,
-                          { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surface },
-                        ]}>
-                        <Text style={[styles.historyFilterChipText, { color: active ? tc.primary : tc.textSecondary }]}>{opt.label}</Text>
-                      </AnimatedPressable>
-                    );
-                  })}
-                </ScrollView>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.historyFilterScroller}>
-                  {HISTORY_TYPE_FILTER_OPTIONS.map(opt => {
-                    const active = historyTypeFilter === opt.key;
-                    return (
-                      <AnimatedPressable
-                        key={opt.key}
-                        onPress={() => setHistoryTypeFilter(opt.key)}
-                        scaleDown={0.95}
-                        accessibilityRole="button"
-                        accessibilityState={{ selected: active }}
-                        style={[
-                          styles.historyFilterChip,
-                          { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surface },
-                        ]}>
-                        <Ionicons name={opt.icon} size={12} color={active ? tc.primary : tc.textMuted} />
-                        <Text style={[styles.historyFilterChipText, { color: active ? tc.primary : tc.textSecondary }]}>{opt.label}</Text>
-                      </AnimatedPressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-              {stalenessWatches.length > 0 && (
-                <View style={{ marginBottom: 8 }}>
-                  <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textMuted, marginBottom: 4 }}>
-                    Reminders if you skip these
-                  </Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-                    {stalenessWatches.map(w => (
-                      <View
-                        key={w.term}
-                        style={{ flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 9, paddingRight: 6, paddingVertical: 5, borderRadius: 13, backgroundColor: tc.primary + '12', borderWidth: 1, borderColor: tc.primary + '44' }}>
-                        <TouchableOpacity
-                          onPress={() => setHistoryQuery(w.term)}
-                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 2 }}
-                          style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                          <Ionicons name="notifications" size={11} color={tc.primary} />
-                          <Text style={{ fontSize: 11, fontWeight: '600', color: tc.primary }}>{w.term}</Text>
-                          <Text style={{ fontSize: 10, color: tc.primary + 'BB' }}>{w.thresholdDays}d</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          onPress={async () => {
-                            const m = await import('../utils/stalenessReminders');
-                            setStalenessWatches(await m.removeStalenessWatch(w.term));
-                          }}
-                          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}>
-                          <Ionicons name="close" size={13} color={tc.primary} />
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-              {loweredHistoryQuery !== '' && matchedHistory.length > 0 && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-                  <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>{lastMatchLabel}</Text>
-                  <TouchableOpacity
-                    onPress={async () => {
-                      const m = await import('../utils/stalenessReminders');
-                      const next = queryAlreadyWatched
-                        ? await m.removeStalenessWatch(historyQuery.trim())
-                        : await m.addStalenessWatch(historyQuery.trim());
-                      setStalenessWatches(next);
-                    }}
-                    style={{
-                      flexDirection: 'row', alignItems: 'center', gap: 4,
-                      paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
-                      backgroundColor: queryAlreadyWatched ? tc.primary + '18' : tc.surface,
-                      borderWidth: 1, borderColor: queryAlreadyWatched ? tc.primary : tc.border,
-                    }}>
-                    <Ionicons name={queryAlreadyWatched ? 'notifications' : 'notifications-outline'} size={13} color={queryAlreadyWatched ? tc.primary : tc.textSecondary} />
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: queryAlreadyWatched ? tc.primary : tc.textSecondary }}>
-                      {queryAlreadyWatched ? 'Reminder on' : 'Remind me'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {(loweredHistoryQuery !== '' || hasHistoryFilters) && matchedHistory.length === 0 && (
-                <View style={styles.emptyBox}>
-                  <Ionicons name="search-outline" size={32} color={tc.textMuted} style={{ marginBottom: 6 }} />
-                  <Text style={styles.emptyTitle}>No matches</Text>
-                  <Text style={styles.emptyBody}>
-                    {loweredHistoryQuery
-                      ? `Nothing in your history matches "${historyQuery.trim()}". Try an exercise name like "bench" or a focus like "legs".`
-                      : 'No workouts match those filters. Try All time or All activity.'}
-                  </Text>
-                </View>
-              )}
-              {shownHistory.map((session, i) => {
-                const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
-                const isExpanded = expandedSessionId === session.id;
-                const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
-                const trainingScore = workoutTrainingScore(summary);
-                const trainingRating = workoutTrainingRating(summary);
-                const trainingScoreColor = trainingScore != null ? workoutTrainingScoreColor(trainingScore, tc) : tc.primary;
-                const trainingScoreStat = trainingScore != null ? (
-                  <>
-                    <Text style={styles.sessionStatDot}>·</Text>
-                    <View style={[
-                      styles.workoutScorePill,
-                      {
-                        backgroundColor: trainingScoreColor + '18',
-                        borderColor: trainingScoreColor + '44',
-                      },
-                    ]}>
-                      <Ionicons name="trophy-outline" size={12} color={trainingScoreColor} />
-                      <Text style={[styles.workoutScorePillText, { color: trainingScoreColor }]}>
-                        Score {trainingScore}{trainingRating ? ` · ${trainingRating}` : ''}
-                      </Text>
-                    </View>
-                  </>
-                ) : null;
-                // Composite key: id + index. HK auto-imports can collide
-                // on session.id when the dedup helper sees the same HK
-                // workout twice across import attempts; the index makes
-                // the key unique even on collision so React stops warning.
-                const rowKey = `${session.id ?? 'sess'}-${i}`;
-                const deleteSession = () => {
-                  if (!session.id) return;
-                  Alert.alert(
-                    'Delete this workout?',
-                    'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      { text: 'Delete', style: 'destructive', onPress: async () => {
-                        try {
-                          await deleteWorkoutSession(session.id!);
-                          await deleteWorkoutSummary(session.id!).catch(() => null);
-                          if (authToken && session.date) {
-                            const dateISO = session.date.slice(0, 10);
-                            const { deleteWorkoutCompletion } = await import('../services/api');
-                            const completionId = serverCompletionIdFromLocalId(session.id);
-                            await deleteWorkoutCompletion(authToken, dateISO, {
-                              focusLabel: session.focus,
-                              completionId,
-                              externalSourceId: completionId ? undefined : externalSourceIdFromLocalId(session.id),
-                            }).catch(() => null);
-                          }
-                          setHistory(prev => prev.filter(x => x.id !== session.id));
-                          setSummaries(prev => prev.filter(x => x.id !== session.id));
-                          import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-                        } catch (err: any) {
-                          Alert.alert('Could not delete', String(err?.message ?? err));
-                        }
-                      }},
-                    ],
-                  );
-                };
-                return (
-                  <FadeInView key={rowKey} delay={i * 60}>
-                  <SwipeableRow
-                    enabled={!!session.id}
-                    actions={session.id ? [{
-                      icon: 'trash-outline',
-                      label: 'Delete',
-                      color: '#fff',
-                      bgColor: tc.error ?? '#EF4444',
-                      onPress: deleteSession,
-                    }] : []}>
-                  <TouchableOpacity
-                    style={styles.sessionCard}
-                    activeOpacity={0.8}
-                    onPress={() => { configureExpandAnimation(300); setExpandedSessionId(isExpanded ? null : (session.id ?? `s${i}`)); }}>
-                    <View style={styles.sessionHeader}>
-                      <View style={{ flex: 1 }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          <Text style={styles.sessionFocus}>
-                            {session.manualActivity
-                              ? `${humanizeToken(session.manualActivity.category)}${session.manualActivity.subtype ? ' · ' + humanizeToken(session.manualActivity.subtype) : ''}${session.manualActivity.intensity ? ' (' + session.manualActivity.intensity + ')' : ''}`
-                              : displayFocusForExercises(session.focus, session.exercises)}
-                          </Text>
-                          {summary?.totalSets != null && summary.totalSets > 0 && (
-                            <View style={{ backgroundColor: tc.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
-                              <Text style={{ fontSize: 9, fontWeight: '700', color: tc.primary }}>
-                                {summary.totalSets > 25 ? 'VOLUME' : summary.totalSets < 15 ? 'STRENGTH' : 'HYPERTROPHY'}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                        <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
-                      </View>
-                      <View style={styles.sessionBadge}>
-                        <Text style={styles.sessionBadgeText}>{formatDuration(session.durationSeconds)}</Text>
-                      </View>
-                      {session.id && (
-                        <TouchableOpacity
-                          onPress={(e) => {
-                            // Stop the row's expand toggle from firing
-                            // when the user taps the delete glyph.
-                            e.stopPropagation?.();
-                            deleteSession();
-                          }}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                          style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
-                          <Text style={{ fontSize: 16, color: tc.textMuted, fontWeight: '600' }}>✕</Text>
-                        </TouchableOpacity>
-                      )}
-                      <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={tc.textMuted} style={{ marginLeft: 6 }} />
-                    </View>
-                    {(session.manualActivity || session.exercises.length === 0) ? (
-                      <View style={styles.sessionStats}>
-                        {/* Manual / imported activity (Strong, Strava, Apple
-                            Health): no per-set data, so surface distance +
-                            the estimated calorie burn instead of an empty
-                            "0 exercises · 0 sets". */}
-                        <Text style={styles.sessionStat}>
-                          {[
-                            session.manualActivity?.distanceMiles && session.manualActivity.distanceMiles > 0
-                              ? formatDistance(session.manualActivity.distanceMiles, distanceUnit)
-                              : null,
-                            Number.isFinite(Number(session.manualActivity?.details?.elevationGainFt)) && Number(session.manualActivity?.details?.elevationGainFt) > 0
-                              ? `${Math.round(Number(session.manualActivity?.details?.elevationGainFt))} ft elev`
-                              : null,
-                            Number.isFinite(Number(session.manualActivity?.details?.avgWatts)) && Number(session.manualActivity?.details?.avgWatts) > 0
-                              ? `${Math.round(Number(session.manualActivity?.details?.avgWatts))} W`
-                              : null,
-                            (session.manualActivity?.caloriesBurned ?? summary?.caloriesBurned ?? 0) > 0
-                              ? `~${Math.round(session.manualActivity?.caloriesBurned ?? summary?.caloriesBurned ?? 0)} kcal`
-                              : null,
-                          ].filter(Boolean).join('   ·   ') || 'Activity logged'}
-                        </Text>
-                        {trainingScoreStat}
-                      </View>
-                    ) : (
-                      <View style={styles.sessionStats}>
-                        <Text style={styles.sessionStat}>{session.exercises.length} exercises</Text>
-                        <Text style={styles.sessionStatDot}>·</Text>
-                        <Text style={styles.sessionStat}>{totalSets} sets</Text>
-                        {summary && summary.caloriesBurned > 0 && (
-                          <>
-                            <Text style={styles.sessionStatDot}>·</Text>
-                            <Text style={styles.sessionStat}>~{summary.caloriesBurned} kcal</Text>
-                          </>
-                        )}
-                        {trainingScoreStat}
-                      </View>
-                    )}
-
-                    {isExpanded && (
-                      <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
-                        {session.routeCoords && session.routeCoords.length > 1 ? (
-                          <RouteSummaryMap
-                            themeName={themeName}
-                            coords={session.routeCoords}
-                            height={180}
-                          />
-                        ) : null}
-                        {Platform.OS === 'ios' && (
-                          <TouchableOpacity
-                            activeOpacity={0.85}
-                            onPress={(e) => {
-                              e.stopPropagation?.();
-                              setAppleHealthAttachSession(session);
-                            }}
-                            style={{
-                              alignSelf: 'flex-start',
-                              flexDirection: 'row',
-                              alignItems: 'center',
-                              gap: 6,
-                              paddingHorizontal: 10,
-                              paddingVertical: 7,
-                              borderRadius: 8,
-                              backgroundColor: session.linkedAppleHealthWorkout ? tc.primary + '18' : tc.surfaceRaised,
-                              borderWidth: 1,
-                              borderColor: session.linkedAppleHealthWorkout ? tc.primary + '44' : tc.border,
-                              marginBottom: 8,
-                            }}>
-                            <Ionicons name={session.linkedAppleHealthWorkout ? 'checkmark-circle-outline' : 'link-outline'} size={14} color={session.linkedAppleHealthWorkout ? tc.primary : tc.textSecondary} />
-                            <Text style={{ fontSize: 12, fontWeight: '700', color: session.linkedAppleHealthWorkout ? tc.primary : tc.textSecondary }}>
-                              {session.linkedAppleHealthWorkout ? 'Apple Health attached' : 'Attach Apple Health'}
-                            </Text>
-                          </TouchableOpacity>
-                        )}
-                        {session.exercises.filter(ex => ex.sets.length > 0).map((ex, ei) => {
-                          const best = ex.sets.reduce((b, s) => s.weightLbs > b.weightLbs ? s : b, ex.sets[0]);
-                          return (
-                            <View key={ei} style={styles.exRow}>
-                              <Text style={styles.exName}>{ex.name}</Text>
-                              <Text style={styles.exBest}>{formatWeight(best.weightLbs, weightUnit)} × {best.reps}</Text>
-                            </View>
-                          );
-                        })}
-                        {summary && (
-                          <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
-                            {/* HR annotation from Apple Watch (captured at
-                                finish time). Same circle viz as the active
-                                summary so users see consistent zone data
-                                whether they're looking at the just-finished
-                                workout or a past one. */}
-                            {(summary.hrAvg || summary.hrMax || (summary.hrZoneMinutes && summary.hrZoneMinutes.some(m => m > 0))) && (
-                              <View style={{ marginBottom: 10 }}>
-                                <View style={{ flexDirection: 'row', gap: 12, marginBottom: 8 }}>
-                                  {summary.hrAvg ? (
-                                    <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 8, backgroundColor: tc.surfaceRaised }}>
-                                      <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{summary.hrAvg}</Text>
-                                      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>AVG HR</Text>
-                                    </View>
-                                  ) : null}
-                                  {summary.hrMax ? (
-                                    <View style={{ flex: 1, alignItems: 'center', padding: 6, borderRadius: 8, backgroundColor: tc.surfaceRaised }}>
-                                      <Text style={{ fontSize: 15, fontWeight: '800', color: tc.textPrimary }}>{summary.hrMax}</Text>
-                                      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>MAX HR</Text>
-                                    </View>
-                                  ) : null}
-                                </View>
-                                {summary.hrZoneMinutes && summary.hrZoneMinutes.some(m => m > 0) && (
-                                  <View style={{ flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', marginTop: 4 }}>
-                                    {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
-                                      const min = summary.hrZoneMinutes![i];
-                                      const peak = Math.max(...summary.hrZoneMinutes!, 1);
-                                      const size = 32 + Math.round(18 * (min / peak));
-                                      const zoneColor = ['#22C55E', '#EAB308', tc.primary, '#F97316', '#EF4444'][i];
-                                      const isEmpty = min < 0.5;
-                                      return (
-                                        <View key={label} style={{ alignItems: 'center' }}>
-                                          <View style={{
-                                            width: size, height: size, borderRadius: size / 2,
-                                            borderWidth: 2,
-                                            borderColor: isEmpty ? tc.border : zoneColor,
-                                            backgroundColor: isEmpty ? 'transparent' : zoneColor + '22',
-                                            alignItems: 'center', justifyContent: 'center',
-                                          }}>
-                                            <Text style={{ fontSize: 11, fontWeight: '800', color: isEmpty ? tc.textMuted : zoneColor }}>
-                                              {Math.round(min)}
-                                            </Text>
-                                          </View>
-                                          <Text style={{ fontSize: 9, fontWeight: '800', color: isEmpty ? tc.textMuted : zoneColor, marginTop: 3, letterSpacing: 0.5 }}>
-                                            {label}
-                                          </Text>
-                                        </View>
-                                      );
-                                    })}
-                                  </View>
-                                )}
-                              </View>
-                            )}
-                            {summary.motivationMessage ? (
-                              <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19, marginBottom: 6 }}>{summary.motivationMessage}</Text>
-                            ) : null}
-                            {summary.achievements?.length > 0 && (
-                              <View style={{ gap: 2, marginBottom: 6 }}>
-                                {summary.achievements.map((a: string, ai: number) => (
-                                  <Text key={ai} style={{ fontSize: 12, color: tc.primary }}>★ {a}</Text>
-                                ))}
-                              </View>
-                            )}
-                            {summary.feedback && (
-                              <Text style={{ fontSize: 12, color: tc.textMuted }}>
-                                Felt {summary.feedback.feeling} · intensity {summary.feedback.intensity}/5
-                                {summary.feedback.sorenessAreas?.length ? ` · sore: ${summary.feedback.sorenessAreas.join(', ')}` : ''}
-                              </Text>
-                            )}
-                          </View>
-                        )}
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                  </SwipeableRow>
-                  </FadeInView>
-                );
-              })}
-              {matchedHistory.length > visibleWorkoutCount && (
-                <TouchableOpacity
-                  onPress={() => setVisibleWorkoutCount(c => c + 30)}
-                  activeOpacity={0.85}
-                  style={{
-                    backgroundColor: tc.surface,
-                    borderRadius: 12,
-                    paddingVertical: 12,
-                    borderWidth: 1,
-                    borderColor: tc.border,
-                    alignItems: 'center',
-                    marginTop: 4,
-                  }}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                    Load {Math.min(30, matchedHistory.length - visibleWorkoutCount)} more workouts
-                  </Text>
-                </TouchableOpacity>
-              )}
-            </>
-            );
-          })()}
-        </ScrollView>
-      ) : false ? (
-        <ScrollView contentContainerStyle={styles.content}>
-          <Text style={styles.sectionLabel}>Goal History</Text>
-          {goalHistory.filter(entry => {
-            if (!entry.endedAt) return true; // still active
-            const s = new Date(entry.startedAt);
-            const e = new Date(entry.endedAt);
-            return s.getFullYear() !== e.getFullYear() || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
-          }).length === 0 ? (
-            <View style={[styles.emptyBox, { marginBottom: 16 }]}>
-              <Text style={styles.emptyBody}>No goal changes recorded yet. Switch goals to start tracking.</Text>
-            </View>
-          ) : goalHistory.filter(entry => {
-            if (!entry.endedAt) return true;
-            const s = new Date(entry.startedAt);
-            const e = new Date(entry.endedAt);
-            return s.getFullYear() !== e.getFullYear() || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
-          }).map((entry, i, arr) => {
-            const goalKey = `${entry.id ?? 'goal'}-${i}`;
-            // Goal label preference: registered meta label → humanized
-            // fallback (e.g. "body_recomp" → "Body Recomp"). Previously
-            // the fallback was the raw enum value, so any goal not in
-            // the meta registry rendered as snake_case in the history list.
-            const goalLabel = meta.goals.find(g => g.value === entry.goal)?.label ?? humanizeToken(entry.goal);
-            const start = new Date(entry.startedAt);
-            const end = entry.endedAt ? new Date(entry.endedAt) : null;
-            const days = end
-              ? Math.round((end.getTime() - start.getTime()) / 86400000)
-              : Math.round((Date.now() - start.getTime()) / 86400000);
-            return (
-              <View key={goalKey} style={[styles.sessionCard, { marginBottom: 8 }]}>
-                <View style={styles.sessionHeader}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.sessionFocus}>{goalLabel}</Text>
-                    <Text style={styles.sessionDate}>
-                      {`${MONTH_NAMES[start.getMonth()]} ${start.getDate()}, ${start.getFullYear()}`}
-                      {end ? ` → ${MONTH_NAMES[end.getMonth()]} ${end.getDate()}, ${end.getFullYear()}` : ' → now'}
-                    </Text>
-                  </View>
-                  <View style={styles.sessionBadge}>
-                    <Text style={styles.sessionBadgeText}>{days}d</Text>
-                  </View>
-                </View>
-                <View style={styles.sessionStats}>
-                  <Text style={styles.sessionStat}>Pace: {humanizeToken(entry.pace)}</Text>
-                  {entry.startWeightLbs ? (
-                    <>
-                      <Text style={styles.sessionStatDot}>·</Text>
-                      <Text style={styles.sessionStat}>Started at {formatWeight(entry.startWeightLbs, weightUnit)}</Text>
-                    </>
-                  ) : null}
-                </View>
-              </View>
-            );
-          })}
-
-          {/* Workout Summaries — paginated. We dedupe by (date,
-              focus) at render time because `saveWorkoutSummary` only
-              dedupes by id, so re-saves with new IDs (timing race on
-              finish, two-device sync) used to surface as visible
-              duplicates. The most-recent entry (first in the array
-              since unshift) wins.
-
-              `visibleSummaryCount` drives a "Load more" button so
-              users with long histories can dig back without paying
-              the render cost on the initial mount. */}
-          {(() => {
-            const seen = new Set<string>();
-            const dedupedSummaries = summaries.filter(s => {
-              const dateKey = (s.date || '').slice(0, 10);
-              const focusKey = (s.focus || '').toLowerCase().trim();
-              const key = `${dateKey}::${focusKey}`;
-              if (!dateKey || !focusKey) return true;  // can't dedupe → keep
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
-            const dropped = summaries.length - dedupedSummaries.length;
-            const visible = dedupedSummaries.slice(0, visibleSummaryCount);
-            const remaining = dedupedSummaries.length - visible.length;
-            return (
-              <>
-                <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
-                  Workout Summaries
-                  {dedupedSummaries.length > 0
-                    ? ` · ${visible.length} of ${dedupedSummaries.length}`
-                    : ''}
-                  {dropped > 0 ? ` (${dropped} duplicate${dropped === 1 ? '' : 's'} hidden)` : ''}
-                </Text>
-                {dedupedSummaries.length === 0 ? (
-                  <View style={styles.emptyBox}>
-                    <Ionicons name="trophy-outline" size={40} color={tc.textMuted} />
-                    <Text style={styles.emptyTitle}>No summaries yet</Text>
-                    <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
-                  </View>
-                ) : (<>
-                {visible.map((s, i) => {
-                  const trainingScore = workoutTrainingScore(s);
-                  const trainingRating = workoutTrainingRating(s);
-                  const trainingScoreColor = trainingScore != null ? workoutTrainingScoreColor(trainingScore, tc) : tc.primary;
-                  const deleteSummary = () => {
-                    if (!s.id) return;
-                    Alert.alert(
-                      'Delete this workout?',
-                      'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        { text: 'Delete', style: 'destructive', onPress: async () => {
-                          try {
-                            await deleteWorkoutSummary(s.id!);
-                            await deleteWorkoutSession(s.id!).catch(() => null);
-                            if (authToken && s.date) {
-                              const dateISO = s.date.slice(0, 10);
-                              const { deleteWorkoutCompletion } = await import('../services/api');
-                              const completionId = serverCompletionIdFromLocalId(s.id);
-                              await deleteWorkoutCompletion(authToken, dateISO, {
-                                focusLabel: s.focus,
-                                completionId,
-                                externalSourceId: completionId ? undefined : externalSourceIdFromLocalId(s.id),
-                              }).catch(() => null);
-                            }
-                            setSummaries(prev => prev.filter(x => x.id !== s.id));
-                            setHistory(prev => prev.filter(x => x.id !== s.id));
-                            import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-                          } catch (e: any) {
-                            Alert.alert('Could not delete', String(e?.message ?? e));
-                          }
-                        }},
-                      ],
-                    );
-                  };
-                  return (
-            <SwipeableRow
-              key={`${s.id ?? 'sum'}-${i}`}
-              enabled={!!s.id}
-              actions={s.id ? [{
-                icon: 'trash-outline',
-                label: 'Delete',
-                color: '#fff',
-                bgColor: tc.error ?? '#EF4444',
-                onPress: deleteSummary,
-              }] : []}>
-            <View style={[styles.sessionCard, { gap: 8 }]}>
-              <View style={styles.sessionHeader}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.sessionFocus}>{s.focus}</Text>
-                  <Text style={styles.sessionDate}>
-                    {formatDate(s.date)}
-                    {s.startedAt && s.endedAt
-                      ? ` · ${new Date(s.startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} – ${new Date(s.endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
-                      : ''}
-                  </Text>
-                </View>
-                <View style={styles.sessionBadge}>
-                  <Text style={styles.sessionBadgeText}>{formatDuration(s.durationSeconds)}</Text>
-                </View>
-                {s.id && (
-                  <TouchableOpacity
-                    onPress={() => {
-                      deleteSummary();
-                    }}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
-                    <Text style={{ fontSize: 18, color: tc.textMuted, fontWeight: '600' }}>✕</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-              <View style={styles.sessionStats}>
-                <Text style={styles.sessionStat}>{s.totalSets} sets</Text>
-                <Text style={styles.sessionStatDot}>·</Text>
-                <Text style={styles.sessionStat}>{s.totalReps} reps</Text>
-                <Text style={styles.sessionStatDot}>·</Text>
-                <Text style={styles.sessionStat}>~{s.caloriesBurned} kcal</Text>
-                {trainingScore != null ? (
-                  <>
-                    <Text style={styles.sessionStatDot}>·</Text>
-                    <View style={[
-                      styles.workoutScorePill,
-                      {
-                        backgroundColor: trainingScoreColor + '18',
-                        borderColor: trainingScoreColor + '44',
-                      },
-                    ]}>
-                      <Ionicons name="trophy-outline" size={12} color={trainingScoreColor} />
-                      <Text style={[styles.workoutScorePillText, { color: trainingScoreColor }]}>
-                        Score {trainingScore}{trainingRating ? ` · ${trainingRating}` : ''}
-                      </Text>
-                    </View>
-                  </>
-                ) : null}
-              </View>
-              <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{s.motivationMessage}</Text>
-              {s.achievements?.length > 0 && (
-                <View style={{ gap: 3 }}>
-                  {s.achievements.map((a, ai) => (
-                    <Text key={ai} style={{ fontSize: 12, color: tc.textMuted }}>• {a}</Text>
-                  ))}
-                </View>
-              )}
-              {/* End-of-workout feedback the user filled in on the
-                  summary modal. Optional — older summaries predate
-                  this field and just don't render the block. */}
-              {s.feedback && (
-                <View style={{
-                  marginTop: 8,
-                  paddingTop: 10,
-                  borderTopWidth: 1,
-                  borderTopColor: tc.border,
-                  gap: 4,
-                }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-                    How it felt
-                  </Text>
-                  <Text style={{ fontSize: 13, color: tc.textPrimary }}>
-                    {s.feedback.feeling} · intensity {s.feedback.intensity}/5
-                    {s.feedback.sorenessAreas?.length ? ` · sore: ${s.feedback.sorenessAreas.join(', ')}` : ''}
-                  </Text>
-                  {s.feedback.notes ? (
-                    <Text style={{ fontSize: 12, color: tc.textSecondary, fontStyle: 'italic' }}>
-                      "{s.feedback.notes}"
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-              {/* Full per-exercise detail — exactly what the user
-                  did. Only shown for summaries that include the
-                  exercises array (all new summaries going forward). */}
-              {s.exercises && s.exercises.length > 0 && (
-                <View style={{
-                  marginTop: 8,
-                  paddingTop: 10,
-                  borderTopWidth: 1,
-                  borderTopColor: tc.border,
-                  gap: 8,
-                }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-                    What you did
-                  </Text>
-                  {s.exercises.map((sx, xi) => (
-                    <View key={xi} style={{ gap: 2 }}>
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                        {sx.name}
-                      </Text>
-                      {((sx.warmupSets?.length ?? 0) + sx.sets.length) === 0 ? (
-                        <Text style={{ fontSize: 12, color: tc.textMuted }}>no sets logged</Text>
-                      ) : (
-                        [...(sx.warmupSets ?? []).map(set => ({ ...set, setType: 'warmup' as const })), ...sx.sets].map((set, si) => {
-                          const hasDuration = (set as any).durationSeconds != null;
-                          const durMin = hasDuration ? Math.floor((set as any).durationSeconds / 60) : 0;
-                          const durSec = hasDuration ? (set as any).durationSeconds % 60 : 0;
-                          const label = (set as any).setType === 'warmup' ? `W${set.setNumber}` : `Set ${set.setNumber}`;
-                          const line = hasDuration
-                            ? `${label}: ${durMin}:${String(durSec).padStart(2, '0')}`
-                            : `${label}: ${set.weightLbs} lb × ${set.reps}${set.feedback ? ` · ${set.feedback}` : ''}`;
-                          return (
-                            <Text key={si} style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
-                              {line}
-                            </Text>
-                          );
-                        })
-                      )}
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
-            </SwipeableRow>
-                  );
-                })}
-                {remaining > 0 && (
-                  <TouchableOpacity
-                    onPress={() => setVisibleSummaryCount(c => c + 30)}
-                    activeOpacity={0.85}
-                    style={{
-                      backgroundColor: tc.surface,
-                      borderRadius: 12, paddingVertical: 12,
-                      borderWidth: 1, borderColor: tc.border,
-                      alignItems: 'center', marginTop: 4,
-                    }}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
-                      Load {Math.min(30, remaining)} more
-                    </Text>
-                  </TouchableOpacity>
-                )}
-                </>)}
-              </>
-            );
-          })()}
-
-          {/* Plan Change Requests & History — display cap 20. The full log
-              still lives in storage for audit / debug purposes. */}
-          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
-            Plan Change Requests & History
-            {planChanges.length > 20 ? ` · showing most recent 20 of ${planChanges.length}` : ''}
-          </Text>
-          {planChanges.length === 0 ? (
-            <View style={[styles.emptyBox, { marginBottom: 24 }]}>
-              <Ionicons name="clipboard-outline" size={40} color={tc.textMuted} />
-              <Text style={styles.emptyTitle}>No plan changes yet</Text>
-              <Text style={styles.emptyBody}>Future-dated setting requests and trainer / nutritionist updates will appear here.</Text>
-            </View>
-          ) : planChanges.slice(0, 20).map((c, i) => {
-            const d = new Date(c.changedAt);
-            const label = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-            const isScheduled = planChangeIsScheduled(c);
-            const canCancel = isScheduled
-              && !!c.previousProfile
-              && !!c.nextProfile
-              && !!onCancelScheduledPlanChange
-              && planScopeMatches(userProfile, c.nextProfile, c.scope);
-            // Title varies by author. User-driven entries get a scope
-            // tag (Goal / Workout / Meal Plan) so the user can scan
-            // their own settings tweaks at a glance.
-            const baseSourceLabel = c.changedBy === 'trainer'
-              ? 'Trainer Update'
-              : c.changedBy === 'nutritionist'
-                ? 'Nutritionist Update'
-                : c.scope === 'goal'
-                  ? 'You · Goal Change'
-                  : c.scope === 'workout'
-                    ? 'You · Workout Settings'
-                    : c.scope === 'mealplan'
-                      ? 'You · Meal Plan Settings'
-                      : 'You · Settings';
-            const sourceLabel = isScheduled
-              ? baseSourceLabel.replace('You ·', 'Scheduled ·')
-              : baseSourceLabel;
-            return (
-              <View key={c.id ?? i} style={[styles.sessionCard, { gap: 6, marginBottom: 8 }]}>
-                <View style={styles.sessionHeader}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.sessionFocus}>{sourceLabel}</Text>
-                    <Text style={styles.sessionDate}>{label}</Text>
-                  </View>
-                  {c.id && (
-                    <TouchableOpacity
-                      onPress={() => handleDeletePlanChange(c)}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      style={{
-                        paddingHorizontal: isScheduled ? 10 : 8,
-                        paddingVertical: 5,
-                        marginLeft: 6,
-                        borderRadius: 999,
-                        borderWidth: isScheduled ? 1 : 0,
-                        borderColor: canCancel ? tc.primary + '66' : tc.border,
-                        backgroundColor: isScheduled ? tc.surfaceRaised : 'transparent',
-                      }}>
-                      {isScheduled ? (
-                        <Text style={{ fontSize: 12, color: canCancel ? tc.primary : tc.textMuted, fontWeight: '800' }}>
-                          {canCancel ? 'Cancel' : 'Remove'}
-                        </Text>
-                      ) : (
-                        <Ionicons name="trash-outline" size={17} color={tc.textMuted} />
-                      )}
-                    </TouchableOpacity>
-                  )}
-                </View>
-                {/* Coach-driven changes carry the chat that triggered
-                    them; user-driven changes don't (they came from a
-                    settings save). */}
-                {c.changedBy !== 'user' && c.question && (
-                  <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic', marginBottom: 2 }}>
-                    You asked: "{c.question.length > 80 ? c.question.slice(0, 80) + '…' : c.question}"
-                  </Text>
-                )}
-                <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{c.summary}</Text>
-                {c.effectiveDate && (
-                  <Text style={{ fontSize: 11, color: tc.primary, fontWeight: '700', marginTop: 2 }}>
-                    {isScheduled ? 'Scheduled for ' : 'Took effect '}{(() => {
-                      const ed = new Date(`${c.effectiveDate}T12:00:00`);
-                      return `${MONTH_NAMES[ed.getMonth()]} ${ed.getDate()}, ${ed.getFullYear()}`;
-                    })()}
-                  </Text>
-                )}
-              </View>
-            );
-          })}
-        </ScrollView>
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          onScroll={handleProgressChromeScroll}
+          scrollEventThrottle={16}>
           <View style={{ alignItems: 'flex-end', marginBottom: 8 }}>
             <AnimatedPressable
               testID="progress-edit-health"
@@ -13136,137 +11404,6 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
             </FadeInView>
           )}
 
-          {/* The MyFitnessPal-via-Apple-Health card moved to
-              Meals → Foods Settings (see MyFitnessPalCard) where it
-              belongs as a food-import surface. Leaving this null
-              branch so the Health tab's vertical rhythm is unchanged
-              between users who had it expanded and those who didn't. */}
-          {false && showMealProgress && isProTier && isHealthKitAvailable() && (() => {
-            const snap = appleNutritionSnapshot!;
-            const hasData = [snap.calories, snap.proteinG, snap.carbsG, snap.fatG]
-              .some(v => typeof v === 'number' && v > 0);
-            const handleConnectNutrition = () => {
-              Alert.alert(
-                'Use MyFitnessPal with Thallo',
-                'Log food in MyFitnessPal, let MyFitnessPal write nutrition summaries to Apple Health, then allow Thallo to read nutrition from Apple Health.',
-                [
-                  { text: 'Not now', style: 'cancel' },
-                  {
-                    text: 'Connect Apple Health',
-                    onPress: async () => {
-                      setHealthConnecting(true);
-                      try {
-                        const granted = await requestHealthPermissions();
-                        await persistAppleHealthEnabled(granted);
-                        setHealthEnabled(granted);
-                        if (granted) {
-                          await refreshAppleNutritionSnapshot();
-                        } else {
-                          const err = getLastHealthKitError();
-                          Alert.alert('Apple Health not connected', `${APPLE_HEALTH_PERMISSION_COPY.denied}\n\n${err ?? ''}`.trim());
-                        }
-                      } catch (e: any) {
-                        Alert.alert('Apple Health error', String(e?.message ?? e));
-                      } finally {
-                        setHealthConnecting(false);
-                      }
-                    },
-                  },
-                ],
-              );
-            };
-            const openSettings = () => {
-              Linking.openURL('app-settings:').catch(() => {
-                Alert.alert('Unable to open Settings', 'Go to iPhone Settings -> Privacy & Security -> Health, then allow nutrition categories for MyFitnessPal and Thallo.');
-              });
-            };
-            return (
-              <View testID="apple-health-nutrition-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
-                <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
-                  <Ionicons name="restaurant-outline" size={16} color={tc.primary} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>MyFitnessPal via Apple Health</Text>
-                  {hasData ? (
-                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.success }}>TODAY</Text>
-                  ) : (
-                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted }}>OPTIONAL</Text>
-                  )}
-                </View>
-
-                {hasData ? (
-                  <>
-                    <View style={{ flexDirection: 'row', gap: 6, marginBottom: 9 }}>
-                      {[
-                        { label: 'Calories', value: snap?.calories != null ? `${snap.calories}` : 'n/a', color: tc.primary },
-                        { label: 'Protein', value: snap?.proteinG != null ? `${snap.proteinG}g` : 'n/a', color: '#22C55E' },
-                        { label: 'Carbs', value: snap?.carbsG != null ? `${snap.carbsG}g` : 'n/a', color: '#F59E0B' },
-                        { label: 'Fat', value: snap?.fatG != null ? `${snap.fatG}g` : 'n/a', color: '#A78BFA' },
-                      ].map(item => (
-                        <View key={item.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
-                          <Text style={{ fontSize: 15, fontWeight: '900', color: item.color }}>{item.value}</Text>
-                          <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, marginTop: 1 }}>{item.label}</Text>
-                        </View>
-                      ))}
-                    </View>
-                    <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
-                      These are Apple Health nutrition totals. If MyFitnessPal is connected to Apple Health, Thallo can use the summaries without asking you to relog individual foods here.
-                    </Text>
-                  </>
-                ) : (
-                  <>
-                    <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
-                      Keep logging food in MyFitnessPal. In MFP, enable HealthKit Sharing for food/nutrition; then allow Thallo to read dietary energy, protein, carbs, and fat from Apple Health.
-                    </Text>
-                    <View style={{ marginTop: 10, gap: 6 }}>
-                      {[
-                        'MyFitnessPal: More -> Settings -> Sharing & Privacy -> HealthKit Sharing',
-                        'iPhone Settings: Health -> Data Access & Devices -> MyFitnessPal',
-                        'iPhone Settings: Health -> Data Access & Devices -> Thallo',
-                      ].map(step => (
-                        <View key={step} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
-                          <Ionicons name="checkmark-circle-outline" size={14} color={tc.primary} style={{ marginTop: 1 }} />
-                          <Text style={{ flex: 1, fontSize: 11, color: tc.textMuted, lineHeight: 15 }}>{step}</Text>
-                        </View>
-                      ))}
-                    </View>
-                  </>
-                )}
-
-                <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-                  {!healthEnabled ? (
-                    <TouchableOpacity
-                      activeOpacity={0.85}
-                      disabled={healthConnecting}
-                      onPress={handleConnectNutrition}
-                      style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: radius.md, backgroundColor: tc.primary }}>
-                      {healthConnecting ? (
-                        <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
-                      ) : (
-                        <Text style={{ fontSize: 12, fontWeight: '800', color: getContrastingTextColor(tc.primary) }}>Connect Apple Health</Text>
-                      )}
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      activeOpacity={0.85}
-                      disabled={appleNutritionReading}
-                      onPress={() => refreshAppleNutritionSnapshot()}
-                      style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: radius.md, backgroundColor: tc.primary }}>
-                      {appleNutritionReading ? (
-                        <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
-                      ) : (
-                        <Text style={{ fontSize: 12, fontWeight: '800', color: getContrastingTextColor(tc.primary) }}>Refresh Nutrition</Text>
-                      )}
-                    </TouchableOpacity>
-                  )}
-                  <TouchableOpacity
-                    activeOpacity={0.85}
-                    onPress={openSettings}
-                    style={{ alignItems: 'center', justifyContent: 'center', minHeight: 38, paddingHorizontal: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
-                    <Ionicons name="settings-outline" size={17} color={tc.textSecondary} />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            );
-          })()}
 
           {/* Nutrition & Gut Facts — 14-day logged-food window (facts only, no scores). */}
           {healthShown('nutrition-gut') && showMealProgress && isProTier && (gutHealthWindow || mealAverages) && (
@@ -13965,7 +12102,10 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
         </ScrollView>
       ) : tab === 'body' ? (
         /* ── Body Tab ───────────────────────────────────────────────── */
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          onScroll={handleProgressChromeScroll}
+          scrollEventThrottle={16}>
           {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
               all 12 muscle groups with the full expanded bars. */}
           {showWorkoutProgress && isProTier && muscleFatigue && (
@@ -13991,6 +12131,10 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
             };
             const score = muscleBalance.balance_score;
             const scoreColor = score >= 70 ? '#22C55E' : score >= 45 ? '#F59E0B' : '#EF4444';
+            // A word reads as a verdict; a third 0-100 numeral on this tab
+            // just competes with the others. The exact score still lives in
+            // the expanded breakdown context.
+            const balanceLabel = score >= 70 ? 'Balanced' : score >= 45 ? 'Uneven' : 'Skewed';
 
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
@@ -14001,8 +12145,9 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
                   <View style={[styles.vitalsHeader, { marginBottom: muscleBalanceExpanded ? 12 : 0 }]}>
                     <Ionicons name="body-outline" size={16} color={tc.primary} />
                     <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Muscle Distribution</Text>
-                    <Text style={{ fontSize: 20, fontWeight: '800', color: scoreColor }}>{score}</Text>
-                    <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, marginLeft: 2 }}>/100</Text>
+                    <View style={{ backgroundColor: scoreColor + '1A', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 3 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '600', color: scoreColor }}>{balanceLabel}</Text>
+                    </View>
                     <Ionicons name={muscleBalanceExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} style={{ marginLeft: 6 }} />
                   </View>
                 </TouchableOpacity>
@@ -14085,6 +12230,63 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
                 setWeightInputVisible(true);
               };
 
+              const GOAL_HAS_TARGET_WEIGHT = new Set([
+                'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
+                'build_muscle', 'lean_bulk', 'gain_weight',
+                'body_recomp', 'tone', 'get_toned',
+              ]);
+              const isTargetGoal = GOAL_HAS_TARGET_WEIGHT.has(userProfile.goal);
+              const target = isTargetGoal ? userProfile.goalDetails?.targetWeightLbs ?? null : null;
+              const curr = weightEntries[weightEntries.length - 1]?.weightLbs ?? currentWeight;
+              const remaining = target != null && Number.isFinite(curr) ? Math.abs(target - curr) : null;
+              const showEstimate = isTargetGoal && !!estimate;
+
+              // Chart window — segmented 30d/90d/all control. Falls back to
+              // the full history when the window holds fewer than 2 points so
+              // the chart never blanks out under a narrow range.
+              const rangeDays = weightChartRange === '30d' ? 30 : weightChartRange === '90d' ? 90 : null;
+              const rangeCutoff = rangeDays != null ? Date.now() - rangeDays * 86400000 : null;
+              const entriesInRange = rangeCutoff != null
+                ? weightEntries.filter(e => +new Date(`${e.date.slice(0, 10)}T12:00:00`) >= rangeCutoff)
+                : weightEntries;
+              const chartEntries = entriesInRange.length >= 2 ? entriesInRange : weightEntries;
+              const chartScans = rangeCutoff != null && entriesInRange.length >= 2
+                ? bodyScanHistory.filter(s => +new Date(`${String(s.date ?? '').slice(0, 10)}T12:00:00`) >= rangeCutoff)
+                : bodyScanHistory;
+
+              // Trend over the visible window. Direction color is goal-aware:
+              // gaining is the win condition for build/bulk goals, not a warning.
+              const trendFirst = chartEntries[0];
+              const trendLast = chartEntries[chartEntries.length - 1];
+              const trendDelta = chartEntries.length >= 2
+                ? Math.round((trendLast.weightLbs - trendFirst.weightLbs) * 10) / 10
+                : null;
+              const trendSpanDays = chartEntries.length >= 2
+                ? Math.max(1, Math.round((+new Date(`${trendLast.date.slice(0, 10)}T12:00:00`) - +new Date(`${trendFirst.date.slice(0, 10)}T12:00:00`)) / 86400000))
+                : null;
+              const trendPerWeek = trendDelta != null && trendSpanDays != null && trendSpanDays >= 7
+                ? Math.round((trendDelta / trendSpanDays) * 7 * 10) / 10
+                : null;
+              const GAIN_GOALS = new Set(['build_muscle', 'lean_bulk', 'gain_weight']);
+              const gainGoal = GAIN_GOALS.has(userProfile.goal);
+              const trendColor = trendDelta == null || trendDelta === 0
+                ? tc.textMuted
+                : (trendDelta < 0 ? !gainGoal : gainGoal)
+                  ? (tc.success ?? '#22C55E')
+                  : (tc.warning ?? '#F59E0B');
+              const trendWeeks = trendSpanDays != null ? Math.max(1, Math.round(trendSpanDays / 7)) : null;
+              const statChips = [
+                trendPerWeek != null
+                  ? { key: 'trend', label: 'Trend', value: `${formatSignedWeightDelta(trendPerWeek, weightUnit)}/wk` }
+                  : null,
+                remaining != null && remaining > 0.05
+                  ? { key: 'togoal', label: 'To goal', value: formatWeight(remaining, weightUnit) }
+                  : null,
+                showEstimate && estimate
+                  ? { key: 'eta', label: 'ETA', value: estimate.label }
+                  : null,
+              ].filter((chip): chip is { key: string; label: string; value: string } => chip != null);
+
               return (
                 <>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -14098,116 +12300,92 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
                     </TouchableOpacity>
                   </View>
 
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <Text
+                      testID="progress-weight-current-value"
+                      style={{ fontSize: 34, fontWeight: '800', letterSpacing: -0.5, color: tc.textPrimary, fontVariant: ['tabular-nums'] }}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.72}
+                    >
+                      {hasDisplayWeight ? formatWeight(displayWeight, weightUnit, { suffix: false }) : '—'} <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textMuted }}>{weightUnit}</Text>
+                    </Text>
+                    {trendDelta != null && trendWeeks != null && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: trendColor + '1A', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 3 }}>
+                        <Ionicons name={trendDelta < 0 ? 'trending-down' : trendDelta > 0 ? 'trending-up' : 'remove'} size={13} color={trendColor} />
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: trendColor }}>
+                          {formatSignedWeightDelta(trendDelta, weightUnit)} in {trendWeeks} wk{trendWeeks === 1 ? '' : 's'}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                    {displaySubtitle}{latestWeight ? '' : ' · log to start history'}
+                  </Text>
+
+                  {weightEntries.length >= 2 && (
+                    <>
+                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 10, marginBottom: 4 }}>
+                        <View style={{ flexDirection: 'row', backgroundColor: tc.surfaceRaised, borderRadius: 999, padding: 2 }}>
+                          {(['30d', '90d', 'all'] as const).map(r => (
+                            <TouchableOpacity
+                              key={r}
+                              accessibilityRole="button"
+                              accessibilityState={{ selected: weightChartRange === r }}
+                              onPress={() => setWeightChartRange(r)}
+                              style={{ paddingHorizontal: 11, paddingVertical: 4, borderRadius: 999, backgroundColor: weightChartRange === r ? tc.surface : 'transparent' }}
+                            >
+                              <Text style={{ fontSize: 11, fontWeight: '600', color: weightChartRange === r ? tc.textPrimary : tc.textMuted }}>
+                                {r === 'all' ? 'All' : r}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </View>
+                      <WeightBodyFatTrendChart
+                        weightEntries={chartEntries}
+                        bodyScanHistory={chartScans}
+                        weightUnit={weightUnit}
+                        tc={tc}
+                        targetWeightLbs={target}
+                      />
+                    </>
+                  )}
+
+                  {statChips.length > 0 && (
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+                      {statChips.map(chip => (
+                        <View key={chip.key} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: radius.md, paddingVertical: 8, paddingHorizontal: 10 }}>
+                          <Text style={{ fontSize: 11, color: tc.textMuted }}>{chip.label}</Text>
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary, marginTop: 1 }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+                            {chip.value}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
                   <TouchableOpacity
                     activeOpacity={0.75}
                     accessibilityRole="button"
-                    accessibilityLabel={`${hasDisplayWeight ? formatWeight(displayWeight, weightUnit) : 'No current weight'}. ${weightCardExpanded ? 'Hide' : 'Show'} weight details.`}
+                    accessibilityLabel={`${weightCardExpanded ? 'Hide' : 'Show'} weight history`}
                     onPress={() => { configureExpandAnimation(300); setWeightCardExpanded(prev => !prev); }}
-                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}
+                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border }}
                   >
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text
-                        testID="progress-weight-current-value"
-                        style={{ fontSize: 30, fontWeight: '900', color: tc.textPrimary }}
-                        numberOfLines={1}
-                        adjustsFontSizeToFit
-                        minimumFontScale={0.72}
-                      >
-                        {hasDisplayWeight ? formatWeight(displayWeight, weightUnit, { suffix: false }) : '—'} <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textMuted }}>{weightUnit}</Text>
-                      </Text>
-                      <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
-                        {displaySubtitle}{latestWeight ? '' : ' · log to start history'}
-                      </Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                      <Text style={{ fontSize: 11, fontWeight: '900', color: tc.textMuted }}>
-                        {weightCardExpanded ? 'Hide' : 'Details'}
-                      </Text>
-                      <Ionicons name={weightCardExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
-                    </View>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textSecondary }}>
+                      History{weightEntries.length > 0 ? ` · ${weightEntries.length}` : ''}
+                    </Text>
+                    <Ionicons name={weightCardExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
                   </TouchableOpacity>
 
                   {weightCardExpanded && (
-                    <View style={{ marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: tc.border }}>
+                    <View style={{ marginTop: 4 }}>
                       {weightEntries.length === 0 ? (
                         <Text style={{ fontSize: 13, color: tc.textMuted, textAlign: 'center', paddingVertical: 8 }}>
                           Log your first weigh-in to start trend history.
                         </Text>
                       ) : (
                         <>
-                          {weightEntries.length >= 2 && (() => {
-                            const first = weightEntries[0];
-                            const last = weightEntries[weightEntries.length - 1];
-                            const diff = Math.round((last.weightLbs - first.weightLbs) * 10) / 10;
-                            const color = diff < 0 ? (tc.success ?? '#22C55E') : diff > 0 ? (tc.warning ?? '#F59E0B') : tc.textMuted;
-                            return (
-                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                                <Text style={{ fontSize: 12, color: tc.textMuted }}>Since {new Date(first.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</Text>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                                  <Ionicons name={diff < 0 ? 'trending-down' : diff > 0 ? 'trending-up' : 'remove'} size={18} color={color} />
-                                  <Text style={{ fontSize: 16, fontWeight: '800', color }}>{formatSignedWeightDelta(diff, weightUnit)}</Text>
-                                </View>
-                              </View>
-                            );
-                          })()}
-
-                          {(() => {
-                            const GOAL_HAS_TARGET_WEIGHT = new Set([
-                              'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
-                              'build_muscle', 'lean_bulk', 'gain_weight',
-                              'body_recomp', 'tone', 'get_toned',
-                            ]);
-                            const isTargetGoal = GOAL_HAS_TARGET_WEIGHT.has(userProfile.goal);
-                            const target = isTargetGoal ? userProfile.goalDetails?.targetWeightLbs : null;
-                            const start = userProfile.goalDetails?.startWeightLbs ?? weightEntries[0]?.weightLbs;
-                            const curr = weightEntries[weightEntries.length - 1]?.weightLbs ?? currentWeight;
-                            const remaining = target ? Math.abs(target - curr) : null;
-                            const showEstimate = isTargetGoal && !!estimate;
-                            return (
-                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10, paddingVertical: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
-                                {start != null && (
-                                  <View style={{ alignItems: 'center' }}>
-                                    <Text style={{ fontSize: 11, color: tc.textMuted }}>Start</Text>
-                                    <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{formatWeight(start, weightUnit, { suffix: false })}</Text>
-                                  </View>
-                                )}
-                                <View style={{ alignItems: 'center' }}>
-                                  <Text style={{ fontSize: 11, color: tc.textMuted }}>Current</Text>
-                                  <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{formatWeight(curr, weightUnit, { suffix: false })}</Text>
-                                </View>
-                                {target != null && (
-                                  <View style={{ alignItems: 'center' }}>
-                                    <Text style={{ fontSize: 11, color: tc.textMuted }}>Target</Text>
-                                    <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{formatWeight(target, weightUnit, { suffix: false })}</Text>
-                                  </View>
-                                )}
-                                {remaining != null && (
-                                  <View style={{ alignItems: 'center' }}>
-                                    <Text style={{ fontSize: 11, color: tc.textMuted }}>Remaining</Text>
-                                    <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{formatWeight(remaining, weightUnit, { suffix: false })}</Text>
-                                  </View>
-                                )}
-                                {showEstimate && estimate && (
-                                  <View style={{ alignItems: 'center' }}>
-                                    <Text style={{ fontSize: 11, color: tc.textMuted }}>ETA</Text>
-                                    <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{estimate.label}</Text>
-                                    <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 1 }}>
-                                      {estimate.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                                    </Text>
-                                  </View>
-                                )}
-                              </View>
-                            );
-                          })()}
-
-                          <WeightBodyFatTrendChart
-                            weightEntries={weightEntries}
-                            bodyScanHistory={bodyScanHistory}
-                            weightUnit={weightUnit}
-                            tc={tc}
-                            styles={styles}
-                          />
-
                           {weightEntries.slice(-10).reverse().map((e, i) => (
                             <View key={e.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
                               <Text style={{ flex: 1, fontSize: 13, color: tc.textSecondary }}>
@@ -16447,33 +14625,35 @@ function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCanc
         animationType="fade"
         onRequestClose={() => setPlateauModalVisible(false)}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 24 }}>
-          <View style={{ backgroundColor: tc.surface, borderRadius: 16, padding: 20, maxHeight: '80%' }}>
+          <View
+            testID="progress-plateau-modal"
+            style={{ backgroundColor: tc.surface, borderRadius: 16, padding: 20, maxHeight: '80%' }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary }}>Plateaus</Text>
-              <TouchableOpacity onPress={() => setPlateauModalVisible(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary }}>Plateau recommendations</Text>
+              <TouchableOpacity
+                testID="progress-plateau-modal-close"
+                accessibilityRole="button"
+                accessibilityLabel="Close plateau recommendations"
+                onPress={() => setPlateauModalVisible(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Ionicons name="close" size={22} color={tc.textMuted} />
               </TouchableOpacity>
             </View>
-            <ScrollView>
+            <ScrollView testID="progress-plateau-modal-list">
               {plateaus.map((p, i) => {
-                const suggestionCopy =
-                  p.suggestion === 'deload'
-                    ? 'Try a deload week: cut volume by 30-40% and come back fresh next week.'
-                    : p.suggestion === 'swap'
-                    ? 'Swap this exercise for a variation — the current movement has run its course.'
-                    : 'Add volume: 1-2 extra sets or an additional day hitting this lift.';
                 return (
                   <View
+                    testID={`progress-plateau-modal-row-${i}`}
                     key={`${p.exercise_name}-${i}`}
                     style={{ marginBottom: 14, backgroundColor: tc.background, padding: 12, borderRadius: 10 }}>
                     <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>
                       {p.exercise_name}
                     </Text>
                     <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 2 }}>
-                      est 1RM {Math.round(p.current_1rm)} lb · flat for {p.weeks_stuck} weeks
+                      {plateauSuggestionTitle(p.suggestion)} · est 1RM {Math.round(p.current_1rm)} lb · flat for {p.weeks_stuck} weeks
                     </Text>
                     <Text style={{ fontSize: 12, color: tc.textPrimary, marginTop: 6, lineHeight: 16 }}>
-                      {suggestionCopy}
+                      {plateauSuggestionDetail(p)}
                     </Text>
                   </View>
                 );
@@ -17003,347 +15183,6 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors'], webMode = f
     justifyContent: 'flex-start',
     ...elevations.subtle,
   },
-  thalloScoreTodayCard: {
-    overflow: 'hidden',
-    marginBottom: 0,
-    minHeight: 210,
-  },
-  todayThalloScoreWrap: {
-    // Sits below the goal-estimate hero. No horizontal margin so it spans the
-    // same width as the hero / sleep cards (the ScrollView content already
-    // pads 16px) — an extra inset here made it look narrower than its siblings.
-    marginTop: 12,
-    marginBottom: 12,
-    zIndex: 2,
-  },
-  thalloScoreFloat: {
-    minHeight: 88,
-    borderRadius: 18,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    ...elevations.card,
-  },
-  thalloScoreFloatHalo: {
-    width: 66,
-    height: 66,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  thalloScoreFloatCopy: {
-    flex: 1,
-    minWidth: 0,
-  },
-  thalloScoreFloatTitle: {
-    fontSize: 17,
-    lineHeight: 21,
-    fontWeight: '900',
-    marginTop: 2,
-  },
-  thalloScoreFloatSubtitle: {
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '800',
-    marginTop: 2,
-  },
-  thalloScoreFloatRight: {
-    alignItems: 'flex-end',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  thalloScoreTodayHero: {
-    minHeight: 104,
-    justifyContent: 'center',
-    overflow: 'hidden',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  thalloScoreTodayHeroMeta: {
-    padding: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  thalloScoreTodayIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 15,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  thalloScoreTodayEyebrow: {
-    fontSize: 9,
-    lineHeight: 12,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-  },
-  thalloScoreTodayTitle: {
-    fontSize: 18,
-    lineHeight: 22,
-    fontWeight: '900',
-    marginTop: 2,
-  },
-  thalloScoreTodaySubtitle: {
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  thalloScoreTodayStatusPill: {
-    minHeight: 27,
-    maxWidth: 104,
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 9,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  thalloScoreTodayStatusText: {
-    fontSize: 9,
-    lineHeight: 12,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-  },
-  thalloScoreTodayBody: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 12,
-    paddingBottom: 12,
-  },
-  thalloScoreLegend: {
-    minHeight: 24,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 5,
-  },
-  thalloScoreLegendChip: {
-    minHeight: 22,
-    maxWidth: 82,
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 7,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  thalloScoreLegendDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  thalloScoreLegendText: {
-    flexShrink: 1,
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '900',
-  },
-  todayMetricHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    marginBottom: 9,
-  },
-  todayMetricIcon: {
-    width: 28,
-    height: 28,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  todayMetricLabel: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '900',
-    letterSpacing: 0,
-    textTransform: 'uppercase',
-    color: colors.textMuted,
-  },
-  todayMetricValue: {
-    fontSize: 28,
-    lineHeight: 34,
-    fontWeight: '900',
-    fontVariant: ['tabular-nums'] as any,
-  },
-  todayMetricSubLabel: {
-    fontSize: 11,
-    lineHeight: 15,
-    fontWeight: '800',
-    color: colors.textSecondary,
-    marginTop: 1,
-  },
-  todayMetricTrack: {
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: colors.border,
-    overflow: 'hidden',
-    marginTop: 10,
-    marginBottom: 8,
-  },
-  todayMetricFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  todayMetricDetail: {
-    minWidth: 0,
-    fontSize: 11,
-    lineHeight: 16,
-    color: colors.textSecondary,
-  },
-  thalloScoreModalHero: {
-    minHeight: 112,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 12,
-  },
-  thalloScoreMetaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 8,
-  },
-  thalloScoreMetaPill: {
-    minHeight: 24,
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  thalloScoreMetaPillText: {
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-  },
-  thalloScoreAttributeButton: {
-    minHeight: 72,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    padding: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  thalloScoreAttributeIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  thalloScoreAttributeHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  thalloScoreAttributeLabel: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 13,
-    lineHeight: 17,
-    fontWeight: '900',
-    color: colors.textPrimary,
-  },
-  thalloScoreAttributeScore: {
-    fontSize: 13,
-    lineHeight: 17,
-    fontWeight: '900',
-    fontVariant: ['tabular-nums'] as any,
-  },
-  thalloScoreAttributeMeta: {
-    fontSize: 10,
-    lineHeight: 13,
-    fontWeight: '800',
-    color: colors.textMuted,
-    marginTop: 2,
-  },
-  thalloScoreAttributeTrack: {
-    height: 6,
-    borderRadius: 999,
-    overflow: 'hidden',
-    backgroundColor: colors.border,
-    marginTop: 7,
-  },
-  thalloScoreAttributeFill: {
-    height: '100%',
-    borderRadius: 999,
-  },
-  thalloScorePillarDetail: {
-    borderRadius: radius.md,
-    borderWidth: 1,
-    padding: 12,
-  },
-  thalloScorePillarDetailHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 8,
-  },
-  thalloScorePillarDetailScore: {
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '900',
-  },
-  thalloScorePillarDetailTitle: {
-    fontSize: 10,
-    lineHeight: 13,
-    fontWeight: '900',
-    color: colors.textMuted,
-    textTransform: 'uppercase',
-    marginTop: 8,
-    marginBottom: 4,
-  },
-  thalloScorePillarDetailBody: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: colors.textSecondary,
-  },
-  thalloScoreChipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  thalloScoreDataChip: {
-    minHeight: 24,
-    borderRadius: 999,
-    borderWidth: 1,
-    backgroundColor: colors.surface,
-    paddingHorizontal: 8,
-    justifyContent: 'center',
-  },
-  thalloScoreDataChipText: {
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '800',
-    color: colors.textSecondary,
-  },
-  thalloScoreActionRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 7,
-    marginTop: 6,
-  },
-  thalloScoreActionText: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 12,
-    lineHeight: 17,
-    color: colors.textSecondary,
-  },
   goalForecastHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -17671,14 +15510,13 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors'], webMode = f
     paddingHorizontal: 6,
   },
   trendsRadarScoreText: {
-    fontSize: 17,
-    lineHeight: 20,
-    fontWeight: '900',
-    fontVariant: ['tabular-nums'] as any,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
   },
   trendsRadarScoreTextCompact: {
-    fontSize: 14,
-    lineHeight: 17,
+    fontSize: 11,
+    lineHeight: 14,
   },
   trendsRadarBody: {
     flexDirection: 'column',

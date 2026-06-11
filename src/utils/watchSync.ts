@@ -116,6 +116,18 @@ function shouldSkipUnchanged(surface: string, payload: unknown, force?: boolean)
   return false;
 }
 
+// Pushes fire on every set log / rest event during a workout. Persisting the
+// status snapshot and POSTing telemetry on each one adds an AsyncStorage write
+// and a network call to the hottest interaction path, so both are throttled:
+// the snapshot only rewrites when its content changes or every 30s (the only
+// consumer renders minute-granularity "last sync X min ago"), and telemetry
+// only fires on ok/fail transitions plus a 5-minute heartbeat per surface.
+const WATCH_SNAPSHOT_MIN_REWRITE_MS = 30_000;
+const WATCH_TELEMETRY_HEARTBEAT_MS = 5 * 60_000;
+let lastSnapshotContentKey = '';
+let lastSnapshotWriteAtMs = 0;
+const lastTelemetryBySurface = new Map<string, { ok: boolean; atMs: number }>();
+
 async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: string): Promise<WatchSyncSnapshot> {
   const snapshot: WatchSyncSnapshot = {
     surface,
@@ -128,6 +140,12 @@ async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: st
       ? (WatchBridge.isReachable() || WatchBridge.isWatchAppInstalled())
       : false,
   };
+  const contentKey = `${surface}|${ok}|${detail ?? ''}|${snapshot.reachable}|${snapshot.paired}|${snapshot.installed}`;
+  if (contentKey === lastSnapshotContentKey && snapshot.atMs - lastSnapshotWriteAtMs < WATCH_SNAPSHOT_MIN_REWRITE_MS) {
+    return snapshot;
+  }
+  lastSnapshotContentKey = contentKey;
+  lastSnapshotWriteAtMs = snapshot.atMs;
   try { await AsyncStorage.setItem(WATCH_SYNC_STATUS_KEY, JSON.stringify(snapshot)); } catch {}
   return snapshot;
 }
@@ -140,6 +158,10 @@ async function recordWatchSync(surface: string, ok: boolean, detail?: string): P
     surface: 'bridge',
     detail: `${ok ? 'ok' : 'FAIL'}${detail ? ` ${detail}` : ''}`,
   });
+  const previous = lastTelemetryBySurface.get(surface);
+  const isTransition = !previous || previous.ok !== ok;
+  if (!isTransition && snapshot.atMs - previous.atMs < WATCH_TELEMETRY_HEARTBEAT_MS) return;
+  lastTelemetryBySurface.set(surface, { ok, atMs: snapshot.atMs });
   recordTelemetryEvent('watch_sync_result', {
     surface,
     ok,
@@ -201,6 +223,19 @@ function nonNegativeInt(value: unknown, fallback = 0): number {
 
 function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function normalizeSwapOverlapPercent(option: any): number | null {
+  const parsed = finiteNumber(
+    option?.overlap
+      ?? option?._overlap
+      ?? option?.overlapPercent
+      ?? option?.overlap_percentage
+      ?? option?.matchPercent
+      ?? option?.match_percentage,
+  );
+  if (parsed == null) return null;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
 // Keep this name-only fallback narrow. Strength movements like rows,
@@ -434,7 +469,7 @@ export function buildWatchWorkoutPayload(
           name: String(option?.name ?? '').trim(),
           equipment: nullableString(option?.equipment),
           primaryMuscle: nullableString(option?.primaryMuscle ?? option?.primary_muscle),
-          overlap: finiteNumber(option?.overlap),
+          overlap: normalizeSwapOverlapPercent(option),
         }))
         .filter((option: any) => option.name.length > 0)
         .slice(0, 5)

@@ -1,5 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, ImageBackground, Modal, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View, type ImageSourcePropType, type LayoutChangeEvent } from 'react-native';
+import {
+  ActivityIndicator,
+  Animated,
+  ImageBackground,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
+  type ImageSourcePropType,
+  type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -26,6 +42,7 @@ interface HealthInsightsScreenProps {
   embedded?: boolean;
   showHeader?: boolean;
   onClose?: () => void;
+  onChromeScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
 }
 
 interface InsightPreviewModuleProps {
@@ -1653,7 +1670,7 @@ export function InsightPreviewModule({ authToken, themeName, days = 14, onOpenAl
   );
 }
 
-export default function HealthInsightsScreen({ authToken, themeName, days = 14, embedded = false, showHeader = true, onClose }: HealthInsightsScreenProps) {
+export default function HealthInsightsScreen({ authToken, themeName, days = 14, embedded = false, showHeader = true, onClose, onChromeScroll }: HealthInsightsScreenProps) {
   const colors = getTheme(themeName).colors;
   const { width: viewportWidth } = useWindowDimensions();
   const riskSignalsEnabled = isFeatureEnabled('healthInsights.riskSignals');
@@ -1678,7 +1695,7 @@ export default function HealthInsightsScreen({ authToken, themeName, days = 14, 
   const needsDataCards = useMemo(() => cards.filter(card => card.status === 'unknown'), [cards]);
   const hiddenCount = useMemo(() => allCards.filter(card => hiddenIds.has(card.id)).length, [allCards, hiddenIds]);
   const showFilterControls = filters.length > 1 || allCards.length > 0;
-  const reveal = useScrollReveal();
+  const reveal = useScrollReveal(onChromeScroll);
   const estimatedGridWidth = Math.max(0, viewportWidth - 32);
   const gridWidth = measuredGridWidth > 0 && estimatedGridWidth > 0
     ? Math.min(measuredGridWidth, estimatedGridWidth)
@@ -1717,7 +1734,9 @@ export default function HealthInsightsScreen({ authToken, themeName, days = 14, 
     </ScrollRevealView>
   );
   return (
-    <View style={[styles.container, !embedded && { backgroundColor: colors.background }]}>
+    <View
+      testID={embedded ? 'progress-health-insights-screen' : 'health-insights-screen'}
+      style={[styles.container, !embedded && { backgroundColor: colors.background }]}>
       {showHeader && <View style={[styles.header, { borderColor: colors.border }]}>
         <View style={[styles.previewIcon, { backgroundColor: colors.primary + '18' }]}>
           <Ionicons name="sparkles-outline" size={18} color={colors.primary} />
@@ -1730,6 +1749,7 @@ export default function HealthInsightsScreen({ authToken, themeName, days = 14, 
         </View>
         <View style={styles.headerActions}>
           <TouchableOpacity
+            testID="health-insights-customize"
             accessibilityRole="button"
             accessibilityLabel="Customize insight cards"
             onPress={() => setEditInsightsOpen(true)}
@@ -1758,6 +1778,7 @@ export default function HealthInsightsScreen({ authToken, themeName, days = 14, 
         </View>
       ) : (
         <Animated.ScrollView
+          testID="health-insights-content"
           style={styles.scrollView}
           contentContainerStyle={[styles.scrollContent, embedded && styles.embeddedScrollContent]}
           showsVerticalScrollIndicator={false}

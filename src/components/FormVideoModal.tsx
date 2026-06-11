@@ -11,6 +11,8 @@ import { AppThemeName } from '../types';
 import ExerciseDemoCard from './ExerciseDemoCard';
 import { buildExerciseVideoSearchUrl } from '../utils/exerciseVideoSearch';
 import { moveKitDemoVideo } from '../utils/exerciseDemo';
+import { resolveFormDemoAvailability } from '../utils/formDemoAvailability';
+import { normalizeWorkoutXDemoPreview } from '../utils/workoutxDemoPreview';
 
 // Module-level session cache. Form video metadata is per-exercise +
 // stable across the session — re-fetching every time the user taps
@@ -22,6 +24,7 @@ type VideoCacheEntry = {
   savedAt: number;
   options: VideoOption[];
   emptyReason: string | null;
+  workoutxDemo: WorkoutXDemo | null;
 };
 const videoCache = new Map<string, VideoCacheEntry>();
 function videoCacheKey(opts: { exerciseName: string; equipment?: string | null; primaryMuscle?: string | null; movementPattern?: string | null }): string {
@@ -40,9 +43,7 @@ interface Props {
   equipment?: string | null;
   primaryMuscle?: string | null;
   movementPattern?: string | null;
-  /** free-exercise-db identifier — when present, a 2-frame photo demo
-   *  card renders at the top of the modal so users get a visual form
-   *  reference even before any YouTube video loads. */
+  /** Legacy demo identifier, retained for Move Kit video matching. */
   demoExerciseDbId?: string | null;
   onClose: () => void;
 }
@@ -54,6 +55,25 @@ interface VideoOption {
   author_name: string;
   is_short: boolean;
   recommended?: boolean;
+}
+
+interface WorkoutXDemo {
+  id?: string | null;
+  name?: string | null;
+  gif_url?: string | null;
+  gif_path?: string | null;
+  gif?: string | null;
+  gifUrl?: string | null;
+  preview_url?: string | null;
+  thumbnail_url?: string | null;
+  image?: string | null;
+  image_url?: string | null;
+  source_url?: string | null;
+  body_part?: string | null;
+  target?: string | null;
+  equipment?: string | null;
+  difficulty?: string | null;
+  source?: string | null;
 }
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -72,17 +92,40 @@ export default function FormVideoModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [emptyReason, setEmptyReason] = useState<string | null>(null);
+  const [workoutxDemo, setWorkoutxDemo] = useState<WorkoutXDemo | null>(null);
+  const [moveKitFailed, setMoveKitFailed] = useState(false);
+  const [workoutxFailed, setWorkoutxFailed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const loadSeqRef = useRef(0);
 
+  const hasMoveKitMatch = !!moveKitDemoVideo(demoExerciseDbId, exerciseName);
+  const demoAvailability = resolveFormDemoAvailability({
+    hasMoveKitMatch,
+    moveKitFailed,
+    hasWorkoutXGif: !!workoutxDemo?.gif_url,
+    workoutxFailed,
+  });
+  const hasPrimaryDemo = demoAvailability.hasPrimaryDemo;
+  const youtubeOptions = hasPrimaryDemo ? [] : options;
+
   const load = useCallback(async () => {
     if (!authToken || !exerciseName) return;
+    if (!demoAvailability.shouldFetchHostedDemo) {
+      setOptions([]);
+      setEmptyReason(null);
+      setWorkoutxDemo(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     const key = videoCacheKey({ exerciseName, equipment, primaryMuscle, movementPattern });
     const cached = videoCache.get(key);
     if (cached && Date.now() - cached.savedAt < VIDEO_CACHE_TTL_MS) {
       // Cache hit — instant render, no network.
       setOptions(cached.options);
       setEmptyReason(cached.emptyReason);
+      setWorkoutxDemo(cached.workoutxDemo);
+      setWorkoutxFailed(false);
       setLoading(false);
       setError(null);
       return;
@@ -98,6 +141,8 @@ export default function FormVideoModal({
     setEmptyReason(null);
     setOptions([]);
     setActiveVideo(null);
+    setWorkoutxDemo(null);
+    setWorkoutxFailed(false);
     try {
       const { getApiBaseUrl } = await import('../services/api');
       const baseUrl = getApiBaseUrl();
@@ -120,11 +165,20 @@ export default function FormVideoModal({
       const data = await res.json();
       if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       const opts: VideoOption[] = Array.isArray(data?.options) ? data.options : [];
+      const rawWx = data?.workoutx_demo && typeof data.workoutx_demo === 'object'
+        ? data.workoutx_demo as WorkoutXDemo
+        : null;
+      const wxPreview = normalizeWorkoutXDemoPreview(rawWx, baseUrl);
+      const wx = rawWx && wxPreview
+        ? { ...rawWx, gif_url: wxPreview.gifUrl, name: rawWx.name ?? wxPreview.label ?? null }
+        : null;
       const reason = opts.length === 0 ? (data?.empty_reason || 'no_results') : null;
       setOptions(opts);
+      setWorkoutxDemo(wx);
+      setWorkoutxFailed(false);
       if (reason) setEmptyReason(reason);
       // Stash for the rest of the session.
-      videoCache.set(key, { savedAt: Date.now(), options: opts, emptyReason: reason });
+      videoCache.set(key, { savedAt: Date.now(), options: opts, emptyReason: reason, workoutxDemo: wx });
     } catch (e: any) {
       if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       setError(String(e?.message ?? e));
@@ -134,7 +188,23 @@ export default function FormVideoModal({
       }
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [authToken, exerciseName, equipment, primaryMuscle, movementPattern]);
+  }, [
+    authToken,
+    exerciseName,
+    equipment,
+    primaryMuscle,
+    movementPattern,
+    demoAvailability.shouldFetchHostedDemo,
+  ]);
+
+  useEffect(() => {
+    setMoveKitFailed(false);
+    setWorkoutxFailed(false);
+  }, [exerciseName, demoExerciseDbId]);
+
+  useEffect(() => {
+    setWorkoutxFailed(false);
+  }, [workoutxDemo?.gif_url]);
 
   useEffect(() => {
     if (!visible) {
@@ -146,6 +216,9 @@ export default function FormVideoModal({
       setLoading(false);
       setError(null);
       setEmptyReason(null);
+      setWorkoutxDemo(null);
+      setMoveKitFailed(false);
+      setWorkoutxFailed(false);
       return;
     }
     const task = InteractionManager.runAfterInteractions(() => {
@@ -183,7 +256,6 @@ export default function FormVideoModal({
   const searchUrl = buildExerciseVideoSearchUrl(exerciseName, equipment);
 
   const handleBack = () => setActiveVideo(null);
-  const hasBundledDemo = !!demoExerciseDbId || !!moveKitDemoVideo(demoExerciseDbId, exerciseName);
   const handleClose = () => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -193,6 +265,9 @@ export default function FormVideoModal({
     setLoading(false);
     setError(null);
     setEmptyReason(null);
+    setWorkoutxDemo(null);
+    setMoveKitFailed(false);
+    setWorkoutxFailed(false);
     onClose();
   };
 
@@ -292,18 +367,23 @@ export default function FormVideoModal({
           ) : (
             /* Video selection grid — default view */
             <>
-              {/* Bundled demo at the top — Move Kit video when available,
-                  otherwise the older 2-frame photo fallback. */}
-              {hasBundledDemo ? (
+              {/* Primary demo at the top: Move Kit when available, otherwise WorkoutX. */}
+              {hasPrimaryDemo ? (
                 <View style={{ marginBottom: 12 }}>
                   <ExerciseDemoCard
                     demoExerciseDbId={demoExerciseDbId}
                     exerciseName={exerciseName}
+                    workoutxGifUrl={workoutxDemo?.gif_url ?? null}
+                    workoutxLabel={workoutxDemo?.name ?? null}
                     themeName={themeName}
+                    onDemoUnavailable={(kind) => {
+                      if (kind === 'moveKit') setMoveKitFailed(true);
+                      if (kind === 'workoutx') setWorkoutxFailed(true);
+                    }}
                   />
                 </View>
               ) : null}
-              {loading && options.length === 0 && (
+              {loading && !hasPrimaryDemo && youtubeOptions.length === 0 && (
                 <View style={{ alignItems: 'center', paddingVertical: 30 }}>
                   <ActivityIndicator color={colors.primary} />
                   <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 8 }}>
@@ -311,7 +391,7 @@ export default function FormVideoModal({
                   </Text>
                 </View>
               )}
-              {error && options.length === 0 && (
+              {error && !hasPrimaryDemo && youtubeOptions.length === 0 && (
                 <View style={{ alignItems: 'center', paddingVertical: 20 }}>
                   <Text style={{ fontSize: 12, color: colors.textMuted, textAlign: 'center' }}>
                     Couldn't load videos: {error}
@@ -321,7 +401,7 @@ export default function FormVideoModal({
               {/* Empty state — NO curated/well-ranked results came back.
                   We don't dump raw YouTube results into the UI; instead
                   we tell the user so they can open a search themselves. */}
-              {!loading && !error && options.length === 0 && (
+              {!loading && !error && !hasPrimaryDemo && youtubeOptions.length === 0 && (
                 <View style={{ alignItems: 'center', paddingVertical: 28, paddingHorizontal: 20 }}>
                   <View style={{
                     width: 52, height: 52, borderRadius: 26,
@@ -339,10 +419,10 @@ export default function FormVideoModal({
                   </Text>
                 </View>
               )}
-              {options.length > 0 && (
+              {youtubeOptions.length > 0 && (
                 <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
                   <View style={styles.grid}>
-                    {options.map((opt) => (
+                    {youtubeOptions.map((opt) => (
                       <Animated.View
                         key={opt.video_id}
                         style={{ opacity: 1, transform: [{ translateY: 0 }] }}
@@ -406,7 +486,7 @@ export default function FormVideoModal({
                 >
                   <Ionicons name="open-outline" size={14} color={colors.textSecondary} />
                   <Text style={[styles.secondaryBtnText, { color: colors.textSecondary }]}>
-                    {options.length === 0 ? 'Search YouTube' : 'More on YouTube'}
+                    {youtubeOptions.length === 0 ? 'Search YouTube' : 'More on YouTube'}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity

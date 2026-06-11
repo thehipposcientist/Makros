@@ -16,76 +16,16 @@
  * The device-side string `id` (used for
  * `_routineId` matching) is left untouched; `backendId` is the durable link.
  */
-import type { MealItem, MealRoutineEntry, MealRoutineFood } from '../types';
+import type { MealRoutineEntry } from '../types';
 import * as api from '../services/api';
 import { loadMealRoutines, saveMealRoutines } from './workoutHistory';
-import { inferBackendIdFromRoutineEntry } from './mealRoutineSyncCore';
+import {
+  inferBackendIdFromRoutineEntry,
+  mealRoutineEntryFromBackend,
+  mealRoutineInputFromEntry,
+} from './mealRoutineSyncCore';
 
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().trim();
-
-function itemsFromBackend(items: api.MealRoutineItem[]): MealItem[] {
-  return (items ?? []).map(it => ({
-    name: it.food_name,
-    food_id: it.food_id ?? null,
-    serving_grams: it.serving_grams ?? null,
-    quantity: it.quantity,
-    unit: it.unit as any,
-    calories: it.calories,
-    protein: it.protein_g,
-    carbs: it.carbs_g,
-    fat: it.fat_g,
-  })) as MealItem[];
-}
-
-function itemsToBackend(entry: MealRoutineEntry): api.MealRoutineItem[] {
-  const items = entry.items ?? [];
-  if (items.length > 0) {
-    return items.map(it => ({
-      food_name: it.name,
-      food_id: (it as any).food_id ?? null,
-      serving_grams: (it as any).serving_grams ?? null,
-      quantity: Number((it as any).quantity ?? 1),
-      unit: String((it as any).unit ?? 'serving'),
-      calories: Number((it as any).calories ?? 0),
-      protein_g: Number((it as any).protein ?? 0),
-      carbs_g: Number((it as any).carbs ?? 0),
-      fat_g: Number((it as any).fat ?? 0),
-    }));
-  }
-  // Legacy foods-only routine: no per-item macros to snapshot.
-  return (entry.foods ?? []).map((f: MealRoutineFood) => ({
-    food_name: f.name,
-    food_id: null,
-    quantity: 1,
-    unit: 'serving',
-    calories: 0,
-    protein_g: 0,
-    carbs_g: 0,
-    fat_g: 0,
-  }));
-}
-
-function backendToEntry(r: api.MealRoutine): MealRoutineEntry {
-  const items = itemsFromBackend(r.items);
-  return {
-    id: `routine_backend_${r.id}`,
-    backendId: r.id,
-    displayOrder: r.display_order ?? 0,
-    name: r.name,
-    mealType: r.meal_type ?? 'custom',
-    foods: items.map((it, i) => ({
-      id: `${r.id}_${i}`,
-      name: it.name,
-      quantity: (it as any).unit === 'piece' ? String((it as any).quantity) : `${(it as any).quantity} ${(it as any).unit}`,
-    })),
-    items: items.length > 0 ? items : undefined,
-    createdAt: r.created_at,
-    calories: r.total_calories,
-    protein: r.total_protein_g,
-    carbs: r.total_carbs_g,
-    fat: r.total_fat_g,
-  };
-}
 
 export function stampMealRoutineDisplayOrder(routines: MealRoutineEntry[]): MealRoutineEntry[] {
   return routines.map((routine, index) => ({ ...routine, displayOrder: index }));
@@ -101,30 +41,6 @@ function sortMealRoutinesForDisplay(routines: MealRoutineEntry[]): MealRoutineEn
     if (aCreated !== bCreated) return aCreated - bCreated;
     return String(a.id).localeCompare(String(b.id));
   });
-}
-
-function entryToInput(entry: MealRoutineEntry, fallbackOrder = 0): api.MealRoutineInput {
-  const items = itemsToBackend(entry);
-  const mt = entry.mealType && entry.mealType !== 'custom' ? entry.mealType : undefined;
-  const displayOrder = Number.isFinite(Number(entry.displayOrder)) ? Number(entry.displayOrder) : fallbackOrder;
-  // Default to all 7 days when the client doesn't supply a schedule.
-  // The current "make routine" surface has no day-of-week picker — users
-  // expect the routine to recur daily. Sending [] would persist as
-  // "never auto-scheduled" on the backend and the routine would be
-  // invisible to fresh-install / multi-device flows where the local
-  // AsyncStorage cache hasn't hydrated yet.
-  const ALL_WEEK = [0, 1, 2, 3, 4, 5, 6];
-  return {
-    name: entry.name,
-    meal_type: mt,
-    display_order: displayOrder,
-    items,
-    days_of_week: ALL_WEEK,
-    // Stable client key so a retried / double-submitted create dedupes on the
-    // backend instead of inserting a duplicate routine. entry.id is the local
-    // UUID and is preserved across reconciles.
-    ...(entry.id ? { idempotency_key: `routine:${entry.id}` } : {}),
-  };
 }
 
 /** Pull server routines into the session-local working copy. Local entries are matched to
@@ -145,12 +61,12 @@ export async function syncMealRoutinesFromBackend(token: string): Promise<MealRo
     );
     if (match) {
       usedServerIds.add(match.id);
-      return { ...backendToEntry(match), id: entry.id };
+      return { ...mealRoutineEntryFromBackend(match), id: entry.id };
     }
     return entry;
   });
   for (const r of serverRows) {
-    if (!usedServerIds.has(r.id)) merged.push(backendToEntry(r));
+    if (!usedServerIds.has(r.id)) merged.push(mealRoutineEntryFromBackend(r));
   }
   const ordered = sortMealRoutinesForDisplay(merged);
   await saveMealRoutines(ordered);
@@ -212,10 +128,10 @@ async function _reconcileRoutinesToBackend(
       }
       if (serverId != null) {
         matchedServerIds.add(serverId);
-        await api.updateMealRoutineApi(token, serverId, entryToInput(entry, index));
+        await api.updateMealRoutineApi(token, serverId, mealRoutineInputFromEntry(entry, index));
         out.push({ ...entry, backendId: serverId, displayOrder: index });
       } else {
-        const created = await api.createMealRoutineApi(token, entryToInput(entry, index));
+        const created = await api.createMealRoutineApi(token, mealRoutineInputFromEntry(entry, index));
         matchedServerIds.add(created.id);
         out.push({ ...entry, backendId: created.id, displayOrder: index });
       }

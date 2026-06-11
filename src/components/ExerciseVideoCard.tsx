@@ -1,61 +1,90 @@
 // Exercise demo video card — thumbnail preview that opens the in-app
 // FormVideoModal on tap. The card is purely VISUAL — the actual video
-// playback still flows through FormVideoModal / `/ai/exercise-video`
-// (embedded YouTube WebView). This gives users an at-a-glance preview
-// without leaving the app.
+// playback still flows through FormVideoModal / `/ai/exercise-video`.
 //
 // Preview source:
 //   - Bundled Move Kit demo video when this exercise has a match.
-//   - Older bundled free-exercise-db frame when there is no Move Kit match.
-//   - Curated or auto-scraped YouTube video (`videoId`) thumbnail.
-//   - No media → a branded placeholder tile.
-//
-// Legal framing:
-//   - Thumbnails are served by `img.youtube.com` (hotlinking allowed,
-//     same as Twitter/Discord/Reddit previews).
-//   - YouTube playback still routes through the embed iframe — no download,
-//     no rehost.
+//   - Hosted WorkoutX GIF when available.
+//   - No media → a branded placeholder tile that opens the demo modal.
 //
 // onPress always invokes openExerciseVideo (FormVideoModal).
 
-import { View, Text, TouchableOpacity, ImageSourcePropType } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Image, View, Text, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
-import { demoLockoutSource, moveKitDemoVideo } from '../utils/exerciseDemo';
+import { moveKitDemoVideo } from '../utils/exerciseDemo';
 import ExerciseThumbMedia from './ExerciseThumbMedia';
+import { loadWorkoutXDemoPreview } from '../utils/workoutxDemoPreview';
 
 interface Props {
   exerciseName: string;
   videoId?: string | null;
-  /** free-exercise-db id — when present, the lockout photo frame is
-   *  used as the thumbnail instead of the YouTube thumbnail. */
+  /** Legacy demo id, retained only for Move Kit video matching. */
   demoExerciseDbId?: string | null;
+  authToken?: string | null;
+  equipment?: string | null;
+  primaryMuscle?: string | null;
+  movementPattern?: string | null;
   themeName?: AppThemeName;
   /** Invoked on tap. Typically wired to the parent's openExerciseVideo
    *  callback which opens FormVideoModal. */
   onPress?: () => void;
 }
 
-function ytThumb(id: string): string {
-  // hqdefault is a safe bet on every public video (480×360). maxresdefault
-  // isn't guaranteed to exist, so we avoid it.
-  return `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
-}
-
-export default function ExerciseVideoCard({ exerciseName, videoId, demoExerciseDbId, themeName, onPress }: Props) {
+export default function ExerciseVideoCard({
+  exerciseName,
+  demoExerciseDbId,
+  authToken,
+  equipment,
+  primaryMuscle,
+  movementPattern,
+  themeName,
+  onPress,
+}: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const onPrimary = getContrastingTextColor(tc.primary);
 
-  // Prefer the bundled Move Kit demo video, then the older bundled
-  // free-exercise-db lockout frame, then the YouTube thumbnail.
-  const demoSrc = demoLockoutSource(demoExerciseDbId);
   const moveKitVideo = moveKitDemoVideo(demoExerciseDbId, exerciseName);
-  const ytSrc: ImageSourcePropType | null = videoId ? { uri: ytThumb(videoId) } : null;
-  const thumbSrc = demoSrc ?? ytSrc;
-  const isDemoFrame = !!demoSrc;
   const isMoveKitFrame = !!moveKitVideo;
+  const [workoutxGifUrl, setWorkoutxGifUrl] = useState<string | null>(null);
+  const [workoutxLabel, setWorkoutxLabel] = useState<string | null>(null);
+  const [workoutxLoading, setWorkoutxLoading] = useState(false);
+  const [workoutxErrored, setWorkoutxErrored] = useState(false);
+  const isWorkoutXFrame = !isMoveKitFrame && !!workoutxGifUrl && !workoutxErrored;
+
+  useEffect(() => {
+    setWorkoutxGifUrl(null);
+    setWorkoutxLabel(null);
+    setWorkoutxErrored(false);
+    if (isMoveKitFrame || !authToken || !exerciseName) {
+      setWorkoutxLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setWorkoutxLoading(true);
+    loadWorkoutXDemoPreview({
+      authToken,
+      exerciseName,
+      equipment,
+      primaryMuscle,
+      movementPattern,
+    }).then((demo) => {
+      if (cancelled) return;
+      setWorkoutxGifUrl(demo?.gifUrl ?? null);
+      setWorkoutxLabel(demo?.label ?? null);
+      setWorkoutxErrored(!demo);
+    }).catch(() => {
+      if (!cancelled) setWorkoutxErrored(true);
+    }).finally(() => {
+      if (!cancelled) setWorkoutxLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [authToken, equipment, exerciseName, isMoveKitFrame, movementPattern, primaryMuscle]);
 
   return (
     <TouchableOpacity
@@ -69,19 +98,23 @@ export default function ExerciseVideoCard({ exerciseName, videoId, demoExerciseD
     >
       <View style={{
         position: 'relative', width: '100%',
-        // Bundled demo frames are 3:2 (850x567); YouTube thumbs are 16:9.
-        aspectRatio: isDemoFrame && !isMoveKitFrame ? 3 / 2 : 16 / 9,
-        // Demo photos sit on a neutral light background; the YouTube
-        // thumbnail covers fully so no surface color shows through.
-        backgroundColor: isMoveKitFrame ? '#000000' : (isDemoFrame ? '#F5F5F5' : tc.surface),
+        aspectRatio: 16 / 9,
+        backgroundColor: isMoveKitFrame ? '#000000' : isWorkoutXFrame ? '#FFFFFF' : tc.surface,
       }}>
-        {thumbSrc || isMoveKitFrame ? (
+        {isMoveKitFrame ? (
           <ExerciseThumbMedia
             exerciseName={exerciseName}
             demoExerciseDbId={demoExerciseDbId}
-            fallbackSource={ytSrc}
             style={{ width: '100%', height: '100%' }}
-            imageResizeMode={isDemoFrame && !isMoveKitFrame ? 'contain' : 'cover'}
+            imageResizeMode="cover"
+            shouldPlayVideo
+          />
+        ) : isWorkoutXFrame ? (
+          <Image
+            source={{ uri: workoutxGifUrl! }}
+            style={{ width: '100%', height: '100%' }}
+            resizeMode="contain"
+            onError={() => setWorkoutxErrored(true)}
           />
         ) : (
           <View style={{
@@ -102,14 +135,14 @@ export default function ExerciseVideoCard({ exerciseName, videoId, demoExerciseD
               {exerciseName}
             </Text>
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4, letterSpacing: 0.5, fontWeight: '600' }}>
-              TAP FOR YOUTUBE FORM DEMO
+              {workoutxLoading ? 'LOADING DEMO' : 'TAP FOR FORM DEMOS'}
             </Text>
+            {workoutxLoading && (
+              <ActivityIndicator color={tc.primary} size="small" style={{ marginTop: 10 }} />
+            )}
           </View>
         )}
-        {/* Light bottom-only gradient — ensures the "YouTube" badge stays
-            readable without darkening the whole thumbnail. Top 60% of
-            the image is fully unaltered so the form preview stays clear. */}
-        {(thumbSrc || isMoveKitFrame) && (
+        {(isMoveKitFrame || isWorkoutXFrame) && (
           <View pointerEvents="none" style={{
             position: 'absolute', left: 0, right: 0, bottom: 0, height: '45%',
             backgroundColor: 'rgba(0,0,0,0.25)',
@@ -130,27 +163,14 @@ export default function ExerciseVideoCard({ exerciseName, videoId, demoExerciseD
             <Ionicons name="play" size={22} color="#fff" style={{ marginLeft: 3 }} />
           </View>
         </View>
-        {thumbSrc && !isDemoFrame && !isMoveKitFrame && (
-          <View style={{
-            position: 'absolute', bottom: 8, right: 10,
-            backgroundColor: 'rgba(0,0,0,0.72)',
-            paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4,
-            flexDirection: 'row', alignItems: 'center', gap: 5,
-          }}>
-            <Ionicons name="logo-youtube" size={11} color="#FF0000" />
-            <Text style={{ fontSize: 10, fontWeight: '700', color: '#fff', letterSpacing: 0.3 }}>
-              YOUTUBE
-            </Text>
-          </View>
-        )}
-        {(isDemoFrame || isMoveKitFrame) && (
+        {(isMoveKitFrame || isWorkoutXFrame) && (
           <View style={{
             position: 'absolute', bottom: 8, right: 10,
             backgroundColor: tc.primary,
             paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4,
           }}>
             <Text style={{ fontSize: 10, fontWeight: '800', color: onPrimary, letterSpacing: 0.5 }}>
-              FORM PREVIEW
+              {isWorkoutXFrame ? 'WORKOUTX PREVIEW' : 'FORM PREVIEW'}
             </Text>
           </View>
         )}
@@ -159,10 +179,14 @@ export default function ExerciseVideoCard({ exerciseName, videoId, demoExerciseD
         <Ionicons name="play-circle" size={16} color={tc.primary} />
         <View style={{ flex: 1 }}>
           <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
-            {isDemoFrame || isMoveKitFrame ? 'Tap for form demo + videos' : 'Watch form video'}
+            {isMoveKitFrame || isWorkoutXFrame ? 'Tap for form demo + videos' : 'Open form demos'}
           </Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 1 }} numberOfLines={1}>
-            {isMoveKitFrame ? 'Move Kit demo above · video on tap' : (isDemoFrame ? 'Static frame above · video on tap' : 'YouTube form demo — not created by Thallo')}
+            {isMoveKitFrame
+              ? 'Move Kit demo above · more videos on tap'
+              : isWorkoutXFrame
+                ? `${workoutxLabel ?? 'WorkoutX'} demo above · more videos on tap`
+                : 'WorkoutX / YouTube form demos'}
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />

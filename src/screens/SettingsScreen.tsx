@@ -46,6 +46,13 @@ import { HYDRATION_REMINDER_INTERVAL_HOURS, formatHydrationReminderInterval } fr
 import {
   loadQuietHours, saveQuietHours, type QuietHoursSettings,
 } from '../utils/notificationPrefs';
+import {
+  loadSettings as loadFeedbackSettings,
+  playRestTimerDone,
+  saveSettings as saveFeedbackSettings,
+  type AppSettings,
+  type RestTimerSound,
+} from '../utils/feedback';
 import type { WeightUnit, DistanceUnit } from '../utils/units';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { SUPPORT_EMAIL } from '../constants/legal';
@@ -83,9 +90,26 @@ type SettingsTab = 'theme' | 'reminders' | 'plan' | 'coach' | 'privacy';
 const SETTINGS_TABS: { key: SettingsTab; label: string }[] = [
   { key: 'theme', label: 'Theme' },
   { key: 'reminders', label: 'Reminders' },
-  { key: 'plan', label: 'Plan' },
+  { key: 'plan', label: 'Workout' },
   { key: 'coach', label: 'Coach' },
   { key: 'privacy', label: 'Privacy' },
+];
+
+const DEFAULT_FEEDBACK_SETTINGS: AppSettings = {
+  hapticsEnabled: true,
+  soundsEnabled: true,
+  vibrationEnabled: true,
+  restNotificationSoundEnabled: false,
+  restTimerSound: 'chime',
+  restSoundEnabled: true,
+  restHapticEnabled: true,
+};
+
+const REST_TIMER_SOUNDS: { key: RestTimerSound; label: string }[] = [
+  { key: 'chime', label: 'Chime' },
+  { key: 'beep', label: 'Beep' },
+  { key: 'ping', label: 'Ping' },
+  { key: 'double', label: 'Double' },
 ];
 
 function pad2(n: number): string {
@@ -153,6 +177,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   const [healthPermissionsVisible, setHealthPermissionsVisible] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('theme');
   const [activityDetectionEnabled, setActivityDetectionEnabled] = useState(false);
+  const [feedbackSettings, setFeedbackSettings] = useState<AppSettings>(DEFAULT_FEEDBACK_SETTINGS);
 
   const markPendingImportRequested = useCallback((source: string) => {
     const now = new Date().toISOString();
@@ -201,7 +226,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
     if (!visible) return;
     (async () => {
       try {
-        const [wr, mr, hr, cn, ssn, rn, qh, ad] = await Promise.all([
+        const [wr, mr, hr, cn, ssn, rn, qh, ad, fs] = await Promise.all([
           loadReminderSettings(),
           loadMealReminderSettings(),
           loadHydrationReminderSettings(),
@@ -210,6 +235,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
           loadReadinessNotificationSettings(),
           loadQuietHours(),
           loadActivityDetectionPreference(),
+          loadFeedbackSettings(),
         ]);
         setWorkoutReminder(wr);
         setMealReminder(mr);
@@ -219,6 +245,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
         setReadinessNotification(rn);
         setQuietHours(qh);
         setActivityDetectionEnabled(ad);
+        setFeedbackSettings(fs);
       } catch {}
       // Surface the active plan's pause status, if any. Best-effort —
       // a 404 / network glitch just leaves the section showing "Not paused".
@@ -363,6 +390,19 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
       await saveActivityDetectionPreference(enabled);
     } catch (e: any) {
       setActivityDetectionEnabled(!enabled);
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateFeedbackSettings = async (changes: Partial<AppSettings>, previewRestSound = false) => {
+    setLoading(true);
+    try {
+      const updated = await saveFeedbackSettings(changes);
+      setFeedbackSettings(updated);
+      if (previewRestSound) playRestTimerDone().catch(() => {});
+    } catch (e: any) {
       Alert.alert('Could not update', e?.message ?? 'Try again.');
     } finally {
       setLoading(false);
@@ -1097,6 +1137,103 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
 
         {/* ── Plan pause ─────────────────────────────────────────────── */}
         {activeTab === 'plan' && (<>
+        <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 12 }]}>WORKOUT TIMER</Text>
+        <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+          <View style={styles.row}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Rest timer ding</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Play a sound when rest ends in app, in the background, or from the Lock Screen.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-rest-timer-ding-toggle"
+              accessibilityLabel="Rest timer ding"
+              value={feedbackSettings.restSoundEnabled}
+              onValueChange={(v) => updateFeedbackSettings({ restSoundEnabled: v })}
+              disabled={loading}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Rest timer buzz</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Vibrate when a rest timer ends, independent of normal tap haptics.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-rest-timer-buzz-toggle"
+              accessibilityLabel="Rest timer buzz"
+              value={feedbackSettings.vibrationEnabled && feedbackSettings.restHapticEnabled}
+              onValueChange={(v) => updateFeedbackSettings({ vibrationEnabled: v, restHapticEnabled: v })}
+              disabled={loading}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Background keepalive</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Optional iOS fallback to keep live countdown sync awake while Thallo is backgrounded.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-rest-timer-keepalive-toggle"
+              accessibilityLabel="Background keepalive"
+              value={feedbackSettings.restNotificationSoundEnabled}
+              onValueChange={(v) => updateFeedbackSettings({ restNotificationSoundEnabled: v })}
+              disabled={loading}
+              trackColor={{ false: toggleOffTrack(tc), true: tc.primary }}
+            />
+          </View>
+
+          <View style={[styles.soundBlock, { borderTopColor: tc.border }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Rest timer sound</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Tap to preview the sound that plays when rest ends.
+              </Text>
+            </View>
+            <View style={styles.soundGrid}>
+              {REST_TIMER_SOUNDS.map((sound) => {
+                const active = (feedbackSettings.restTimerSound ?? 'chime') === sound.key;
+                return (
+                  <TouchableOpacity
+                    key={sound.key}
+                    testID={`settings-rest-sound-${e2eId(sound.key)}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Rest timer sound ${sound.label}`}
+                    accessibilityState={{ selected: active }}
+                    activeOpacity={0.75}
+                    onPress={() => updateFeedbackSettings({ restTimerSound: sound.key }, true)}
+                    style={[
+                      styles.soundPill,
+                      {
+                        borderColor: active ? tc.primary : tc.border,
+                        backgroundColor: active ? tc.primary + '18' : 'transparent',
+                      },
+                    ]}>
+                    <Ionicons
+                      name={active ? 'radio-button-on' : 'radio-button-off'}
+                      size={14}
+                      color={active ? tc.primary : tc.textMuted}
+                    />
+                    <Text style={[
+                      styles.soundPillText,
+                      { color: active ? tc.primary : tc.textSecondary },
+                    ]}>
+                      {sound.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+
         {authToken && (
           <>
             <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PLAN</Text>
@@ -1414,6 +1551,32 @@ const styles = StyleSheet.create({
   },
   rowTitle: { fontSize: 14, fontWeight: '700' },
   rowSub: { fontSize: 11, marginTop: 2, lineHeight: 15 },
+  soundBlock: {
+    borderTopWidth: 1,
+    marginTop: 6,
+    paddingTop: 14,
+    gap: 10,
+  },
+  soundGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  soundPill: {
+    minHeight: 44,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  soundPillText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
   privacyBlock: {
     flexDirection: 'row',
     alignItems: 'flex-start',

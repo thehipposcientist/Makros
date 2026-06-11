@@ -9,6 +9,7 @@ import type { AppThemeName, SunExposureDailySummary } from '../types';
 import { TIMING_SMOOTH, useReducedMotion } from '../utils/motion';
 import AnimatedNumber from './AnimatedNumber';
 import {
+  type CurrentUvGuidance,
   estimatedOutdoorDaylightMinutes,
   formatLux,
   formatSunMinutes,
@@ -32,6 +33,7 @@ interface Props {
   onOpenSettings?: () => void;
   detailsOpen?: boolean;
   historyOpen?: boolean;
+  currentUvGuidance?: CurrentUvGuidance | null;
   /** Half-width two-up variant: speedometer gauge + icon-only actions. */
   compact?: boolean;
 }
@@ -208,6 +210,47 @@ function SunMetricTile({
   );
 }
 
+function currentUvGuidanceColor(guidance: CurrentUvGuidance): string {
+  if (guidance.level === 'very_high') return '#DC2626';
+  if (guidance.level === 'high') return '#EF4444';
+  if (guidance.level === 'moderate') return '#F59E0B';
+  return '#22C55E';
+}
+
+function currentUvGuidanceIcon(guidance: CurrentUvGuidance): ComponentProps<typeof Ionicons>['name'] {
+  if (guidance.level === 'very_high' || guidance.level === 'high') return 'warning-outline';
+  if (guidance.level === 'moderate') return 'partly-sunny-outline';
+  return 'sunny-outline';
+}
+
+function compactUvGuidanceCopy(guidance: CurrentUvGuidance): string {
+  if (guidance.level === 'very_high') return `${guidance.title} · avoid direct sun`;
+  if (guidance.level === 'high') return `${guidance.title} · shade or go later`;
+  if (guidance.level === 'moderate') return `${guidance.title} · use protection`;
+  return `${guidance.title} · good daylight window`;
+}
+
+function CurrentUvGuidanceCard({
+  guidance,
+  colors,
+}: {
+  guidance: CurrentUvGuidance;
+  colors: ReturnType<typeof getTheme>['colors'];
+}) {
+  const color = currentUvGuidanceColor(guidance);
+  return (
+    <View style={[styles.currentUvCard, { backgroundColor: `${color}12`, borderColor: `${color}45` }]}>
+      <View style={[styles.currentUvIconBubble, { backgroundColor: `${color}18` }]}>
+        <Ionicons name={currentUvGuidanceIcon(guidance)} size={17} color={color} />
+      </View>
+      <View style={styles.currentUvTextBlock}>
+        <Text style={[styles.currentUvTitle, { color }]}>{guidance.title}</Text>
+        <Text style={[styles.currentUvDetail, { color: colors.textSecondary }]}>{guidance.detail}</Text>
+      </View>
+    </View>
+  );
+}
+
 export default function SunExposureEstimateCard({
   summary,
   themeName,
@@ -217,6 +260,7 @@ export default function SunExposureEstimateCard({
   onOpenSettings,
   detailsOpen,
   historyOpen,
+  currentUvGuidance,
   compact,
 }: Props) {
   const tc = getTheme(themeName).colors;
@@ -288,7 +332,7 @@ export default function SunExposureEstimateCard({
         onPress={onOpenDetails}
         testID="sun-exposure-compact"
         accessibilityRole="button"
-        accessibilityLabel={`Sun exposure score ${exposureScore}. ${scoreTitle}. ${scoreStatus}. ${scoreMeaning}`}
+        accessibilityLabel={`Sun exposure score ${exposureScore}. ${scoreTitle}. ${scoreStatus}. ${scoreMeaning}${currentUvGuidance ? ` ${currentUvGuidance.title}. ${currentUvGuidance.detail}` : ''}`}
         style={[styles.card, styles.compactCard, { backgroundColor: tc.surface, borderColor: tc.border }]}>
         <ImageBackground
           source={SUN_EXPOSURE_HEADER_SOURCE}
@@ -338,6 +382,26 @@ export default function SunExposureEstimateCard({
               <Text style={[styles.compactDaylight, { color: tc.textMuted }]} numberOfLines={2}>
                 {summary ? `${scoreMeaning} ${formatSunMinutes(daylightMinutes)} daylight` : 'No daylight yet'}
               </Text>
+              {currentUvGuidance ? (
+                <View style={[
+                  styles.compactUvPill,
+                  {
+                    backgroundColor: `${currentUvGuidanceColor(currentUvGuidance)}12`,
+                    borderColor: `${currentUvGuidanceColor(currentUvGuidance)}45`,
+                  },
+                ]}>
+                  <Ionicons
+                    name={currentUvGuidanceIcon(currentUvGuidance)}
+                    size={12}
+                    color={currentUvGuidanceColor(currentUvGuidance)}
+                  />
+                  <Text
+                    style={[styles.compactUvText, { color: currentUvGuidanceColor(currentUvGuidance) }]}
+                    numberOfLines={2}>
+                    {compactUvGuidanceCopy(currentUvGuidance)}
+                  </Text>
+                </View>
+              ) : null}
             </>
           )}
         </View>
@@ -417,6 +481,9 @@ export default function SunExposureEstimateCard({
             <Text style={[styles.scoreNote, { color: tc.textSecondary }]}>
               {scoreHelp} Too little daylight scores low; sustained high UV can cap the score instead of being treated as more is always better. Based on Apple Health daylight, light intensity when available, and UV Index.
             </Text>
+            {currentUvGuidance ? (
+              <CurrentUvGuidanceCard guidance={currentUvGuidance} colors={tc} />
+            ) : null}
             <View style={styles.metricGrid}>
               <SunMetricTile
                 value={formatSunMinutes(daylightMinutes)}
@@ -525,6 +592,27 @@ const styles = StyleSheet.create({
   scoreValue: { fontSize: 46, lineHeight: 50, fontWeight: '900' },
   scoreScale: { fontSize: 14, fontWeight: '900', marginLeft: 2 },
   scoreNote: { fontSize: 12, lineHeight: 17 },
+  currentUvCard: {
+    minHeight: 58,
+    borderWidth: 1,
+    borderRadius: radius.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  currentUvIconBubble: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  currentUvTextBlock: { flex: 1, minWidth: 0 },
+  currentUvTitle: { fontSize: 13, lineHeight: 17, fontWeight: '900' },
+  currentUvDetail: { fontSize: 11, lineHeight: 15, fontWeight: '700', marginTop: 1 },
   metricGrid: {
     flexDirection: 'row',
     gap: 8,
@@ -599,4 +687,17 @@ const styles = StyleSheet.create({
   compactEyebrow: { fontSize: 9, fontWeight: '900', letterSpacing: 0, textAlign: 'center', marginBottom: 2 },
   compactScoreLabel: { fontSize: 13, fontWeight: '900', textAlign: 'center' },
   compactDaylight: { fontSize: 10, lineHeight: 13, fontWeight: '700', textAlign: 'center' },
+  compactUvPill: {
+    minHeight: 30,
+    borderWidth: 1,
+    borderRadius: radius.sm,
+    paddingHorizontal: 7,
+    paddingVertical: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    alignSelf: 'stretch',
+  },
+  compactUvText: { flex: 1, minWidth: 0, fontSize: 9.5, lineHeight: 12, fontWeight: '900', textAlign: 'center' },
 });

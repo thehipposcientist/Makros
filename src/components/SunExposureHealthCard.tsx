@@ -14,6 +14,7 @@ import {
 import { syncSunExposureForToday } from '../services/sunExposureSync';
 import {
   DEFAULT_SUN_EXPOSURE_PREFERENCES,
+  currentUvGuidanceFromSegments,
   estimatedOutdoorDaylightMinutes,
   formatLux,
   formatSunMinutes,
@@ -620,6 +621,12 @@ export default function SunExposureHealthCard({ authToken, themeName, isActive =
   }, [history]);
   const historyByDate = useMemo(() => new Map(history.map(row => [row.date.slice(0, 10), row])), [history]);
   const selectedHistorySummary = historyDetailDay ? historyByDate.get(historyDetailDay) ?? null : null;
+  const currentUvGuidance = useMemo(
+    () => preferences?.useCoarseLocation && preferences?.highUvRemindersEnabled !== false
+      ? currentUvGuidanceFromSegments(segments)
+      : null,
+    [preferences?.highUvRemindersEnabled, preferences?.useCoarseLocation, segments],
+  );
   const latestHistoryDay = useMemo(() => {
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const row = history[index];
@@ -742,6 +749,26 @@ export default function SunExposureHealthCard({ authToken, themeName, isActive =
               locationMode: value ? 'workout_routes_only' : (preferences?.useCoarseLocation ? 'coarse_location' : 'off'),
             })}
           />
+          <PreferenceToggle
+            title="Right-now UV"
+            subtitle="Use coarse location while the app is open."
+            value={Boolean(preferences?.useCoarseLocation)}
+            disabled={dependentSettingsDisabled}
+            colors={colors}
+            onValueChange={(value) => handlePreferenceUpdate({
+              useCoarseLocation: value,
+              highUvRemindersEnabled: value ? preferences?.highUvRemindersEnabled ?? true : false,
+              locationMode: value ? 'coarse_location' : (preferences?.useWorkoutRoutes ? 'workout_routes_only' : 'off'),
+            })}
+          />
+          <PreferenceToggle
+            title="High UV guidance"
+            subtitle="Show shade/protection guidance on the card."
+            value={Boolean(preferences?.useCoarseLocation && preferences?.highUvRemindersEnabled)}
+            disabled={dependentSettingsDisabled || !preferences?.useCoarseLocation}
+            colors={colors}
+            onValueChange={(value) => handlePreferenceUpdate({ highUvRemindersEnabled: value })}
+          />
         </View>
       )}
 
@@ -820,6 +847,7 @@ export default function SunExposureHealthCard({ authToken, themeName, isActive =
         themeName={themeName}
         loading={loading}
         compact={compact}
+        currentUvGuidance={currentUvGuidance}
         detailsOpen={detailsOpen}
         historyOpen={historyOpen}
         onOpenDetails={() => setSheetMode(detailsOpen ? null : 'details')}

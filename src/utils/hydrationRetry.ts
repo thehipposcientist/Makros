@@ -34,16 +34,46 @@ export async function flushPendingHydration(token: string | null | undefined): P
     try {
       const pending = await pendingCachedHydrationRows();
       if (pending.length === 0) return;
-      // Read the latest cache once so we can preserve target_ounces +
-      // any newer optimistic writes that landed mid-flush.
-      const cache = await loadHydrationCache();
       for (const row of pending) {
         try {
-          const deltaOz = pendingHydrationDeltaOz(row);
+          const cacheBefore = await loadHydrationCache();
+          const current = cacheBefore[row.date] ?? row;
+          if (!current.pending) continue;
+          const deltaOz = pendingHydrationDeltaOz(current);
           const saved = deltaOz != null
-            ? await logHydrationDelta(token, deltaOz, row.date, { commandId: row.pendingCommandId ?? undefined })
-            : await logHydration(token, row.ounces, row.date, { commandId: row.pendingCommandId ?? undefined });
-          const current = cache[row.date] ?? row;
+            ? await logHydrationDelta(token, deltaOz, current.date, { commandId: current.pendingCommandId ?? undefined })
+            : await logHydration(token, current.ounces, current.date, { commandId: current.pendingCommandId ?? undefined });
+          const cacheAfter = await loadHydrationCache();
+          const latest = cacheAfter[current.date] ?? current;
+          const latestDeltaOz = pendingHydrationDeltaOz(latest);
+          const latestChangedDuringFlush = !!latest.pending && (
+            latest.pendingCommandId !== current.pendingCommandId
+            || latestDeltaOz !== deltaOz
+            || latest.ounces !== current.ounces
+            || (latest.updatedAtMs ?? 0) > (current.updatedAtMs ?? 0)
+          );
+          if (deltaOz != null && latestChangedDuringFlush && latestDeltaOz != null) {
+            const remainingDeltaOz = Math.round((latestDeltaOz - deltaOz) * 10) / 10;
+            if (remainingDeltaOz !== 0) {
+              await saveCachedHydration(
+                {
+                  date: saved.date,
+                  ounces: Math.max(0, Math.round((saved.ounces + remainingDeltaOz) * 10) / 10),
+                  target_ounces: latest.target_ounces,
+                  target_ounces_min: latest.target_ounces_min,
+                  target_ounces_max: latest.target_ounces_max,
+                },
+                {
+                  pending: true,
+                  pendingCommandId: latest.pendingCommandId,
+                  pendingDeltaOz: remainingDeltaOz,
+                },
+              );
+              continue;
+            }
+          } else if (latestChangedDuringFlush) {
+            continue;
+          }
           // Backend wins on `ounces` (it reconciles with any other
           // device's writes), but we keep the target from the cache
           // because that's per-user not per-day.

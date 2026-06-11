@@ -62,7 +62,7 @@ struct WatchSwapOption: Codable, Identifiable, Equatable {
     let overlap: Int?
 
     enum CodingKeys: String, CodingKey {
-        case name, equipment, primaryMuscle, overlap
+        case name, equipment, primaryMuscle, primary_muscle, overlap, _overlap, overlapPercent, overlap_percentage, matchPercent, match_percentage
     }
 
     init(from decoder: Decoder) throws {
@@ -70,7 +70,22 @@ struct WatchSwapOption: Codable, Identifiable, Equatable {
         self.name = c.decodeFlexibleStringIfPresent(forKey: .name) ?? "Exercise"
         self.equipment = c.decodeFlexibleStringIfPresent(forKey: .equipment)
         self.primaryMuscle = c.decodeFlexibleStringIfPresent(forKey: .primaryMuscle)
-        self.overlap = c.decodeFlexibleIntIfPresent(forKey: .overlap)
+            ?? c.decodeFlexibleStringIfPresent(forKey: .primary_muscle)
+        let rawOverlap = c.decodeFlexibleIntIfPresent(forKey: .overlap)
+            ?? c.decodeFlexibleIntIfPresent(forKey: ._overlap)
+            ?? c.decodeFlexibleIntIfPresent(forKey: .overlapPercent)
+            ?? c.decodeFlexibleIntIfPresent(forKey: .overlap_percentage)
+            ?? c.decodeFlexibleIntIfPresent(forKey: .matchPercent)
+            ?? c.decodeFlexibleIntIfPresent(forKey: .match_percentage)
+        self.overlap = rawOverlap.map { min(100, max(0, $0)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(equipment, forKey: .equipment)
+        try c.encodeIfPresent(primaryMuscle, forKey: .primaryMuscle)
+        try c.encodeIfPresent(overlap, forKey: .overlap)
     }
 }
 
@@ -171,7 +186,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.clientExerciseId = c.decodeFlexibleStringIfPresent(forKey: .clientExerciseId)
         self.name = c.decodeFlexibleStringIfPresent(forKey: .name) ?? "Exercise"
         self.slug = c.decodeFlexibleStringIfPresent(forKey: .slug)
-        self.sets = max(1, c.decodeFlexibleIntIfPresent(forKey: .sets) ?? 1)
+        self.sets = max(0, c.decodeFlexibleIntIfPresent(forKey: .sets) ?? 1)
         self.reps = c.decodeFlexibleStringIfPresent(forKey: .reps) ?? ""
         self.restSeconds = max(0, c.decodeFlexibleIntIfPresent(forKey: .restSeconds) ?? 60)
         self.equipment = c.decodeFlexibleStringIfPresent(forKey: .equipment)

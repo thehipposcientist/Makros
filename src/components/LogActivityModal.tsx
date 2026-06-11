@@ -17,6 +17,7 @@ import { parseWorkoutPhoto } from '../services/api';
 import PressableScale from './PressableScale';
 import NumberWheelPicker from './NumberWheelPicker';
 import BottomSheetDismissHandle from './BottomSheetDismissHandle';
+import LifestyleFactorsCard from './LifestyleFactorsCard';
 import { estimateRouteElevationGainFt } from '../utils/cardioGpsTracker';
 import { estimateActivityCaloriesDetailed } from '../utils/activityEnergy';
 import { isVenueAmbiguous, defaultVenueForActivity } from '../utils/activityVenue';
@@ -71,6 +72,8 @@ const CATEGORIES: { key: ActivityCategory; label: string; icon: string; desc: st
     image: require('../../assets/images/card-backgrounds/workout-card-sauna-day.jpg'),
   },
 ];
+
+const LIFE_EVENTS_CARD_IMAGE = require('../../assets/images/card-backgrounds/lifestyle-card-caffeine-coffee.jpg');
 
 type SubtypeDef = { key: string; label: string; icon: string; cardioStyle?: CardioStyle; desc?: string; image?: ImageSourcePropType };
 
@@ -509,6 +512,11 @@ function activityDateFromOffset(offset: number, today = new Date()): Date {
   return date;
 }
 
+function activityDateKeyFromOffset(offset: number): string {
+  const date = activityDateFromOffset(offset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 function activityMonthStart(date = new Date()): Date {
   return new Date(date.getFullYear(), date.getMonth(), 1, 12);
 }
@@ -936,6 +944,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
   const supportsCardioStyle = category === 'cardio' || !!effectiveSubtypeDef?.cardioStyle;
   const supportsSessionRpe = category === 'strength' || category === 'cardio' || category === 'sport' || category === 'active';
   const showPrefillEffortDetails = !!prefill && !editPrefillValues && category !== 'recovery' && prefill.avgHeartRate == null;
+  const lifestyleDateKey = useMemo(() => activityDateKeyFromOffset(dateOffset), [dateOffset]);
   const effectiveLabel = (() => {
     if (customSubtype.trim()) return customSubtype.trim();
     if (!category || !subtype) return '';
@@ -1509,6 +1518,19 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                       </ImageBackground>
                     </TouchableOpacity>
                   ))}
+                  {authToken ? (
+                    <View style={s.lifeEventsCardSlot}>
+                      <LifestyleFactorsCard
+                        authToken={authToken}
+                        dateISO={lifestyleDateKey}
+                        themeName={themeName}
+                        title="Life Events"
+                        subtitle="Caffeine, stress, illness"
+                        variant="photo"
+                        entryImage={LIFE_EVENTS_CARD_IMAGE}
+                      />
+                    </View>
+                  ) : null}
                 </View>
                 {(appleHealthImportSlot || authToken) ? (
                   <View style={s.importSection}>
@@ -2208,6 +2230,7 @@ const s = StyleSheet.create({
   catIconBubble: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.18)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.24)' },
   catLabel: { fontSize: 15, fontWeight: '800', color: '#fff' },
   catDesc: { fontSize: 11, textAlign: 'center', color: 'rgba(255,255,255,0.78)' },
+  lifeEventsCardSlot: { width: '97%' },
   importSection: { marginTop: -2, marginBottom: 18, gap: 9 },
   importSectionLabel: { fontSize: 10, fontWeight: '900', letterSpacing: 0 },
   importChoiceGrid: { flexDirection: 'row', gap: 10 },

@@ -21,7 +21,6 @@ import type { GoalScoreResult } from '../services/api';
 import { getContrastingTextColor, radius } from '../constants/theme';
 import { TIMING_SMOOTH, useReducedMotion } from '../utils/motion';
 import FadeInView from './FadeInView';
-import LifestyleFactorsCard from './LifestyleFactorsCard';
 import MacroDonutRow from './MacroDonutRow';
 import PressableScale from './PressableScale';
 import SunExposureHealthCard from './SunExposureHealthCard';
@@ -40,6 +39,8 @@ export type HomeReminderPrompt = {
   eyebrow: string;
   title: string;
   body: string;
+  infoTitle?: string;
+  infoBody?: string;
   icon: IconName;
   accent: string;
   primaryLabel: string;
@@ -61,11 +62,7 @@ export type HomeReadinessAlert = {
 
 type TodayHomeTabProps = {
   themeName?: AppThemeName;
-  /** Required for the Life Events pill — auth + the day to log against.
-   *  Optional so older callers keep compiling; the pill is skipped when
-   *  either is missing. */
   authToken?: string;
-  todayDateKey?: string;
   themeColors: any;
   workoutAccent: string;
   mealsAccent: string;
@@ -177,7 +174,6 @@ function formatStartedAgo(startedAt: number) {
 function TodayHomeTab({
   themeName,
   authToken,
-  todayDateKey,
   themeColors,
   workoutAccent,
   mealsAccent,
@@ -389,15 +385,15 @@ function TodayHomeTab({
     ? 'Loading'
     : trackingValuePct != null
       ? `${trackingValuePct}%`
-      : 'Tracking';
+      : '—';
   const topGoalLimiter = goalScore?.limitingFactors?.[0] ?? null;
+  // Plain-language copy — "Execution score" / "Top limiter" were internal
+  // jargon leaking into the most-glanced tile on the screen.
   const baseTrackingDetail = goalLoading
     ? 'Syncing progress'
-    : goalScore
-      ? topGoalLimiter
-        ? `Top limiter: ${topGoalLimiter.driverName}`
-        : `Execution score - ${goalLabel}`
-      : `Execution score - ${goalLabel}`;
+    : topGoalLimiter
+      ? `Focus on ${topGoalLimiter.driverName.toLowerCase()}`
+      : goalLabel;
   // Prefix the day count ("Day 17/42") so users see how far into the current
   // 42-day execution block they are — mirrors the Progress-screen graph.
   const trackingDetail = !goalLoading && goalDayLabel
@@ -420,6 +416,10 @@ function TodayHomeTab({
         <Text style={[styles.dateText, { color: themeColors.textSecondary }]}>{todayDate}</Text>
       </FadeInView>
 
+      {/* One attention card at a time — a readiness alert outranks a
+          reminder. Stacking both above the hero buried the actual day
+          under two urgent-looking banners; the reminder resurfaces on
+          its own once the alert clears. */}
       {readinessAlert ? (
         <FadeInView delay={25} duration={340} slideDistance={8}>
           <ReadinessAlertCard
@@ -428,10 +428,8 @@ function TodayHomeTab({
             onPress={onOpenReadiness}
           />
         </FadeInView>
-      ) : null}
-
-      {homePrompt ? (
-        <FadeInView delay={readinessAlert ? 65 : 35} duration={340} slideDistance={8}>
+      ) : homePrompt ? (
+        <FadeInView delay={35} duration={340} slideDistance={8}>
           <HomeReminderCard prompt={homePrompt} themeColors={themeColors} />
         </FadeInView>
       ) : null}
@@ -566,7 +564,7 @@ function TodayHomeTab({
         </PressableScale>
       </FadeInView>
 
-      <FadeInView delay={115} duration={360} slideDistance={10}>
+      <FadeInView delay={130} duration={360} slideDistance={10}>
         <PressableScale
           scaleDown={0.99}
           onPress={showMealsSurface ? onOpenMeals : onOpenProgress}
@@ -636,17 +634,23 @@ function TodayHomeTab({
             onPressMacro={showMealsSurface ? () => onOpenMeals() : undefined}
           />
           <View style={[styles.waterRow, { borderTopColor: themeColors.border }]}>
-            <View style={styles.waterCopy}>
+            <PressableScale
+              scaleDown={0.985}
+              onPress={onQuickAddWater}
+              disabled={hydrationLoading}
+              accessibilityRole="button"
+              accessibilityLabel="Log a glass of water"
+              style={styles.waterCopy}>
               <View style={[styles.waterIcon, { backgroundColor: themeColors.primary + '16' }]}>
                 <Ionicons name="water-outline" size={16} color={themeColors.primary} />
               </View>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={[styles.waterTitle, { color: themeColors.textPrimary }]}>Water</Text>
                 <Text style={[styles.waterDetail, { color: themeColors.textSecondary }]} numberOfLines={1}>
-                  {hydrationLabel}{hydrationTarget ? '' : ' - tap to log'}
+                  {hydrationLabel}{hydrationTarget ? '' : ' · tap to log'}
                 </Text>
               </View>
-            </View>
+            </PressableScale>
             <View style={styles.waterActions}>
               <PressableScale
                 scaleDown={0.955}
@@ -711,7 +715,7 @@ function TodayHomeTab({
         <FadeInView delay={245} duration={340} slideDistance={8} style={styles.metricGridFullItem}>
           <MetricTile
             icon="speedometer-outline"
-            label="Tracking"
+            label="Goal pace"
             value={trackingValue}
             detail={trackingDetail}
             color={themeColors.primary}
@@ -733,20 +737,6 @@ function TodayHomeTab({
         </FadeInView>
       ) : null}
 
-      {/* Life Events — moved here under the Tracking tile (was previously
-          rendered just below the day header). */}
-      {authToken && todayDateKey ? (
-        <FadeInView delay={showSunExposureSurface ? 305 : 280} duration={320} slideDistance={8} style={{ marginHorizontal: 16, marginTop: 12 }}>
-          <LifestyleFactorsCard
-            authToken={authToken}
-            dateISO={todayDateKey}
-            themeName={themeName}
-            title="Life events"
-            variant="inline"
-            compact
-          />
-        </FadeInView>
-      ) : null}
     </ScrollView>
     </>
   );
@@ -1162,11 +1152,9 @@ const styles = StyleSheet.create({
   promptEyebrow: {
     flex: 1,
     minWidth: 0,
-    fontSize: 10,
-    lineHeight: 13,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-    letterSpacing: 0,
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '600',
   },
   promptQueuePill: {
     minWidth: 26,
@@ -1263,11 +1251,9 @@ const styles = StyleSheet.create({
   readinessAlertEyebrow: {
     flex: 1,
     minWidth: 0,
-    fontSize: 10,
-    lineHeight: 13,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-    letterSpacing: 0,
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '600',
   },
   readinessAlertScorePill: {
     minHeight: 20,
@@ -1518,10 +1504,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
   },
   macroScoreLabel: {
-    fontSize: 10,
-    lineHeight: 13,
-    fontWeight: '900',
-    textTransform: 'uppercase',
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '600',
   },
   macroScoreValue: {
     minWidth: 18,
@@ -1705,10 +1690,9 @@ const styles = StyleSheet.create({
   metricLabel: {
     flex: 1,
     minWidth: 0,
-    fontSize: 10,
-    lineHeight: 13,
-    fontWeight: '900',
-    textTransform: 'uppercase',
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '600',
   },
   metricValue: {
     fontSize: 25,

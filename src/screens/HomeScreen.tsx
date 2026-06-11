@@ -325,7 +325,9 @@ import {
 import { matchesExerciseSearch } from '../utils/exerciseSearch';
 import { preferredExerciseVideoEquipment } from '../utils/exerciseVideoSearch';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
+import { drainDailyWatchCommands, enqueueDailyWatchCommand } from '../utils/watchDailyCommandBacklog';
 import { recordWatchCommandEvent } from '../utils/watchCommandProcessor';
+import { isWatchSupplementCommand, processWatchSupplementCommand } from '../utils/watchSupplementCommands';
 import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
 import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayReasonLabel, skippedDayTitle, skippedDayUndoLabel, skippedFocusFallbackReason } from '../utils/coachApplyState';
 import {
@@ -368,6 +370,12 @@ import {
   upsertHistoryEntry,
 } from '../utils/mealHistoryState';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan, macroTotalsFromMeal, splitMealItemByFraction, syncLegacyFieldsFromItems } from '../utils/mealItems';
+import {
+  duplicateMealForPlan,
+  mealItemMicronutrientSnapshot,
+  savedMealToSuggestion,
+  type SavedMealReferenceLike as SavedMealReference,
+} from '../utils/mealPlanTransforms';
 import { foodClassificationFields, needsFoodClassification } from '../utils/foodClassification';
 import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -383,6 +391,7 @@ import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import ExerciseDemoCard from '../components/ExerciseDemoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
 import { moveKitDemoVideo } from '../utils/exerciseDemo';
+import { isRecoveryFlowWorkout, workoutStartActionLabel } from '../utils/workoutFlowMode';
 import EquipmentImageCard from '../components/EquipmentImageCard';
 import {
   equipmentKeySetsMatch,
@@ -971,21 +980,26 @@ const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
   workoutPalette,
   onOpen,
   onPlayVideo,
+  authToken,
 }: {
   item: ExerciseLibraryItem;
   themeColors: any;
   workoutPalette: any;
   onOpen: (item: ExerciseLibraryItem) => void;
   onPlayVideo: (item: ExerciseLibraryItem) => void;
+  authToken?: string | null;
 }) {
   const thumb = exerciseThumbSmall(item as any);
   const demoExerciseDbId = (item as any).demo_exercise_db_id ?? null;
+  const videoEquipment = preferredExerciseVideoEquipment(item) ?? item.equipment ?? null;
   const isCustom = Boolean((item as any).is_custom);
   const programmingTags = Array.isArray((item as any).programming_tags) ? (item as any).programming_tags as string[] : [];
   const hasThumb = hasExerciseThumbMedia({
     exerciseName: item.name,
     demoExerciseDbId,
     fallbackSource: thumb,
+    authToken,
+    allowHostedFallback: true,
   });
   return (
     <TouchableOpacity
@@ -995,40 +1009,48 @@ const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
       activeOpacity={0.8}
       onPress={() => onOpen(item)}
     >
-      {hasThumb ? (
-        <TouchableOpacity
-          activeOpacity={0.7}
-          onPress={(e) => {
-            e.stopPropagation();
-            onPlayVideo(item);
-          }}
-          accessibilityRole="button"
-          accessibilityLabel={`Play form video for ${item.name}`}
-        >
-          <View style={{
-            width: 48, height: 48, borderRadius: 10,
-            backgroundColor: themeColors.surface,
-            overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative',
-          }}>
+      <TouchableOpacity
+        activeOpacity={0.7}
+        onPress={(e) => {
+          e.stopPropagation();
+          onPlayVideo(item);
+        }}
+        accessibilityRole="button"
+        accessibilityLabel={`Open form demos for ${item.name}`}
+      >
+        <View style={{
+          width: 48, height: 48, borderRadius: 10,
+          backgroundColor: hasThumb ? themeColors.surface : workoutPalette.soft,
+          overflow: 'hidden', borderWidth: 2, borderColor: hasThumb ? themeColors.border : workoutPalette.strong + '55', position: 'relative',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          {hasThumb ? (
             <ExerciseThumbMedia
               exerciseName={item.name}
               demoExerciseDbId={demoExerciseDbId}
               fallbackSource={thumb}
+              authToken={authToken}
+              equipment={videoEquipment}
+              primaryMuscle={item.primary_muscle ?? null}
+              movementPattern={(item as any).movement_pattern ?? null}
               style={{ width: 48, height: 48 }}
               shouldPlayVideo={false}
+              placeholder={(
+                <View style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+                  <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
+                </View>
+              )}
             />
-            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-              <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
-              </View>
+          ) : (
+            <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
+          )}
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+            <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: hasThumb ? 'rgba(0,0,0,0.55)' : workoutPalette.strong, alignItems: 'center', justifyContent: 'center' }}>
+              <Ionicons name="play" size={10} color={hasThumb ? '#fff' : getContrastingTextColor(workoutPalette.strong)} style={{ marginLeft: 1 }} />
             </View>
           </View>
-        </TouchableOpacity>
-      ) : (
-        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
-          <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
         </View>
-      )}
+      </TouchableOpacity>
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
           <Text style={[styles.libraryItemName, { color: themeColors.textPrimary, flex: 1 }]} numberOfLines={1}>{item.name}</Text>
@@ -2361,47 +2383,6 @@ async function savePreservedMealWithBackendId(
   await savePreservedMeal(date, mealType, meal).catch(() => {});
 }
 
-function duplicateMealForPlan(meal: MealSuggestion): MealSuggestion {
-  const withItems = ensureItems(meal);
-  const rest = { ...(withItems as any) };
-  delete rest._routineId;
-  delete rest._savedMealId;
-  delete rest._loggedMealId;
-  delete rest._localId;
-  delete rest._consumedAt;
-  delete rest.isRoutine;
-  const clonedItems = Array.isArray(withItems.items)
-    ? withItems.items.map(item => ({
-        ...item,
-        ...(item.micronutrients ? { micronutrients: { ...item.micronutrients } } : {}),
-      }))
-    : undefined;
-  const clone = {
-    ...rest,
-    meal: withItems.meal || withItems.name || 'Meal',
-    name: withItems.name || withItems.meal || 'Meal',
-    foods: [...(withItems.foods ?? [])],
-    ...(withItems.amounts ? { amounts: [...withItems.amounts] } : {}),
-    ...(clonedItems ? { items: clonedItems } : {}),
-    ...(withItems.micronutrients ? { micronutrients: { ...withItems.micronutrients } } : {}),
-    ...(withItems.instructionVariants ? { instructionVariants: [...withItems.instructionVariants] } : {}),
-    _savedMealId: null,
-    _localId: `duplicate_meal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-  } as MealSuggestion;
-  return clonedItems?.length ? syncLegacyFieldsFromItems(clone) : clone;
-}
-
-type SavedMealReference = {
-  id?: number;
-  _optimisticId?: number;
-  name: string;
-  items?: any[];
-  total_calories?: number;
-  total_protein_g?: number;
-  total_carbs_g?: number;
-  total_fat_g?: number;
-};
-
 type MealSavedMarkerSnapshot = {
   present: boolean;
   value?: number | null;
@@ -2441,116 +2422,6 @@ function mealMatchesSavedMealReference(meal: MealSuggestion, saved: SavedMealRef
   const mealSavedId = Number((meal as any)._savedMealId ?? 0) || null;
   if (savedId && mealSavedId === savedId) return true;
   return mealSavedMealSignature(meal) === savedMealSignature(saved);
-}
-
-function mealItemMicronutrientSnapshot(raw: Record<string, any>): Record<string, number> | undefined {
-  const out: Record<string, number> = {};
-  const existing = raw.micronutrients && typeof raw.micronutrients === 'object'
-    ? raw.micronutrients
-    : null;
-  if (existing) {
-    for (const [key, value] of Object.entries(existing)) {
-      if (value == null || value === '') continue;
-      const n = Number(value);
-      if (Number.isFinite(n)) out[key] = n;
-    }
-  }
-
-  const mappings: Array<[string, string[]]> = [
-    ['fiber', ['fiber_g', 'fiber']],
-    ['sugar', ['sugar_g', 'sugar']],
-    ['added_sugar_g', ['added_sugar_g', 'added_sugar', 'addedSugar']],
-    ['sodium', ['sodium_mg', 'sodium']],
-    ['saturated_fat', ['saturated_fat_g', 'saturated_fat', 'saturatedFat']],
-    ['cholesterol', ['cholesterol_mg', 'cholesterol']],
-    ['caffeine', ['caffeine_mg', 'caffeine']],
-    ['monounsaturated_fat', ['monounsaturated_fat_g', 'monounsaturated_fat', 'monounsaturatedFat']],
-    ['polyunsaturated_fat', ['polyunsaturated_fat_g', 'polyunsaturated_fat', 'polyunsaturatedFat']],
-    ['omega_3', ['omega_3_g', 'omega_3', 'omega3']],
-    ['potassium', ['potassium_mg', 'potassium']],
-    ['calcium', ['calcium_mg', 'calcium']],
-    ['iron', ['iron_mg', 'iron']],
-    ['magnesium', ['magnesium_mg', 'magnesium']],
-    ['vitamin_d', ['vitamin_d_mcg', 'vitamin_d', 'vitaminD']],
-    ['vitamin_b12', ['vitamin_b12_mcg', 'vitamin_b12', 'vitaminB12']],
-    ['folate', ['folate_mcg', 'folate', 'folate_b9']],
-    ['zinc', ['zinc_mg', 'zinc']],
-  ];
-
-  for (const [target, keys] of mappings) {
-    if (out[target] != null) continue;
-    for (const key of keys) {
-      if (raw[key] == null || raw[key] === '') continue;
-      const n = Number(raw[key]);
-      if (Number.isFinite(n)) {
-        out[target] = n;
-        break;
-      }
-    }
-  }
-
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-function savedMealToSuggestion(saved: SavedMealReference, consumedAt?: string, mealId?: number): MealSuggestion {
-  const mappedItems = (saved.items || []).map((it: any) => {
-    const qty = Number(it.quantity || 1);
-    const cal = Number(it.calories || 0);
-    const pro = Number(it.protein_g ?? it.protein ?? 0);
-    const carbs = Number(it.carbs_g ?? it.carbs ?? 0);
-    const fat = Number(it.fat_g ?? it.fat ?? 0);
-    const micronutrients = mealItemMicronutrientSnapshot(it);
-    return {
-      name: String(it.food_name || it.name || 'Item'),
-      food_id: it.food_id ?? null,
-      serving_id: it.serving_id ?? null,
-      serving_grams: it.serving_grams ?? null,
-      quantity: qty,
-      unit: String(it.unit || 'serving'),
-      calories: cal,
-      protein: pro,
-      carbs,
-      fat,
-      baseQuantity: qty > 0 ? qty : 1,
-      baseCalories: cal,
-      baseProtein: pro,
-      baseCarbs: carbs,
-      baseFat: fat,
-      ...(micronutrients ? { micronutrients } : {}),
-    };
-  });
-  const itemTotals = mappedItems.reduce(
-    (acc, it) => ({
-      calories: acc.calories + Number(it.calories || 0),
-      protein: acc.protein + Number(it.protein || 0),
-      carbs: acc.carbs + Number(it.carbs || 0),
-      fat: acc.fat + Number(it.fat || 0),
-    }),
-    { calories: 0, protein: 0, carbs: 0, fat: 0 },
-  );
-  const totals = mappedItems.length > 0 ? itemTotals : {
-    calories: Number(saved.total_calories || 0),
-    protein: Number(saved.total_protein_g || 0),
-    carbs: Number(saved.total_carbs_g || 0),
-    fat: Number(saved.total_fat_g || 0),
-  };
-  const localId = mealId ? `saved_log_${mealId}` : `saved_${saved.id ?? 'meal'}_${Date.now()}`;
-  return {
-    meal: saved.name || 'Saved meal',
-    name: saved.name || 'Saved meal',
-    items: mappedItems as any,
-    foods: mappedItems.map(it => it.name),
-    amounts: mappedItems.map(it => `${it.quantity} ${it.unit}`),
-    calories: totals.calories,
-    protein: totals.protein,
-    carbs: totals.carbs,
-    fat: totals.fat,
-    _localId: localId,
-    _clientMealKey: mealId ? `log_${mealId}` : `local_${localId}`,
-    _consumedAt: consumedAt,
-    ...(mealId ? { _loggedMealId: mealId } : {}),
-    ...(saved.id ? { _savedMealId: Number(saved.id) } : {}),
-  } as MealSuggestion;
 }
 
 function mealHistoryEntryToSuggestion(entry: MealHistoryEntry): MealSuggestion {
@@ -3179,6 +3050,11 @@ function externalSourceIdFromLocalId(id?: string | null): string | undefined {
   return value;
 }
 
+function workoutSourceKey(externalSourceId?: string | null): string | null {
+  const sourceKey = typeof externalSourceId === 'string' ? externalSourceId.trim() : '';
+  return sourceKey ? `source|${sourceKey}` : null;
+}
+
 function workoutDateFocusKey(dateISO?: string | null, focus?: string | null): string | null {
   const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
   const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
@@ -3186,9 +3062,26 @@ function workoutDateFocusKey(dateISO?: string | null, focus?: string | null): st
 }
 
 function workoutExactKey(dateISO?: string | null, focus?: string | null, externalSourceId?: string | null): string | null {
-  const sourceKey = typeof externalSourceId === 'string' ? externalSourceId.trim() : '';
-  if (sourceKey) return `source|${sourceKey}`;
-  return workoutDateFocusKey(dateISO, focus);
+  return workoutSourceKey(externalSourceId) ?? workoutDateFocusKey(dateISO, focus);
+}
+
+function workoutIdentitiesMatch(
+  aSource: string | null,
+  aDateFocus: string | null,
+  bSource: string | null,
+  bDateFocus: string | null,
+): boolean {
+  if (aSource && bSource) return aSource === bSource;
+  return !!aDateFocus && aDateFocus === bDateFocus;
+}
+
+function workoutSessionsMatch(a: WorkoutSession, b: WorkoutSession): boolean {
+  return workoutIdentitiesMatch(
+    workoutSourceKey(externalSourceIdFromLocalId(a.id)),
+    workoutDateFocusKey(a.date, a.focus),
+    workoutSourceKey(externalSourceIdFromLocalId(b.id)),
+    workoutDateFocusKey(b.date, b.focus),
+  );
 }
 
 function sessionExactKey(session: WorkoutSession): string | null {
@@ -3323,7 +3216,7 @@ function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
     };
   });
   return {
-    id: `server-session-${row.id}`,
+    id: row.external_source_id?.trim() || `server-session-${row.id}`,
     date: row.completed_at ?? `${row.workout_date}T12:00:00.000Z`,
     focus: row.focus,
     durationSeconds: 0,
@@ -3340,24 +3233,22 @@ function sessionSetCount(session: WorkoutSession): number {
 }
 
 function mergeWorkoutSessionSources(localHistory: WorkoutSession[], serverRows: WorkoutSessionRecord[] | null): WorkoutSession[] {
-  const merged = [...localHistory];
-  if (!serverRows) return merged;
-  for (const row of serverRows) {
-    const serverSession = workoutSessionFromServer(row);
-    const exact = sessionExactKey(serverSession);
-    const dateFocus = workoutDateFocusKey(serverSession.date, serverSession.focus);
-    const existingIndex = merged.findIndex(session =>
-      (exact && sessionExactKey(session) === exact)
-      || (dateFocus && workoutDateFocusKey(session.date, session.focus) === dateFocus),
-    );
+  const merged: WorkoutSession[] = [];
+  const upsert = (incoming: WorkoutSession) => {
+    const existingIndex = merged.findIndex(session => workoutSessionsMatch(session, incoming));
     if (existingIndex < 0) {
-      merged.push(serverSession);
-      continue;
+      merged.push(incoming);
+      return;
     }
-    if (sessionSetCount(merged[existingIndex]) === 0 && sessionSetCount(serverSession) > 0) {
-      merged[existingIndex] = serverSession;
+    const existing = merged[existingIndex];
+    const existingHasSource = !!workoutSourceKey(externalSourceIdFromLocalId(existing.id));
+    const incomingHasSource = !!workoutSourceKey(externalSourceIdFromLocalId(incoming.id));
+    if ((!existingHasSource && incomingHasSource) || (sessionSetCount(existing) === 0 && sessionSetCount(incoming) > 0)) {
+      merged[existingIndex] = incoming;
     }
-  }
+  };
+  localHistory.forEach(upsert);
+  (serverRows ?? []).map(workoutSessionFromServer).forEach(upsert);
   return merged;
 }
 
@@ -4541,6 +4432,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const mealHistoryWindowDaysRef = useRef(mealHistoryWindowDays);
   const savedMealLibraryRef = useRef<SavedMealReference[]>([]);
   const reloadSavedMealsRef = useRef<(() => void) | null>(null);
+  const addSavedMealLocalIdByMutationKeyRef = useRef<Map<string, string>>(new Map());
   const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion; historyMealId?: number; markEatenOnSave?: boolean; startWithCamera?: boolean; startWithBarcode?: boolean } | null>(null);
   const [hydration, setHydration] = useState<HydrationSummary | null>(null);
   const [hydrationByDate, setHydrationByDate] = useState<Record<string, HydrationSummary>>({});
@@ -6619,6 +6511,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const homeWatchLogSetChainRef = useRef(Promise.resolve());
   const homeWatchHydrationCommandChainRef = useRef(Promise.resolve());
   const homeWatchLifestyleCommandChainRef = useRef(Promise.resolve());
+  const homeWatchSupplementCommandChainRef = useRef(Promise.resolve());
   useEffect(() => {
     watchCmdHandlersRef.current = {
       start: (today: any) => { onStartWorkout?.(today, { playCountdown: false }); },
@@ -6626,6 +6519,75 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       toggleMeal: (date: string, mealType: string, checked?: boolean) => handleToggleMeal(date, mealType, checked),
     };
   });
+
+  const processWatchMealToggleCommand = useCallback((
+    payload: Record<string, any>,
+    opts: { claim?: boolean; surface?: 'home' | 'active' } = {},
+  ) => {
+    const shouldClaim = opts.claim !== false;
+    if (shouldClaim && !claimWatchCommand('toggle_meal', payload)) {
+      recordWatchCommandEvent({ phase: 'deduped', command: 'toggle_meal', surface: opts.surface ?? 'home' });
+      return;
+    }
+    if (!rePushStateRef.current.showMealsSurface) return;
+    const mealType = String(payload?.mealType || '');
+    const payloadDate = typeof payload?.dateISO === 'string'
+      ? payload.dateISO.slice(0, 10)
+      : '';
+    const dateISO = /^\d{4}-\d{2}-\d{2}$/.test(payloadDate) ? payloadDate : todayKey();
+    const desiredChecked = typeof payload?.check === 'boolean' ? payload.check : undefined;
+    if (!mealType) return;
+    watchCmdHandlersRef.current.toggleMeal(dateISO, mealType, desiredChecked);
+    recordWatchCommandEvent({ phase: 'applied', command: 'toggle_meal', surface: opts.surface ?? 'home', detail: `${dateISO}:${mealType}` });
+  }, []);
+
+  const processWatchSupplementCommandOnHome = useCallback((
+    command: string,
+    payload: Record<string, any>,
+    opts: { claim?: boolean; surface?: 'home' | 'active' } = {},
+  ) => {
+    if (!isWatchSupplementCommand(command)) return;
+    const shouldClaim = opts.claim !== false;
+    if (shouldClaim && !claimWatchCommand(command, payload)) {
+      recordWatchCommandEvent({ phase: 'deduped', command, surface: opts.surface ?? 'home' });
+      return;
+    }
+    const process = async () => {
+      const currentAuthToken = authTokenRef.current;
+      if (!currentAuthToken) {
+        await enqueueDailyWatchCommand(command, payload).catch(() => undefined);
+        recordWatchCommandEvent({ phase: 'queued', command, surface: opts.surface ?? 'home', detail: 'no_token' });
+        return;
+      }
+      try {
+        await processWatchSupplementCommand(currentAuthToken, command, payload);
+        recordWatchCommandEvent({ phase: 'applied', command, surface: opts.surface ?? 'home' });
+      } catch {
+        recordWatchCommandEvent({ phase: 'dropped', command, surface: opts.surface ?? 'home', detail: 'save_failed' });
+      }
+    };
+    homeWatchSupplementCommandChainRef.current = homeWatchSupplementCommandChainRef.current
+      .then(process, process);
+    homeWatchSupplementCommandChainRef.current.catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    drainDailyWatchCommands()
+      .then(commands => {
+        if (cancelled) return;
+        for (const event of commands) {
+          recordWatchCommandEvent({ phase: 'drained', command: event.command, surface: 'home' });
+          if (event.command === 'toggle_meal') {
+            processWatchMealToggleCommand(event.payload, { claim: false, surface: 'home' });
+          } else {
+            processWatchSupplementCommandOnHome(event.command, event.payload, { claim: false, surface: 'home' });
+          }
+        }
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [processWatchMealToggleCommand, processWatchSupplementCommandOnHome]);
 
   const persistWatchEndedWorkoutFallback = useCallback(async (payload: Record<string, any>): Promise<boolean> => {
     if (hasActiveWatchCommandConsumer()) return false;
@@ -7263,15 +7225,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const today = todayScheduleItemSkip?.workout ?? refState.workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'toggle_meal') {
-            if (!claimWatchCommand(command, payload)) return;
-            if (!rePushStateRef.current.showMealsSurface) return;
-            const mealType = String(payload?.mealType || '');
-            const payloadDate = typeof payload?.dateISO === 'string'
-              ? payload.dateISO.slice(0, 10)
-              : '';
-            const dateISO = /^\d{4}-\d{2}-\d{2}$/.test(payloadDate) ? payloadDate : todayKey();
-            const desiredChecked = typeof payload?.check === 'boolean' ? payload.check : undefined;
-            if (mealType) watchCmdHandlersRef.current.toggleMeal(dateISO, mealType, desiredChecked);
+            processWatchMealToggleCommand(payload, { surface: 'home' });
           } else if (command === 'log_hydration') {
             if (!claimWatchCommand(command, payload)) return;
             // Newer watch builds send quick-adds as deltas; Digital Crown
@@ -7321,6 +7275,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return;
                   }
                 }
+                let cachedBeforeWrite = await loadCachedHydration(dateISO).catch(() => null);
+                if (cachedBeforeWrite?.pending) {
+                  await import('../utils/hydrationRetry')
+                    .then(m => m.flushPendingHydration(currentAuthToken))
+                    .catch(() => {});
+                  cachedBeforeWrite = await loadCachedHydration(dateISO).catch(() => null);
+                  if (cachedBeforeWrite && !cachedBeforeWrite.pending) {
+                    commitHydrationRow(cachedBeforeWrite);
+                  }
+                }
                 writeSeq = beginHydrationWrite(dateISO, hasDelta ? 'delta' : 'set');
                 didBeginHydrationWrite = true;
                 const currentRow = visibleHydrationRow(dateISO);
@@ -7336,11 +7300,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   target_ounces_max: currentRow?.target_ounces_max ?? hydrationRangeFields(currentRow?.target_ounces ?? 64).target_ounces_max,
                 };
                 commitHydrationRow(optimistic);
-                await saveCachedHydration(optimistic, {
-                  pending: true,
-                  pendingCommandId: commandId,
-                  pendingDeltaOz: hasDelta ? rawDelta : undefined,
-                }).catch(() => null);
+                if (hasDelta) {
+                  await applyCachedHydrationDelta(dateISO, rawDelta, currentRow?.target_ounces ?? 64, {
+                    pending: true,
+                    pendingCommandId: commandId,
+                  }).catch(() => null);
+                } else {
+                  await saveCachedHydration(optimistic, {
+                    pending: true,
+                    pendingCommandId: commandId,
+                  }).catch(() => null);
+                }
                 const result = hasDelta
                   ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO, { commandId })
                   : await logHydration(currentAuthToken, next, dateISO, { commandId });
@@ -7378,27 +7348,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   });
                 }
               } catch {
-                let restored: HydrationSummary | null = null;
-                if (!didBeginHydrationWrite || isLatestHydrationWrite(rollbackDateISO, writeSeq) || latestHydrationWriteKind(rollbackDateISO) === 'delta') {
-                  restored = rollbackRow ?? await getHydration(currentAuthToken, rollbackDateISO)
-                    .then(row => row)
-                    .catch(() => null);
-                  if (restored) {
-                    restored = commitHydrationRow(restored);
-                    await saveCachedHydration(restored).catch(() => null);
-                  } else {
-                    removeVisibleHydrationRow(rollbackDateISO);
-                    await removeCachedHydration(rollbackDateISO).catch(() => null);
-                  }
-                }
+                const queued = await loadCachedHydration(rollbackDateISO).catch(() => null);
+                const fallback = queued ?? visibleHydrationRow(rollbackDateISO) ?? rollbackRow;
                 const { pushHydrationToWatch } = await import('../utils/watchSync');
-                const watchRow = visibleHydrationRow(restored?.date ?? rollbackDateISO) ?? restored;
                 await pushHydrationToWatch({
-                  dateISO: watchRow?.date ?? rollbackDateISO,
-                  ounces: watchRow?.ounces ?? 0,
-                  targetOunces: watchRow?.target_ounces ?? 64,
-                  targetOuncesMin: watchRow?.target_ounces_min,
-                  targetOuncesMax: watchRow?.target_ounces_max,
+                  dateISO: fallback?.date ?? rollbackDateISO,
+                  ounces: fallback?.ounces ?? 0,
+                  targetOunces: fallback?.target_ounces ?? 64,
+                  targetOuncesMin: fallback?.target_ounces_min,
+                  targetOuncesMax: fallback?.target_ounces_max,
                   force: true,
                 }).catch(() => {});
               } finally {
@@ -7484,104 +7442,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             homeWatchLifestyleCommandChainRef.current = homeWatchLifestyleCommandChainRef.current
               .then(processLifestyleCommand, processLifestyleCommand);
             homeWatchLifestyleCommandChainRef.current.catch(() => undefined);
-          } else if (command === 'toggle_supplement') {
-            // Watch tapped a supplement row — log the dose on the
-            // phone, then re-push the stack so the watch picks up
-            // the authoritative state (overrides the optimistic flip).
-            (async () => {
-              try {
-                const id = Number(payload?.id ?? 0);
-                if (!id) return;
-                const taken = !!payload?.taken;
-                const { logDose, getTodaySupplements } = await import('../services/api');
-                const currentAuthToken = authTokenRef.current;
-                if (!currentAuthToken) return;
-                await logDose(currentAuthToken, id, { skipped: !taken }).catch(() => null);
-                const fresh = await getTodaySupplements(currentAuthToken).catch(() => null);
-                if (fresh) {
-                  const { pushSupplementsToWatch } = await import('../utils/watchSync');
-                  await pushSupplementsToWatch(
-                    fresh.map(s => ({
-                      id: s.id,
-                      name: s.custom_name || 'Supplement',
-                      dose: `${s.dose_amount}${s.dose_unit}`,
-                      timing: s.timing ?? null,
-                      groupLabel: s.group_label ?? null,
-                      taken: !!(s.logs_today || []).find(l => !l.skipped),
-                      skipped: !!(s.logs_today || []).find(l => l.skipped),
-                    })),
-                  );
-                }
-              } catch { /* non-fatal */ }
-            })();
-          } else if (command === 'take_supplement_group') {
-            // Watch tapped a grouped supplement action. Mirrors the
-            // phone's "Take group" path: custom groups use group_label;
-            // timing buckets use timing and exclude custom-grouped items
-            // on the backend.
-            (async () => {
-              try {
-                const currentAuthToken = authTokenRef.current;
-                if (!currentAuthToken) return;
-                const groupLabel = typeof payload?.groupLabel === 'string' ? payload.groupLabel.trim() : '';
-                const timing = typeof payload?.timing === 'string' ? payload.timing.trim() : '';
-                if (!groupLabel && !timing) return;
-                const { logSupplementGroup, getTodaySupplements } = await import('../services/api');
-                await logSupplementGroup(
-                  currentAuthToken,
-                  groupLabel ? { group_label: groupLabel } : { timing },
-                ).catch(() => null);
-                const fresh = await getTodaySupplements(currentAuthToken).catch(() => null);
-                if (fresh) {
-                  const { pushSupplementsToWatch } = await import('../utils/watchSync');
-                  await pushSupplementsToWatch(
-                    fresh.map(s => ({
-                      id: s.id,
-                      name: s.custom_name || 'Supplement',
-                      dose: `${s.dose_amount}${s.dose_unit}`,
-                      timing: s.timing ?? null,
-                      groupLabel: s.group_label ?? null,
-                      taken: !!(s.logs_today || []).find(l => !l.skipped),
-                      skipped: !!(s.logs_today || []).find(l => l.skipped),
-                    })),
-                  );
-                }
-              } catch { /* non-fatal */ }
-            })();
-          } else if (command === 'take_all_supplements') {
-            // Bulk-log every pending stack item. Mirrors the phone's
-            // "Take all (N)" button. Serial calls so backend timestamps
-            // don't collide + round-trip order is predictable.
-            (async () => {
-              try {
-                const currentAuthToken = authTokenRef.current;
-                if (!currentAuthToken) return;
-                const { logDose, getTodaySupplements } = await import('../services/api');
-                const current = await getTodaySupplements(currentAuthToken).catch(() => null);
-                if (!current) return;
-                for (const s of current) {
-                  const logs = s.logs_today || [];
-                  if (logs.find(l => !l.skipped)) continue; // already taken
-                  if (logs.find(l => l.skipped))  continue; // explicitly skipped
-                  await logDose(currentAuthToken, s.id, { skipped: false }).catch(() => null);
-                }
-                const fresh = await getTodaySupplements(currentAuthToken).catch(() => null);
-                if (fresh) {
-                  const { pushSupplementsToWatch } = await import('../utils/watchSync');
-                  await pushSupplementsToWatch(
-                    fresh.map(s => ({
-                      id: s.id,
-                      name: s.custom_name || 'Supplement',
-                      dose: `${s.dose_amount}${s.dose_unit}`,
-                      timing: s.timing ?? null,
-                      groupLabel: s.group_label ?? null,
-                      taken: !!(s.logs_today || []).find(l => !l.skipped),
-                      skipped: !!(s.logs_today || []).find(l => l.skipped),
-                    })),
-                  );
-                }
-              } catch { /* non-fatal */ }
-            })();
+          } else if (isWatchSupplementCommand(command)) {
+            processWatchSupplementCommandOnHome(command, payload, { surface: 'home' });
           } else if (command === 'cancel_workout') {
             if (showLiveTrackerRef.current) return;
             if (!rePushStateRef.current.showWorkoutsSurface) return;
@@ -8486,7 +8348,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // per routine, and honors the plan's persisted suppressedRoutineIds,
           // so re-applying a saved/remote plan re-adds active routines without
           // duplicating or resurrecting ones the user removed for that day.
-          picked = applyRoutines(picked, routines);
+          picked = applyRoutines(picked, routines, d.key);
         }
         const preserved = await getPreservedMeals(d.key);
         const skipPreservedOverlay = pickedPathRef.name === 'saved' || pickedPathRef.name === 'remote';
@@ -8524,7 +8386,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           });
           if (toAdd.length > 0) {
             picked = { ...picked, meals: [...currentMeals, ...toAdd] };
-            if (routines.length > 0) picked = applyRoutines(picked, routines);
+            if (routines.length > 0) picked = applyRoutines(picked, routines, d.key);
           }
         }
         return [d.key, picked] as const;
@@ -9647,7 +9509,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           : resp.updated_nutrition_plan as DailyNutritionPlan;
         // Re-apply routines on top of the AI-merged plan so pinned meals win.
         const currentRoutines = await loadMealRoutines();
-        const mergedPlan = applyRoutines(baseMerge, currentRoutines);
+        const mergedPlan = applyRoutines(baseMerge, currentRoutines, today);
         appliedNutrition = mergedPlan;
         setNutritionPlansByDate(prev => ({ ...prev, [today]: mergedPlan }));
         await saveNutritionPlan(today, mergedPlan);
@@ -10182,6 +10044,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } else {
       console.log(`[handleMealSave] no current plan for ${date}`);
     }
+    // Resolve the backend log id for an edited logged meal BEFORE the
+    // day-state persist below, so the _loggedMealId stamp rides that same
+    // write and the PATCH overlaps it. The old flow persisted the day state,
+    // then stamped + persisted it again, then PATCHed — three sequential
+    // round-trips holding the editor's saving spinner.
+    let editLoggedId = Number((updated as any)._loggedMealId ?? 0) || null;
+    if (!editLoggedId && !isNewMeal) {
+      editLoggedId = await resolvePendingMealLog(pendingMealLogKeys(date, savedMealType, updated));
+    }
+    const isExistingLogEdit = userInitiated && !isNewMeal && !!editLoggedId && !!authToken;
+    let editPatchPromise: Promise<MealPageResponse> | null = null;
+    if (isExistingLogEdit && authToken && editLoggedId) {
+      if (nextPlan && savedIdx >= 0 && nextPlan.meals?.[savedIdx]) {
+        const stampedMeals = [...nextPlan.meals];
+        stampedMeals[savedIdx] = { ...stampedMeals[savedIdx], _loggedMealId: editLoggedId } as MealSuggestion;
+        nextPlan = { ...nextPlan, meals: stampedMeals };
+        // Merge against the live ref, not the pre-await snapshot — the
+        // resolvePendingMealLog await above can let concurrent handlers
+        // update other dates, and a stale whole-map write would drop them.
+        nextPlansByDate = { ...nutritionPlansByDateRef.current, [date]: nextPlan };
+        nutritionPlansByDateRef.current = nextPlansByDate;
+        setNutritionPlansByDate(nextPlansByDate);
+      }
+      const normalizedEdit = ensureItems(updated);
+      editPatchPromise = updateMeal(authToken, editLoggedId, {
+        name: normalizedEdit.meal || (normalizedEdit as any).name || 'Meal',
+        consumed_at: consumedAtForMealDate(normalizedEdit, date),
+        items: mealSuggestionToHistoryItems(normalizedEdit),
+        version: Number((updated as any)._version ?? 0) || undefined,
+      });
+      // Rejection is handled at the await site in the edit branch below;
+      // pre-attach a catch so an early failure isn't flagged unhandled.
+      editPatchPromise.catch(() => {});
+    }
     if (nextPlan) {
       await saveNutritionPlan(date, nextPlan);
       console.log(`[handleMealSave] staged day plan for server persist`);
@@ -10208,45 +10104,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // A logged meal IS its own backend row. Editing it must ALWAYS reach the
     // backend (rule G), independent of local check state — the old code only
     // re-logged when the slot happened to be marked checked, so edits to a
-    // logged meal silently never persisted and reverted on reload. Resolve the
-    // backend id from the meal (the editor preserves `_loggedMealId`) or from
-    // an in-flight initial log, then PATCH via updateMeal exactly like the
-    // History-tab path, with a 404 → re-create fallback.
-    let editLoggedId = Number((updated as any)._loggedMealId ?? 0) || null;
-    if (!editLoggedId && !isNewMeal) {
-      editLoggedId = await resolvePendingMealLog(pendingMealLogKeys(date, savedMealType, updated));
-    }
-    const isExistingLogEdit = userInitiated && !isNewMeal && !!editLoggedId && !!authToken;
-    if (isExistingLogEdit && authToken && editLoggedId) {
+    // logged meal silently never persisted and reverted on reload. The PATCH
+    // was started above so it overlaps the day-state persist; the 404 →
+    // re-create fallback below keeps the History-tab path's semantics. The
+    // _loggedMealId stamp already rode the day-state write, so applyRoutines
+    // + the history overlay treat this row as the authoritative logged
+    // instance and never revert it on reload.
+    if (isExistingLogEdit && authToken && editLoggedId && editPatchPromise) {
       const normalizedEdit = ensureItems(updated);
-      const historyItems = mealSuggestionToHistoryItems(normalizedEdit);
-      // Keep the backend id on the saved local plan so applyRoutines + the
-      // history overlay treat this row as the authoritative logged instance
-      // and never revert it on reload.
       if (savedIdx >= 0) {
-        let sp: DailyNutritionPlan | null = null;
-        setNutritionPlansByDate(prev => {
-          const cur = prev[date]; const meals = cur?.meals ?? [];
-          if (!cur || !meals[savedIdx]) return prev;
-          const nm = [...meals];
-          nm[savedIdx] = { ...nm[savedIdx], _loggedMealId: editLoggedId } as MealSuggestion;
-          sp = { ...cur, meals: nm };
-          nutritionPlansByDateRef.current = { ...nutritionPlansByDateRef.current, [date]: sp as DailyNutritionPlan };
-          return { ...prev, [date]: sp as DailyNutritionPlan };
-        });
-        if (sp) {
-          await saveNutritionPlan(date, sp).catch(() => {});
-          await persistDayState(date, { nutrition_plan: sp }).catch(() => {});
-        }
         try { await savePreservedMeal(date, savedMealType, { ...normalizedEdit, _loggedMealId: editLoggedId } as MealSuggestion); } catch {}
       }
       try {
-        const page = await updateMeal(authToken, editLoggedId, {
-          name: normalizedEdit.meal || (normalizedEdit as any).name || 'Meal',
-          consumed_at: consumedAtForMealDate(normalizedEdit, date),
-          items: historyItems,
-          version: Number((updated as any)._version ?? 0) || undefined,
-        });
+        const page = await editPatchPromise;
         await applyMealPageResponse(page);
       } catch (err: any) {
         const m = String(err?.message ?? '');
@@ -12416,48 +12286,55 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Per-(date, saved) lock — `upsertMealInPlansByDate(..., 'new_meal')`
     // always appends, so a synchronous double-tap from anywhere
     // (sheet row + race, watch bridge, etc.) would otherwise insert
-    // two copies of the same favorite into the day. The mutation
-    // coordinator's `runMealMutation` queue serializes by key, so the
-    // second invocation simply waits for the first to finish and then
-    // re-runs; the `_localId` dedup guard below short-circuits the
-    // re-run so it does not double-write.
+    // two copies of the same favorite into the day. The mutation coordinator
+    // serializes by key; queued duplicate taps reuse one transient local id so
+    // the re-run below can see the first insert and short-circuit. The id is
+    // released after the queue drains, so a later intentional second add still
+    // creates a separate copy.
     const mutationKey = addSavedMutationKey(date, saved as any);
-    return runMealMutation(mutationKey, async () => {
-      const plannedMeal = savedMealToSuggestion(saved);
-      const fallbackPlan = {
-        meals: [],
-        removedMealIds: [],
-        targets: userProfile ? calculateNutritionTargets(userProfile) : { calories: 0, protein: 0, carbs: 0, fat: 0 },
-      } as DailyNutritionPlan;
-      const currentPlan = nutritionPlansByDateRef.current[date] ?? fallbackPlan;
-      // Dedup guard: if the most recent meal in the day is the SAME
-      // saved-meal _localId we just stamped (from a queued re-run), bail.
-      const plannedLocalId = String((plannedMeal as any)?._localId ?? '').trim();
-      if (plannedLocalId) {
+    let localIdForQueuedAdd = addSavedMealLocalIdByMutationKeyRef.current.get(mutationKey);
+    if (!localIdForQueuedAdd) {
+      localIdForQueuedAdd = `saved_add_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      addSavedMealLocalIdByMutationKeyRef.current.set(mutationKey, localIdForQueuedAdd);
+    }
+    const plannedLocalId = localIdForQueuedAdd;
+    try {
+      return await runMealMutation(mutationKey, async () => {
+        const plannedMeal = savedMealToSuggestion(saved, undefined, undefined, { localId: plannedLocalId });
+        const fallbackPlan = {
+          meals: [],
+          removedMealIds: [],
+          targets: userProfile ? calculateNutritionTargets(userProfile) : { calories: 0, protein: 0, carbs: 0, fat: 0 },
+        } as DailyNutritionPlan;
+        const currentPlan = nutritionPlansByDateRef.current[date] ?? fallbackPlan;
         const already = (currentPlan.meals ?? []).some(m => String((m as any)?._localId ?? '') === plannedLocalId);
         if (already) return;
-      }
-      const mutation = upsertMealInPlansByDate(
-        { ...nutritionPlansByDateRef.current, [date]: currentPlan },
-        date,
-        'new_meal',
-        plannedMeal,
-      );
-      if (!mutation.plan) return;
+        const mutation = upsertMealInPlansByDate(
+          { ...nutritionPlansByDateRef.current, [date]: currentPlan },
+          date,
+          'new_meal',
+          plannedMeal,
+        );
+        if (!mutation.plan) return;
 
-      nutritionPlansByDateRef.current = mutation.plansByDate;
-      setNutritionPlansByDate(mutation.plansByDate);
-      await saveNutritionPlan(date, mutation.plan);
-      await persistDayState(date, { nutrition_plan: mutation.plan });
-      if (authToken) {
-        _backfillFoodClassifications(
-          { [date]: mutation.plan },
-          authToken,
-          setNutritionPlansByDate,
-          applyAndPersistFoodClassifications,
-        ).catch(() => {});
+        nutritionPlansByDateRef.current = mutation.plansByDate;
+        setNutritionPlansByDate(mutation.plansByDate);
+        await saveNutritionPlan(date, mutation.plan);
+        await persistDayState(date, { nutrition_plan: mutation.plan });
+        if (authToken) {
+          _backfillFoodClassifications(
+            { [date]: mutation.plan },
+            authToken,
+            setNutritionPlansByDate,
+            applyAndPersistFoodClassifications,
+          ).catch(() => {});
+        }
+      });
+    } finally {
+      if (addSavedMealLocalIdByMutationKeyRef.current.get(mutationKey) === plannedLocalId) {
+        addSavedMealLocalIdByMutationKeyRef.current.delete(mutationKey);
       }
-    });
+    }
   }, [authToken, applyAndPersistFoodClassifications, persistDayState, userProfile]);
 
   const mirrorLoggedSavedMealToDay = useCallback(async (
@@ -12740,8 +12617,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       workoutPalette={workoutPalette}
       onOpen={openLibraryExercise}
       onPlayVideo={playLibraryExerciseVideo}
+      authToken={authToken}
     />
-  ), [openLibraryExercise, playLibraryExerciseVideo, themeColors, workoutPalette]);
+  ), [authToken, openLibraryExercise, playLibraryExerciseVideo, themeColors, workoutPalette]);
   const exerciseLibraryKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
   const renderEquipmentLibraryItem = useCallback(({ item }: { item: EquipmentLibraryItem }) => (
     <View style={{ marginBottom: 8 }}>
@@ -13589,7 +13467,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       id: weightPromptId,
       eyebrow: 'Body',
       title: 'Time for a weigh-in',
-      body: `Your last logged weight was ${daysSinceWeight} day${daysSinceWeight === 1 ? '' : 's'} ago. A fresh entry keeps goal pace and nutrition targets sharper.`,
+      body: `Last logged ${daysSinceWeight} day${daysSinceWeight === 1 ? '' : 's'} ago. Add today when you can.`,
+      infoTitle: 'Why weigh-ins matter',
+      infoBody: 'A fresh weight keeps goal pace, trend estimates, and nutrition targets sharper. The weekly trend matters more than any single weigh-in.',
       icon: 'scale-outline',
       accent: themeColors.primary,
       primaryLabel: 'Log weight',
@@ -13886,7 +13766,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <TodayHomeTab
             themeName={userProfile.themePreference}
             authToken={authToken ?? undefined}
-            todayDateKey={todayHomeISO}
             themeColors={themeColors}
             workoutAccent={workoutPalette.strong}
             mealsAccent={mealPalette.strong}
@@ -15117,9 +14996,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   }}
                   collapsable={false}
                 >
-                <DayCard
+                  <DayCard
                   item={item}
                   themeName={userProfile.themePreference}
+                  authToken={authToken}
                   profileGender={userProfile.physicalStats?.gender}
                   visualOccurrenceIndex={workoutVisualOccurrenceIndex(weekSchedule, item)}
                   isToday={isToday}
@@ -15219,18 +15099,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       dayKey: key,
                     });
                   }}
-                  onOpenExerciseVideo={(exName) => {
+                  onOpenExerciseVideo={(exName, ctx) => {
                     // Launched from the small thumbnail on an exercise
-                    // row. Pull context from the workout exercise so
-                    // the video-search filter is tight.
+                    // row. Prefer the context the row passed, then fall
+                    // back to the workout exercise so the video-search
+                    // filter stays tight.
                     const ex = (item.workout?.exercises || []).find(
                       (e: any) => (e.name || '').toLowerCase() === exName.toLowerCase(),
                     );
                     openExerciseVideo(exName, {
-                      equipment: (ex as any)?.equipment ?? null,
-                      primary_muscle: (ex as any)?.primary_muscle ?? null,
-                      movement_pattern: (ex as any)?.movement_pattern ?? null,
-                      demo_exercise_db_id: (ex as any)?.demo_exercise_db_id ?? null,
+                      equipment: ctx?.equipment ?? (ex as any)?.equipment ?? null,
+                      primary_muscle: ctx?.primary_muscle ?? (ex as any)?.primary_muscle ?? null,
+                      movement_pattern: ctx?.movement_pattern ?? (ex as any)?.movement_pattern ?? null,
+                      demo_exercise_db_id: ctx?.demo_exercise_db_id ?? (ex as any)?.demo_exercise_db_id ?? null,
                     });
                   }}
                   onViewExercise={async (exName) => {
@@ -16064,6 +15945,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 	              resetToTodayToken={progressResetToken}
 	              focusTarget={progressFocusTarget}
 	              focusTargetToken={progressFocusToken}
+	              onChromeScroll={handleTopChromeScroll}
 	              nutritionPlan={progressNutritionPlan}
 	              nutritionLogRefreshKey={mealNutritionRefreshKey + activityNutritionRefreshKey}
 	              planWeekWindow={progressPlanWeekWindow}
@@ -16797,13 +16679,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     movement_pattern: (selectedExercise as any).movement_pattern ?? null,
                     demo_exercise_db_id: selectedExercise.demo_exercise_db_id ?? null,
                   });
-                  const hasDemo = !!selectedExercise.demo_exercise_db_id || !!moveKitDemoVideo(
+                  const hasMoveKitDemo = !!moveKitDemoVideo(
                     selectedExercise.demo_exercise_db_id ?? null,
                     selectedExercise.name,
                   );
                   return (
                     <>
-                      {hasDemo ? (
+                      {hasMoveKitDemo ? (
                         <>
                           <ExerciseDemoCard
                             demoExerciseDbId={selectedExercise.demo_exercise_db_id}
@@ -16844,7 +16726,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <ExerciseVideoCard
                           exerciseName={selectedExercise.name}
                           videoId={_vid}
-                          demoExerciseDbId={null}
+                          demoExerciseDbId={selectedExercise.demo_exercise_db_id ?? null}
+                          authToken={authToken}
+                          equipment={preferredExerciseVideoEquipment(selectedExercise)}
+                          primaryMuscle={selectedExercise.primary_muscle ?? null}
+                          movementPattern={(selectedExercise as any).movement_pattern ?? null}
                           themeName={userProfile.themePreference}
                           onPress={openVideos}
                         />
@@ -20615,9 +20501,10 @@ function WorkoutStimulusInfoModal({ visible, meta, tc, onClose }: {
   );
 }
 
-function DayCardImpl({ item, themeName, profileGender, visualOccurrenceIndex = 0, isToday, dayStepCount, isCompleted, isSkipped, skipReason, completedSummary, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, currentStreak, onReadinessTap, templateOptions, onUseTemplate, onStartRecoverySession, onChangeTemplate, onStartCustom, onLogActivity }: {
+function DayCardImpl({ item, themeName, authToken, profileGender, visualOccurrenceIndex = 0, isToday, dayStepCount, isCompleted, isSkipped, skipReason, completedSummary, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, currentStreak, onReadinessTap, templateOptions, onUseTemplate, onStartRecoverySession, onChangeTemplate, onStartCustom, onLogActivity }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
+  authToken?: string | null;
   profileGender?: UserProfile['physicalStats']['gender'];
   visualOccurrenceIndex?: number;
   isToday: boolean;
@@ -20656,7 +20543,15 @@ function DayCardImpl({ item, themeName, profileGender, visualOccurrenceIndex = 0
   /** Opens the form-video modal for the given exercise. Wired from
    *  the WorkoutCard thumbnail tap — users can play the YouTube
    *  demo without leaving the plan. */
-  onOpenExerciseVideo?: (exerciseName: string) => void;
+  onOpenExerciseVideo?: (
+    exerciseName: string,
+    context?: {
+      equipment?: string | null;
+      primary_muscle?: string | null;
+      movement_pattern?: string | null;
+      demo_exercise_db_id?: string | null;
+    },
+  ) => void;
   readinessBadge?: WorkoutReadinessBadge;
   currentStreak?: number;
   onReadinessTap?: () => void;
@@ -21170,6 +21065,8 @@ function DayCardImpl({ item, themeName, profileGender, visualOccurrenceIndex = 0
   const changeActionIconBackground = hasCardPhotoBackground ? cardActionIconBackground : expandedActionIconBackground;
   const changeActionTextColor = hasCardPhotoBackground ? cardActionTextColor : expandedActionTextColor;
   const changeActionSubColor = hasCardPhotoBackground ? cardActionSubColor : expandedActionSubColor;
+  const isFlowWorkout = isRecoveryFlowWorkout(item.workout);
+  const startWorkoutLabel = workoutStartActionLabel(item.workout);
   const showChangeTemplateControl = !onChangeFocus && !!onChangeTemplate && !isCompleted;
   const showChangeFocusControl = !!onChangeFocus && !!splitOptions && splitOptions.length > 1 && !isCompleted;
   const showChangeWorkoutControl = showChangeTemplateControl || showChangeFocusControl;
@@ -21565,10 +21462,10 @@ function DayCardImpl({ item, themeName, profileGender, visualOccurrenceIndex = 0
               <View testID="start-workout-cta-visible" style={[styles.startWorkoutBtn, { shadowColor: hasCardPhotoBackground && !lightPhotoChrome ? '#000000' : accentColor }]}>
                 <View style={[styles.startWorkoutBody, { backgroundColor: startWorkoutButtonColor }]}>
                   <View style={[styles.startWorkoutIconBadge, { backgroundColor: startWorkoutIconBackground }]}>
-                    <Ionicons name="play" size={17} color={startWorkoutTextColor} style={{ marginLeft: 2 }} />
+                    <Ionicons name={isFlowWorkout ? 'body-outline' : 'play'} size={17} color={startWorkoutTextColor} style={isFlowWorkout ? undefined : { marginLeft: 2 }} />
                   </View>
                   <View style={styles.startWorkoutCopy}>
-                    <Text style={[styles.startWorkoutBtnText, { color: startWorkoutTextColor }]}>Start Workout</Text>
+                    <Text style={[styles.startWorkoutBtnText, { color: startWorkoutTextColor }]}>{startWorkoutLabel}</Text>
                   </View>
                 </View>
               </View>
@@ -21951,6 +21848,7 @@ function DayCardImpl({ item, themeName, profileGender, visualOccurrenceIndex = 0
                 workout={item.workout!}
                 themeName={themeName}
                 sessionMinutes={sessionMinutes}
+                authToken={authToken}
                 onSwapExercise={
                   onSwapExercise
                     ? (exIdx, exName) => onSwapExercise(item.workout!, exIdx, exName)
@@ -21984,6 +21882,7 @@ const DayCard = React.memo(DayCardImpl, (prev, next) => {
   return (
     prev.item === next.item
     && prev.themeName === next.themeName
+    && prev.authToken === next.authToken
     && prev.profileGender === next.profileGender
     && prev.visualOccurrenceIndex === next.visualOccurrenceIndex
     && prev.isToday === next.isToday

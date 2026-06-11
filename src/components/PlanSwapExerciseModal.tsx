@@ -398,6 +398,8 @@ export default function PlanSwapExerciseModal({
                 exerciseName: c.name,
                 demoExerciseDbId,
                 fallbackSource: thumbSrc,
+                authToken,
+                allowHostedFallback: true,
               });
               const equipment = exerciseEquipmentLabel(c, ownedEquipment);
               return (
@@ -432,8 +434,17 @@ export default function PlanSwapExerciseModal({
                         exerciseName={c.name}
                         demoExerciseDbId={demoExerciseDbId}
                         fallbackSource={thumbSrc}
+                        authToken={authToken}
+                        equipment={exerciseEquipmentLabel(c, ownedEquipment) ?? c.equipment ?? null}
+                        primaryMuscle={c.primary_muscle ?? null}
+                        movementPattern={(c as any).movement_pattern ?? null}
                         style={{ width: '100%', height: '100%' }}
                         shouldPlayVideo={false}
+                        placeholder={(
+                          <View style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+                            <Ionicons name="videocam-outline" size={19} color={tc.textMuted} />
+                          </View>
+                        )}
                       />
                     ) : (
                       <Ionicons name="videocam-outline" size={19} color={tc.textMuted} />

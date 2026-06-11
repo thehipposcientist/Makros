@@ -1,204 +1,159 @@
 import { useEffect, useRef } from 'react';
-import { View, Image, Animated, Easing, StyleSheet } from 'react-native';
+import { Animated, Easing, Image, StyleSheet, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Defs, G, LinearGradient as SvgLinearGradient, Path, Stop } from 'react-native-svg';
 
-const MARK_SIZE = 96;
-const LOGO_W = 276;
-const LOGO_H = 92;
+import BrandMark from './BrandMark';
+
+const WORDMARK = require('../../assets/images/thallo-logo-white-transparent-New.png');
+const HERO_IMAGE = require('../../assets/images/card-backgrounds/workout-card-generic-gym-day-neutral.jpg');
+const AnimatedLinearGradient = Animated.createAnimatedComponent(LinearGradient);
 
 export function SplashLoadingScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const backgroundAnim = useRef(new Animated.Value(0)).current;
-  const heartbeatAnim = useRef(new Animated.Value(0)).current;
+  const breatheAnim = useRef(new Animated.Value(0)).current;
+  const gradientAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 520,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
 
-    const background = Animated.loop(
+    const breathe = Animated.loop(
       Animated.sequence([
-        Animated.timing(backgroundAnim, {
-          toValue: 1, duration: 6500, useNativeDriver: true,
-          easing: Easing.inOut(Easing.quad),
-        }),
-        Animated.timing(backgroundAnim, {
-          toValue: 0, duration: 6500, useNativeDriver: true,
-          easing: Easing.inOut(Easing.quad),
-        }),
-      ]),
-    );
-    background.start();
-
-    const heartbeat = Animated.loop(
-      Animated.sequence([
-        Animated.timing(heartbeatAnim, {
-          toValue: 1, duration: 1800, useNativeDriver: false,
+        Animated.timing(breatheAnim, {
+          toValue: 1,
+          duration: 2600,
           easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
         }),
-        Animated.timing(heartbeatAnim, { toValue: 0, duration: 0, useNativeDriver: false }),
-        Animated.delay(520),
+        Animated.timing(breatheAnim, {
+          toValue: 0,
+          duration: 2600,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
       ]),
     );
-    heartbeat.start();
+    const gradient = Animated.loop(
+      Animated.sequence([
+        Animated.timing(gradientAnim, {
+          toValue: 1,
+          duration: 6200,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(gradientAnim, {
+          toValue: 0,
+          duration: 6200,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
 
-    return () => { background.stop(); heartbeat.stop(); };
-  }, []);
+    breathe.start();
+    gradient.start();
 
-  const backgroundScale = backgroundAnim.interpolate({
+    return () => {
+      breathe.stop();
+      gradient.stop();
+    };
+  }, [breatheAnim, fadeAnim, gradientAnim]);
+
+  const imageScale = breatheAnim.interpolate({
     inputRange: [0, 1],
     outputRange: [1.03, 1.08],
   });
-  const backgroundOpacity = fadeAnim.interpolate({
+  const haloScale = breatheAnim.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, 0.64],
+    outputRange: [0.92, 1.16],
   });
-  const ambientTopOpacity = backgroundAnim.interpolate({
-    inputRange: [0, 0.45, 1],
-    outputRange: [0.1, 0.26, 0.14],
+  const haloOpacity = breatheAnim.interpolate({
+    inputRange: [0, 0.52, 1],
+    outputRange: [0.18, 0.34, 0.16],
   });
-  const ambientBottomOpacity = backgroundAnim.interpolate({
+  const gradientTranslateX = gradientAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-34, 34],
+  });
+  const gradientTranslateY = gradientAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [26, -24],
+  });
+  const gradientOpacity = gradientAnim.interpolate({
     inputRange: [0, 0.5, 1],
-    outputRange: [0.08, 0.16, 0.24],
+    outputRange: [0.2, 0.36, 0.22],
   });
-  const ambientTopTranslateY = backgroundAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [-28, 26],
-  });
-  const ambientBottomTranslateY = backgroundAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [32, -18],
-  });
-  const ambientTranslateX = backgroundAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [-18, 22],
-  });
-  const ambientScale = backgroundAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.06],
-  });
-  const heartbeatWidth = heartbeatAnim.interpolate({
-    inputRange: [0, 0.16, 0.76, 1],
-    outputRange: [0, 0, MARK_SIZE, MARK_SIZE],
-  });
-  const heartbeatOpacity = heartbeatAnim.interpolate({
-    inputRange: [0, 0.12, 0.2, 0.78, 1],
-    outputRange: [0, 0, 1, 0.9, 0],
-  });
-  const markScale = heartbeatAnim.interpolate({
-    inputRange: [0, 0.18, 0.26, 0.34, 0.48, 1],
-    outputRange: [1, 1, 1.035, 0.995, 1.018, 1],
-  });
-
   return (
     <View style={styles.root}>
       <Animated.Image
-        source={require('../../assets/images/card-backgrounds/workout-card-generic-gym-day-neutral.jpg')}
+        source={HERO_IMAGE}
+        resizeMode="cover"
         style={[
           StyleSheet.absoluteFillObject,
-          styles.backgroundImage,
-          { opacity: backgroundOpacity, transform: [{ scale: backgroundScale }] },
+          styles.heroImage,
+          { transform: [{ scale: imageScale }] },
         ]}
-        resizeMode="cover"
       />
       <LinearGradient
         colors={[
-          'rgba(4,10,12,0.96)',
-          'rgba(6,16,15,0.90)',
-          'rgba(6,16,15,0.98)',
+          'rgba(4,10,12,0.98)',
+          'rgba(6,16,15,0.92)',
+          'rgba(4,10,12,0.99)',
         ]}
         locations={[0, 0.48, 1]}
         style={StyleSheet.absoluteFill}
       />
-      <LinearGradient
-        colors={['rgba(64,232,160,0.22)', 'rgba(18,207,192,0.13)', 'rgba(160,112,232,0.08)']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={StyleSheet.absoluteFill}
+      <AnimatedLinearGradient
+        pointerEvents="none"
+        colors={[
+          'rgba(78,241,210,0.32)',
+          'rgba(92,141,120,0.06)',
+          'rgba(169,230,136,0.18)',
+        ]}
+        locations={[0, 0.54, 1]}
+        start={{ x: 0.02, y: 0.08 }}
+        end={{ x: 0.98, y: 0.92 }}
+        style={[
+          styles.movingGradient,
+          {
+            opacity: gradientOpacity,
+            transform: [
+              { translateX: gradientTranslateX },
+              { translateY: gradientTranslateY },
+              { scale: 1.16 },
+            ],
+          },
+        ]}
       />
+      <View pointerEvents="none" style={styles.gridOverlay}>
+        {Array.from({ length: 7 }).map((_, index) => (
+          <View key={`h-${index}`} style={[styles.gridLineH, { top: `${14 + index * 11}%` }]} />
+        ))}
+        {Array.from({ length: 5 }).map((_, index) => (
+          <View key={`v-${index}`} style={[styles.gridLineV, { left: `${16 + index * 17}%` }]} />
+        ))}
+      </View>
 
-      <Animated.View
-        pointerEvents="none"
-        style={[
-          styles.ambientWashTop,
-          {
-            opacity: ambientTopOpacity,
-            transform: [
-              { translateX: ambientTranslateX },
-              { translateY: ambientTopTranslateY },
-              { rotate: '-10deg' },
-              { scale: ambientScale },
-            ],
-          },
-        ]}>
-        <LinearGradient
-          colors={['rgba(64,232,160,0)', 'rgba(64,232,160,0.44)', 'rgba(96,184,240,0.26)', 'rgba(64,232,160,0)']}
-          locations={[0, 0.36, 0.7, 1]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={StyleSheet.absoluteFill}
-        />
-      </Animated.View>
-      <Animated.View
-        pointerEvents="none"
-        style={[
-          styles.ambientWashBottom,
-          {
-            opacity: ambientBottomOpacity,
-            transform: [
-              { translateX: ambientTranslateX },
-              { translateY: ambientBottomTranslateY },
-              { rotate: '14deg' },
-              { scale: ambientScale },
-            ],
-          },
-        ]}>
-        <LinearGradient
-          colors={['rgba(96,184,240,0)', 'rgba(96,184,240,0.30)', 'rgba(160,112,232,0.34)', 'rgba(96,184,240,0)']}
-          locations={[0, 0.28, 0.64, 1]}
-          start={{ x: 1, y: 0 }}
-          end={{ x: 0, y: 1 }}
-          style={StyleSheet.absoluteFill}
-        />
-      </Animated.View>
+      <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
+        <View style={styles.markStage}>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.markHalo,
+              {
+                opacity: haloOpacity,
+                transform: [{ scale: haloScale }],
+              },
+            ]}
+          />
+          <BrandMark size={116} variant="tile" animated />
+        </View>
 
-      <Animated.View style={[styles.logoWrap, { opacity: fadeAnim }]}>
-        <Animated.View style={[styles.markStage, { transform: [{ scale: markScale }] }]}>
-          <Animated.View pointerEvents="none" style={[styles.heartbeatClip, { width: heartbeatWidth, opacity: heartbeatOpacity }]}>
-            <Svg width={MARK_SIZE} height={MARK_SIZE} viewBox="0 0 96 96" style={styles.heartbeatSvg}>
-              <Defs>
-                <SvgLinearGradient id="heartbeatGlow" x1="0" y1="0" x2="1" y2="0">
-                  <Stop offset="0" stopColor="#40E8A0" stopOpacity="0" />
-                  <Stop offset="0.18" stopColor="#40E8A0" stopOpacity="0.88" />
-                  <Stop offset="0.58" stopColor="#F8FFF8" stopOpacity="1" />
-                  <Stop offset="1" stopColor="#60B8F0" stopOpacity="0.78" />
-                </SvgLinearGradient>
-              </Defs>
-              <G>
-                <Path
-                  d="M7 51 H22 L27 43 L34 64 L43 35 L51 58 L58 46 L64 51 H89"
-                  fill="none"
-                  stroke="rgba(64,232,160,0.18)"
-                  strokeWidth="9"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <Path
-                  d="M7 51 H22 L27 43 L34 64 L43 35 L51 58 L58 46 L64 51 H89"
-                  fill="none"
-                  stroke="url(#heartbeatGlow)"
-                  strokeWidth="3.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </G>
-            </Svg>
-          </Animated.View>
-        </Animated.View>
-        <Image
-          source={require('../../assets/images/thallo-logo-white-transparent-New.png')}
-          style={styles.logo}
-          resizeMode="contain"
-        />
+        <Image source={WORDMARK} resizeMode="contain" style={styles.wordmark} />
       </Animated.View>
     </View>
   );
@@ -212,52 +167,60 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 32,
   },
-  backgroundImage: {
+  heroImage: {
     width: '100%',
     height: '100%',
+    opacity: 0.42,
   },
-  ambientWashTop: {
+  movingGradient: {
     position: 'absolute',
-    top: '6%',
-    left: -80,
-    right: -80,
-    height: '46%',
+    top: '-12%',
+    right: '-18%',
+    bottom: '-12%',
+    left: '-18%',
   },
-  ambientWashBottom: {
-    position: 'absolute',
-    left: -90,
-    right: -90,
-    bottom: '2%',
-    height: '44%',
+  gridOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.28,
   },
-  logoWrap: {
-    width: LOGO_W,
-    minHeight: MARK_SIZE + LOGO_H + 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 6,
-  },
-  markStage: {
-    width: MARK_SIZE,
-    height: MARK_SIZE,
-    marginBottom: 12,
-    position: 'relative',
-    overflow: 'hidden',
-  },
-  heartbeatClip: {
+  gridLineH: {
     position: 'absolute',
     left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(248,255,248,0.055)',
+  },
+  gridLineV: {
+    position: 'absolute',
     top: 0,
-    height: MARK_SIZE,
-    overflow: 'hidden',
+    bottom: 0,
+    width: 1,
+    backgroundColor: 'rgba(248,255,248,0.04)',
   },
-  heartbeatSvg: {
-    width: MARK_SIZE,
-    height: MARK_SIZE,
+  content: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  logo: {
-    width: LOGO_W,
-    height: LOGO_H,
+  markStage: {
+    width: 148,
+    height: 148,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  markHalo: {
+    position: 'absolute',
+    width: 138,
+    height: 138,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(78,241,210,0.7)',
+    backgroundColor: 'rgba(78,241,210,0.08)',
+  },
+  wordmark: {
+    width: 252,
+    height: 84,
+    marginTop: 2,
   },
 });
 

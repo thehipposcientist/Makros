@@ -1,13 +1,20 @@
 .PHONY: start start-fresh tunnel stop reset-db wait-backend test dev maintenance seed-e2e seed-e2e-recovery-apply \
-        deploy deploy-backend prepare-ios-build-version deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
-        smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates \
-        smoke-mobile-plan-adaptation smoke-mobile-android-platform smoke-mobile-preflight smoke-mobile-preflight-fast smoke-mobile-preflight-parallel
+        deploy deploy-backend deploy-web export-web sync-web verify-web materialize-deploy-files prepare-ios-build-version deploy-ios deploy-ios-clean submit-ios smoke-prod smoke-mobile smoke-mobile-signup smoke-mobile-seeded \
+        smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates smoke-mobile-surface-sweep \
+        smoke-mobile-plan-adaptation smoke-mobile-plan-deep smoke-mobile-android-platform smoke-mobile-preflight smoke-mobile-preflight-fast smoke-mobile-preflight-parallel
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
 AWS_REGION      := us-east-1
 ECR_REPO        := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/thallo-backend
 APP_RUNNER_URL  := https://q4q8mjjhmp.us-east-1.awsapprunner.com
+WEB_BUCKET      := thallofitness-com-web-225629394823
+WEB_URL         := https://thallofitness.com
+CLOUDFRONT_DISTRIBUTION_ID := E307459UYO0OPX
+WEB_DIST_DIR    ?= dist
+WEB_EXPORT_WORKERS ?= 2
+DEPLOY_RESTORE_DIR ?=
+MATERIALIZE_RESTORE_DIR_ARG = $(if $(DEPLOY_RESTORE_DIR),--restore-from-dir $(DEPLOY_RESTORE_DIR),)
 MAESTRO_DRIVER_STARTUP_TIMEOUT ?= 120000
 MAESTRO ?= MAESTRO_DRIVER_STARTUP_TIMEOUT=$(MAESTRO_DRIVER_STARTUP_TIMEOUT) maestro
 MAESTRO_FAST_FLAGS ?=
@@ -155,6 +162,16 @@ seed-e2e-recovery-apply: seed-e2e
 	@echo ""
 	@docker exec thallo-backend python seed_e2e_recovery_apply.py
 
+# Cloud-synced placeholder files can make Metro/EAS look hung while reading
+# zero-byte streams. This fails early or rewrites clean tracked placeholders
+# from HEAD before the expensive deploy steps start.
+materialize-deploy-files:
+	@if [ -f build-latest.ipa ]; then \
+	  node scripts/materialize-deploy-files.mjs --restore-from-head $(MATERIALIZE_RESTORE_DIR_ARG) --restore-from-ipa build-latest.ipa; \
+	else \
+	  node scripts/materialize-deploy-files.mjs --restore-from-head $(MATERIALIZE_RESTORE_DIR_ARG); \
+	fi
+
 # ── Deploy: backend (ECR + App Runner auto-deploys) ──────────────────────────
 deploy-backend:
 	@echo ""
@@ -179,6 +196,46 @@ deploy-backend:
 	@echo ""
 	@echo "Done. Run 'make smoke-prod' in a minute to verify."
 
+# ── Deploy: web (Expo export -> S3 -> CloudFront) ────────────────────────────
+export-web: materialize-deploy-files
+	@echo ""
+	@echo "Exporting production web bundle..."
+	@echo ""
+	@rm -rf $(WEB_DIST_DIR)
+	@NODE_ENV=production CI=1 npx expo export --platform web --output-dir $(WEB_DIST_DIR) --max-workers $(WEB_EXPORT_WORKERS)
+
+sync-web:
+	@echo ""
+	@echo "Syncing web export to s3://$(WEB_BUCKET)..."
+	@echo ""
+	@aws s3 sync $(WEB_DIST_DIR) s3://$(WEB_BUCKET) --delete --size-only \
+	  --exclude "index.html" \
+	  --exclude "metadata.json" \
+	  --exclude "favicon.ico" \
+	  --exclude "favicon.png" \
+	  --exclude "apple-touch-icon.png" \
+	  --exclude "thallo-social-card.png"
+	@for file in index.html metadata.json favicon.ico favicon.png apple-touch-icon.png thallo-social-card.png; do \
+	  if [ -f "$(WEB_DIST_DIR)/$$file" ]; then \
+	    aws s3 cp "$(WEB_DIST_DIR)/$$file" "s3://$(WEB_BUCKET)/$$file"; \
+	  fi; \
+	done
+	@echo ""
+	@echo "Invalidating CloudFront..."
+	@INVALIDATION_ID=$$(aws cloudfront create-invalidation --distribution-id $(CLOUDFRONT_DISTRIBUTION_ID) --paths '/*' --query 'Invalidation.Id' --output text); \
+	  aws cloudfront wait invalidation-completed --distribution-id $(CLOUDFRONT_DISTRIBUTION_ID) --id "$$INVALIDATION_ID"; \
+	  echo "      CloudFront invalidation $$INVALIDATION_ID completed."
+
+verify-web:
+	@echo ""
+	@echo "Verifying production web bundle..."
+	@ENTRY_BUNDLE=$$(node -e 'const fs=require("fs"); const html=fs.readFileSync("$(WEB_DIST_DIR)/index.html","utf8"); const match=html.match(/\/_expo\/static\/js\/web\/entry-[^"]+\.js/); if (!match) process.exit(1); process.stdout.write(match[0]);'); \
+	  curl -fsSL "$(WEB_URL)" | grep -F "$$ENTRY_BUNDLE" >/dev/null
+	@curl -fsSI "$(WEB_URL)" >/dev/null
+	@echo "      Web verified: $(WEB_URL)"
+
+deploy-web: export-web sync-web verify-web
+
 # ── Deploy: iOS (local Xcode build + submit to TestFlight) ────────────────────
 # Builds on this machine — no EAS cloud build credits consumed.
 # Requires Xcode + valid Apple certs/provisioning in your keychain.
@@ -190,7 +247,7 @@ prepare-ios-build-version:
 	  | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const version = JSON.parse(input); const next = Number(version.buildNumber) + 1; if (!Number.isInteger(next)) throw new Error(`Invalid iOS buildNumber: $${version.buildNumber}`); process.stdout.write(String(next)); });') \
 	  node scripts/sync-ios-build-versions.mjs
 
-deploy-ios: prepare-ios-build-version
+deploy-ios: materialize-deploy-files prepare-ios-build-version
 	@echo ""
 	@echo "Building iOS locally..."
 	@echo "(~15-25 min depending on machine. No EAS build credits used.)"
@@ -201,31 +258,34 @@ deploy-ios: prepare-ios-build-version
 	@# EAS_NO_VCS: skip eas-cli's git copy step. The repo's .git history is huge
 	@# (tens of GB), so the default git-based "Compressing project files" copy
 	@# hangs. With this set, eas-cli archives the working dir honoring .easignore.
-	@EAS_NO_VCS=1 EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --output build-latest.ipa
+	@NODE_ENV=production EAS_NO_VCS=1 EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --output build-latest.ipa
 	@echo ""
 	@echo "Build finished. Submitting to TestFlight..."
-	@eas submit --platform ios --path build-latest.ipa --non-interactive
+	@$(MAKE) submit-ios
 
 # Fresh local iOS build — clears EAS's cached entitlements / provisioning.
 # Use when entitlements changed (HealthKit, Push, etc.) or app.json
 # infoPlist keys changed. Required after any `ios.entitlements` or
 # capability edit in Apple Developer portal.
-deploy-ios-clean: prepare-ios-build-version
+deploy-ios-clean: materialize-deploy-files prepare-ios-build-version
 	@echo ""
 	@echo "Building iOS locally with --clear-cache (fresh entitlements)..."
 	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"
 	@echo ""
-	@EAS_NO_VCS=1 EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --clear-cache --output build-latest.ipa
+	@NODE_ENV=production EAS_NO_VCS=1 EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --clear-cache --output build-latest.ipa
 	@echo ""
 	@echo "Build finished. Submitting to TestFlight..."
-	@eas submit --platform ios --path build-latest.ipa --non-interactive
+	@$(MAKE) submit-ios
 	@echo ""
 	@echo "Done. Check App Store Connect -> TestFlight tab for processing status."
 
+submit-ios:
+	@eas submit --platform ios --path build-latest.ipa --non-interactive
+
 # ── Deploy everything ────────────────────────────────────────────────────────
-deploy: deploy-backend deploy-ios
+deploy: materialize-deploy-files deploy-backend deploy-web deploy-ios
 	@echo ""
-	@echo "Full deploy kicked off. Backend is already live; iOS will appear"
+	@echo "Full deploy completed. Backend and web are live; iOS will appear"
 	@echo "in TestFlight once Apple finishes processing."
 
 # ── Smoke-test the mobile app via Maestro ────────────────────────────────────
@@ -235,6 +295,16 @@ smoke-mobile:
 	  echo "ERROR: maestro not found. Install with:"; \
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
+	@$(MAESTRO) test .maestro/flows/signup-entrypoints.yaml
+	@$(MAESTRO) test .maestro/flows/signup-and-regen.yaml
+
+smoke-mobile-signup:
+	@echo "Running Maestro signup flows (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAESTRO) test .maestro/flows/signup-entrypoints.yaml
 	@$(MAESTRO) test .maestro/flows/signup-and-regen.yaml
 
 smoke-mobile-seeded: seed-e2e
@@ -254,16 +324,44 @@ smoke-mobile-workouts: seed-e2e
 	@$(MAESTRO) test .maestro/flows/recovery-live-workouts.yaml
 	@$(MAESTRO) test .maestro/flows/workout-templates.yaml
 	@$(MAESTRO) test .maestro/flows/active-workout-swap-recommendations.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-long-session-reachability.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-set-editing.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-rest-timer-summary.yaml
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-exercise-actions.yaml
 
-smoke-mobile-plan-adaptation: seed-e2e-recovery-apply
+smoke-mobile-plan-adaptation: seed-e2e
 	@echo "Running Maestro plan-adaptation E2E flows (requires backend + Metro running)..."
 	@command -v maestro >/dev/null 2>&1 || { \
 	  echo "ERROR: maestro not found. Install with:"; \
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@$(MAESTRO) test .maestro/flows/ppl-history-ordering.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/plan-current-week-modification.yaml
+	@$(MAKE) seed-e2e-recovery-apply
 	@$(MAESTRO) test .maestro/flows/recovery-recommendation-apply.yaml
+
+smoke-mobile-plan-deep: seed-e2e
+	@echo "Running deep Maestro PlanWeek E2E flows (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAESTRO) test \
+	  .maestro/flows/plan-week-strip-full-navigation.yaml \
+	  .maestro/flows/plan-focus-picker-layout.yaml \
+	  .maestro/flows/plan-focus-picker-close-no-mutation.yaml \
+	  .maestro/flows/plan-rest-day-ctas-across-week.yaml \
+	  .maestro/flows/plan-edit-plan-back-navigation.yaml \
+	  .maestro/flows/plan-history-filter-controls.yaml \
+	  .maestro/flows/plan-settings-duration-current-week-choice.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/plan-empty-focus-persists-across-tabs.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/plan-rest-day-switch-custom-shell.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-pause-resume-controls.yaml
 
 smoke-mobile-android-platform: seed-e2e
 	@echo "Running Android platform parity Maestro flow (requires backend + Metro or installed Android build)..."
@@ -280,6 +378,8 @@ smoke-mobile-state: seed-e2e
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-set-editing.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-rest-timer-summary.yaml
 	@$(MAESTRO) test .maestro/flows/activity-nutrition-hydration.yaml
 	@$(MAESTRO) test .maestro/flows/meals-supplements-state.yaml
 	@$(MAESTRO) test .maestro/flows/meal-history-facts-alignment.yaml
@@ -301,6 +401,44 @@ smoke-mobile-free-gates: seed-e2e
 	  exit 1; }
 	@$(MAESTRO) test .maestro/flows/free-vs-pro-gates.yaml
 
+smoke-mobile-surface-sweep:
+	@echo "Running Maestro surface-sweep E2E flows with fresh seed data between mutating groups..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
+	  .maestro/flows/workout-subtab-navigation.yaml \
+	  .maestro/flows/workout-cards-collapsed-default.yaml \
+	  .maestro/flows/start-workout-active-screen.yaml \
+	  .maestro/flows/workout-history-row-detail.yaml \
+	  .maestro/flows/progress-weight-card.yaml \
+	  .maestro/flows/progress-1rm-consistency.yaml \
+	  .maestro/flows/progress-plateau-recommendations.yaml \
+	  .maestro/flows/progress-health-insights-tab.yaml \
+	  .maestro/flows/nutrition-trend-renders.yaml \
+	  .maestro/flows/nutrition-gut-facts-toggle.yaml \
+	  .maestro/flows/hydration-large-bottles.yaml \
+	  .maestro/flows/meal-search-thallo-badge.yaml \
+	  .maestro/flows/social-friend-detail-back.yaml \
+	  .maestro/flows/gear-tracker-open.yaml \
+	  .maestro/flows/account-details-fast-open.yaml \
+	  .maestro/flows/tutorial-replay.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
+	  .maestro/flows/theme-onyx-contrast.yaml \
+	  .maestro/flows/theme-paper-contrast.yaml \
+	  .maestro/flows/meal-reminder-schedule-edit.yaml \
+	  .maestro/flows/workout-reminder-schedule-edit.yaml \
+	  .maestro/flows/quiet-hours-toggle.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
+	  .maestro/flows/workout-template-build.yaml \
+	  .maestro/flows/plan-current-week-modification.yaml \
+	  .maestro/flows/switch-day-rest-to-workout.yaml \
+	  .maestro/flows/logout-and-relogin.yaml
+
 smoke-mobile-preflight:
 	@echo "Running Maestro preflight flows with fresh E2E seed data between mutating checks..."
 	@command -v maestro >/dev/null 2>&1 || { \
@@ -311,6 +449,8 @@ smoke-mobile-preflight:
 	@$(MAESTRO) test .maestro/flows/seeded-returning-user.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/plan-settings-immutability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/plan-current-week-modification.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/ppl-history-ordering.yaml
 	@$(MAKE) seed-e2e-recovery-apply
@@ -326,7 +466,15 @@ smoke-mobile-preflight:
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/active-workout-swap-recommendations.yaml
 	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-long-session-reachability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-set-editing.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-rest-timer-summary.yaml
+	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-exercise-actions.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/activity-nutrition-hydration.yaml
 	@$(MAKE) seed-e2e
@@ -335,6 +483,7 @@ smoke-mobile-preflight:
 	@$(MAESTRO) test .maestro/flows/meal-history-facts-alignment.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/social-digest.yaml
+	@$(MAKE) smoke-mobile-surface-sweep
 
 # Faster local preflight: same coverage as smoke-mobile-preflight, but with
 # fast deterministic reseeds and isolated flow processes.
@@ -358,10 +507,20 @@ smoke-mobile-preflight-fast:
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/seeded-returning-user.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-settings-immutability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-current-week-modification.yaml
 	@$(MAKE) seed-e2e-recovery-apply
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-recommendation-apply.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-swap-recommendations.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-long-session-reachability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-set-editing.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-rest-timer-summary.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-exercise-actions.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/activity-nutrition-hydration.yaml
 	@$(MAKE) seed-e2e
@@ -372,6 +531,7 @@ smoke-mobile-preflight-fast:
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-live-workouts.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAKE) smoke-mobile-surface-sweep
 
 # Parallel local preflight. Requires MAESTRO_PARALLEL_SHARDS booted devices.
 # Keep shared-user mutating flows sequential to avoid backend fixture races.
@@ -390,11 +550,21 @@ smoke-mobile-preflight-parallel:
 	  .maestro/flows/seeded-returning-user.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-settings-immutability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-current-week-modification.yaml
 	@$(MAKE) seed-e2e-recovery-apply
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) $(MAESTRO_PARALLEL_DEVICE_ARG) --shard-split=$(MAESTRO_PARALLEL_SHARDS) \
 	  .maestro/flows/recovery-recommendation-apply.yaml \
 	  .maestro/flows/active-workout-swap-recommendations.yaml \
 	  .maestro/flows/activity-nutrition-hydration.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-long-session-reachability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-set-editing.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-rest-timer-summary.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-exercise-actions.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/auth-recovery.yaml
 	@$(MAKE) seed-e2e
@@ -405,6 +575,7 @@ smoke-mobile-preflight-parallel:
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-live-workouts.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAKE) smoke-mobile-surface-sweep
 
 # ── Smoke-test the prod backend ──────────────────────────────────────────────
 smoke-prod:

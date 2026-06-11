@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View,
@@ -19,6 +19,8 @@ import {
   LayoutAnimation,
   Keyboard,
   useWindowDimensions,
+  type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 import type { ImageSourcePropType } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -32,6 +34,7 @@ import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
 import EquipmentInfoSheet from '../components/EquipmentInfoSheet';
 import BirthdateInput from '../components/BirthdateInput';
+import NumberWheelPicker from '../components/NumberWheelPicker';
 import { deriveAge, validateBirthdate } from '../utils/age';
 import { cmToFeetInches, feetInchesToCm, lbsToUnit, unitToLbs } from '../utils/units';
 // Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
@@ -54,7 +57,7 @@ import {
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { useLiveFoodSearch } from '../hooks/useLiveFoodSearch';
 import { billingEntitlementToProfilePatch, scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe } from '../services/api';
-import { FREE_TIER_SUMMARY, PRO_TIER_SUMMARY, requirePro, type ProFeature } from '../utils/subscription';
+import { SIGNUP_TRIAL_DAYS, requirePro, type ProFeature } from '../utils/subscription';
 import {
   APPLE_HEALTH_PERMISSION_COPY,
   APPLE_HEALTH_PERMISSION_ITEMS,
@@ -74,7 +77,6 @@ import {
 } from '../utils/strengthEquipmentSettings';
 import { dynamicTextProps } from '../utils/dynamicType';
 import { goalEquipmentWarnings } from '../utils/goalEquipmentGuardrails';
-import { getGoalCardImageSource } from '../utils/goalCardImages';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS,
   SIGNUP_GOAL_MATCH_IDS,
@@ -84,6 +86,165 @@ import {
 } from '../constants/goalConfig';
 import { pexelsPhoto, STOCK_IMAGES } from '../constants/stockImages';
 import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_STATUS_COPY } from '../constants/platformHealth';
+
+type SignupArtTone = {
+  accent: string;
+  accent2: string;
+  bg: [string, string, string];
+};
+
+type GoalArtKind =
+  | 'muscle'
+  | 'recomp'
+  | 'fatLoss'
+  | 'strength'
+  | 'cardio'
+  | 'athletic'
+  | 'hyrox'
+  | 'longevity'
+  | 'maintain';
+
+const GOAL_CARD_ART: Record<string, SignupArtTone & { kind: GoalArtKind; icon: string }> = {
+  build_muscle: {
+    kind: 'muscle',
+    icon: 'barbell-outline',
+    accent: '#15C7B8',
+    accent2: '#7CFCB2',
+    bg: ['#092023', '#0E342E', '#071015'],
+  },
+  body_recomp: {
+    kind: 'recomp',
+    icon: 'body-outline',
+    accent: '#8B5CF6',
+    accent2: '#15C7B8',
+    bg: ['#120F2F', '#0B2D2B', '#071015'],
+  },
+  lose_fat: {
+    kind: 'fatLoss',
+    icon: 'flame-outline',
+    accent: '#F97316',
+    accent2: '#FACC15',
+    bg: ['#271006', '#3B170A', '#071015'],
+  },
+  build_strength: {
+    kind: 'strength',
+    icon: 'shield-checkmark-outline',
+    accent: '#60A5FA',
+    accent2: '#A78BFA',
+    bg: ['#071A31', '#12284F', '#071015'],
+  },
+  improve_cardio: {
+    kind: 'cardio',
+    icon: 'pulse-outline',
+    accent: '#22D3EE',
+    accent2: '#F43F5E',
+    bg: ['#062434', '#0E3A4A', '#071015'],
+  },
+  improve_athleticism: {
+    kind: 'athletic',
+    icon: 'rocket-outline',
+    accent: '#A3E635',
+    accent2: '#38BDF8',
+    bg: ['#102506', '#173216', '#071015'],
+  },
+  hyrox: {
+    kind: 'hyrox',
+    icon: 'stopwatch-outline',
+    accent: '#F59E0B',
+    accent2: '#E11D48',
+    bg: ['#251006', '#33141B', '#071015'],
+  },
+  longevity: {
+    kind: 'longevity',
+    icon: 'leaf-outline',
+    accent: '#34D399',
+    accent2: '#93C5FD',
+    bg: ['#08261B', '#102B38', '#071015'],
+  },
+  maintain: {
+    kind: 'maintain',
+    icon: 'checkmark-done-outline',
+    accent: '#14B8A6',
+    accent2: '#FBBF24',
+    bg: ['#0B2523', '#1A2B20', '#071015'],
+  },
+};
+
+const EQUIPMENT_ART: Record<string, SignupArtTone & { kind: string; icon: string }> = {
+  bodyweight: {
+    kind: 'bodyweight',
+    icon: 'body-outline',
+    accent: '#34D399',
+    accent2: '#A7F3D0',
+    bg: ['#0A251C', '#123026', '#071015'],
+  },
+  home_basic: {
+    kind: 'home_basic',
+    icon: 'home-outline',
+    accent: '#38BDF8',
+    accent2: '#15C7B8',
+    bg: ['#082031', '#0B3443', '#071015'],
+  },
+  home_full: {
+    kind: 'home_full',
+    icon: 'barbell-outline',
+    accent: '#A78BFA',
+    accent2: '#22D3EE',
+    bg: ['#170F34', '#152D47', '#071015'],
+  },
+  planet_fitness: {
+    kind: 'planet_fitness',
+    icon: 'ellipse-outline',
+    accent: '#FACC15',
+    accent2: '#A855F7',
+    bg: ['#20150A', '#241B3A', '#071015'],
+  },
+  commercial_gym: {
+    kind: 'commercial_gym',
+    icon: 'business-outline',
+    accent: '#60A5FA',
+    accent2: '#F97316',
+    bg: ['#081A34', '#1B2535', '#071015'],
+  },
+  crossfit: {
+    kind: 'crossfit',
+    icon: 'flash-outline',
+    accent: '#F97316',
+    accent2: '#22C55E',
+    bg: ['#271006', '#17331C', '#071015'],
+  },
+};
+
+const TRAINING_ART: Record<string, SignupArtTone & { density: number; icon: string }> = {
+  starter: {
+    density: 3,
+    icon: 'walk-outline',
+    accent: '#34D399',
+    accent2: '#15C7B8',
+    bg: ['#09251C', '#0D332F', '#071015'],
+  },
+  busy: {
+    density: 3,
+    icon: 'timer-outline',
+    accent: '#F59E0B',
+    accent2: '#22D3EE',
+    bg: ['#251706', '#14303B', '#071015'],
+  },
+  balanced: {
+    density: 4,
+    icon: 'scale-outline',
+    accent: '#60A5FA',
+    accent2: '#34D399',
+    bg: ['#081C34', '#123329', '#071015'],
+  },
+  committed: {
+    density: 5,
+    icon: 'flame-outline',
+    accent: '#F97316',
+    accent2: '#A78BFA',
+    bg: ['#271006', '#21153E', '#071015'],
+  },
+};
 
 function OnboardingPhotoBanner({
   uri,
@@ -126,6 +287,341 @@ function OnboardingPhotoBanner({
   );
 }
 
+function SignupArtBackdrop({
+  tone,
+  active,
+  children,
+  style,
+}: {
+  tone: SignupArtTone;
+  active?: boolean;
+  children: ReactNode;
+  style?: StyleProp<ViewStyle>;
+}) {
+  return (
+    <View style={[styles.signupArtBackdrop, style]}>
+      <LinearGradient
+        colors={tone.bg}
+        start={{ x: 0.05, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.signupArtGradient}
+      />
+      <View style={[styles.signupArtGlowLarge, { backgroundColor: tone.accent + (active ? '66' : '4D') }]} />
+      <View style={[styles.signupArtGlowSmall, { backgroundColor: tone.accent2 + '40' }]} />
+      <View style={[styles.signupArtRail, { borderColor: tone.accent + '33' }]} />
+      <View style={[styles.signupArtRail, styles.signupArtRailSecond, { borderColor: tone.accent2 + '24' }]} />
+      {children}
+    </View>
+  );
+}
+
+function GoalCardArt({ goalId, active }: { goalId: string; active: boolean }) {
+  const art = GOAL_CARD_ART[goalId] ?? GOAL_CARD_ART.maintain;
+  return (
+    <SignupArtBackdrop tone={art} active={active} style={styles.goalHero}>
+      <GoalArtMotif kind={art.kind} tone={art} />
+      <View style={[
+        styles.goalHeroIconBubble,
+        { borderColor: art.accent + '66' },
+        active && styles.goalHeroIconBubbleActive,
+      ]}>
+        <Ionicons name={art.icon as any} size={20} color={active ? art.accent : '#fff'} />
+      </View>
+      {active && (
+        <View style={[styles.goalHeroCheckBubble, { backgroundColor: art.accent }]}>
+          <Ionicons name="checkmark" size={16} color="#fff" />
+        </View>
+      )}
+    </SignupArtBackdrop>
+  );
+}
+
+function GoalArtMotif({ kind, tone }: { kind: GoalArtKind; tone: SignupArtTone }) {
+  switch (kind) {
+    case 'muscle':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artBarbellShaft, { backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artPlate, styles.artPlateLeftOuter, { borderColor: tone.accent }]} />
+          <View style={[styles.artPlate, styles.artPlateLeftInner, { borderColor: tone.accent2 }]} />
+          <View style={[styles.artPlate, styles.artPlateRightInner, { borderColor: tone.accent2 }]} />
+          <View style={[styles.artPlate, styles.artPlateRightOuter, { borderColor: tone.accent }]} />
+          {[24, 36, 50].map((height, index) => (
+            <View
+              key={height}
+              style={[
+                styles.artGrowthBar,
+                {
+                  height,
+                  left: 78 + index * 17,
+                  backgroundColor: index === 1 ? tone.accent : tone.accent2,
+                  opacity: 0.34 + index * 0.14,
+                },
+              ]}
+            />
+          ))}
+        </View>
+      );
+    case 'recomp':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artRecompRing, { borderColor: tone.accent + 'B8' }]} />
+          <View style={[styles.artRecompRing, styles.artRecompRingAlt, { borderColor: tone.accent2 + 'B8' }]} />
+          <View style={[styles.artRecompCore, { backgroundColor: tone.accent + '24', borderColor: tone.accent2 + '66' }]}>
+            <Ionicons name="body-outline" size={30} color="#FFFFFF" />
+          </View>
+          <View style={[styles.artMetricCard, { borderColor: tone.accent + '44' }]}>
+            <View style={[styles.artMetricLine, { width: 34, backgroundColor: tone.accent }]} />
+            <View style={[styles.artMetricLine, { width: 22, backgroundColor: tone.accent2 }]} />
+            <View style={[styles.artMetricLine, { width: 28, backgroundColor: '#FFFFFF' }]} />
+          </View>
+        </View>
+      );
+    case 'fatLoss':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artFlameAura, { backgroundColor: tone.accent + '24' }]} />
+          <Ionicons name="flame" size={58} color={tone.accent} style={styles.artFlameIcon} />
+          <View style={[styles.artTrendLine, styles.artTrendLineDownOne, { backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artTrendLine, styles.artTrendLineDownTwo, { backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artTrendDot, { left: 120, top: 29, backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artTrendDot, { left: 150, top: 53, backgroundColor: tone.accent }]} />
+        </View>
+      );
+    case 'strength':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artRackPost, { left: 58, borderColor: tone.accent }]} />
+          <View style={[styles.artRackPost, { right: 38, borderColor: tone.accent }]} />
+          <View style={[styles.artRackBeam, { backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artLoadedBar, { backgroundColor: '#FFFFFF' }]} />
+          <View style={[styles.artLoadedPlate, { left: 41, backgroundColor: tone.accent }]} />
+          <View style={[styles.artLoadedPlate, { right: 21, backgroundColor: tone.accent }]} />
+          <View style={[styles.artPlatform, { backgroundColor: tone.accent + '33' }]} />
+        </View>
+      );
+    case 'cardio':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artTrackRing, { borderColor: tone.accent + '80' }]} />
+          <View style={[styles.artTrackRing, styles.artTrackRingInner, { borderColor: tone.accent2 + '70' }]} />
+          <View style={[styles.artPulseSegment, { left: 58, top: 59, width: 26, transform: [{ rotate: '28deg' }], backgroundColor: tone.accent }]} />
+          <View style={[styles.artPulseSegment, { left: 80, top: 49, width: 22, transform: [{ rotate: '-48deg' }], backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artPulseSegment, { left: 98, top: 52, width: 26, transform: [{ rotate: '34deg' }], backgroundColor: tone.accent }]} />
+          <View style={[styles.artPulseSegment, { left: 120, top: 45, width: 30, transform: [{ rotate: '-24deg' }], backgroundColor: tone.accent2 }]} />
+          <Ionicons name="heart" size={26} color="#FFFFFF" style={styles.artHeartIcon} />
+        </View>
+      );
+    case 'athletic':
+      return (
+        <View style={styles.goalArtLayer}>
+          {[0, 1, 2, 3].map((i) => (
+            <View key={i} style={[styles.artAgilityRung, { left: 52 + i * 28, borderColor: i % 2 ? tone.accent2 : tone.accent }]} />
+          ))}
+          <View style={[styles.artSprintTrail, { backgroundColor: tone.accent + '55' }]} />
+          <View style={[styles.artSprintDot, { left: 92, top: 36, backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artSprintDot, { left: 122, top: 28, backgroundColor: tone.accent }]} />
+          <Ionicons name="flash" size={42} color="#FFFFFF" style={styles.artFlashIcon} />
+        </View>
+      );
+    case 'hyrox':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artLaneLine, { top: 36, backgroundColor: tone.accent + '44' }]} />
+          <View style={[styles.artLaneLine, { top: 77, backgroundColor: tone.accent2 + '38' }]} />
+          <View style={[styles.artSledBase, { borderColor: tone.accent }]} />
+          <View style={[styles.artSledHandle, { borderColor: tone.accent2 }]} />
+          <View style={[styles.artSledPlate, { backgroundColor: tone.accent }]} />
+          <View style={[styles.artSledRunner, { backgroundColor: '#FFFFFF' }]} />
+          <Ionicons name="stopwatch-outline" size={26} color="#FFFFFF" style={styles.artStopwatchIcon} />
+        </View>
+      );
+    case 'longevity':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artLongevityCircle, { borderColor: tone.accent + '8A' }]} />
+          <View style={[styles.artLongevityCircle, styles.artLongevityCircleSmall, { borderColor: tone.accent2 + '7A' }]} />
+          <Ionicons name="leaf" size={42} color={tone.accent} style={styles.artLeafIcon} />
+          <View style={[styles.artPulseSegment, { left: 92, top: 66, width: 22, transform: [{ rotate: '-36deg' }], backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artPulseSegment, { left: 111, top: 58, width: 28, transform: [{ rotate: '28deg' }], backgroundColor: '#FFFFFF' }]} />
+          <View style={[styles.artPulseSegment, { left: 135, top: 61, width: 22, transform: [{ rotate: '-22deg' }], backgroundColor: tone.accent }]} />
+        </View>
+      );
+    case 'maintain':
+      return (
+        <View style={styles.goalArtLayer}>
+          <View style={[styles.artBalanceBeam, { backgroundColor: tone.accent2 }]} />
+          <View style={[styles.artBalancePost, { backgroundColor: tone.accent }]} />
+          <View style={[styles.artBalancePan, { left: 50, borderColor: tone.accent }]} />
+          <View style={[styles.artBalancePan, { right: 32, borderColor: tone.accent2 }]} />
+          <View style={[styles.artCalendarCard, { borderColor: tone.accent + '55' }]}>
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <View key={i} style={[styles.artCalendarDot, { backgroundColor: i < 4 ? tone.accent : tone.accent2 }]} />
+            ))}
+          </View>
+        </View>
+      );
+    default:
+      return (
+        <View style={styles.goalArtLayer}>
+          <Ionicons name="flag-outline" size={58} color={tone.accent} style={styles.artFallbackIcon} />
+        </View>
+      );
+  }
+}
+
+function EquipmentTemplateArt({
+  template,
+  active,
+}: {
+  template: EquipmentTemplate;
+  active: boolean;
+}) {
+  const art = EQUIPMENT_ART[template.id] ?? EQUIPMENT_ART.commercial_gym;
+  return (
+    <SignupArtBackdrop tone={art} active={active} style={styles.equipmentTemplateImage}>
+      <EquipmentArtMotif kind={art.kind} tone={art} />
+      <View style={styles.equipmentTemplateTopRow}>
+        <View style={[styles.equipmentTemplatePill, { borderColor: art.accent + '55' }]}>
+          <Ionicons name={art.icon as any} size={12} color="#FFFFFF" />
+          <Text style={styles.equipmentTemplatePillText}>{template.items.length}</Text>
+        </View>
+        {active ? (
+          <View style={[styles.equipmentTemplateCheck, { backgroundColor: art.accent }]}>
+            <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.equipmentTemplateBody}>
+        <Text style={styles.equipmentTemplateLabel} numberOfLines={1}>{template.label}</Text>
+        <Text style={styles.equipmentTemplateDesc} numberOfLines={2}>{template.description}</Text>
+      </View>
+    </SignupArtBackdrop>
+  );
+}
+
+function EquipmentArtMotif({ kind, tone }: { kind: string; tone: SignupArtTone }) {
+  if (kind === 'bodyweight') {
+    return (
+      <View style={styles.equipmentArtLayer}>
+        <View style={[styles.artMat, { borderColor: tone.accent }]} />
+        <View style={[styles.artMobilityArc, { borderColor: tone.accent2 }]} />
+        <Ionicons name="body-outline" size={38} color="#FFFFFF" style={styles.artBodyweightIcon} />
+      </View>
+    );
+  }
+  if (kind === 'home_basic') {
+    return (
+      <View style={styles.equipmentArtLayer}>
+        <View style={[styles.artDumbbellHandle, { backgroundColor: '#FFFFFF' }]} />
+        <View style={[styles.artMiniPlate, { left: 52, backgroundColor: tone.accent }]} />
+        <View style={[styles.artMiniPlate, { left: 77, backgroundColor: tone.accent2 }]} />
+        <View style={[styles.artMiniPlate, { right: 51, backgroundColor: tone.accent2 }]} />
+        <View style={[styles.artMiniPlate, { right: 76, backgroundColor: tone.accent }]} />
+        <View style={[styles.artBand, { borderColor: tone.accent2 }]} />
+        <View style={[styles.artPullupBar, { borderColor: tone.accent }]} />
+      </View>
+    );
+  }
+  if (kind === 'home_full') {
+    return (
+      <View style={styles.equipmentArtLayer}>
+        <View style={[styles.artRackPost, styles.artEquipmentRackLeft, { borderColor: tone.accent }]} />
+        <View style={[styles.artRackPost, styles.artEquipmentRackRight, { borderColor: tone.accent }]} />
+        <View style={[styles.artRackBeam, styles.artEquipmentRackBeam, { backgroundColor: tone.accent2 }]} />
+        <View style={[styles.artBench, { backgroundColor: '#FFFFFF' }]} />
+        <View style={[styles.artBenchLeg, { backgroundColor: tone.accent }]} />
+        <View style={[styles.artWallPlate, { backgroundColor: tone.accent2 }]} />
+      </View>
+    );
+  }
+  if (kind === 'planet_fitness') {
+    return (
+      <View style={styles.equipmentArtLayer}>
+        <View style={[styles.artMachineFrame, { borderColor: tone.accent2 }]} />
+        <View style={[styles.artMachineSeat, { backgroundColor: tone.accent }]} />
+        <View style={[styles.artMachineStack, { borderColor: tone.accent }]} />
+        <View style={[styles.artGymBadge, { backgroundColor: tone.accent2 + '33', borderColor: tone.accent2 }]}>
+          <Ionicons name="ellipse" size={18} color={tone.accent2} />
+        </View>
+      </View>
+    );
+  }
+  if (kind === 'crossfit') {
+    return (
+      <View style={styles.equipmentArtLayer}>
+        <View style={[styles.artRigPost, { left: 52, borderColor: tone.accent }]} />
+        <View style={[styles.artRigPost, { right: 50, borderColor: tone.accent }]} />
+        <View style={[styles.artRigBeam, { backgroundColor: tone.accent2 }]} />
+        <View style={[styles.artKettlebell, { borderColor: '#FFFFFF', backgroundColor: tone.accent + '66' }]} />
+        <View style={[styles.artRowerRail, { backgroundColor: tone.accent2 + 'AA' }]} />
+        <View style={[styles.artRowerSeat, { backgroundColor: '#FFFFFF' }]} />
+      </View>
+    );
+  }
+  return (
+    <View style={styles.equipmentArtLayer}>
+      <View style={[styles.artCableTower, styles.artCableTowerLeft, { borderColor: tone.accent }]} />
+      <View style={[styles.artCableTower, styles.artCableTowerRight, { borderColor: tone.accent2 }]} />
+      <View style={[styles.artCableCrossbar, { backgroundColor: '#FFFFFF' }]} />
+      <View style={[styles.artPlateTree, { backgroundColor: tone.accent }]} />
+      <View style={[styles.artPlateTree, styles.artPlateTreeAlt, { backgroundColor: tone.accent2 }]} />
+    </View>
+  );
+}
+
+function TrainingTemplateArt({
+  template,
+  active,
+}: {
+  template: TrainingTemplate;
+  active: boolean;
+}) {
+  const art = TRAINING_ART[template.id] ?? TRAINING_ART.starter;
+  return (
+    <SignupArtBackdrop tone={art} active={active} style={styles.trainingTemplateArt}>
+      <View style={styles.trainingTemplateTopRow}>
+        <View style={[styles.trainingTemplateIcon, { borderColor: art.accent + '55' }]}>
+          <Ionicons name={art.icon as any} size={17} color="#FFFFFF" />
+        </View>
+        {active ? (
+          <View style={[styles.trainingTemplateCheck, { backgroundColor: art.accent }]}>
+            <Ionicons name="checkmark" size={13} color="#FFFFFF" />
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.trainingCalendar}>
+        {Array.from({ length: 7 }).map((_, i) => (
+          <View
+            key={i}
+            style={[
+              styles.trainingCalendarDay,
+              {
+                backgroundColor: i < art.density ? art.accent : 'rgba(255,255,255,0.14)',
+                borderColor: i < art.density ? art.accent2 + '66' : 'rgba(255,255,255,0.16)',
+              },
+            ]}
+          />
+        ))}
+      </View>
+      <View style={styles.trainingLoadBars}>
+        {[0, 1, 2].map(i => (
+          <View
+            key={i}
+            style={[
+              styles.trainingLoadBar,
+              {
+                width: 26 + i * (template.id === 'busy' ? 7 : 14),
+                backgroundColor: i === 1 ? art.accent2 : art.accent,
+              },
+            ]}
+          />
+        ))}
+      </View>
+    </SignupArtBackdrop>
+  );
+}
+
 function normalizeEquipmentSearchText(value: unknown): string {
   return String(value ?? '')
     .toLowerCase()
@@ -164,7 +660,7 @@ function equipmentItemSelected(item: { name: string; aliases?: string[] }, selec
 type SetupMode = 'quick' | 'custom';
 type AppFocus = 'fitness' | 'nutrition' | 'both';
 type WorkoutPlanningPreference = 'generated' | 'manual' | 'hybrid';
-type StepKey = 'appFocus' | 'workoutStyle' | 'setupPath' | 'goal' | 'quickSetup' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'baseline' | 'injuries' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
+type StepKey = 'appFocus' | 'workoutStyle' | 'setupPath' | 'goal' | 'quickSetup' | 'goalRefine' | 'physicalStats' | 'trial' | 'trainingDays' | 'equipment' | 'baseline' | 'injuries' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
 
 const STEP_LABELS: Record<StepKey, string> = {
   setupPath: 'Setup',
@@ -174,6 +670,7 @@ const STEP_LABELS: Record<StepKey, string> = {
   quickSetup: 'Templates',
   goalRefine: 'Refine',
   physicalStats: 'About You',
+  trial: 'Trial',
   trainingDays: 'Schedule',
   equipment: 'Equipment',
   baseline: 'Baseline',
@@ -210,6 +707,7 @@ const STEP_DOMAIN: Record<StepKey, 'fitness' | 'nutrition' | 'both'> = {
   quickSetup:    'both',     // template picker spans both domains
   goalRefine:    'fitness',
   physicalStats: 'both',
+  trial:         'both',
   trainingDays:  'fitness',
   equipment:     'fitness',
   baseline:      'fitness',
@@ -221,48 +719,31 @@ const STEP_DOMAIN: Record<StepKey, 'fitness' | 'nutrition' | 'both'> = {
   context:       'both',
 };
 
-const FEATURE_OVERVIEW: Array<{
-  key: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  title: string;
-  body: string;
-}> = [
-  {
-    key: 'week',
-    icon: 'calendar-outline',
-    title: 'Stable weekly plans',
-    body: 'A 7-day training week stays fixed while you complete, skip, swap, or log custom work.',
-  },
-  {
-    key: 'meals',
-    icon: 'restaurant-outline',
-    title: 'Meals and macros',
-    body: 'Track food, hydration, routines, supplements, scores, and grocery-friendly meal ideas.',
-  },
-  {
-    key: 'scans',
-    icon: 'scan-outline',
-    title: 'AI scans',
-    body: 'Analyze food, supplements, equipment, form clips, and body photos when Pro is active.',
-  },
-  {
-    key: 'signals',
-    icon: 'pulse-outline',
-    title: 'Recovery and progress',
-    body: 'See readiness, muscle recovery, strength trends, cardio work, body changes, and health signals.',
-  },
-];
+const IMPERIAL_HEIGHT_FEET = [3, 4, 5, 6, 7, 8] as const;
+const IMPERIAL_HEIGHT_INCHES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] as const;
+const METRIC_HEIGHT_CM = Array.from({ length: 111 }, (_, i) => 120 + i);
 
-function getSteps(setupMode: SetupMode, appFocus: AppFocus = 'both'): StepKey[] {
+function getSteps(
+  setupMode: SetupMode,
+  appFocus: AppFocus = 'both',
+  workoutPreference: WorkoutPlanningPreference = 'generated',
+): StepKey[] {
   // Meal routine moved out of onboarding — users can pin meals as routines
   // from the Home screen, which gives a much better UX than typing prose
   // at signup time.
   // Injuries step is intentionally custom-mode only. Quick mode is a
   // 60-second flow; users on quick can still add structured injuries
   // from EditProfile, and the legacy free-text path stays untouched.
-  const base: StepKey[] = setupMode === 'quick'
-    ? ['appFocus', 'workoutStyle', 'setupPath', 'goal', 'quickSetup', 'physicalStats']
-    : ['appFocus', 'workoutStyle', 'setupPath', 'goal', 'physicalStats', 'trainingDays', 'equipment', 'baseline', 'injuries', 'foods'];
+  const manualWorkout = workoutPreference === 'manual';
+  const base: StepKey[] = manualWorkout
+    ? (
+        appFocus === 'both' || appFocus === 'nutrition'
+          ? ['appFocus', 'workoutStyle', 'goal', 'quickSetup', 'physicalStats', 'trial']
+          : ['appFocus', 'workoutStyle', 'goal', 'physicalStats', 'trial']
+      )
+    : setupMode === 'quick'
+      ? ['appFocus', 'workoutStyle', 'setupPath', 'goal', 'quickSetup', 'physicalStats', 'trial']
+      : ['appFocus', 'workoutStyle', 'setupPath', 'goal', 'physicalStats', 'trainingDays', 'equipment', 'baseline', 'injuries', 'foods', 'trial'];
   if (appFocus === 'both') return base;
   return base.filter(step => {
     const domain = STEP_DOMAIN[step];
@@ -793,14 +1274,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   // Step 3 — Physical stats
   const [weightLbs, setWeightLbs] = useState('');
-  const [heightFeet, setHeightFeet] = useState('');
-  const [heightInches, setHeightInches] = useState('');
+  const [heightFeet, setHeightFeet] = useState('5');
+  const [heightInches, setHeightInches] = useState('10');
   // Unit-input mode. Canonical storage stays imperial (weightLbs +
   // heightFeet/heightInches); metric inputs convert on toggle and on submit
   // so the backend payload + DB stay one canonical shape.
   const [unitSystem, setUnitSystem] = useState<'imperial' | 'metric'>('imperial');
   const [weightKg, setWeightKg] = useState('');
-  const [heightCm, setHeightCm] = useState('');
+  const [heightCm, setHeightCm] = useState('178');
   // Birthdate is the source of truth. `age` is derived for legacy
   // consumers (HRmax, TDEE) via the deriveAge helper so the cached int
   // stays accurate as users age.
@@ -895,7 +1376,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [onboardingInjuries, setOnboardingInjuries] = useState<InjuryEntry[]>([]);
   const [noInjuriesAck, setNoInjuriesAck] = useState(false);
 
-  const steps = getSteps(setupMode, appFocus);
+  const steps = getSteps(setupMode, appFocus, workoutPlanningPreference);
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
   const renderStepProgress = () => (
@@ -926,29 +1407,25 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       onPress={() => applyTemplate(template)}
       activeOpacity={0.8}
     >
-      <ImageBackground
-        source={template.image}
-        resizeMode="cover"
-        imageStyle={styles.equipmentTemplatePhoto}
-        style={styles.equipmentTemplateImage}
-      >
-        <View style={styles.equipmentTemplateScrim} />
-        <View style={styles.equipmentTemplateTopRow}>
-          <View style={styles.equipmentTemplatePill}>
-            <Ionicons name="barbell-outline" size={12} color="#FFFFFF" />
-            <Text style={styles.equipmentTemplatePillText}>{template.items.length}</Text>
-          </View>
-          {active ? (
-            <View style={styles.equipmentTemplateCheck}>
-              <Ionicons name="checkmark" size={14} color="#FFFFFF" />
-            </View>
-          ) : null}
-        </View>
-        <View style={styles.equipmentTemplateBody}>
-          <Text style={styles.equipmentTemplateLabel} numberOfLines={1}>{template.label}</Text>
-          <Text style={styles.equipmentTemplateDesc} numberOfLines={2}>{template.description}</Text>
-        </View>
-      </ImageBackground>
+      <EquipmentTemplateArt template={template} active={active} />
+    </TouchableOpacity>
+  );
+  const renderTrainingTemplateCard = (template: TrainingTemplate, active: boolean) => (
+    <TouchableOpacity
+      key={template.id}
+      style={[styles.trainingTemplateCard, active && styles.trainingTemplateCardActive]}
+      onPress={() => applyTrainingTemplate(template)}
+      activeOpacity={0.75}
+    >
+      <TrainingTemplateArt template={template} active={active} />
+      <View style={styles.trainingTemplateBody}>
+        <Text style={[styles.trainingTemplateLabel, active && styles.trainingTemplateLabelActive]} numberOfLines={1}>
+          {template.label}
+        </Text>
+        <Text style={styles.trainingTemplateDesc} numberOfLines={2}>
+          {template.description}
+        </Text>
+      </View>
     </TouchableOpacity>
   );
   const renderFoodPresetCard = (preset: FoodPreset, active: boolean, testIDPrefix: string) => (
@@ -1094,7 +1571,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               : 'generated';
           setWorkoutPlanningPreference(restoredWorkoutPlanningPreference);
           if (typeof draft.currentStep === 'number') {
-            const maxStep = Math.max(0, getSteps(restoredSetupMode, restoredAppFocus).length - 1);
+            const maxStep = Math.max(0, getSteps(restoredSetupMode, restoredAppFocus, restoredWorkoutPlanningPreference).length - 1);
             setCurrentStep(Math.min(Math.max(0, draft.currentStep), maxStep));
           }
           if (typeof draft.selectedGoal === 'string') setSelectedGoal(draft.selectedGoal);
@@ -1290,7 +1767,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         // Nutrition-only users don't train through the app — only force
         // training + equipment template selection when fitness is part
         // of the user's focus. Food preset stays optional regardless.
-        if (appFocus !== 'nutrition') {
+        if (appFocus !== 'nutrition' && workoutPlanningPreference !== 'manual') {
           if (!selectedTrainingTemplate) return 'Pick a training template';
           if (selectedEquipment.length === 0) return 'Pick the equipment preset closest to your setup';
         }
@@ -1312,12 +1789,19 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         return null;
       }
       case 'physicalStats': {
-        const w = parseFloat(weightLbs);
-        const hf = parseInt(heightFeet);
-        const hi = parseInt(heightInches);
-        if (isNaN(w) || w < 50 || w > 600) return 'Enter a valid weight (50–600 lbs)';
-        if (isNaN(hf) || hf < 3 || hf > 8) return 'Enter a valid height';
-        if (isNaN(hi) || hi < 0 || hi > 11) return 'Inches must be between 0–11';
+        if (unitSystem === 'metric') {
+          const kg = parseFloat(weightKg);
+          const cm = parseInt(heightCm);
+          if (isNaN(kg) || kg < 23 || kg > 272) return 'Enter a valid weight (23–272 kg)';
+          if (isNaN(cm) || cm < 91 || cm > 244) return 'Enter a valid height';
+        } else {
+          const w = parseFloat(weightLbs);
+          const hf = parseInt(heightFeet);
+          const hi = parseInt(heightInches);
+          if (isNaN(w) || w < 50 || w > 600) return 'Enter a valid weight (50–600 lbs)';
+          if (isNaN(hf) || hf < 3 || hf > 8) return 'Enter a valid height';
+          if (isNaN(hi) || hi < 0 || hi > 11) return 'Inches must be between 0–11';
+        }
         const birthErr = validateBirthdate(birthdate);
         if (birthErr) return birthErr;
         if (!gender) return 'Please select a biological sex option';
@@ -1482,16 +1966,16 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       weightUnit: unitSystem === 'metric' ? 'kg' : 'lbs',
       heightUnit: unitSystem === 'metric' ? 'cm' : 'in',
       daysPerWeek:            parseInt(daysPerWeek),
-      trainingDays:           selectedTrainingDays.length === parseInt(daysPerWeek) ? selectedTrainingDays : undefined,
+      trainingDays:           workoutPlanningPreference === 'manual' ? undefined : selectedTrainingDays.length === parseInt(daysPerWeek) ? selectedTrainingDays : undefined,
       preferredSplit:         preferredSplit === 'auto' ? undefined : preferredSplit,
       workoutDurationMinutes: workoutDuration,
       // Lifestyle-activity nudge for TDEE. Optional — omitting it
       // preserves the legacy training-schedule-only multiplier.
       lifestyleActivity:      lifestyleActivity ?? undefined,
-      equipment:              selectedEquipment,
-      equipmentSettings:      normalizeStrengthEquipmentSettings(equipmentSettings, selectedEquipment),
-      strengthBaselines,
-      cardioBaseline,
+      equipment:              workoutPlanningPreference === 'manual' ? [] : selectedEquipment,
+      equipmentSettings:      workoutPlanningPreference === 'manual' ? undefined : normalizeStrengthEquipmentSettings(equipmentSettings, selectedEquipment),
+      strengthBaselines:      workoutPlanningPreference === 'manual' ? undefined : strengthBaselines,
+      cardioBaseline:         workoutPlanningPreference === 'manual' ? undefined : cardioBaseline,
       foodsAvailable,
       allergies: allergies.length > 0 ? allergies : undefined,
       supplementsAvailable: supplementsAvailable.length > 0 ? supplementsAvailable : undefined,
@@ -1669,9 +2153,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     <View style={styles.stepContainer}>
       {renderStepHero(STOCK_IMAGES.onboarding.workoutStyle, 'Train your way', 'Generated weeks, manual logs, or both')}
       <Text style={styles.stepTitle}>How do you want to train?</Text>
-      <Text style={styles.stepDescription}>
-        Choose the workflow you want to open with. You can still change this later from workout settings.
-      </Text>
 
       <View style={{ gap: 12 }}>
         {([
@@ -1680,21 +2161,18 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             icon: 'calendar-outline',
             label: 'Build my plan for me',
             badge: 'Recommended',
-            desc: 'Get a deterministic weekly plan from your goal, schedule, equipment, and recovery.',
           },
           {
             value: 'manual',
             icon: 'create-outline',
             label: 'Log my own workouts',
             badge: null,
-            desc: 'Start custom workouts, log sessions from your own program, and save repeatable templates.',
           },
           {
             value: 'hybrid',
             icon: 'shuffle-outline',
             label: 'Mix both',
             badge: null,
-            desc: 'Keep a generated week, but use custom workouts or templates whenever your real routine changes.',
           },
         ] as const).map(opt => {
           const active = workoutPlanningPreference === opt.value;
@@ -1705,7 +2183,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               style={[
                 styles.chipWide,
                 active && styles.chipWideSelected,
-                { alignItems: 'flex-start' },
               ]}
               onPress={() => {
                 import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
@@ -1741,7 +2218,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                     </View>
                   )}
                 </View>
-                <Text style={styles.chipWideDesc}>{opt.desc}</Text>
               </View>
               {active && <Ionicons name="checkmark-circle" size={20} color={colors.primary} />}
             </PressableScale>
@@ -1749,12 +2225,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         })}
       </View>
 
-      <View style={[styles.baselineWhyBox, { marginTop: 14 }]}>
-        <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
-        <Text style={styles.baselineWhyText}>
-          {FREE_TIER_SUMMARY} {PRO_TIER_SUMMARY}
-        </Text>
-      </View>
     </View>
   );
 
@@ -1762,9 +2232,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     <View style={styles.stepContainer}>
       {renderStepHero(STOCK_IMAGES.onboarding.setupPath, 'Start simple', 'Pick templates now, tune details later')}
       <Text style={styles.stepTitle}>Choose Your Setup</Text>
-      <Text style={styles.stepDescription}>
-        New to fitness apps, or just want the fastest setup? Use Quick Start. If you already know your schedule, equipment, and training preferences, use Advanced Setup.
-      </Text>
 
       <View style={{ gap: 12 }}>
         {([
@@ -1772,13 +2239,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             value: 'quick',
             icon: 'flash-outline',
             label: 'Quick Start',
-            desc: 'Best for most people. Pick simple templates now and adjust anything later.',
           },
           {
             value: 'custom',
             icon: 'options-outline',
             label: 'Advanced Setup',
-            desc: 'Best if you have fitness-app experience or already know your exact training days, split, gear, and food preferences.',
           },
         ] as const).map(opt => {
           const active = setupMode === opt.value;
@@ -1789,7 +2254,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               style={[
                 styles.chipWide,
                 active && styles.chipWideSelected,
-                { alignItems: 'flex-start' },
               ]}
               onPress={() => {
                 import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
@@ -1809,7 +2273,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={[styles.chipWideLabel, active && styles.chipWideLabelSelected]}>{opt.label}</Text>
-                <Text style={styles.chipWideDesc}>{opt.desc}</Text>
               </View>
               {active && <Ionicons name="checkmark-circle" size={20} color={colors.primary} />}
             </PressableScale>
@@ -1822,18 +2285,17 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const renderQuickSetupStep = () => (
     <View style={styles.stepContainer}>
       {renderStepHero(
-        appFocus === 'nutrition' ? STOCK_IMAGES.onboarding.quickNutrition : STOCK_IMAGES.onboarding.quickTraining,
-        'Your first week',
-        'Training, equipment, and food defaults',
+        appFocus === 'nutrition' || workoutPlanningPreference === 'manual'
+          ? STOCK_IMAGES.onboarding.quickNutrition
+          : STOCK_IMAGES.onboarding.quickTraining,
+        workoutPlanningPreference === 'manual' ? 'Fuel defaults' : 'Your first week',
+        workoutPlanningPreference === 'manual' ? 'Food preferences only' : 'Training, equipment, and food defaults',
       )}
-      <Text style={styles.stepTitle}>Pick Your Templates</Text>
-      <Text style={styles.stepDescription}>
-        These defaults set up your first week or manual tracker. Every choice can be changed later from your profile.
-      </Text>
+      <Text style={styles.stepTitle}>{workoutPlanningPreference === 'manual' ? 'Pick Your Food Defaults' : 'Pick Your Templates'}</Text>
 
       {/* Training + Equipment hidden when the user picked nutrition-only —
           they don't train through the app so these picks are noise. */}
-      {appFocus !== 'nutrition' && (
+      {appFocus !== 'nutrition' && workoutPlanningPreference !== 'manual' && (
         <>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <Ionicons name="calendar-outline" size={14} color={colors.primary} />
@@ -1844,17 +2306,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
             {TRAINING_TEMPLATES.map(t => {
               const active = selectedTrainingTemplate === t.id;
-              return (
-                <TouchableOpacity
-                  key={t.id}
-                  style={[styles.templateChip, active && styles.templateChipActive]}
-                  onPress={() => applyTrainingTemplate(t)}
-                  activeOpacity={0.75}
-                >
-                  <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{t.label}</Text>
-                  <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{t.description}</Text>
-                </TouchableOpacity>
-              );
+              return renderTrainingTemplateCard(t, active);
             })}
           </ScrollView>
 
@@ -1936,68 +2388,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <Text style={styles.stepTitle}>What's Your Goal?</Text>
         <Text style={styles.stepDescription}>This shapes your workout split, nutrition targets, and coaching style. You can change this anytime.</Text>
 
-        {/* AI goal matcher — bigger, multiline so the user can see what they're typing.
-            Auto-expands as they write more. */}
-        <View style={{
-          marginBottom: 20,
-          backgroundColor: colors.primary + '10',
-          borderRadius: 14,
-          borderWidth: 1.5,
-          borderColor: colors.primary + '55',
-          padding: 14,
-        }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-            <Ionicons name="sparkles-outline" size={16} color={colors.primary} />
-            <Text style={{ fontSize: 12, fontWeight: '800', color: colors.primary, textTransform: 'uppercase', letterSpacing: 0.8 }}>
-              Describe your goal
-            </Text>
-          </View>
-          <Text style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 10, lineHeight: 16 }}>
-            Describe what you want in your own words. The AI picks the best-fit goal for you.
-          </Text>
-          <TextInput
-            style={{
-              backgroundColor: colors.surface, borderRadius: 10,
-              paddingHorizontal: 14, paddingVertical: 14, fontSize: 15,
-              color: colors.textPrimary, borderWidth: 1.5, borderColor: colors.primary + '88',
-              minHeight: 90, textAlignVertical: 'top',
-              marginBottom: 10,
-            }}
-            placeholder="e.g. I want to lose my belly but keep muscle, train 4 days a week, and feel athletic for pickup basketball"
-            placeholderTextColor={colors.textMuted}
-            value={goalQuery}
-            onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); setGoalQueryApplied(''); }}
-            multiline
-            scrollEnabled
-          />
-          <TouchableOpacity
-            activeOpacity={0.75}
-            style={{
-              backgroundColor: colors.primary, borderRadius: 10,
-              paddingVertical: 12, alignItems: 'center', justifyContent: 'center',
-              flexDirection: 'row', gap: 6,
-              opacity: goalMatchLoading || !goalQuery.trim() ? 0.5 : 1,
-            }}
-            disabled={goalMatchLoading || !goalQuery.trim()}
-            onPress={async () => {
-              if (!goalQuery.trim()) return;
-              await applyGoalQueryMatch();
-            }}>
-            {goalMatchLoading
-              ? <ActivityIndicator size="small" color="#fff" />
-              : <>
-                  <Ionicons name="sparkles" size={14} color="#fff" />
-                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Find my goal</Text>
-                </>
-            }
-          </TouchableOpacity>
-          {goalMatchReason && (
-            <Text style={{ fontSize: 12, color: colors.primary, marginTop: 8, fontStyle: 'italic' }}>
-              {goalMatchReason}
-            </Text>
-          )}
-        </View>
-
         {/* Launch goals. Each card shows a short
             description so users can compare without tapping. Selected
             card expands to full width for the full text. */}
@@ -2060,9 +2450,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           }}
         >
           {LAUNCH_GOALS.map((g) => {
-            const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
             const active = visibleSelectedGoal === g.id;
-            const imageSource = getGoalCardImageSource(g.id, gender || undefined);
             return (
               <PressableScale
                 key={g.id}
@@ -2077,25 +2465,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 onPress={() => selectGoal(g.id)}
                 scaleDown={0.97}
               >
-                <ImageBackground
-                  source={imageSource}
-                  resizeMode="cover"
-                  style={styles.goalHero}
-                  imageStyle={styles.goalHeroImage}
-                >
-                  <View style={styles.goalHeroScrim} />
-                  <View style={[
-                    styles.goalHeroIconBubble,
-                    active && styles.goalHeroIconBubbleActive,
-                  ]}>
-                    <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={20} color={active ? colors.primary : '#fff'} />
-                  </View>
-                  {active && (
-                    <View style={styles.goalHeroCheckBubble}>
-                      <Ionicons name="checkmark" size={16} color="#fff" />
-                    </View>
-                  )}
-                </ImageBackground>
+                <GoalCardArt goalId={g.id} active={active} />
                 <View style={styles.goalCardContent}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                     <Text style={[styles.goalLabel, active && styles.goalLabelActive, { flex: 1 }]}>{g.label}</Text>
@@ -2432,7 +2802,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   };
 
   const renderPhysicalStatsStep = () => (
-    <View style={styles.stepContainer}>
+    <View style={[styles.stepContainer, styles.physicalStatsStep]}>
       <Text style={styles.stepTitle}>About You</Text>
       <Text style={styles.stepDescription}>We use this to calculate your daily calorie and macro targets — nothing is shared.</Text>
 
@@ -2458,88 +2828,85 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         </View>
       </View>
 
-      <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Current weight</Text>
-        {unitSystem === 'imperial' ? (
-          <View style={styles.inlineInput}>
-            <TextInput
-              testID="onboarding-weight-input"
-              accessibilityLabel="onboarding-weight-input"
-              style={[styles.input, { flex: 1 }]}
-              placeholder="e.g. 185"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="decimal-pad"
-              value={weightLbs}
-              onChangeText={setWeightLbs}
-            />
-            <Text style={styles.unit}>lbs</Text>
-          </View>
-        ) : (
-          <View style={styles.inlineInput}>
-            <TextInput
-              testID="onboarding-weight-kg-input"
-              accessibilityLabel="onboarding-weight-kg-input"
-              style={[styles.input, { flex: 1 }]}
-              placeholder="e.g. 84"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="decimal-pad"
-              value={weightKg}
-              onChangeText={setWeightKg}
-            />
-            <Text style={styles.unit}>kg</Text>
-          </View>
-        )}
-      </View>
+      <View style={styles.measurementRow}>
+        <View style={styles.measurementPane}>
+          <Text style={styles.fieldLabel}>Current weight</Text>
+          {unitSystem === 'imperial' ? (
+            <View style={styles.inlineInput}>
+              <TextInput
+                testID="onboarding-weight-input"
+                accessibilityLabel="onboarding-weight-input"
+                style={[styles.input, styles.measurementInput]}
+                placeholder="185"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="decimal-pad"
+                value={weightLbs}
+                onChangeText={setWeightLbs}
+              />
+              <Text style={styles.unit}>lbs</Text>
+            </View>
+          ) : (
+            <View style={styles.inlineInput}>
+              <TextInput
+                testID="onboarding-weight-kg-input"
+                accessibilityLabel="onboarding-weight-kg-input"
+                style={[styles.input, styles.measurementInput]}
+                placeholder="84"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="decimal-pad"
+                value={weightKg}
+                onChangeText={setWeightKg}
+              />
+              <Text style={styles.unit}>kg</Text>
+            </View>
+          )}
+        </View>
 
-      <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Height</Text>
-        {unitSystem === 'imperial' ? (
-          <View style={styles.heightRow}>
-            <View style={[styles.inlineInput, { flex: 1 }]}>
-              <TextInput
-                testID="onboarding-height-feet-input"
-                accessibilityLabel="onboarding-height-feet-input"
-                style={[styles.input, { flex: 1 }]}
-                placeholder="5"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="number-pad"
-                value={heightFeet}
-                onChangeText={setHeightFeet}
-                maxLength={1}
+        <View style={styles.measurementPane}>
+          <Text style={styles.fieldLabel}>Height</Text>
+          {unitSystem === 'imperial' ? (
+            <View style={styles.heightWheelRow}>
+              <NumberWheelPicker
+                values={IMPERIAL_HEIGHT_FEET}
+                value={(IMPERIAL_HEIGHT_FEET.includes(parseInt(heightFeet) as any) ? parseInt(heightFeet) : 5) as typeof IMPERIAL_HEIGHT_FEET[number]}
+                onChange={value => setHeightFeet(String(value))}
+                itemHeight={32}
+                visibleCount={3}
+                label="ft"
+                selectedColor={colors.textPrimary}
+                mutedColor={colors.textMuted}
+                dividerColor={colors.border}
+                testID="onboarding-height-feet-wheel"
               />
-              <Text style={styles.unit}>ft</Text>
-            </View>
-            <View style={[styles.inlineInput, { flex: 1 }]}>
-              <TextInput
-                testID="onboarding-height-inches-input"
-                accessibilityLabel="onboarding-height-inches-input"
-                style={[styles.input, { flex: 1 }]}
-                placeholder="10"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="number-pad"
-                value={heightInches}
-                onChangeText={setHeightInches}
-                maxLength={2}
+              <NumberWheelPicker
+                values={IMPERIAL_HEIGHT_INCHES}
+                value={(IMPERIAL_HEIGHT_INCHES.includes(parseInt(heightInches) as any) ? parseInt(heightInches) : 10) as typeof IMPERIAL_HEIGHT_INCHES[number]}
+                onChange={value => setHeightInches(String(value))}
+                itemHeight={32}
+                visibleCount={3}
+                label="in"
+                selectedColor={colors.textPrimary}
+                mutedColor={colors.textMuted}
+                dividerColor={colors.border}
+                formatLabel={value => String(value).padStart(2, '0')}
+                testID="onboarding-height-inches-wheel"
               />
-              <Text style={styles.unit}>in</Text>
             </View>
-          </View>
-        ) : (
-          <View style={styles.inlineInput}>
-            <TextInput
-              testID="onboarding-height-cm-input"
-              accessibilityLabel="onboarding-height-cm-input"
-              style={[styles.input, { flex: 1 }]}
-              placeholder="e.g. 178"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="number-pad"
-              value={heightCm}
-              onChangeText={setHeightCm}
-              maxLength={3}
+          ) : (
+            <NumberWheelPicker
+              values={METRIC_HEIGHT_CM}
+              value={METRIC_HEIGHT_CM.includes(parseInt(heightCm)) ? parseInt(heightCm) : 178}
+              onChange={value => setHeightCm(String(value))}
+              itemHeight={32}
+              visibleCount={3}
+              label="cm"
+              selectedColor={colors.textPrimary}
+              mutedColor={colors.textMuted}
+              dividerColor={colors.border}
+              testID="onboarding-height-cm-wheel"
             />
-            <Text style={styles.unit}>cm</Text>
-          </View>
-        )}
+          )}
+        </View>
       </View>
 
       <View style={styles.fieldGroup}>
@@ -3815,9 +4182,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const renderContextStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Almost Done</Text>
-      <Text style={styles.stepDescription}>
-        Help your AI trainer nail the first workout — safe weights, smart exercise selection, no guesswork.
-      </Text>
 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>
@@ -3832,7 +4196,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           multiline
           onFocus={scrollToInput}
         />
-        <Text style={styles.hint}>Your AI trainer will avoid exercises that could aggravate these.</Text>
       </View>
 
       <View style={styles.fieldGroup}>
@@ -3848,10 +4211,28 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           multiline
           onFocus={scrollToInput}
         />
-        <Text style={styles.hint}>Helps the AI pick the right starting weights and avoid training the same muscles back-to-back.</Text>
       </View>
     </View>
   );
+
+  const renderTrialStep = () => {
+    const hasSignupTrial = SIGNUP_TRIAL_DAYS > 0;
+    return (
+      <View style={styles.stepContainer}>
+        <View style={styles.trialSummaryCard}>
+          <View style={styles.trialSummaryIcon}>
+            <Ionicons name="sparkles-outline" size={24} color={colors.background} />
+          </View>
+          <Text style={styles.trialSummaryEyebrow}>
+            {hasSignupTrial ? `${SIGNUP_TRIAL_DAYS}-day Pro trial` : 'Ready to start'}
+          </Text>
+          <Text style={styles.trialSummaryTitle}>
+            {hasSignupTrial ? 'No payment at signup.' : 'Ready to start.'}
+          </Text>
+        </View>
+      </View>
+    );
+  };
 
   const renderAppleHealthStep = () => {
     // Pre-permission education. Shown BEFORE the OS-level HealthKit prompt so
@@ -4016,37 +4397,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     );
   };
 
-  const renderFeatureOverview = () => (
-    <View style={styles.featureOverviewBlock}>
-      <View style={styles.featureOverviewHeader}>
-        <Text style={styles.featureOverviewEyebrow}>What Thallo can do</Text>
-        <Text style={styles.featureOverviewSubhead}>
-          Your choices decide which surfaces show up first. Nothing here locks you in.
-        </Text>
-      </View>
-      <View style={styles.featureOverviewGrid}>
-        {FEATURE_OVERVIEW.map((feature, idx) => (
-          <View key={feature.key} style={styles.featureOverviewCard}>
-            <LinearGradient
-              colors={[
-                idx % 2 === 0 ? colors.primary + '24' : (colors.success ?? '#22C55E') + '20',
-                colors.surfaceRaised,
-              ]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.featureOverviewGradient}
-            />
-            <View style={styles.featureOverviewIcon}>
-              <Ionicons name={feature.icon} size={16} color={idx % 2 === 0 ? colors.primary : (colors.success ?? '#22C55E')} />
-            </View>
-            <Text style={styles.featureOverviewTitle}>{feature.title}</Text>
-            <Text style={styles.featureOverviewBody}>{feature.body}</Text>
-          </View>
-        ))}
-      </View>
-    </View>
-  );
-
   const renderAppFocusStep = () => {
     const focusHero = {
       both: {
@@ -4070,11 +4420,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       <View style={styles.stepContainer}>
         {renderStepHero(focusHero.uri, focusHero.title, focusHero.subtitle)}
         <Text style={styles.stepTitle}>What are you here for?</Text>
-        <Text style={styles.stepDescription}>
-          We'll tailor the app to match. You can change this anytime in Settings.
-        </Text>
-
-        {renderFeatureOverview()}
 
         <View style={{ gap: 12 }}>
           {([
@@ -4082,19 +4427,16 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               value: 'both',
               icon: 'sparkles-outline',
               label: 'Both',
-              desc: 'Track workouts and nutrition together. Most users start here.',
             },
             {
               value: 'fitness',
               icon: 'barbell-outline',
               label: 'Fitness only',
-              desc: 'Workouts, recovery, and progress. We\'ll hide meal tracking.',
             },
             {
               value: 'nutrition',
               icon: 'restaurant-outline',
               label: 'Nutrition only',
-              desc: 'Meals, macros, and weight. We\'ll hide workout planning.',
             },
           ] as const).map(opt => {
             const active = appFocus === opt.value;
@@ -4105,7 +4447,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 style={[
                   styles.chipWide,
                   active && styles.chipWideSelected,
-                  { alignItems: 'flex-start' },
                 ]}
                 onPress={() => {
                   import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
@@ -4125,7 +4466,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.chipWideLabel, active && styles.chipWideLabelSelected]}>{opt.label}</Text>
-                  <Text style={styles.chipWideDesc}>{opt.desc}</Text>
                 </View>
                 {active && <Ionicons name="checkmark-circle" size={20} color={colors.primary} />}
               </PressableScale>
@@ -4145,6 +4485,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       case 'quickSetup':    return renderQuickSetupStep();
       case 'goalRefine':    return renderGoalRefineStep();
       case 'physicalStats': return renderPhysicalStatsStep();
+      case 'trial':         return renderTrialStep();
       case 'trainingDays':  return renderTrainingDaysStep();
       case 'equipment':     return renderEquipmentStep();
       case 'baseline':      return renderBaselineStep();
@@ -4213,7 +4554,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               style={[styles.nextButton, currentStep === totalSteps - 1 && styles.nextButtonFinal]}
               onPress={handleNext}>
               <Text style={[styles.nextButtonText, currentStep === totalSteps - 1 && styles.nextButtonTextFinal]}>
-                {currentStep === totalSteps - 1 ? 'Get Started' : 'Next'}
+                {currentStep === totalSteps - 1
+                  ? SIGNUP_TRIAL_DAYS > 0 ? 'Start Trial' : 'Get Started'
+                  : 'Next'}
               </Text>
               {currentStep < totalSteps - 1 && <Ionicons name="arrow-forward" size={16} color={colors.background} />}
             </PressableScale>
@@ -4304,9 +4647,7 @@ const styles = StyleSheet.create({
   goalCardWrap: { width: '48%' },
   goalCard: { width: '100%', padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
   goalCardActive: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
-  goalHero: { height: 118, width: '100%', justifyContent: 'space-between', padding: 12 },
-  goalHeroImage: { borderTopLeftRadius: radius.lg - 2, borderTopRightRadius: radius.lg - 2 },
-  goalHeroScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(7, 13, 15, 0.24)' },
+  goalHero: { height: 118, width: '100%', justifyContent: 'space-between', padding: 12, overflow: 'hidden' },
   goalHeroIconBubble: {
     width: 38,
     height: 38,
@@ -4341,6 +4682,370 @@ const styles = StyleSheet.create({
   goalBadgeText: { fontSize: 9, fontWeight: '700', color: '#fff' },
   goalDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 16, textAlign: 'center' },
   goalDescActive: { color: colors.primaryLight },
+  signupArtBackdrop: {
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  signupArtGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  signupArtGlowLarge: {
+    position: 'absolute',
+    width: 122,
+    height: 122,
+    borderRadius: 61,
+    top: -42,
+    right: -20,
+    opacity: 0.62,
+  },
+  signupArtGlowSmall: {
+    position: 'absolute',
+    width: 86,
+    height: 86,
+    borderRadius: 43,
+    left: 22,
+    bottom: -36,
+    opacity: 0.72,
+  },
+  signupArtRail: {
+    position: 'absolute',
+    width: 210,
+    height: 92,
+    borderRadius: 46,
+    borderWidth: 1,
+    right: -50,
+    top: 23,
+    transform: [{ rotate: '-12deg' }],
+  },
+  signupArtRailSecond: {
+    right: -84,
+    top: 50,
+    transform: [{ rotate: '14deg' }],
+  },
+  goalArtLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  artBarbellShaft: {
+    position: 'absolute',
+    left: 42,
+    right: 22,
+    top: 61,
+    height: 5,
+    borderRadius: 3,
+  },
+  artPlate: {
+    position: 'absolute',
+    top: 45,
+    width: 16,
+    height: 38,
+    borderRadius: 7,
+    borderWidth: 4,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  artPlateLeftOuter: { left: 37 },
+  artPlateLeftInner: { left: 56, height: 30, top: 49 },
+  artPlateRightInner: { right: 36, height: 30, top: 49 },
+  artPlateRightOuter: { right: 17 },
+  artGrowthBar: {
+    position: 'absolute',
+    bottom: 18,
+    width: 10,
+    borderRadius: 5,
+  },
+  artRecompRing: {
+    position: 'absolute',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    borderWidth: 8,
+    left: 58,
+    top: 23,
+  },
+  artRecompRingAlt: {
+    left: 90,
+    top: 18,
+    opacity: 0.72,
+  },
+  artRecompCore: {
+    position: 'absolute',
+    left: 84,
+    top: 38,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  artMetricCard: {
+    position: 'absolute',
+    right: 23,
+    bottom: 16,
+    width: 58,
+    height: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: 'rgba(255,255,255,0.09)',
+    padding: 9,
+    gap: 5,
+  },
+  artMetricLine: {
+    height: 4,
+    borderRadius: 2,
+    opacity: 0.84,
+  },
+  artFlameAura: {
+    position: 'absolute',
+    left: 53,
+    top: 24,
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+  },
+  artFlameIcon: {
+    position: 'absolute',
+    left: 62,
+    top: 28,
+  },
+  artTrendLine: {
+    position: 'absolute',
+    height: 4,
+    borderRadius: 2,
+  },
+  artTrendLineDownOne: {
+    left: 119,
+    top: 40,
+    width: 38,
+    transform: [{ rotate: '34deg' }],
+  },
+  artTrendLineDownTwo: {
+    left: 145,
+    top: 59,
+    width: 33,
+    transform: [{ rotate: '-8deg' }],
+  },
+  artTrendDot: {
+    position: 'absolute',
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+  },
+  artRackPost: {
+    position: 'absolute',
+    top: 25,
+    bottom: 24,
+    width: 12,
+    borderRadius: 4,
+    borderWidth: 3,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  artRackBeam: {
+    position: 'absolute',
+    left: 60,
+    right: 40,
+    top: 30,
+    height: 6,
+    borderRadius: 3,
+  },
+  artLoadedBar: {
+    position: 'absolute',
+    left: 34,
+    right: 18,
+    top: 57,
+    height: 5,
+    borderRadius: 3,
+    opacity: 0.9,
+  },
+  artLoadedPlate: {
+    position: 'absolute',
+    top: 43,
+    width: 18,
+    height: 34,
+    borderRadius: 8,
+    opacity: 0.88,
+  },
+  artPlatform: {
+    position: 'absolute',
+    left: 54,
+    right: 36,
+    bottom: 19,
+    height: 8,
+    borderRadius: 4,
+  },
+  artTrackRing: {
+    position: 'absolute',
+    left: 48,
+    top: 24,
+    width: 118,
+    height: 72,
+    borderRadius: 36,
+    borderWidth: 6,
+  },
+  artTrackRingInner: {
+    left: 70,
+    top: 38,
+    width: 74,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 4,
+  },
+  artPulseSegment: {
+    position: 'absolute',
+    height: 4,
+    borderRadius: 2,
+  },
+  artHeartIcon: {
+    position: 'absolute',
+    left: 93,
+    top: 42,
+  },
+  artAgilityRung: {
+    position: 'absolute',
+    top: 54,
+    width: 20,
+    height: 44,
+    borderRadius: 6,
+    borderWidth: 3,
+    transform: [{ rotate: '-16deg' }],
+  },
+  artSprintTrail: {
+    position: 'absolute',
+    left: 77,
+    top: 40,
+    width: 104,
+    height: 5,
+    borderRadius: 3,
+    transform: [{ rotate: '-13deg' }],
+  },
+  artSprintDot: {
+    position: 'absolute',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  artFlashIcon: {
+    position: 'absolute',
+    left: 65,
+    top: 30,
+  },
+  artLaneLine: {
+    position: 'absolute',
+    left: 48,
+    right: 20,
+    height: 3,
+    borderRadius: 2,
+  },
+  artSledBase: {
+    position: 'absolute',
+    left: 67,
+    bottom: 31,
+    width: 82,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 4,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  artSledHandle: {
+    position: 'absolute',
+    left: 132,
+    bottom: 51,
+    width: 30,
+    height: 42,
+    borderTopWidth: 4,
+    borderRightWidth: 4,
+    borderRadius: 8,
+  },
+  artSledPlate: {
+    position: 'absolute',
+    left: 80,
+    bottom: 62,
+    width: 20,
+    height: 28,
+    borderRadius: 6,
+  },
+  artSledRunner: {
+    position: 'absolute',
+    left: 60,
+    right: 42,
+    bottom: 24,
+    height: 5,
+    borderRadius: 3,
+    opacity: 0.9,
+  },
+  artStopwatchIcon: {
+    position: 'absolute',
+    left: 43,
+    top: 28,
+  },
+  artLongevityCircle: {
+    position: 'absolute',
+    left: 55,
+    top: 20,
+    width: 86,
+    height: 86,
+    borderRadius: 43,
+    borderWidth: 2,
+  },
+  artLongevityCircleSmall: {
+    left: 90,
+    top: 33,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+  },
+  artLeafIcon: {
+    position: 'absolute',
+    left: 68,
+    top: 35,
+  },
+  artBalanceBeam: {
+    position: 'absolute',
+    left: 48,
+    right: 30,
+    top: 54,
+    height: 5,
+    borderRadius: 3,
+  },
+  artBalancePost: {
+    position: 'absolute',
+    left: 103,
+    top: 42,
+    width: 7,
+    height: 48,
+    borderRadius: 4,
+  },
+  artBalancePan: {
+    position: 'absolute',
+    top: 66,
+    width: 44,
+    height: 16,
+    borderBottomWidth: 4,
+    borderRadius: 14,
+  },
+  artCalendarCard: {
+    position: 'absolute',
+    right: 23,
+    top: 23,
+    width: 58,
+    height: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: 'rgba(255,255,255,0.09)',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+    padding: 9,
+  },
+  artCalendarDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+  },
+  artFallbackIcon: {
+    position: 'absolute',
+    left: 75,
+    top: 28,
+  },
 
   paceCards: { flexDirection: 'row', gap: 8, marginTop: 8 },
   paceCard: { flex: 1, padding: 12, borderRadius: radius.lg, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center' },
@@ -4357,6 +5062,32 @@ const styles = StyleSheet.create({
   fieldLabel: { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 8 },
   optional: { fontWeight: '400', color: colors.textMuted },
   inlineInput: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  physicalStatsStep: { paddingTop: 10 },
+  measurementRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginBottom: 20,
+  },
+  measurementPane: {
+    flex: 1,
+    minWidth: 0,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceRaised,
+    padding: 12,
+  },
+  measurementInput: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+  },
+  heightWheelRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
   baselineWhyBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -4405,6 +5136,65 @@ const styles = StyleSheet.create({
   unit: { fontSize: 14, color: colors.textSecondary, fontWeight: '500', minWidth: 40 },
   hint: { fontSize: 13, color: colors.textMuted, marginTop: 8 },
   optionalBanner: { fontSize: 13, color: colors.primary, fontWeight: '500', marginBottom: 16, fontStyle: 'italic' },
+  trialSummaryCard: {
+    borderRadius: radius.lg,
+    backgroundColor: colors.primary,
+    padding: 20,
+    gap: 12,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
+    elevation: 6,
+  },
+  trialSummaryIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: 'rgba(7, 13, 15, 0.28)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.32)',
+  },
+  trialSummaryEyebrow: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '900',
+    color: colors.background,
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  trialSummaryTitle: {
+    fontSize: 27,
+    lineHeight: 31,
+    fontWeight: '900',
+    color: colors.background,
+  },
+  trialSummaryBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '700',
+    color: colors.background,
+    opacity: 0.88,
+  },
+  trialSummaryList: {
+    gap: 9,
+    paddingTop: 4,
+  },
+  trialSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  trialSummaryRowText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
+    color: colors.background,
+    opacity: 0.9,
+  },
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
   searchInput: { marginBottom: 0, paddingVertical: 11, color: colors.textPrimary, letterSpacing: 0, fontWeight: '400' },
   clearBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center' },
@@ -4509,6 +5299,96 @@ const styles = StyleSheet.create({
   templateChipLabelActive: { color: colors.primary },
   templateChipDesc: { fontSize: 11, color: colors.textSecondary, lineHeight: 15 },
   templateChipDescActive: { color: colors.primaryLight },
+  trainingTemplateCard: {
+    width: 158,
+    minHeight: 168,
+    borderRadius: radius.lg,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  trainingTemplateCardActive: {
+    borderColor: colors.primary,
+  },
+  trainingTemplateArt: {
+    height: 94,
+    padding: 10,
+  },
+  trainingTemplateTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  trainingTemplateIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    borderWidth: 1,
+    backgroundColor: 'rgba(7,13,15,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trainingTemplateCheck: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.72)',
+  },
+  trainingCalendar: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    bottom: 18,
+    flexDirection: 'row',
+    gap: 5,
+  },
+  trainingCalendarDay: {
+    flex: 1,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
+  trainingLoadBars: {
+    position: 'absolute',
+    right: 14,
+    top: 42,
+    alignItems: 'flex-end',
+    gap: 5,
+  },
+  trainingLoadBar: {
+    height: 4,
+    borderRadius: 2,
+    opacity: 0.78,
+  },
+  trainingTemplateBody: {
+    padding: 12,
+    paddingTop: 10,
+  },
+  trainingTemplateLabel: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginBottom: 4,
+  },
+  trainingTemplateLabelActive: {
+    color: colors.primary,
+  },
+  trainingTemplateDesc: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
   equipmentTemplateCard: {
     width: 188,
     height: 148,
@@ -4529,13 +5409,6 @@ const styles = StyleSheet.create({
   equipmentTemplateImage: {
     flex: 1,
     justifyContent: 'flex-end',
-  },
-  equipmentTemplatePhoto: {
-    borderRadius: radius.lg - 2,
-  },
-  equipmentTemplateScrim: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(5, 10, 14, 0.36)',
   },
   equipmentTemplateTopRow: {
     position: 'absolute',
@@ -4587,6 +5460,239 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 15,
     fontWeight: '700',
+  },
+  equipmentArtLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  artMat: {
+    position: 'absolute',
+    left: 52,
+    right: 34,
+    bottom: 36,
+    height: 32,
+    borderRadius: 18,
+    borderWidth: 3,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    transform: [{ rotate: '-7deg' }],
+  },
+  artMobilityArc: {
+    position: 'absolute',
+    left: 72,
+    top: 29,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
+    transform: [{ rotate: '18deg' }],
+  },
+  artBodyweightIcon: {
+    position: 'absolute',
+    left: 83,
+    top: 38,
+  },
+  artDumbbellHandle: {
+    position: 'absolute',
+    left: 57,
+    right: 48,
+    top: 54,
+    height: 6,
+    borderRadius: 3,
+    opacity: 0.9,
+  },
+  artMiniPlate: {
+    position: 'absolute',
+    top: 43,
+    width: 15,
+    height: 28,
+    borderRadius: 6,
+    opacity: 0.9,
+  },
+  artBand: {
+    position: 'absolute',
+    left: 77,
+    top: 76,
+    width: 70,
+    height: 28,
+    borderRadius: 18,
+    borderWidth: 4,
+    transform: [{ rotate: '-8deg' }],
+  },
+  artPullupBar: {
+    position: 'absolute',
+    left: 54,
+    top: 25,
+    width: 88,
+    height: 22,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
+    borderRightWidth: 4,
+    borderRadius: 8,
+  },
+  artEquipmentRackLeft: {
+    left: 50,
+    top: 24,
+    bottom: 39,
+  },
+  artEquipmentRackRight: {
+    right: 46,
+    top: 24,
+    bottom: 39,
+  },
+  artEquipmentRackBeam: {
+    left: 56,
+    right: 52,
+    top: 31,
+  },
+  artBench: {
+    position: 'absolute',
+    left: 74,
+    right: 40,
+    bottom: 42,
+    height: 8,
+    borderRadius: 4,
+    transform: [{ rotate: '-10deg' }],
+    opacity: 0.9,
+  },
+  artBenchLeg: {
+    position: 'absolute',
+    left: 101,
+    bottom: 26,
+    width: 7,
+    height: 24,
+    borderRadius: 4,
+  },
+  artWallPlate: {
+    position: 'absolute',
+    right: 27,
+    top: 49,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    opacity: 0.9,
+  },
+  artMachineFrame: {
+    position: 'absolute',
+    left: 62,
+    top: 26,
+    width: 76,
+    height: 70,
+    borderRadius: 16,
+    borderWidth: 4,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  artMachineSeat: {
+    position: 'absolute',
+    left: 80,
+    top: 70,
+    width: 52,
+    height: 10,
+    borderRadius: 5,
+    transform: [{ rotate: '-6deg' }],
+  },
+  artMachineStack: {
+    position: 'absolute',
+    right: 40,
+    top: 41,
+    width: 18,
+    height: 44,
+    borderRadius: 7,
+    borderWidth: 3,
+  },
+  artGymBadge: {
+    position: 'absolute',
+    left: 45,
+    top: 40,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  artRigPost: {
+    position: 'absolute',
+    top: 25,
+    height: 68,
+    width: 10,
+    borderRadius: 4,
+    borderWidth: 3,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  artRigBeam: {
+    position: 'absolute',
+    left: 57,
+    right: 55,
+    top: 31,
+    height: 6,
+    borderRadius: 3,
+  },
+  artKettlebell: {
+    position: 'absolute',
+    left: 74,
+    bottom: 33,
+    width: 36,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 3,
+  },
+  artRowerRail: {
+    position: 'absolute',
+    right: 34,
+    bottom: 37,
+    width: 58,
+    height: 5,
+    borderRadius: 3,
+    transform: [{ rotate: '-11deg' }],
+  },
+  artRowerSeat: {
+    position: 'absolute',
+    right: 61,
+    bottom: 45,
+    width: 21,
+    height: 10,
+    borderRadius: 5,
+    transform: [{ rotate: '-11deg' }],
+  },
+  artCableTower: {
+    position: 'absolute',
+    top: 24,
+    width: 34,
+    height: 76,
+    borderRadius: 12,
+    borderWidth: 4,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  artCableTowerLeft: {
+    left: 54,
+  },
+  artCableTowerRight: {
+    right: 44,
+  },
+  artCableCrossbar: {
+    position: 'absolute',
+    left: 80,
+    right: 70,
+    top: 39,
+    height: 5,
+    borderRadius: 3,
+    opacity: 0.9,
+  },
+  artPlateTree: {
+    position: 'absolute',
+    left: 95,
+    bottom: 36,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    opacity: 0.9,
+  },
+  artPlateTreeAlt: {
+    left: 117,
+    bottom: 43,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
   },
   foodPresetCard: {
     width: 174,

@@ -1,28 +1,37 @@
 import React, { useEffect, useState } from 'react';
-import { Image, ImageSourcePropType, StyleProp, ViewStyle } from 'react-native';
+import { Image, ImageSourcePropType, StyleProp, View, ViewStyle } from 'react-native';
 import { ResizeMode, Video } from 'expo-av';
 
-import { demoLockoutSource, moveKitDemoVideo } from '../utils/exerciseDemo';
+import { moveKitDemoVideo } from '../utils/exerciseDemo';
+import { loadWorkoutXDemoPreview } from '../utils/workoutxDemoPreview';
 
 interface Props {
   exerciseName?: string | null;
   demoExerciseDbId?: string | null;
   fallbackSource?: ImageSourcePropType | null;
+  authToken?: string | null;
+  equipment?: string | null;
+  primaryMuscle?: string | null;
+  movementPattern?: string | null;
   style: StyleProp<ViewStyle>;
   imageResizeMode?: 'cover' | 'contain' | 'stretch' | 'repeat' | 'center';
+  workoutxResizeMode?: 'cover' | 'contain' | 'stretch' | 'repeat' | 'center';
   videoResizeMode?: ResizeMode;
   shouldPlayVideo?: boolean;
+  placeholder?: React.ReactNode;
 }
 
 export function hasExerciseThumbMedia(opts: {
   exerciseName?: string | null;
   demoExerciseDbId?: string | null;
   fallbackSource?: ImageSourcePropType | null;
+  authToken?: string | null;
+  allowHostedFallback?: boolean;
 }): boolean {
   return (
     !!moveKitDemoVideo(opts.demoExerciseDbId, opts.exerciseName)
-    || !!demoLockoutSource(opts.demoExerciseDbId)
     || !!opts.fallbackSource
+    || !!(opts.allowHostedFallback && opts.authToken && opts.exerciseName)
   );
 }
 
@@ -30,18 +39,70 @@ export default function ExerciseThumbMedia({
   exerciseName,
   demoExerciseDbId,
   fallbackSource,
+  authToken,
+  equipment,
+  primaryMuscle,
+  movementPattern,
   style,
   imageResizeMode = 'cover',
+  workoutxResizeMode = 'contain',
   videoResizeMode = ResizeMode.COVER,
   shouldPlayVideo = false,
+  placeholder,
 }: Props) {
   const [videoErrored, setVideoErrored] = useState(false);
+  const [workoutxGifUrl, setWorkoutxGifUrl] = useState<string | null>(null);
+  const [workoutxErrored, setWorkoutxErrored] = useState(false);
+  const [workoutxLoading, setWorkoutxLoading] = useState(false);
+  const [workoutxSettledKey, setWorkoutxSettledKey] = useState<string | null>(null);
 
   useEffect(() => {
     setVideoErrored(false);
   }, [demoExerciseDbId, exerciseName]);
 
   const video = moveKitDemoVideo(demoExerciseDbId, exerciseName);
+  const shouldFetchWorkoutX = !video && !!authToken && !!exerciseName;
+  const workoutxLookupKey = [
+    exerciseName ?? '',
+    equipment ?? '',
+    primaryMuscle ?? '',
+    movementPattern ?? '',
+  ].join('|').toLowerCase();
+  const workoutxSettled = !shouldFetchWorkoutX || workoutxSettledKey === workoutxLookupKey;
+
+  useEffect(() => {
+    let cancelled = false;
+    setWorkoutxGifUrl(null);
+    setWorkoutxErrored(false);
+    setWorkoutxSettledKey(null);
+    if (!shouldFetchWorkoutX) {
+      setWorkoutxLoading(false);
+      return;
+    }
+    setWorkoutxLoading(true);
+    loadWorkoutXDemoPreview({
+      authToken,
+      exerciseName,
+      equipment,
+      primaryMuscle,
+      movementPattern,
+    }).then((demo) => {
+      if (!cancelled) {
+        setWorkoutxGifUrl(demo?.gifUrl ?? null);
+        setWorkoutxErrored(!demo);
+        setWorkoutxSettledKey(workoutxLookupKey);
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setWorkoutxErrored(true);
+        setWorkoutxSettledKey(workoutxLookupKey);
+      }
+    }).finally(() => {
+      if (!cancelled) setWorkoutxLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authToken, equipment, exerciseName, movementPattern, primaryMuscle, shouldFetchWorkoutX, workoutxLookupKey]);
+
   if (video && !videoErrored) {
     return (
       <Video
@@ -57,11 +118,24 @@ export default function ExerciseThumbMedia({
     );
   }
 
-  // Move Kit video is preferred above; this keeps the old bundled
-  // free-exercise-db frame as the offline fallback for exercises
-  // without a Move Kit match.
-  const imageSource = demoLockoutSource(demoExerciseDbId) ?? fallbackSource;
-  return imageSource ? (
-    <Image source={imageSource} style={style as any} resizeMode={imageResizeMode} />
-  ) : null;
+  if (workoutxGifUrl && !workoutxErrored && workoutxSettled) {
+    return (
+      <Image
+        source={{ uri: workoutxGifUrl }}
+        style={style as any}
+        resizeMode={workoutxResizeMode}
+        onError={() => setWorkoutxErrored(true)}
+      />
+    );
+  }
+
+  if (shouldFetchWorkoutX && (workoutxLoading || !workoutxSettled)) {
+    return placeholder ? <View style={style}>{placeholder}</View> : null;
+  }
+
+  if (fallbackSource) {
+    return <Image source={fallbackSource} style={style as any} resizeMode={imageResizeMode} />;
+  }
+
+  return placeholder ? <View style={style}>{placeholder}</View> : null;
 }

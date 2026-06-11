@@ -31,8 +31,10 @@ type Props = {
   dateISO: string;
   themeName?: AppThemeName;
   title?: string;
+  subtitle?: string;
   compact?: boolean;
-  variant?: 'card' | 'inline';
+  variant?: 'card' | 'inline' | 'photo';
+  entryImage?: ImageSourcePropType;
 };
 
 type Choice<T extends string | null> = { label: string; value: T };
@@ -271,8 +273,10 @@ export default function LifestyleFactorsCard({
   dateISO,
   themeName,
   title = 'Log life events',
+  subtitle,
   compact,
   variant = 'card',
+  entryImage,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -388,6 +392,8 @@ export default function LifestyleFactorsCard({
     closeSheet();
   };
 
+  const photoEntry = variant === 'photo';
+
   return (
     <>
       <TouchableOpacity
@@ -399,6 +405,7 @@ export default function LifestyleFactorsCard({
         style={[
           styles.card,
           variant === 'inline' && styles.inline,
+          photoEntry && styles.photoCard,
           compact && styles.compact,
           {
             backgroundColor: variant === 'inline' ? tc.surfaceRaised : tc.surface,
@@ -406,33 +413,68 @@ export default function LifestyleFactorsCard({
           },
         ]}
       >
-        <View style={styles.cardHeader}>
-          <View style={[styles.iconBubble, { backgroundColor: tc.primary + '18' }]}>
-            <Ionicons name="sparkles-outline" size={16} color={tc.primary} />
-          </View>
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={[styles.title, { color: tc.textPrimary }]}>{title}</Text>
-            <View style={styles.chipRow}>
-              {baseLoading ? (
-                <ActivityIndicator size="small" color={tc.textMuted} />
-              ) : chips.length > 0 ? (
-                chips.map(chip => (
-                  <View key={chip} style={[styles.chip, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
-                    <Text style={[styles.chipText, { color: tc.textSecondary }]} numberOfLines={1}>{chip}</Text>
+        {photoEntry ? (
+          <ImageBackground
+            source={entryImage ?? require('../../assets/images/card-backgrounds/lifestyle-card-caffeine-coffee.jpg')}
+            style={styles.photoImage}
+            imageStyle={styles.photoImageStyle}
+            resizeMode="cover">
+            <View style={styles.photoOverlay} />
+            <View style={styles.photoContent}>
+              <View style={styles.photoIconBubble}>
+                <Ionicons name="sparkles-outline" size={18} color="#fff" />
+              </View>
+              <Text style={styles.photoTitle}>{title}</Text>
+              {subtitle ? <Text style={styles.photoSubtitle} numberOfLines={1}>{subtitle}</Text> : null}
+              <View style={styles.photoChipRow}>
+                {baseLoading ? (
+                  <ActivityIndicator size="small" color="rgba(255,255,255,0.86)" />
+                ) : chips.length > 0 ? (
+                  chips.map(chip => (
+                    <View key={chip} style={styles.photoChip}>
+                      <Text style={styles.photoChipText} numberOfLines={1}>{chip}</Text>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.photoEmpty}>No life events logged</Text>
+                )}
+                {basePending ? (
+                  <View style={styles.photoChip}>
+                    <Text style={styles.photoChipText}>Pending</Text>
                   </View>
-                ))
-              ) : (
-                <Text style={[styles.empty, { color: tc.textMuted }]}>No life events logged</Text>
-              )}
-              {basePending ? (
-                <View style={[styles.chip, { backgroundColor: tc.warning + '18', borderColor: tc.warning + '44' }]}>
-                  <Text style={[styles.chipText, { color: tc.warning }]}>Pending</Text>
-                </View>
-              ) : null}
+                ) : null}
+              </View>
             </View>
+          </ImageBackground>
+        ) : (
+          <View style={styles.cardHeader}>
+            <View style={[styles.iconBubble, { backgroundColor: tc.primary + '18' }]}>
+              <Ionicons name="sparkles-outline" size={16} color={tc.primary} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={[styles.title, { color: tc.textPrimary }]}>{title}</Text>
+              <View style={styles.chipRow}>
+                {baseLoading ? (
+                  <ActivityIndicator size="small" color={tc.textMuted} />
+                ) : chips.length > 0 ? (
+                  chips.map(chip => (
+                    <View key={chip} style={[styles.chip, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
+                      <Text style={[styles.chipText, { color: tc.textSecondary }]} numberOfLines={1}>{chip}</Text>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={[styles.empty, { color: tc.textMuted }]}>No life events logged</Text>
+                )}
+                {basePending ? (
+                  <View style={[styles.chip, { backgroundColor: tc.warning + '18', borderColor: tc.warning + '44' }]}>
+                    <Text style={[styles.chipText, { color: tc.warning }]}>Pending</Text>
+                  </View>
+                ) : null}
+              </View>
+            </View>
+            <Ionicons name="add-circle-outline" size={20} color={tc.primary} />
           </View>
-          <Ionicons name="add-circle-outline" size={20} color={tc.primary} />
-        </View>
+        )}
       </TouchableOpacity>
 
       <Modal visible={open} animationType="slide" onRequestClose={closeSheet}>
@@ -789,6 +831,77 @@ const styles = StyleSheet.create({
   },
   compact: {
     padding: 10,
+  },
+  photoCard: {
+    padding: 0,
+    minHeight: 124,
+    overflow: 'hidden',
+    borderRadius: 14,
+  },
+  photoImage: {
+    minHeight: 124,
+    justifyContent: 'center',
+  },
+  photoImageStyle: {
+    borderRadius: 13,
+  },
+  photoOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.48)',
+  },
+  photoContent: {
+    minHeight: 124,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 14,
+    gap: 6,
+  },
+  photoIconBubble: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+  },
+  photoTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  photoSubtitle: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  photoChipRow: {
+    minHeight: 20,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  photoChip: {
+    maxWidth: '100%',
+    borderWidth: 1,
+    borderRadius: 7,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.24)',
+  },
+  photoChipText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  photoEmpty: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 10,
+    fontWeight: '800',
   },
   cardHeader: {
     flexDirection: 'row',

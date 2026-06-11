@@ -214,6 +214,72 @@ public class ThalloHealthKitModule: Module {
             return []
         }
 
+        AsyncFunction("getWalkingStepLength") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            if #available(iOS 14.0, *) {
+                guard let qt = HKQuantityType.quantityType(forIdentifier: .walkingStepLength) else { return [] }
+                return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                    ["value": sample.quantity.doubleValue(for: .meter()),
+                     "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+                }
+            }
+            return []
+        }
+
+        AsyncFunction("getRunningStrideLength") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            if #available(iOS 16.0, *) {
+                guard let qt = HKQuantityType.quantityType(forIdentifier: .runningStrideLength) else { return [] }
+                return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                    ["value": sample.quantity.doubleValue(for: .meter()),
+                     "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+                }
+            }
+            return []
+        }
+
+        AsyncFunction("getWalkingSteadiness") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            if #available(iOS 15.0, *) {
+                guard let qt = HKQuantityType.quantityType(forIdentifier: .appleWalkingSteadiness) else { return [] }
+                return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                    ["value": sample.quantity.doubleValue(for: .percent()) * 100,
+                     "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+                }
+            }
+            return []
+        }
+
+        AsyncFunction("getWalkingAsymmetryPercentage") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            if #available(iOS 14.0, *) {
+                guard let qt = HKQuantityType.quantityType(forIdentifier: .walkingAsymmetryPercentage) else { return [] }
+                return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                    ["value": sample.quantity.doubleValue(for: .percent()) * 100,
+                     "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+                }
+            }
+            return []
+        }
+
+        AsyncFunction("getWalkingDoubleSupportPercentage") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            if #available(iOS 14.0, *) {
+                guard let qt = HKQuantityType.quantityType(forIdentifier: .walkingDoubleSupportPercentage) else { return [] }
+                return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                    ["value": sample.quantity.doubleValue(for: .percent()) * 100,
+                     "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+                }
+            }
+            return []
+        }
+
+        AsyncFunction("getSixMinuteWalkTestDistance") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            if #available(iOS 14.0, *) {
+                guard let qt = HKQuantityType.quantityType(forIdentifier: .sixMinuteWalkTestDistance) else { return [] }
+                return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                    ["value": sample.quantity.doubleValue(for: .meter()),
+                     "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+                }
+            }
+            return []
+        }
+
         AsyncFunction("getStandingHours") { (startMs: Double, endMs: Double) -> [[String: Any]] in
             guard let ct = HKCategoryType.categoryType(forIdentifier: .appleStandHour) else { return [] }
             return try await self.queryCategorySamples(type: ct, start: startMs, end: endMs) { sample in
@@ -558,6 +624,42 @@ public class ThalloHealthKitModule: Module {
         if name == "AppleSleepingBreathingDisturbances" {
             if #available(iOS 18.0, *) {
                 return HKQuantityType.quantityType(forIdentifier: .appleSleepingBreathingDisturbances)
+            }
+            return nil
+        }
+        if name == "WalkingStepLength" {
+            if #available(iOS 14.0, *) {
+                return HKQuantityType.quantityType(forIdentifier: .walkingStepLength)
+            }
+            return nil
+        }
+        if name == "RunningStrideLength" {
+            if #available(iOS 16.0, *) {
+                return HKQuantityType.quantityType(forIdentifier: .runningStrideLength)
+            }
+            return nil
+        }
+        if name == "WalkingSteadiness" {
+            if #available(iOS 15.0, *) {
+                return HKQuantityType.quantityType(forIdentifier: .appleWalkingSteadiness)
+            }
+            return nil
+        }
+        if name == "WalkingAsymmetryPercentage" {
+            if #available(iOS 14.0, *) {
+                return HKQuantityType.quantityType(forIdentifier: .walkingAsymmetryPercentage)
+            }
+            return nil
+        }
+        if name == "WalkingDoubleSupportPercentage" {
+            if #available(iOS 14.0, *) {
+                return HKQuantityType.quantityType(forIdentifier: .walkingDoubleSupportPercentage)
+            }
+            return nil
+        }
+        if name == "SixMinuteWalkTestDistance" {
+            if #available(iOS 14.0, *) {
+                return HKQuantityType.quantityType(forIdentifier: .sixMinuteWalkTestDistance)
             }
             return nil
         }

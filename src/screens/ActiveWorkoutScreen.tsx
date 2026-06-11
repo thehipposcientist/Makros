@@ -71,7 +71,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, analyzeExercisePhoto, AIExerciseResult, getAiWarmup, getPreSetRecommendation, getRecommendationAiSafetyStatus, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, listWorkoutSessions, getHydration, logHydration, logHydrationDelta, getE1RM, type E1RMEstimate, type RecommendationAiSafety, type WorkoutPostSummary, type WorkoutSessionRecord, type WorkoutSessionExerciseRecord, type WorkoutSessionSetRecord } from '../services/api';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
-import { moveKitDemoVideo } from '../utils/exerciseDemo';
 import LiveExerciseDemoThumb from '../components/LiveExerciseDemoThumb';
 import ExerciseThumbMedia, { hasExerciseThumbMedia } from '../components/ExerciseThumbMedia';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
@@ -80,7 +79,7 @@ import { workoutSessionCountsForPlan } from '../utils/workoutCompletion';
 import { activityFromFocus, estimateRouteElevationGainFt, type RouteCoord } from '../utils/cardioGpsTracker';
 import { cardioContextAllowsOutdoorData, isSetlessCardioExercise } from '../utils/cardioDisplay';
 import { hydrationTargetRangeOz } from '../utils/hydration';
-import { loadCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
+import { applyCachedHydrationDelta, loadCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
@@ -100,13 +99,16 @@ import { ScoreInfoModal, ScoreInfoSection, ScoreInfoBody, ScoreInfoRow } from '.
 import { isWatchReachable } from '../utils/watchSync';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { drainActiveWatchCommands, setActiveWatchCommandConsumerMounted } from '../utils/watchCommandBacklog';
+import { enqueueDailyWatchCommand } from '../utils/watchDailyCommandBacklog';
 import { claimWatchCommand } from '../utils/watchCommandDedupe';
 import { recordWatchCommandEvent } from '../utils/watchCommandProcessor';
+import { isWatchSupplementCommand, processWatchSupplementCommand } from '../utils/watchSupplementCommands';
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { matchesExerciseSearch } from '../utils/exerciseSearch';
 import { preferredExerciseVideoEquipment } from '../utils/exerciseVideoSearch';
+import { isGuidedFlowSession, isRecoveryFlowWorkout } from '../utils/workoutFlowMode';
 import {
   shouldHideWeight,
   shouldHideReps,
@@ -167,6 +169,10 @@ import {
 // (sec/km → sec/preferred-unit) without a dedicated helper.
 // 1 km ≈ 0.6214 mi.
 const MI_PER_KM_LOCAL = 0.6213711922;
+const METERS_PER_MILE_LOCAL = 1609.344;
+const YARDS_PER_METER_LOCAL = 1.0936132983;
+const SWIMMING_ACTIVITY_RAW = 46;
+const DEFAULT_SWIM_POOL_LENGTH_METERS = 25;
 const ACTIVE_EXERCISE_LIVE_ACTIVITY_KEY = '__active_exercise__';
 const LIVE_WORKOUT_ACTIVITY_HORIZON_MS = 12 * 60 * 60 * 1000;
 const ACTIVE_WORKOUT_PAUSED_AT_KEY = 'activeWorkoutPausedAtMs';
@@ -189,6 +195,41 @@ const CARDIO_ACTIVITY_RAWS = new Set([
   51, // volleyball
 ]);
 const OUTDOOR_CARDIO_ACTIVITY_RAWS = new Set([37, 52, 16, 13]);
+
+function swimContextText(workout?: Partial<WorkoutDay> | null): string {
+  return `${workout?.focus ?? ''} ${workout?.stimulus ?? ''} ${(workout as any)?._custom_cardio_subtype ?? ''} ${(workout as any)?._custom_activity_venue ?? ''}`.toLowerCase();
+}
+
+function isOpenWaterSwimText(text: string): boolean {
+  return /\b(open water|outdoor|lake|ocean|sea)\b/.test(text);
+}
+
+function parsePoolLengthMetersFromText(text: string): number | null {
+  const match = text.match(/(\d+(?:\.\d+)?)\s*(yd|yds|yard|yards|m|meter|meters|metre|metres)\b/i);
+  if (!match) return null;
+  const rawValue = Number(match[1]);
+  if (!Number.isFinite(rawValue) || rawValue <= 0) return null;
+  const unit = match[2].toLowerCase();
+  const meters = unit.startsWith('yd') || unit.startsWith('yard') ? rawValue * 0.9144 : rawValue;
+  return meters >= 5 && meters <= 150 ? meters : null;
+}
+
+function swimPoolLengthMetersForWorkout(workout?: Partial<WorkoutDay> | null): number | null {
+  const text = swimContextText(workout);
+  if (!/\b(swim|swimming|pool|open water)\b/.test(text) || isOpenWaterSwimText(text)) return null;
+  return parsePoolLengthMetersFromText(text) ?? DEFAULT_SWIM_POOL_LENGTH_METERS;
+}
+
+function swimPaceSecPer100Meters(elapsedSeconds: number, distanceMeters: number): number | null {
+  if (!Number.isFinite(elapsedSeconds) || !Number.isFinite(distanceMeters) || elapsedSeconds <= 0 || distanceMeters < 30) return null;
+  return elapsedSeconds / (distanceMeters / 100);
+}
+
+function formatPaceSeconds(seconds: number | null): string {
+  if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return '—';
+  const rounded = Math.round(seconds);
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
+}
 
 type ExerciseTimerElapsedTextProps = {
   timer: ExerciseTimerState | undefined;
@@ -611,6 +652,16 @@ type LiveRecommendationCue = {
   trace?: Record<string, any> | null;
 };
 
+type ExerciseAwareRecommendationCue = {
+  text: string;
+  nextTarget: string;
+  cue: string;
+  displayTitle: string;
+  displayValue: string;
+  recommendedReps?: string | null;
+  source: string;
+};
+
 function shouldHoldAiSafetyRecommendation(aiSafety?: RecommendationAiSafety | null): boolean {
   if (!aiSafety) return false;
   if (aiSafety.shouldHold === true) return true;
@@ -796,32 +847,6 @@ function exerciseSlotRole(ex: Partial<SessionExercise> | any): string {
   return String(ex?.slotRole ?? ex?.slot_role ?? ex?._role ?? '').toLowerCase();
 }
 
-// Guided flow detection — every exercise is a timed pose AND has a
-// flow_category tag. Strength days with a single mobility drill in a
-// slot will NOT match (the drill won't have a flow_category), keeping
-// regular workouts in standard render mode.
-const _GUIDED_FLOW_PRESCRIPTIONS = new Set([
-  'yoga_flow',
-  'stretch_hold',
-  'mobility',
-]);
-
-function exerciseFlowCategory(ex: Partial<SessionExercise> | any): string | null {
-  const fc = ex?.flowCategory ?? ex?.flow_category ?? null;
-  return typeof fc === 'string' && fc.length > 0 ? fc : null;
-}
-
-function isGuidedFlowSession(workout: { exercises?: SessionExercise[] | any[] } | null | undefined): boolean {
-  const exs = workout?.exercises ?? [];
-  if (!Array.isArray(exs) || exs.length === 0) return false;
-  for (const ex of exs) {
-    const ptype = String(ex?.prescriptionType ?? ex?.prescription_type ?? '').toLowerCase();
-    if (!_GUIDED_FLOW_PRESCRIPTIONS.has(ptype)) return false;
-    if (!exerciseFlowCategory(ex)) return false;
-  }
-  return true;
-}
-
 function isCoreCircuitExercise(ex: Partial<SessionExercise> | any): boolean {
   const role = exerciseSlotRole(ex);
   const prescription = String(ex?.prescriptionType ?? ex?.prescription_type ?? '').toLowerCase();
@@ -934,12 +959,14 @@ const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
   stylesRef,
   onPress,
   onPreview,
+  authToken,
 }: {
   item: SmartSwapItem;
   swapMode: boolean;
   stylesRef: ReturnType<typeof createStyles>;
   onPress: (item: ExerciseLibraryItem) => void;
   onPreview?: (item: ExerciseLibraryItem) => void;
+  authToken?: string | null;
 }) {
   const fitPercent = swapMode ? item._overlap : item._alignment;
   const fitLabel = swapMode ? 'overlap' : 'alignment';
@@ -950,6 +977,8 @@ const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
     exerciseName: item.name,
     demoExerciseDbId,
     fallbackSource: thumbSrc,
+    authToken,
+    allowHostedFallback: true,
   });
   const showPreview = swapMode && !!onPreview;
   return (
@@ -973,8 +1002,17 @@ const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
               exerciseName={item.name}
               demoExerciseDbId={demoExerciseDbId}
               fallbackSource={thumbSrc}
+              authToken={authToken}
+              equipment={item.equipment ?? null}
+              primaryMuscle={item.primary_muscle ?? null}
+              movementPattern={(item as any).movement_pattern ?? null}
               style={stylesRef.addExercisePreviewImage}
               shouldPlayVideo={false}
+              placeholder={(
+                <View style={stylesRef.addExercisePreviewFallback}>
+                  <Ionicons name="videocam-outline" size={16} color="#6B7280" />
+                </View>
+              )}
             />
           ) : (
             <View style={stylesRef.addExercisePreviewFallback}>
@@ -1662,6 +1700,122 @@ function getTimedExerciseTip(name: string, targetReps?: string | number, loggedS
   return null;
 }
 
+function cleanExerciseGuidanceValue(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+function cardioGuidanceForExercise(ex: any): Record<string, unknown> {
+  const guidance = ex?.cardioGuidance ?? ex?.cardio_guidance;
+  return guidance && typeof guidance === 'object' ? guidance : {};
+}
+
+function firstNonEmptyGuidanceValue(...values: unknown[]): string | null {
+  for (const value of values) {
+    const cleaned = cleanExerciseGuidanceValue(value);
+    if (cleaned) return cleaned;
+  }
+  return null;
+}
+
+function hrZoneTargetText(cardioGuidance: Record<string, unknown>, hrZones: HRZone[]): string | null {
+  const explicitRange = firstNonEmptyGuidanceValue(
+    cardioGuidance.hr_range,
+    cardioGuidance.hrRange,
+  );
+  const zoneNumber = Number((cardioGuidance as any).hr_zone ?? (cardioGuidance as any).hrZone);
+  if (!Number.isFinite(zoneNumber) || zoneNumber <= 0) return explicitRange ? `HR ${explicitRange}` : null;
+  const zone = hrZones.find(z => Number(z.zone) === Math.round(zoneNumber));
+  if (zone) return `Z${zone.zone} ${zone.low}-${zone.high} bpm`;
+  return explicitRange ? `Z${Math.round(zoneNumber)} ${explicitRange}` : `Zone ${Math.round(zoneNumber)}`;
+}
+
+function durationTargetText(ex: SessionExercise, cardioGuidance: Record<string, unknown>): string | null {
+  const durationMin = Number((cardioGuidance as any).duration_min ?? (cardioGuidance as any).durationMin);
+  if (Number.isFinite(durationMin) && durationMin > 0) return `${Math.round(durationMin)} min`;
+  const target = cleanExerciseGuidanceValue(ex.targetReps);
+  if (!target) return null;
+  if (/\b(rpm|watt|watts|bpm|mph|kph|km\/h|pace|resistance)\b/i.test(target)) return null;
+  return target;
+}
+
+function buildExerciseAwareRecommendation(
+  ex: SessionExercise,
+  setNumber: number,
+  loggedSets: CompletedSet[],
+  opts: { hrZones: HRZone[]; distanceUnit: DistanceUnit },
+): ExerciseAwareRecommendationCue | null {
+  const cardioGuidance = cardioGuidanceForExercise(ex);
+  const name = String(ex.name ?? '');
+  const nameLower = name.toLowerCase();
+  const guidanceParts: string[] = [];
+
+  const addPart = (label: string, value: unknown) => {
+    const cleaned = cleanExerciseGuidanceValue(value);
+    if (cleaned) guidanceParts.push(`${label} ${cleaned}`);
+  };
+
+  if (/bike|cycling|ride|peloton|spin/.test(nameLower)) {
+    addPart('Watts', cardioGuidance.watts_range ?? (cardioGuidance as any).wattsRange);
+    addPart('RPM', cardioGuidance.rpm_range ?? (cardioGuidance as any).rpmRange);
+    addPart('Resistance', cardioGuidance.resistance_cue ?? (cardioGuidance as any).resistanceCue);
+  } else if (/row|rowing|erg/.test(nameLower)) {
+    addPart('Split', cardioGuidance.pace_per_500m ?? (cardioGuidance as any).pacePer500m);
+    addPart('SPM', cardioGuidance.stroke_rate ?? (cardioGuidance as any).strokeRate);
+  } else if (/incline.?walk|treadmill|running|jogging|run\b|\bwalk\b/.test(nameLower)) {
+    addPart('Speed', cardioGuidance.speed_range ?? (cardioGuidance as any).speedRange);
+    addPart('Incline', cardioGuidance.incline_range ?? (cardioGuidance as any).inclineRange);
+  } else {
+    addPart('Watts', cardioGuidance.watts_range ?? (cardioGuidance as any).wattsRange);
+    addPart('RPM', cardioGuidance.rpm_range ?? (cardioGuidance as any).rpmRange);
+    addPart('Speed', cardioGuidance.speed_range ?? (cardioGuidance as any).speedRange);
+    addPart('Incline', cardioGuidance.incline_range ?? (cardioGuidance as any).inclineRange);
+    addPart('SPM', cardioGuidance.stroke_rate ?? (cardioGuidance as any).strokeRate);
+  }
+
+  const hrText = hrZoneTargetText(cardioGuidance, opts.hrZones);
+  if (hrText) guidanceParts.push(hrText);
+  const rpeText = firstNonEmptyGuidanceValue(cardioGuidance.rpe_range, (cardioGuidance as any).rpeRange);
+  if (rpeText) guidanceParts.push(`RPE ${rpeText}`);
+  const durationText = durationTargetText(ex, cardioGuidance);
+  if (durationText) guidanceParts.unshift(`Duration ${durationText}`);
+
+  const displayValue = guidanceParts.slice(0, 4).join(' · ')
+    || durationText
+    || targetCountText(ex, true);
+  if (!displayValue) return null;
+
+  const intensityCue = firstNonEmptyGuidanceValue(
+    cardioGuidance.intensity_cue,
+    (cardioGuidance as any).intensityCue,
+  );
+  const fallbackCue = getTimedExerciseTip(ex.name, ex.targetReps, loggedSets);
+  const cue = intensityCue
+    ?? fallbackCue
+    ?? (/bike|cycling|ride|peloton|spin/.test(nameLower)
+      ? 'Keep the effort smooth and adjust resistance to stay on target.'
+      : 'Keep the effort controlled and stay inside the target range.');
+  const nextTarget = `Set ${setNumber}: ${displayValue}`;
+  const displayTitle = /bike|cycling|ride|peloton|spin/.test(nameLower)
+    ? 'Bike target'
+    : /row|rowing|erg/.test(nameLower)
+      ? 'Row target'
+      : /run|jog|walk|treadmill/.test(nameLower)
+        ? 'Cardio target'
+        : 'Exercise target';
+
+  return {
+    text: `${nextTarget} — ${cue}`,
+    nextTarget,
+    cue,
+    displayTitle,
+    displayValue,
+    recommendedReps: durationText ?? null,
+    source: 'exercise_aware',
+  };
+}
+
 type MetricField = {
   key: string;
   label: string;
@@ -1994,6 +2148,7 @@ function workoutExerciseToSessionExercise(ex: any): SessionExercise {
     slotRole: ex.slotRole ?? ex.slot_role ?? ex._role ?? null,
     slotLabel: ex.slotLabel ?? ex.slot_label ?? ex._slot ?? null,
     prescriptionType: ex.prescriptionType ?? ex.prescription_type ?? null,
+    flowCategory: ex.flowCategory ?? ex.flow_category ?? null,
     weightRecommendationSource: ex.weightRecommendationSource ?? null,
   };
 }
@@ -2020,6 +2175,7 @@ function savedExerciseFallback(saved: any): SessionExercise {
     slotRole: saved?.slotRole,
     slotLabel: saved?.slotLabel,
     prescriptionType: saved?.prescriptionType,
+    flowCategory: saved?.flowCategory ?? saved?.flow_category,
     weightRecommendationSource: saved?.weightRecommendationSource,
   });
 }
@@ -2067,6 +2223,7 @@ function restoreSavedSessionExercise(saved: any, fallback: SessionExercise): Ses
     slotRole: saved?.slotRole ?? fallback.slotRole ?? null,
     slotLabel: saved?.slotLabel ?? fallback.slotLabel ?? null,
     prescriptionType: saved?.prescriptionType ?? fallback.prescriptionType ?? null,
+    flowCategory: saved?.flowCategory ?? saved?.flow_category ?? fallback.flowCategory ?? null,
     weightRecommendationSource: exerciseNameChanged ? null : saved?.weightRecommendationSource ?? fallback.weightRecommendationSource ?? null,
   };
 }
@@ -2097,6 +2254,7 @@ function serializeActiveWorkoutExercise(ex: SessionExercise, exerciseIndex: numb
     slotRole: ex.slotRole,
     slotLabel: ex.slotLabel,
     prescriptionType: ex.prescriptionType,
+    flowCategory: ex.flowCategory ?? null,
     weightRecommendationSource: ex.weightRecommendationSource,
   };
 }
@@ -2676,7 +2834,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     overrideRir?: number,
   ) => Promise<void> | void>(() => {});
   const exercisesRef = useRef<SessionExercise[]>([]);
-  const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => void>(() => {});
+  const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number; watchRecommendation?: string | null }) => void>(() => {});
   const finishRestTimerRef = useRef<(opts?: FinishRestTimerOptions) => void>(() => {});
   const clearRestStateRef = useRef<(opts?: ClearRestStateOptions) => void>(() => {});
   const rescheduleRestNotificationsRef = useRef<(params: {
@@ -2695,6 +2853,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const watchSwapExerciseRef = useRef<(exerciseIndex: number, toExerciseName?: string | null) => Promise<void> | void>(() => {});
   const watchAddCircuitRef = useRef<(kind: 'core' | 'stretch') => Promise<void> | void>(() => {});
   const watchLogSetChainRef = useRef<Promise<void>>(Promise.resolve());
+  const activeWatchHydrationCommandChainRef = useRef<Promise<void>>(Promise.resolve());
+  const activeWatchSupplementCommandChainRef = useRef<Promise<void>>(Promise.resolve());
   const processedWatchCommandIdsRef = useRef<Set<string>>(new Set());
   const processedWatchCommandIdOrderRef = useRef<string[]>([]);
   const rememberWatchCommandId = useCallback((payload: Record<string, any>): boolean => {
@@ -2794,6 +2954,37 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const elevationGainFt = Number(payload?.elevationGainFt);
             const activityTypeRaw = Number(payload?.activityTypeRaw);
             const normalizedActivityTypeRaw = Number.isFinite(activityTypeRaw) ? activityTypeRaw : null;
+            const isSwimming = normalizedActivityTypeRaw === SWIMMING_ACTIVITY_RAW;
+            const swimPoolLengthFromPayload = Number(payload?.swimPoolLengthMeters);
+            const swimDistanceFromPayload = Number(payload?.swimDistanceMeters);
+            const swimLapCountFromPayload = Number(payload?.swimLapCount);
+            const swimPaceFromPayload = Number(payload?.swimPaceSecPer100m);
+            const swimContext = swimContextText(workout);
+            const swimPoolLengthMeters = isSwimming
+              ? (Number.isFinite(swimPoolLengthFromPayload) && swimPoolLengthFromPayload > 0
+                ? swimPoolLengthFromPayload
+                : swimPoolLengthMetersForWorkout(workout))
+              : null;
+            const swimDistanceMeters = isSwimming
+              ? Math.max(0, Number.isFinite(swimDistanceFromPayload) && swimDistanceFromPayload > 0 ? swimDistanceFromPayload : distanceMeters)
+              : null;
+            const swimLapCount = isSwimming
+              ? (Number.isFinite(swimLapCountFromPayload) && swimLapCountFromPayload > 0
+                ? Math.round(swimLapCountFromPayload)
+                : swimPoolLengthMeters && swimDistanceMeters && swimDistanceMeters > 0
+                  ? Math.max(1, Math.round(swimDistanceMeters / swimPoolLengthMeters))
+                  : null)
+              : null;
+            const swimPace = isSwimming
+              ? (Number.isFinite(swimPaceFromPayload) && swimPaceFromPayload > 0
+                ? swimPaceFromPayload
+                : swimPaceSecPer100Meters(elapsedSeconds, swimDistanceMeters ?? distanceMeters))
+              : null;
+            const swimLocation = isSwimming
+              ? payload?.swimLocation === 'open_water' || payload?.swimLocation === 'pool'
+                ? payload.swimLocation
+                : isOpenWaterSwimText(swimContext) ? 'open_water' : 'pool'
+              : null;
             const allowsOutdoorData = cardioAllowsOutdoorDataRef.current;
             const normalizedElevationGainFt = allowsOutdoorData && Number.isFinite(elevationGainFt) && elevationGainFt > 0 ? Math.round(elevationGainFt) : null;
             const estimatedPowerWatts = allowsOutdoorData && normalizedActivityTypeRaw === 13
@@ -2810,6 +3001,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               distanceMeters,
               activeCalories,
               paceSecPerKm: Number.isFinite(pace) && pace > 0 ? pace : null,
+              swimDistanceMeters,
+              swimPoolLengthMeters,
+              swimLapCount,
+              swimPaceSecPer100m: swimPace,
+              swimLocation,
               heartRate: Number.isFinite(hr) && hr > 0 ? Math.round(hr) : null,
               steps: Number.isFinite(steps) && steps > 0 ? Math.round(steps) : null,
               elevationGainFt: normalizedElevationGainFt,
@@ -2838,68 +3034,147 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             if (Number.isFinite(hr) && hr > 0) setLiveHR(Math.round(hr));
             return;
           }
+          if (command === 'toggle_meal') {
+            enqueueDailyWatchCommand(command, payload)
+              .then(() => recordWatchCommandEvent({ phase: 'queued', command, surface: 'active', detail: 'home_replay' }))
+              .catch(() => recordWatchCommandEvent({ phase: 'dropped', command, surface: 'active', detail: 'queue_failed' }));
+            return;
+          }
+          if (isWatchSupplementCommand(command)) {
+            if (!claimWatchCommand(command, payload)) {
+              recordWatchCommandEvent({ phase: 'deduped', command, surface: 'active' });
+              return;
+            }
+            const processSupplementCommand = async () => {
+              const currentAuthToken = authTokenRef.current;
+              if (!currentAuthToken) {
+                await enqueueDailyWatchCommand(command, payload).catch(() => undefined);
+                recordWatchCommandEvent({ phase: 'queued', command, surface: 'active', detail: 'no_token' });
+                return;
+              }
+              try {
+                await processWatchSupplementCommand(currentAuthToken, command, payload);
+                recordWatchCommandEvent({ phase: 'applied', command, surface: 'active' });
+              } catch {
+                recordWatchCommandEvent({ phase: 'dropped', command, surface: 'active', detail: 'save_failed' });
+              }
+            };
+            activeWatchSupplementCommandChainRef.current = activeWatchSupplementCommandChainRef.current
+              .then(processSupplementCommand, processSupplementCommand);
+            activeWatchSupplementCommandChainRef.current.catch(() => undefined);
+            return;
+          }
           if (command === 'log_hydration') {
-            setTimeout(() => {
-              if (!claimWatchCommand(command, payload)) return;
-              (async () => {
-                try {
-                  const currentAuthToken = authTokenRef.current;
-                  if (!currentAuthToken) return;
-                  const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
-                    ? payload.userId.trim()
-                    : null;
-                  const currentUserId = await AsyncStorage.getItem('last_user_id').catch(() => null);
-                  if (commandUserId && currentUserId && commandUserId !== currentUserId) return;
-                  const rawDelta = Number(payload?.deltaOz ?? payload?.delta_oz);
-                  const rawOunces = Number(payload?.ounces);
-                  const commandId = typeof payload?.commandId === 'string' && payload.commandId.trim()
-                    ? payload.commandId.trim()
-                    : undefined;
-                  const hasDelta = Number.isFinite(rawDelta) && rawDelta !== 0;
-                  if (hasDelta && (rawDelta < -400 || rawDelta > 400)) return;
-                  if (!hasDelta && (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400)) return;
-                  const dateISO = String(payload?.dateISO || dateKey(new Date())).slice(0, 10);
-                  const cached = await loadCachedHydration(dateISO).catch(() => null);
-                  const fallbackTarget = cached?.target_ounces ?? 64;
-                  const fallbackRange = hydrationTargetRangeOz(fallbackTarget);
-                  const optimisticOunces = hasDelta
-                    ? Math.max(0, Math.round(((cached?.ounces ?? (Number.isFinite(rawOunces) ? rawOunces - rawDelta : 0)) + rawDelta) * 10) / 10)
-                    : Math.max(0, Math.round(rawOunces * 10) / 10);
-                  await saveCachedHydration({
-                    date: dateISO,
-                    ounces: optimisticOunces,
-                    target_ounces: fallbackTarget,
-                    target_ounces_min: cached?.target_ounces_min ?? fallbackRange?.min,
-                    target_ounces_max: cached?.target_ounces_max ?? fallbackRange?.max,
-                  }, {
+            if (!claimWatchCommand(command, payload)) {
+              recordWatchCommandEvent({ phase: 'deduped', command, surface: 'active' });
+              return;
+            }
+            const processHydrationCommand = async () => {
+              try {
+                const currentAuthToken = authTokenRef.current;
+                if (!currentAuthToken) return;
+                const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
+                  ? payload.userId.trim()
+                  : null;
+                const currentUserId = await AsyncStorage.getItem('last_user_id').catch(() => null);
+                if (commandUserId && currentUserId && commandUserId !== currentUserId) return;
+                const rawDelta = Number(payload?.deltaOz ?? payload?.delta_oz);
+                const rawOunces = Number(payload?.ounces);
+                const commandId = typeof payload?.commandId === 'string' && payload.commandId.trim()
+                  ? payload.commandId.trim()
+                  : undefined;
+                const hasDelta = Number.isFinite(rawDelta) && rawDelta !== 0;
+                if (hasDelta && (rawDelta < -400 || rawDelta > 400)) return;
+                if (!hasDelta && (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400)) return;
+                const payloadDate = typeof payload?.dateISO === 'string' ? payload.dateISO.slice(0, 10) : '';
+                const dateISO = /^\d{4}-\d{2}-\d{2}$/.test(payloadDate) ? payloadDate : dateKey(new Date());
+                const commandTsMs = Number(payload?.tsMs ?? 0);
+                const commandOwner = currentUserId ?? commandUserId ?? 'unknown';
+                const commandKey = `watch_hydration_command_ts_v1:${commandOwner}:${dateISO}`;
+                const absoluteCommandKey = `watch_hydration_absolute_command_ts_v1:${commandOwner}:${dateISO}`;
+                let lastTsMs = 0;
+                let lastAbsoluteTsMs = 0;
+                if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
+                  const [lastRaw, lastAbsoluteRaw] = await Promise.all([
+                    AsyncStorage.getItem(commandKey).catch(() => null),
+                    AsyncStorage.getItem(absoluteCommandKey).catch(() => null),
+                  ]);
+                  const parsedLast = lastRaw ? Number(lastRaw) : 0;
+                  const parsedAbsolute = lastAbsoluteRaw ? Number(lastAbsoluteRaw) : 0;
+                  lastTsMs = Number.isFinite(parsedLast) ? parsedLast : 0;
+                  lastAbsoluteTsMs = Number.isFinite(parsedAbsolute) ? parsedAbsolute : 0;
+                  if (hasDelta) {
+                    if (lastAbsoluteTsMs > 0 && commandTsMs <= lastAbsoluteTsMs) return;
+                  } else if (lastTsMs > 0 && commandTsMs <= lastTsMs) {
+                    return;
+                  }
+                }
+
+                let cached = await loadCachedHydration(dateISO).catch(() => null);
+                if (cached?.pending) {
+                  await import('../utils/hydrationRetry')
+                    .then(m => m.flushPendingHydration(currentAuthToken))
+                    .catch(() => {});
+                  cached = await loadCachedHydration(dateISO).catch(() => null);
+                }
+                const fallbackTarget = cached?.target_ounces ?? 64;
+                const fallbackRange = hydrationTargetRangeOz(fallbackTarget);
+                const optimisticOunces = hasDelta
+                  ? Math.max(0, Math.round(((cached?.ounces ?? (Number.isFinite(rawOunces) ? rawOunces - rawDelta : 0)) + rawDelta) * 10) / 10)
+                  : Math.max(0, Math.round(rawOunces * 10) / 10);
+                const optimistic = {
+                  date: dateISO,
+                  ounces: optimisticOunces,
+                  target_ounces: fallbackTarget,
+                  target_ounces_min: cached?.target_ounces_min ?? fallbackRange?.min,
+                  target_ounces_max: cached?.target_ounces_max ?? fallbackRange?.max,
+                };
+                if (hasDelta) {
+                  await applyCachedHydrationDelta(dateISO, rawDelta, fallbackTarget, {
                     pending: true,
                     pendingCommandId: commandId,
-                    pendingDeltaOz: hasDelta ? rawDelta : undefined,
                   }).catch(() => null);
-                  const result = hasDelta
-                    ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO, { commandId })
-                    : await logHydration(currentAuthToken, Math.max(0, Math.round(rawOunces * 10) / 10), dateISO, { commandId });
-                  const fresh = await getHydration(currentAuthToken, result.date).catch(() => null);
-                  const saved = fresh ?? {
-                    date: result.date,
-                    ounces: result.ounces,
-                    target_ounces: fallbackTarget,
-                    target_ounces_min: fallbackRange?.min,
-                    target_ounces_max: fallbackRange?.max,
-                  };
-                  await saveCachedHydration(saved).catch(() => null);
-                  const { pushHydrationToWatch } = await import('../utils/watchSync');
-                  await pushHydrationToWatch({
-                    dateISO: saved.date,
-                    ounces: saved.ounces,
-                    targetOunces: saved.target_ounces,
-                    targetOuncesMin: saved.target_ounces_min,
-                    targetOuncesMax: saved.target_ounces_max,
-                    force: true,
-                  });
-                } catch { /* hydration sync should not interrupt the workout */ }
-              })();
-            }, 0);
+                } else {
+                  await saveCachedHydration(optimistic, {
+                    pending: true,
+                    pendingCommandId: commandId,
+                  }).catch(() => null);
+                }
+                const result = hasDelta
+                  ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO, { commandId })
+                  : await logHydration(currentAuthToken, optimisticOunces, dateISO, { commandId });
+                const fresh = await getHydration(currentAuthToken, result.date).catch(() => null);
+                const saved = fresh ?? {
+                  date: result.date,
+                  ounces: result.ounces,
+                  target_ounces: fallbackTarget,
+                  target_ounces_min: fallbackRange?.min,
+                  target_ounces_max: fallbackRange?.max,
+                };
+                await saveCachedHydration(saved).catch(() => null);
+                if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
+                  await AsyncStorage.setItem(commandKey, String(Math.max(lastTsMs, commandTsMs))).catch(() => {});
+                  if (!hasDelta) {
+                    await AsyncStorage.setItem(absoluteCommandKey, String(Math.max(lastAbsoluteTsMs, commandTsMs))).catch(() => {});
+                  }
+                }
+                const { pushHydrationToWatch } = await import('../utils/watchSync');
+                await pushHydrationToWatch({
+                  dateISO: saved.date,
+                  ounces: saved.ounces,
+                  targetOunces: saved.target_ounces,
+                  targetOuncesMin: saved.target_ounces_min,
+                  targetOuncesMax: saved.target_ounces_max,
+                  force: true,
+                });
+                recordWatchCommandEvent({ phase: 'applied', command, surface: 'active', detail: `${saved.ounces} oz` });
+              } catch {
+                // The optimistic cache row remains pending for the shared retry worker.
+              }
+            };
+            activeWatchHydrationCommandChainRef.current = activeWatchHydrationCommandChainRef.current
+              .then(processHydrationCommand, processHydrationCommand);
+            activeWatchHydrationCommandChainRef.current.catch(() => undefined);
             return;
           }
           if (!commandMatchesCurrentSession(command, payload)) return;
@@ -3052,6 +3327,39 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               const normalizedActivityTypeRaw = Number.isFinite(activityTypeRaw) ? activityTypeRaw : liveCardioRef.current?.activityTypeRaw ?? null;
               const elapsedSeconds = Math.max(0, Math.round(Number(payload?.elapsedSeconds) || liveCardioRef.current?.elapsedSeconds || 0));
               const distanceMeters = Math.max(0, Number(payload?.distanceMeters) || liveCardioRef.current?.distanceMeters || 0);
+              const isSwimming = normalizedActivityTypeRaw === SWIMMING_ACTIVITY_RAW;
+              const swimPoolLengthFromPayload = Number(payload?.swimPoolLengthMeters);
+              const swimDistanceFromPayload = Number(payload?.swimDistanceMeters);
+              const swimLapCountFromPayload = Number(payload?.swimLapCount);
+              const swimPaceFromPayload = Number(payload?.swimPaceSecPer100m);
+              const swimContext = swimContextText(workout);
+              const swimPoolLengthMeters = isSwimming
+                ? (Number.isFinite(swimPoolLengthFromPayload) && swimPoolLengthFromPayload > 0
+                  ? swimPoolLengthFromPayload
+                  : liveCardioRef.current?.swimPoolLengthMeters ?? swimPoolLengthMetersForWorkout(workout))
+                : null;
+              const swimDistanceMeters = isSwimming
+                ? Math.max(0, Number.isFinite(swimDistanceFromPayload) && swimDistanceFromPayload > 0
+                  ? swimDistanceFromPayload
+                  : liveCardioRef.current?.swimDistanceMeters ?? distanceMeters)
+                : null;
+              const swimLapCount = isSwimming
+                ? (Number.isFinite(swimLapCountFromPayload) && swimLapCountFromPayload > 0
+                  ? Math.round(swimLapCountFromPayload)
+                  : liveCardioRef.current?.swimLapCount ?? (swimPoolLengthMeters && swimDistanceMeters && swimDistanceMeters > 0
+                    ? Math.max(1, Math.round(swimDistanceMeters / swimPoolLengthMeters))
+                    : null))
+                : null;
+              const swimPace = isSwimming
+                ? (Number.isFinite(swimPaceFromPayload) && swimPaceFromPayload > 0
+                  ? swimPaceFromPayload
+                  : liveCardioRef.current?.swimPaceSecPer100m ?? swimPaceSecPer100Meters(elapsedSeconds, swimDistanceMeters ?? distanceMeters))
+                : null;
+              const swimLocation = isSwimming
+                ? payload?.swimLocation === 'open_water' || payload?.swimLocation === 'pool'
+                  ? payload.swimLocation
+                  : liveCardioRef.current?.swimLocation ?? (isOpenWaterSwimText(swimContext) ? 'open_water' : 'pool')
+                : null;
               const allowsOutdoorData = cardioAllowsOutdoorDataRef.current;
               const normalizedElevationGainFt = allowsOutdoorData && Number.isFinite(elevationGainFt) && elevationGainFt > 0 ? Math.round(elevationGainFt) : allowsOutdoorData ? liveCardioRef.current?.elevationGainFt ?? null : null;
               const estimatedPowerWatts = allowsOutdoorData && normalizedActivityTypeRaw === 13
@@ -3068,6 +3376,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 distanceMeters,
                 activeCalories: Math.max(0, Number(payload?.activeCalories) || liveCardioRef.current?.activeCalories || 0),
                 paceSecPerKm: Number.isFinite(pace) && pace > 0 ? pace : liveCardioRef.current?.paceSecPerKm ?? null,
+                swimDistanceMeters,
+                swimPoolLengthMeters,
+                swimLapCount,
+                swimPaceSecPer100m: swimPace,
+                swimLocation,
                 heartRate: Number.isFinite(hr) && hr > 0 ? Math.round(hr) : liveCardioRef.current?.heartRate ?? null,
                 steps: Number.isFinite(steps) && steps > 0 ? Math.round(steps) : liveCardioRef.current?.steps ?? null,
                 elevationGainFt: normalizedElevationGainFt,
@@ -3170,6 +3483,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     distanceMeters: number;
     activeCalories: number;
     paceSecPerKm: number | null;
+    swimDistanceMeters: number | null;
+    swimPoolLengthMeters: number | null;
+    swimLapCount: number | null;
+    swimPaceSecPer100m: number | null;
+    swimLocation: 'pool' | 'open_water' | null;
     heartRate: number | null;
     steps: number | null;
     elevationGainFt: number | null;
@@ -3316,20 +3634,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 elevationGainFt,
               })
             : null;
-          setLiveCardio({
-            activityTypeRaw: ACTIVITY_RAWS[activity] ?? null,
-            elapsedSeconds: s.elapsedSeconds,
-            distanceMeters: s.distanceMeters,
-            activeCalories: estimatedCalories ?? 0,
-            paceSecPerKm: s.paceSecPerKm,
-            heartRate: null,
-            steps: null,
-            elevationGainFt,
-            estimatedPowerWatts,
-            lastAccuracyM: s.lastAccuracyM,
-            paused: workoutPauseRef.current.paused,
-            receivedAtMs: Date.now(),
-          });
+            setLiveCardio({
+              activityTypeRaw: ACTIVITY_RAWS[activity] ?? null,
+              elapsedSeconds: s.elapsedSeconds,
+              distanceMeters: s.distanceMeters,
+              activeCalories: estimatedCalories ?? 0,
+              paceSecPerKm: s.paceSecPerKm,
+              swimDistanceMeters: null,
+              swimPoolLengthMeters: null,
+              swimLapCount: null,
+              swimPaceSecPer100m: null,
+              swimLocation: null,
+              heartRate: null,
+              steps: null,
+              elevationGainFt,
+              estimatedPowerWatts,
+              lastAccuracyM: s.lastAccuracyM,
+              paused: workoutPauseRef.current.paused,
+              receivedAtMs: Date.now(),
+            });
           if (s.lastCoord) setCurrentCoord(s.lastCoord);
           // Refresh the polyline only when a new point actually
           // landed — getRouteCoords copies the array, so polling it
@@ -3723,8 +4046,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     workoutSidecarQueueRef.current.clear();
   }, []);
 
-  const openEndedCustomLiveActivityEnabled = isCustomCardioWorkout
-    && (Array.isArray(workout.exercises) ? workout.exercises.length === 0 : true);
+  const setlessCardioLiveActivityEnabled = exercises.length > 0
+    && exercises.every(ex => isSetlessCardioExercise(ex));
+  const openEndedCustomLiveActivityEnabled = (isCustomCardioWorkout
+    && (Array.isArray(workout.exercises) ? workout.exercises.length === 0 : true))
+    || setlessCardioLiveActivityEnabled;
 
   const buildOpenEndedCustomLiveActivityState = useCallback((): RestActivityState => {
     const now = Date.now();
@@ -4014,6 +4340,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     confidence: 'high' | 'medium' | 'low';
     weightHeld?: boolean;
     aiSafety?: RecommendationAiSafety | null;
+    displayTitle?: string;
+    displayValue?: string;
+    watchText?: string;
+    source?: string;
   }>>({});
   const [preSetLoadingIdx, setPreSetLoadingIdx] = useState<number | null>(null);
   // Rolling estimated 1RM per exercise name, fetched lazily when an
@@ -4046,7 +4376,54 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       });
       return;
     }
-    if (ex.sets.length > 0 || preSetHints[activeExIdx]) {
+    if (ex.sets.length > 0) {
+      setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
+      return;
+    }
+    const nonLoadRecommendation = isTimedExercise(ex.name, ex.targetReps)
+      || shouldHideWeight({
+        name: ex.name,
+        equipment: ex.equipment,
+        reps: ex.targetReps,
+        primaryMuscle: ex.primaryMuscle,
+        primary_muscle: (ex as any).primary_muscle,
+        _primary_muscle: (ex as any)._primary_muscle,
+        _archetype: (ex as any)._archetype,
+        _training_type: (ex as any)._training_type,
+      })
+      || shouldHideReps({
+        name: ex.name,
+        equipment: ex.equipment,
+        reps: ex.targetReps,
+        primaryMuscle: ex.primaryMuscle,
+        primary_muscle: (ex as any).primary_muscle,
+        _primary_muscle: (ex as any)._primary_muscle,
+        _archetype: (ex as any)._archetype,
+        _training_type: (ex as any)._training_type,
+      });
+    if (nonLoadRecommendation) {
+      setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
+      const cue = buildExerciseAwareRecommendation(ex, 1, [], { hrZones, distanceUnit });
+      if (cue) {
+        setPreSetHints(prev => ({
+          ...prev,
+          [activeExIdx]: {
+            rationale: cue.cue,
+            setType: 'target',
+            intensityLabel: 'Target',
+            recommendedWeight: null,
+            recommendedReps: cue.recommendedReps ?? '',
+            confidence: 'high',
+            displayTitle: cue.displayTitle,
+            displayValue: cue.displayValue,
+            watchText: cue.text.replace(/^Set \d+:\s*/, ''),
+            source: cue.source,
+          },
+        }));
+      }
+      return;
+    }
+    if (preSetHints[activeExIdx]) {
       setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
       return;
     }
@@ -4161,7 +4538,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     }, { delayMs: 650, detached: true });
     return () => { cancelled = true; };
-  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, preSetHints, loadBackendWorkoutHistory, showStartCountdown, scheduleWorkoutSidecar]);
+  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, preSetHints, loadBackendWorkoutHistory, showStartCountdown, scheduleWorkoutSidecar, hrZones, distanceUnit]);
 
   // Lazily fetch the rolling estimated-1RM for the active exercise.
   // Deterministic + server-cached; cache per name so switching back
@@ -4642,6 +5019,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // synchronously when persisting the snapshot blob to AsyncStorage.
   const restNextTargetRef = useRef<string | null>(null);
   const restCueRef = useRef<string | null>(null);
+  const restWatchRecommendationRef = useRef<string | null>(null);
   useEffect(() => { restNextTargetRef.current = restNextTarget; }, [restNextTarget]);
   useEffect(() => { restCueRef.current = restCue; }, [restCue]);
 
@@ -4685,7 +5063,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       restStartedAtMs: startedAtMs,
       restDurationSec: totalSeconds,
       restEndsAtMs: endAtMs,
-      recommendation: restNextTargetRef.current,
+      recommendation: restWatchRecommendationRef.current ?? restNextTargetRef.current,
     });
   };
   reassertRestProgressToWatchRef.current = (delaysMs = [650, 1400]) => {
@@ -4707,6 +5085,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const liveRec = recommendationByIdxRef.current[exerciseIndex];
     const hint = preSetHints[exerciseIndex];
     const recommendationText = liveRec?.text
+      ?? hint?.watchText
       ?? (hint?.recommendedWeight != null
         ? `Try ${displayExerciseWeight(hint.recommendedWeight, ex)}${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
         : hint?.recommendedReps
@@ -4739,6 +5118,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const latestLiveRec = recommendationByIdxRef.current[exerciseIndex];
         const latestHint = preSetHints[exerciseIndex];
         const latestRecommendationText = latestLiveRec?.text
+          ?? latestHint?.watchText
           ?? (latestHint?.recommendedWeight != null
             ? `Try ${displayExerciseWeight(latestHint.recommendedWeight, latest)}${latestHint.recommendedReps ? ` x ${latestHint.recommendedReps}` : ''}`
             : latestHint?.recommendedReps
@@ -4754,7 +5134,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           ...(restEndsAtMs != null && restEndsAtMs > Date.now() ? {} : { restRemainingSec: 0 }),
           recommendation: latestRecommendationText,
           recommendedWeightLbs: latestLiveRec?.recommendedWeightLbs ?? (latestHint?.weightHeld ? null : latestHint?.recommendedWeight) ?? null,
-          recommendedReps: latestLiveRec?.recommendedReps ?? latestHint?.recommendedReps ?? null,
+          recommendedReps: latestLiveRec?.recommendedReps ?? (latestHint?.source === 'exercise_aware' ? null : latestHint?.recommendedReps) ?? null,
         });
       } catch { /* watch bridge optional */ }
     }, { delayMs: 50, detached: true });
@@ -5605,9 +5985,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const recommendedReps = guide
         ? null
         : liveRec?.recommendedReps
-          ?? hint?.recommendedReps
+          ?? (hint?.source === 'exercise_aware' ? null : hint?.recommendedReps)
           ?? null;
       const recommendation = guide ? null : liveRec?.text
+        ?? hint?.watchText
         ?? (hint?.recommendedWeight != null
           ? `Try ${displayExerciseWeight(hint.recommendedWeight, ex)}${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
           : ex.aiRecommendation);
@@ -5748,7 +6129,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     const recommendationText = hint.recommendedWeight != null
       ? `Try ${displayExerciseWeight(hint.recommendedWeight, ex)}${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
-      : hint.recommendedReps
+      : hint.watchText
+        ? hint.watchText
+        : hint.recommendedReps
         ? `Set 1: ${formatCountTarget(ex, hint.recommendedReps, { includeDefaultUnit: true })}`
         : null;
     const signature = [
@@ -5770,7 +6153,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           setNumber: 1,
           recommendation: recommendationText,
           recommendedWeightLbs: hint.recommendedWeight,
-          recommendedReps: hint.recommendedReps,
+          recommendedReps: hint.source === 'exercise_aware' ? null : hint.recommendedReps,
         });
       } catch { /* watch bridge optional */ }
     }, { detached: true });
@@ -6194,6 +6577,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             : restTargetCount
         }`);
       const nextSetCue = rirSuggestion?.cue ?? null;
+      const watchFallbackRecommendation = rirSuggestion?.watchText ?? (
+        timed
+          ? nextSetLabel
+          : `${nextSetLabel} - ${restTracksWeight ? 'Match your last set with clean form.' : 'Match or beat your last set with clean reps.'}`
+      );
       if (rirSuggestion) {
         writeRecommendation(exIdx, {
           text: rirSuggestion.fullText,
@@ -6216,6 +6604,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             nextTarget: nextSetLabel,
             cue: nextSetCue ?? undefined,
             startedAtMs: restStartedAtMs,
+            watchRecommendation: watchFallbackRecommendation,
           });
         };
         restWatchPayload = {
@@ -6226,7 +6615,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           restStartedAtMs,
           restDurationSec: restSeconds,
           restEndsAtMs,
-          recommendation: rirSuggestion?.watchText ?? nextSetLabel,
+          recommendation: watchFallbackRecommendation,
           recommendedWeightLbs: timed ? null : (rirSuggestion?.weightLbs ?? newSet.weightLbs),
           recommendedReps: timed ? null : (rirSuggestion?.repsText ?? ex.targetReps),
         };
@@ -6336,10 +6725,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }, { detached: true });
     }
     if (restNotificationPayload) {
-      scheduleWorkoutSidecar(`rest-notify-${exIdx}-${setSlot}`, async () => {
-        try { await rescheduleRestNotificationsRef.current(restNotificationPayload); }
-        catch { /* notification reschedule is best-effort */ }
-      }, { detached: true });
+      void rescheduleRestNotificationsRef.current(restNotificationPayload);
     }
 
     const setsLogged = cleanSets.length;
@@ -6536,13 +6922,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       sets: [],
       aiRecommendation: undefined,
       primaryMuscle: item.primary_muscle ?? null,
+      primary_muscle: item.primary_muscle ?? null,
       secondaryMuscles: item.secondary_muscles ?? [],
+      secondary_muscles: item.secondary_muscles ?? [],
       movementPattern: item.movement_pattern ?? null,
+      movement_pattern: item.movement_pattern ?? null,
       muscles_targeted: [
         item.primary_muscle,
         ...(item.secondary_muscles ?? []),
       ].filter(Boolean) as string[],
       isCompound: item.is_compound ?? null,
+      slotRole: (item as any).slot_role ?? ((item as any).flow_category ? 'mobility' : null),
+      slotLabel: (item as any).slot_label ?? null,
+      prescriptionType: (item as any).prescription_type ?? ((item as any).flow_category ? 'stretch_hold' : null),
+      flowCategory: (item as any).flow_category ?? null,
       // Carry through enrichment metadata so a freshly-added exercise
       // (wger / AI / custom) renders with the same form-video card and
       // hero thumbnail as a planner-generated one.
@@ -7033,7 +7426,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // audio session keepalive, watch push — is queued through the workout
   // sidecar (detached) so the user-visible timer starts on the next
   // frame instead of waiting on three native bridge round-trips.
-  const startRestTimer = useCallback((seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => {
+  const startRestTimer = useCallback((seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number; watchRecommendation?: string | null }) => {
     clearManagedInterval(restTimerRef);
     const startedAtMs = opts?.startedAtMs && Number.isFinite(opts.startedAtMs) && opts.startedAtMs > 0
       ? opts.startedAtMs
@@ -7044,6 +7437,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       restStartAtRef.current = 0;
       restTotalSecondsRef.current = 0;
       restExerciseNameRef.current = null;
+      restWatchRecommendationRef.current = null;
       lastRestClearedAtMsRef.current = Math.max(lastRestClearedAtMsRef.current, endAtMs);
       // Deferred — AsyncStorage.removeItem itself is async but the call
       // still posts a JS task; keep the early-return path zero-work.
@@ -7072,6 +7466,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // against a follow-up setRestCue.
     const snapNextTarget = opts?.nextTarget !== undefined ? opts.nextTarget : restNextTargetRef.current;
     const snapCue = opts?.cue !== undefined ? opts.cue : restCueRef.current;
+    const snapWatchRecommendation = opts?.watchRecommendation !== undefined
+      ? opts.watchRecommendation
+      : snapCue
+        ? `${snapNextTarget ?? 'Next set'} - ${snapCue}`
+        : snapNextTarget;
+    restWatchRecommendationRef.current = snapWatchRecommendation ?? null;
 
     // ── Deferred side effects ──
     // Keep the iOS background audio session alive so the rest countdown
@@ -7354,6 +7754,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setRestForExercise(null);
     setRestCue(null);
     setRestNextTarget(null);
+    restWatchRecommendationRef.current = null;
     restDurationSeconds.current = 0;
     restStartAtRef.current = 0;
     restTotalSecondsRef.current = 0;
@@ -7393,6 +7794,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, []);
   rescheduleRestNotificationsRef.current = rescheduleRestNotifications;
 
+  const removeExerciseAtIndex = useCallback((exIdx: number) => {
+    if (exercises.length <= 1) {
+      Alert.alert('Cannot remove', 'You need at least one exercise in the workout.');
+      return false;
+    }
+    const exName = exercises[exIdx]?.name ?? 'this exercise';
+    setPreSetHints({});
+    setExercises(prev => prev.filter((_, idx) => idx !== exIdx));
+    setActiveExIdx(prev => Math.max(0, prev > exIdx ? prev - 1 : Math.min(prev, exercises.length - 2)));
+    if (restForExercise === exName) clearRestState();
+    bumpWatchPlanRevision();
+    return true;
+  }, [bumpWatchPlanRevision, clearRestState, exercises, restForExercise]);
+
   const handleRemoveExercise = useCallback((exIdx: number) => {
     if (exercises.length <= 1) {
       Alert.alert('Cannot remove', 'You need at least one exercise in the workout.');
@@ -7404,16 +7819,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {
         text: 'Remove',
         style: 'destructive',
-        onPress: () => {
-          setPreSetHints({});
-          setExercises(prev => prev.filter((_, idx) => idx !== exIdx));
-          setActiveExIdx(prev => Math.max(0, prev > exIdx ? prev - 1 : Math.min(prev, exercises.length - 2)));
-          if (restForExercise === exName) clearRestState();
-          bumpWatchPlanRevision();
-        },
+        onPress: () => { removeExerciseAtIndex(exIdx); },
       },
     ]);
-  }, [bumpWatchPlanRevision, clearRestState, exercises, restForExercise]);
+  }, [exercises, removeExerciseAtIndex]);
 
   const handleReorderExercise = useCallback((fromIdx: number, direction: 'up' | 'down') => {
     const toIdx = direction === 'up' ? fromIdx - 1 : fromIdx + 1;
@@ -7517,9 +7926,38 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       return;
     }
     if (isTimedExercise(ex.name, ex.targetReps)) {
-      const tip = getTimedExerciseTip(ex.name, ex.targetReps, setsForExercise);
-      if (tip) {
-        writeRecommendation(exIdx, tip);
+      const setN = setsForExercise.length + 1;
+      const cue = buildExerciseAwareRecommendation(ex, setN, setsForExercise, { hrZones, distanceUnit });
+      if (cue) {
+        if (!isRequestCurrent()) return;
+        setRestNextTarget(cue.nextTarget);
+        setRestCue(cue.cue);
+        writeRecommendation(exIdx, {
+          text: cue.text,
+          nextTarget: cue.nextTarget,
+          cue: cue.cue,
+          recommendedWeightLbs: null,
+          recommendedReps: null,
+          source: cue.source,
+        });
+        if (liveActivityIdRef.current && liveActivityTimerKeyRef.current == null) {
+          updateRestActivity(liveActivityIdRef.current, {
+            setNumber: setsForExercise.length,
+            totalSets: targetSetCount,
+            nextSetRecommendation: cue.text.replace(/^Set \d+:\s*/, ''),
+            exerciseName: ex.name,
+            themeColorHex: theme.colors.primary,
+          }).catch(() => undefined);
+        }
+        import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+          pushProgressToWatch({
+            exerciseIndex: exIdx,
+            setNumber: setN,
+            recommendation: cue.text.replace(/^Set \d+:\s*/, ''),
+            recommendedWeightLbs: null,
+            recommendedReps: null,
+          })
+        ).catch(() => undefined);
       }
       return;
     }
@@ -7830,7 +8268,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       // never a stale "Updating next set…" placeholder.
       applyDeterministicFallback();
     }
-      }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, displayExerciseWeight, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, scheduleWorkoutSidecar, theme.colors.primary, weightUnit, workout.focus, workout.stimulus, writeRecommendation]);
+      }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, displayExerciseWeight, distanceUnit, exercises, getEffectiveTargetSetCount, goal, hrZones, rescheduleRestNotifications, restForExercise, scheduleWorkoutSidecar, theme.colors.primary, weightUnit, workout.focus, workout.stimulus, writeRecommendation]);
 
   const maybeRefreshRecommendationForExercise = useCallback(async (
     exIdx: number,
@@ -8091,6 +8529,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const sourceContext = workoutSourceContext;
     const templateId = (workout as any)._template_id ?? (workout as any).templateId ?? null;
     const planDayId = (workout as any).plan_day_id ?? (workout as any).planDayId ?? null;
+    const completionExternalSourceId = [
+      'workout',
+      sourceContext || 'planned',
+      planDayId != null
+        ? `planDay:${planDayId}`
+        : templateId
+          ? `template:${templateId}`
+          : `focus:${workout.focus.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 40)}`,
+      `start:${startTime.current}`,
+    ].join('|');
     const focusText = workout.focus.trim();
     const liftPlusCardioFocus = /\+\s*cardio/i.test(focusText);
     const pureCardioFocus = !liftPlusCardioFocus
@@ -8138,6 +8586,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const liveStepCount = liveCardioAtFinish?.steps ?? null;
     const completedElevationGainFt = routeElevationGainFt ?? liveElevationGainFt ?? null;
     const isCyclingActivity = /ride|bike|biking|cycl|spin/.test(`${activitySubtype} ${workout.focus}`.toLowerCase());
+    const isSwimmingActivity = liveCardioAtFinish?.activityTypeRaw === SWIMMING_ACTIVITY_RAW
+      || /swim|pool|open_water|open water/.test(`${activitySubtype} ${workout.focus}`.toLowerCase());
+    const swimPoolLengthMeters = isSwimmingActivity
+      ? liveCardioAtFinish?.swimPoolLengthMeters ?? swimPoolLengthMetersForWorkout(workout)
+      : null;
+    const swimDistanceMeters = isSwimmingActivity && liveCardioAtFinish?.distanceMeters && liveCardioAtFinish.distanceMeters > 0
+      ? Math.round(liveCardioAtFinish.distanceMeters)
+      : completedDistanceMiles != null
+        ? Math.round(completedDistanceMiles * METERS_PER_MILE_LOCAL)
+        : null;
+    const swimLapCount = isSwimmingActivity
+      ? liveCardioAtFinish?.swimLapCount ?? (swimPoolLengthMeters && swimDistanceMeters && swimDistanceMeters > 0
+        ? Math.max(1, Math.round(swimDistanceMeters / swimPoolLengthMeters))
+        : null)
+      : null;
+    const swimPace100m = isSwimmingActivity
+      ? liveCardioAtFinish?.swimPaceSecPer100m ?? swimPaceSecPer100Meters(cardioMetricDurationSeconds, swimDistanceMeters ?? 0)
+      : null;
+    const swimLocation = isSwimmingActivity
+      ? liveCardioAtFinish?.swimLocation ?? (isOpenWaterSwimText(swimContextText(workout)) ? 'open_water' : 'pool')
+      : null;
     const completedAvgSpeedMph = completedDistanceMiles != null && completedDistanceMiles > 0 && cardioMetricDurationSeconds > 0
       ? Math.round((completedDistanceMiles / (cardioMetricDurationSeconds / 3600)) * 10) / 10
       : null;
@@ -8165,8 +8634,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       } : {}),
       ...(completedElevationGainFt != null ? { elevationGainFt: completedElevationGainFt } : {}),
       ...(liveStepCount != null ? { steps: liveStepCount } : {}),
-      ...(completedAvgSpeedMph != null ? { avgSpeedMph: completedAvgSpeedMph } : {}),
-      ...(!isCyclingActivity && completedPaceSecPerMi != null ? { avgPaceSecPerMi: completedPaceSecPerMi } : {}),
+      ...(isSwimmingActivity && swimPoolLengthMeters != null ? { poolLengthMeters: Math.round(swimPoolLengthMeters * 10) / 10 } : {}),
+      ...(isSwimmingActivity && swimLapCount != null ? { laps: swimLapCount } : {}),
+      ...(isSwimmingActivity && swimPace100m != null ? { swimPaceSecPer100Meters: Math.round(swimPace100m) } : {}),
+      ...(isSwimmingActivity && swimDistanceMeters != null ? { swimDistanceMeters } : {}),
+      ...(isSwimmingActivity && swimLocation ? { swimLocation } : {}),
+      ...(!isSwimmingActivity && completedAvgSpeedMph != null ? { avgSpeedMph: completedAvgSpeedMph } : {}),
+      ...(!isCyclingActivity && !isSwimmingActivity && completedPaceSecPerMi != null ? { avgPaceSecPerMi: completedPaceSecPerMi } : {}),
       ...(completedEstimatedPowerWatts != null
         ? { avgWatts: completedEstimatedPowerWatts, avgWattsSource: 'estimated_from_distance_duration_elevation' }
         : {}),
@@ -8195,7 +8669,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           }
         : undefined;
     const session: WorkoutSession = {
-      id: `${Date.now()}`,
+      id: completionExternalSourceId,
       date: now.toISOString(),
       focus: workout.focus,
       durationSeconds: sessionDurationSeconds,
@@ -8428,7 +8902,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             stimulus: workout.stimulus ?? null,
             startedAt: startedAtIso,
             endedAt: endedAtIso,
-            externalSourceId: session.id,
+            externalSourceId: completionExternalSourceId,
           },
         };
         const completeResp = await completeWorkoutWithOfflineQueue(authToken, completionRequest, session);
@@ -8748,7 +9222,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     : 0;
   const coreCircuitExists = useMemo(() => hasCoreCircuit(exercises), [exercises]);
   const stretchBlockExists = useMemo(() => hasStretchBlock(exercises), [exercises]);
-  const guidedFlowEnabled = useMemo(() => isGuidedFlowSession({ exercises }), [exercises]);
+  const guidedFlowEnabled = useMemo(
+    () => isGuidedFlowSession({ ...workout, exercises }),
+    [workout, exercises],
+  );
+  const recoveryFlowSession = useMemo(
+    () => isRecoveryFlowWorkout({ ...workout, exercises }),
+    [workout, exercises],
+  );
   const summaryDurationSeconds = finishedSession?.durationSeconds ?? getElapsedSeconds();
   const summaryExercises = finishedSession?.exercises ?? exercises;
   const summarySetCount = finishedSession
@@ -8838,11 +9319,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       : activeCardioCalories != null && activeCardioCalories > 0 ? `${Math.round(activeCardioCalories)}`
       : '—'
     : `${completedCount}/${exercises.length}`;
-  const finishMiddleStatLabel = isCustomCardioWorkout ? (finishMiddleShowsDistance ? 'Distance' : 'Calories') : 'Exercises';
+  const finishMiddleStatLabel = isCustomCardioWorkout ? (finishMiddleShowsDistance ? 'Distance' : 'Calories') : recoveryFlowSession ? 'Poses' : 'Exercises';
   const finishFinalStatValue = isCustomCardioWorkout
     ? finishHeartRateForDisplay != null && finishHeartRateForDisplay > 0 ? String(Math.round(finishHeartRateForDisplay)) : '—'
     : String(totalLoggedSets);
-  const finishFinalStatLabel = isCustomCardioWorkout ? 'HR' : 'Sets';
+  const finishFinalStatLabel = isCustomCardioWorkout ? 'HR' : recoveryFlowSession ? 'Holds' : 'Sets';
   const finishHasLiveHeartRate = activeCardioHeartRate != null && activeCardioHeartRate > 0;
   const finishHasLiveDistance = activeCardioDistanceMiles != null && activeCardioDistanceMiles > 0;
   const finishHasLiveCalories = !!(liveCardio?.activeCalories && liveCardio.activeCalories > 0);
@@ -8914,6 +9395,30 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const summaryVolumeTone = summaryVolumeStatusValue.tone;
   const summaryVolumeDeltaText = summaryVolumeStatusValue.hint;
   const summaryActivityCategory = String(summaryVisualInput.activityCategory ?? '').toLowerCase();
+  const summaryIsSwimming = /swim|pool|open_water|open water/.test(`${summaryVisualInput.activitySubtype ?? ''} ${workout.focus ?? ''}`.toLowerCase())
+    || Number(summaryActivityDetails?.swimDistanceMeters) > 0
+    || Number(summaryActivityDetails?.laps) > 0;
+  const summarySwimDistanceMeters = summaryIsSwimming
+    ? Number(summaryActivityDetails?.swimDistanceMeters) > 0
+      ? Number(summaryActivityDetails?.swimDistanceMeters)
+      : summaryDistanceMiles != null && summaryDistanceMiles > 0
+        ? summaryDistanceMiles * METERS_PER_MILE_LOCAL
+        : null
+    : null;
+  const summarySwimUsesMeters = distanceUnit === 'km';
+  const summarySwimDistanceLabel = summarySwimDistanceMeters != null && summarySwimDistanceMeters > 0
+    ? summarySwimUsesMeters
+      ? summarySwimDistanceMeters < 1000
+        ? `${Math.round(summarySwimDistanceMeters)} m`
+        : `${Math.round((summarySwimDistanceMeters / 1000) * 100) / 100} km`
+      : `${Math.round(summarySwimDistanceMeters * YARDS_PER_METER_LOCAL)} yd`
+    : null;
+  const summarySwimLapCount = Number(summaryActivityDetails?.laps) > 0 ? Math.round(Number(summaryActivityDetails?.laps)) : null;
+  const summarySwimPaceSec = Number(summaryActivityDetails?.swimPaceSecPer100Meters) > 0
+    ? Number(summaryActivityDetails?.swimPaceSecPer100Meters)
+    : summarySwimDistanceMeters != null
+      ? swimPaceSecPer100Meters(summaryDurationSeconds, summarySwimDistanceMeters)
+      : null;
   const summaryIsActivityLike = summaryIsCardioLike
     || (isCustomCardioWorkout && summarySetCount === 0)
     || summaryActivityCategory === 'sport'
@@ -8941,11 +9446,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       rows.push({
         key: 'distance',
         icon: 'map-outline',
-        value: formatDistance(summaryDistanceMiles, distanceUnit, { precision: summaryDistanceMiles >= 10 ? 0 : 2 }),
-        label: 'Distance',
+        value: summaryIsSwimming && summarySwimDistanceLabel
+          ? summarySwimDistanceLabel
+          : formatDistance(summaryDistanceMiles, distanceUnit, { precision: summaryDistanceMiles >= 10 ? 0 : 2 }),
+        label: summaryIsSwimming ? 'Swim dist' : 'Distance',
         hint: 'Logged',
         tone: 'good',
       });
+    };
+    const addSwimDetails = () => {
+      if (!summaryIsSwimming) return;
+      if (summarySwimLapCount != null && summarySwimLapCount > 0) {
+        rows.push({
+          key: 'swim-laps',
+          icon: 'water-outline',
+          value: String(summarySwimLapCount),
+          label: 'Laps',
+          hint: summaryActivityDetails?.poolLengthMeters ? `${summaryActivityDetails.poolLengthMeters} m pool` : 'Pool',
+          tone: 'good',
+        });
+      }
+      if (summarySwimPaceSec != null && summarySwimPaceSec > 0) {
+        rows.push({
+          key: 'swim-pace',
+          icon: 'speedometer-outline',
+          value: formatPaceSeconds(summarySwimUsesMeters
+            ? summarySwimPaceSec
+            : summarySwimDistanceMeters != null && summarySwimDistanceMeters > 0
+              ? summaryDurationSeconds / ((summarySwimDistanceMeters * YARDS_PER_METER_LOCAL) / 100)
+              : summarySwimPaceSec),
+          label: `Pace /100 ${summarySwimUsesMeters ? 'm' : 'yd'}`,
+          hint: 'Average',
+          tone: 'good',
+        });
+      }
     };
     const addElevation = () => {
       if (!Number.isFinite(summaryElevationGainFt) || summaryElevationGainFt <= 0) return;
@@ -9037,17 +9571,31 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         tone: scoreTone(trainingScore),
       });
     };
+    const addFlowProgress = () => {
+      const plannedPoses = summaryExercises.length || totalPlannedSets;
+      const completedPoses = totalPlannedSets > 0 ? Math.min(summarySetCount, totalPlannedSets) : summarySetCount;
+      rows.push({
+        key: 'poses',
+        icon: 'body-outline',
+        value: plannedPoses > 0 ? `${completedPoses}/${plannedPoses}` : String(completedPoses),
+        label: 'Poses',
+        hint: 'Guided',
+        tone: completedPoses > 0 ? 'good' : 'warn',
+      });
+    };
 
-    if (summaryIsActivityLike) {
-      addTime();
-      addDistance();
-      addPower();
+      if (summaryIsActivityLike) {
+        addTime();
+        addDistance();
+        addSwimDetails();
+        addPower();
       addElevation();
       addHeart();
       addCalories();
       addScore();
-      if (summarySetCount > 0 && rows.length < 4) addSets();
-      if (summaryRepCount > 0 && rows.length < 4) addReps();
+      if (recoveryFlowSession && rows.length < 4) addFlowProgress();
+      if (!recoveryFlowSession && summarySetCount > 0 && rows.length < 4) addSets();
+      if (!recoveryFlowSession && summaryRepCount > 0 && rows.length < 4) addReps();
     } else {
       addSets();
       addReps();
@@ -9060,7 +9608,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     return rows.slice(0, summaryIsActivityLike ? 6 : 4);
   }, [
     distanceUnit,
-    summaryAvgHeartRate,
+      summaryAvgHeartRate,
+    summaryActivityDetails?.poolLengthMeters,
     summaryData?.hrZoneMinutes,
     summaryData?.trainingScore,
     summaryData?.trainingRating,
@@ -9068,6 +9617,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     summaryDurationSeconds,
     summaryElevationGainFt,
     summaryEstimatedSeconds,
+    summaryExercises.length,
+    summaryIsSwimming,
+    summarySwimDistanceLabel,
+    summarySwimDistanceMeters,
+    summarySwimLapCount,
+    summarySwimPaceSec,
+    summarySwimUsesMeters,
     summaryAvgWatts,
     summaryCaloriesBurned,
     summaryIsActivityLike,
@@ -9076,11 +9632,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     summarySetCount,
     summaryTypeLabel,
     totalPlannedSets,
+    recoveryFlowSession,
   ]);
   const summaryPlanLabel = totalPlannedSets > 0
-    ? `${formatSummaryDuration(summaryDurationSeconds)} · ${Math.min(summarySetCount, totalPlannedSets)}/${totalPlannedSets} sets`
-    : summaryDistanceMiles != null && summaryDistanceMiles > 0
-      ? formatDistance(summaryDistanceMiles, distanceUnit, { precision: summaryDistanceMiles >= 10 ? 0 : 2 })
+    ? recoveryFlowSession
+      ? `${formatSummaryDuration(summaryDurationSeconds)} · ${Math.min(summarySetCount, totalPlannedSets)}/${summaryExercises.length || totalPlannedSets} poses`
+      : `${formatSummaryDuration(summaryDurationSeconds)} · ${Math.min(summarySetCount, totalPlannedSets)}/${totalPlannedSets} sets`
+      : summaryDistanceMiles != null && summaryDistanceMiles > 0
+        ? summaryIsSwimming && summarySwimDistanceLabel
+          ? summarySwimDistanceLabel
+          : formatDistance(summaryDistanceMiles, distanceUnit, { precision: summaryDistanceMiles >= 10 ? 0 : 2 })
       : summarySetCount > 0
         ? `${summarySetCount} set${summarySetCount === 1 ? '' : 's'} logged`
         : summaryCaloriesBurned != null && summaryCaloriesBurned > 0
@@ -9489,8 +10050,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       stylesRef={styles}
       onPress={handleAddExercise}
       onPreview={previewExerciseFromPicker}
+      authToken={authToken}
     />
-  ), [handleAddExercise, previewExerciseFromPicker, styles, swapTargetIdx]);
+  ), [authToken, handleAddExercise, previewExerciseFromPicker, styles, swapTargetIdx]);
   const exercisePickerKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
 
   const confirmCancelWorkout = useCallback(() => {
@@ -9575,7 +10137,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 right. */}
             <View style={{ flex: 1 }} />
             <View style={styles.headerActionRow}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={confirmCancelWorkout} disabled={cancelingWorkout}>
+              <TouchableOpacity
+                testID="cancel-workout-button"
+                style={styles.cancelBtn}
+                onPress={confirmCancelWorkout}
+                disabled={cancelingWorkout}>
                 {cancelingWorkout ? (
                   <ActivityIndicator size="small" color={themeColors.textSecondary} />
                 ) : (
@@ -9663,9 +10229,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const isCardio = liveCardio.activityTypeRaw != null && CARDIO_ACTIVITY_RAWS.has(liveCardio.activityTypeRaw);
         const fresh = Date.now() - liveCardio.receivedAtMs < 30_000;
         if (!isCardio || !fresh) return null;
-        const showOutdoorData = cardioAllowsOutdoorData;
-        const noDistanceCardio = liveCardio.activityTypeRaw === 51;
-        // Render in the user's preferred unit (mi default; km if set
+          const showOutdoorData = cardioAllowsOutdoorData;
+          const noDistanceCardio = liveCardio.activityTypeRaw === 51;
+          const isSwimming = liveCardio.activityTypeRaw === SWIMMING_ACTIVITY_RAW;
+          // Render in the user's preferred unit (mi default; km if set
         // on their UserProfile). Watch ships meters as canonical so we
         // convert here at the display boundary. Path: meters → km →
         // miles (canonical) → user unit via miToUnit.
@@ -9689,9 +10256,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const paceLabel = paceSecForUnit
           ? `${Math.floor(paceSecForUnit / 60)}:${String(Math.floor(paceSecForUnit % 60)).padStart(2, '0')}`
           : '—';
-        const calLabel = liveCardio.activeCalories > 0
-          ? `${Math.round(liveCardio.activeCalories)}`
-          : '—';
+          const calLabel = liveCardio.activeCalories > 0
+            ? `${Math.round(liveCardio.activeCalories)}`
+            : '—';
         const hrLabel = liveCardio.heartRate && liveCardio.heartRate > 0
           ? `${Math.round(liveCardio.heartRate)}`
           : '—';
@@ -9708,10 +10275,31 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const powerLabel = showOutdoorData && liveCardio.estimatedPowerWatts != null && liveCardio.estimatedPowerWatts > 0
           ? `${Math.round(liveCardio.estimatedPowerWatts)} W`
           : null;
-        const gpsAccuracyLabel = showOutdoorData && liveCardio.lastAccuracyM != null && liveCardio.lastAccuracyM > 35
-          ? `${Math.round(liveCardio.lastAccuracyM)} m`
-          : null;
-        const elapsedLabel = (() => {
+          const gpsAccuracyLabel = showOutdoorData && liveCardio.lastAccuracyM != null && liveCardio.lastAccuracyM > 35
+            ? `${Math.round(liveCardio.lastAccuracyM)} m`
+            : null;
+          const swimDistanceMeters = liveCardio.swimDistanceMeters ?? liveCardio.distanceMeters;
+          const swimUsesMeters = distanceUnit === 'km';
+          const swimDistanceValue = swimUsesMeters
+            ? swimDistanceMeters
+            : swimDistanceMeters * YARDS_PER_METER_LOCAL;
+          const swimDistanceLabel = swimDistanceMeters <= 0
+            ? '—'
+            : swimDistanceValue < 1000
+              ? `${Math.round(swimDistanceValue)} ${swimUsesMeters ? 'm' : 'yd'}`
+              : `${Math.round(swimDistanceValue / 10) / 100} ${swimUsesMeters ? 'km' : 'k yd'}`;
+          const swimPaceSec = liveCardio.swimPaceSecPer100m
+            ? swimUsesMeters
+              ? liveCardio.swimPaceSecPer100m
+              : liveCardio.elapsedSeconds > 0 && swimDistanceMeters > 0
+                ? liveCardio.elapsedSeconds / ((swimDistanceMeters * YARDS_PER_METER_LOCAL) / 100)
+                : null
+            : swimPaceSecPer100Meters(liveCardio.elapsedSeconds, swimDistanceMeters);
+          const swimPaceLabel = formatPaceSeconds(swimPaceSec);
+          const swimLapLabel = liveCardio.swimLapCount && liveCardio.swimLapCount > 0
+            ? `${liveCardio.swimLapCount}`
+            : '—';
+          const elapsedLabel = (() => {
           const s = liveCardio.elapsedSeconds;
           const h = Math.floor(s / 3600);
           const m = Math.floor((s % 3600) / 60);
@@ -9722,12 +10310,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const timeTile = hideLiveCardioTimeTile
           ? []
           : [{ label: 'TIME', value: elapsedLabel, color: liveCardio.paused || workoutPaused ? themeColors.warning ?? '#F59E0B' : workoutPalette.strong }];
-        const tiles = noDistanceCardio ? [
-          ...timeTile,
-          { label: 'HR', value: hrLabel, color: themeColors.textPrimary },
-          { label: 'KCAL', value: calLabel, color: themeColors.warning ?? '#F59E0B' },
-        ] : [
-          ...timeTile,
+          const tiles = noDistanceCardio ? [
+            ...timeTile,
+            { label: 'HR', value: hrLabel, color: themeColors.textPrimary },
+            { label: 'KCAL', value: calLabel, color: themeColors.warning ?? '#F59E0B' },
+          ] : isSwimming ? [
+            ...timeTile,
+            { label: `DIST (${swimUsesMeters ? 'm' : 'yd'})`, value: swimDistanceLabel, color: themeColors.textPrimary },
+            { label: liveCardio.swimLocation === 'open_water' ? 'TYPE' : 'LAPS', value: liveCardio.swimLocation === 'open_water' ? 'OPEN' : swimLapLabel, color: themeColors.textPrimary },
+            { label: `PACE /100 ${swimUsesMeters ? 'm' : 'yd'}`, value: swimPaceLabel, color: themeColors.textPrimary },
+            ...(liveCardio.heartRate && liveCardio.heartRate > 0 ? [{ label: 'HR', value: hrLabel, color: themeColors.textPrimary }] : []),
+            { label: 'KCAL', value: calLabel, color: themeColors.warning ?? '#F59E0B' },
+          ] : [
+            ...timeTile,
           { label: `DIST (${unitSuffix})`, value: distanceLabel, color: themeColors.textPrimary },
           isCycling
             ? { label: `SPEED ${unitSuffix}/h`, value: speedLabel, color: themeColors.textPrimary }
@@ -10009,7 +10604,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     { text: 'Cancel', style: 'cancel' },
                     { text: 'Exclude', style: 'destructive', onPress: () => {
                       onDislikeExercise(ex.name);
-                      handleRemoveExercise(i);
+                      removeExerciseAtIndex(i);
                     }},
                   ],
                 );
@@ -10068,12 +10663,23 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {!isActive && (() => {
                   const demoId = resolveDemoIdForExercise(ex);
                   const fallbackThumb = exerciseThumbSmall({ ...(ex as any), demo_exercise_db_id: demoId });
-                  if (!demoId && !fallbackThumb) return null;
+                  const hasThumb = hasExerciseThumbMedia({
+                    exerciseName: ex.name,
+                    demoExerciseDbId: demoId,
+                    fallbackSource: fallbackThumb,
+                    authToken,
+                    allowHostedFallback: true,
+                  });
+                  if (!hasThumb) return null;
                   return (
                     <View style={{ marginRight: 10 }}>
                       <LiveExerciseDemoThumb
                         demoExerciseDbId={demoId}
                         exerciseName={ex.name}
+                        authToken={authToken}
+                        equipment={(ex as any).equipment ?? null}
+                        primaryMuscle={(ex as any).primary_muscle ?? null}
+                        movementPattern={(ex as any).movement_pattern ?? null}
                         fallbackThumbSrc={fallbackThumb}
                         isExpanded={false}
                         accentColor={themeColors.primary}
@@ -10172,18 +10778,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               {/* Centered form demo — expanded mode only. The header
                    above carries name/reps/badge across the top; this
                    block is the visual anchor. Tapping opens the video
-                   modal (which has the cycling demo + curated YouTube
-                   videos); the thumbnail itself also cycles. */}
+                   modal with Move Kit / WorkoutX plus curated YouTube
+                   videos. */}
               {isActive && (() => {
                 const demoId = resolveDemoIdForExercise(ex);
                 const fallbackThumb = exerciseThumbSmall({ ...(ex as any), demo_exercise_db_id: demoId });
-                const hasMoveKitDemo = !!moveKitDemoVideo(demoId, ex.name);
-                if (!demoId && !fallbackThumb && !hasMoveKitDemo) return null;
+                const hasThumb = hasExerciseThumbMedia({
+                  exerciseName: ex.name,
+                  demoExerciseDbId: demoId,
+                  fallbackSource: fallbackThumb,
+                  authToken,
+                  allowHostedFallback: true,
+                });
+                if (!hasThumb) return null;
                 return (
                   <View style={{ alignItems: 'center', marginTop: 12, marginBottom: 4 }}>
                     <LiveExerciseDemoThumb
                       demoExerciseDbId={demoId}
                       exerciseName={ex.name}
+                      authToken={authToken}
+                      equipment={(ex as any).equipment ?? null}
+                      primaryMuscle={(ex as any).primary_muscle ?? null}
+                      movementPattern={(ex as any).movement_pattern ?? null}
                       fallbackThumbSrc={fallbackThumb}
                       isExpanded={true}
                       accentColor={themeColors.primary}
@@ -10273,6 +10889,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   })()}
                   {onDislikeExercise && !isDone && (
                     <TouchableOpacity
+                      testID={`hide-exercise-${i}`}
                       style={styles.exerciseToolbarBtn}
                       onPress={() => {
                         Alert.alert(
@@ -10282,29 +10899,32 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             { text: 'Cancel', style: 'cancel' },
                             { text: 'Exclude', style: 'destructive', onPress: () => {
                               onDislikeExercise(ex.name);
-                              handleRemoveExercise(i);
+                              removeExerciseAtIndex(i);
                             }},
                           ],
                         );
-                      }}>
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Hide ${ex.name} from future plans`}>
                       <Ionicons name="thumbs-down-outline" size={14} color={themeColors.textSecondary} />
                       <Text style={styles.exerciseToolbarText}>Hide</Text>
                     </TouchableOpacity>
                   )}
                   {i > 0 && (
-                    <TouchableOpacity style={styles.exerciseToolbarBtn} onPress={() => handleReorderExercise(i, 'up')} accessibilityRole="button" accessibilityLabel="Move exercise up">
+                    <TouchableOpacity testID={`move-exercise-up-${i}`} style={styles.exerciseToolbarBtn} onPress={() => handleReorderExercise(i, 'up')} accessibilityRole="button" accessibilityLabel="Move exercise up">
                       <Ionicons name="arrow-up" size={14} color={themeColors.textSecondary} />
                       <Text style={styles.exerciseToolbarText}>Up</Text>
                     </TouchableOpacity>
                   )}
                   {i < exercises.length - 1 && (
-                    <TouchableOpacity style={styles.exerciseToolbarBtn} onPress={() => handleReorderExercise(i, 'down')} accessibilityRole="button" accessibilityLabel="Move exercise down">
+                    <TouchableOpacity testID={`move-exercise-down-${i}`} style={styles.exerciseToolbarBtn} onPress={() => handleReorderExercise(i, 'down')} accessibilityRole="button" accessibilityLabel="Move exercise down">
                       <Ionicons name="arrow-down" size={14} color={themeColors.textSecondary} />
                       <Text style={styles.exerciseToolbarText}>Down</Text>
                     </TouchableOpacity>
                   )}
                   {exercises.length > 1 && (
                     <TouchableOpacity
+                      testID={`remove-exercise-${i}`}
                       style={[styles.exerciseToolbarBtn, styles.exerciseToolbarDanger]}
                       onPress={() => handleRemoveExercise(i)}
                       accessibilityRole="button"
@@ -10504,6 +11124,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                             {' '}× {preSetHints[i].recommendedReps}
                           </Text>
                         ) : null}
+                      </Text>
+                    </View>
+                  )}
+                  {hasSetRows && !guide && ex.sets.length === 0 && preSetHints[i] && preSetHints[i].recommendedWeight == null && preSetHints[i].displayValue && (
+                    <View
+                      testID={`pre-set-exercise-aware-card-${i}`}
+                      accessibilityLabel={`pre-set-exercise-aware-card-${i}`}
+                      style={[styles.preSetHintCard, {
+                        borderLeftColor: workoutPalette.strong,
+                        backgroundColor: workoutPalette.strong + '14',
+                      }]}>
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        {preSetHints[i].displayTitle ?? 'Recommended target'}
+                      </Text>
+                      <Text
+                        testID={`pre-set-exercise-aware-value-${i}`}
+                        accessibilityLabel={`${preSetHints[i].displayTitle ?? 'Recommended target'} ${preSetHints[i].displayValue}`}
+                        style={{ fontSize: 15, lineHeight: 20, fontWeight: '800', color: themeColors.textPrimary, marginTop: 2 }}>
+                        {preSetHints[i].displayValue}
                       </Text>
                     </View>
                   )}
@@ -11333,6 +11972,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   </View>
 
                                   <TouchableOpacity
+                                    testID={`log-set-${i}-${slot}`}
                                     style={[styles.smartLogBtn, { backgroundColor: workoutPalette.strong }]}
                                     onPress={() => handleSmartLogSet(i, slot, {
                                       weight: fallbackWeightText,
@@ -11631,9 +12271,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     );
                   })()}
 
-	                  {(() => {
-	                    if (!hasSetRows) return null;
-	                    const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;
+                    {(() => {
+                      if (!hasSetRows) return null;
+                      const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;
                     const unitLabel = guide ? 'Step' : timedInterval ? 'Interval' : 'Set';
                     const extras = extraSetCounts[i] ?? 0;
                     return (
@@ -11719,7 +12359,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               </PressableScale>
             )}
             {!isCustomCardioWorkout && (
-              <TouchableOpacity style={styles.addExerciseBtn} onPress={openAddExerciseModal}>
+              <TouchableOpacity testID="active-exercise-add-button" style={styles.addExerciseBtn} onPress={openAddExerciseModal}>
                 <Text style={styles.addExerciseBtnText}>+ Add Exercise</Text>
               </TouchableOpacity>
             )}
@@ -11838,6 +12478,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     exerciseName: mEx?.name ?? null,
                     demoExerciseDbId,
                     fallbackSource: thumbSrc,
+                    authToken,
+                    allowHostedFallback: true,
                   });
                   return hasThumb ? (
                     <TouchableOpacity
@@ -11863,8 +12505,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           exerciseName={mEx?.name ?? null}
                           demoExerciseDbId={demoExerciseDbId}
                           fallbackSource={thumbSrc}
+                          authToken={authToken}
+                          equipment={(mEx as any)?.equipment ?? null}
+                          primaryMuscle={(mEx as any)?.primary_muscle ?? null}
+                          movementPattern={(mEx as any)?.movement_pattern ?? null}
                           style={{ width: '100%', height: '100%' }}
                           shouldPlayVideo={false}
+                          placeholder={(
+                            <View style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+                              <Ionicons name="barbell-outline" size={22} color={themeColors.textMuted} />
+                            </View>
+                          )}
                         />
                         <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.12)' }} />
                         <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
@@ -11967,9 +12618,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <View style={[styles.finishIconWrap, { backgroundColor: workoutPalette.soft }]}>
               <Ionicons name="flag" size={26} color={workoutPalette.strong} />
             </View>
-            <Text style={styles.finishModalTitle}>Finish Workout?</Text>
+            <Text style={styles.finishModalTitle}>{recoveryFlowSession ? 'Finish Flow?' : 'Finish Workout?'}</Text>
             <Text style={styles.finishModalBody}>
-              Save this session and open your shareable recap.
+              {recoveryFlowSession
+                ? 'Save this recovery session and open your recap.'
+                : 'Save this session and open your shareable recap.'}
             </Text>
               <View style={styles.finishModalStats}>
                 <View style={styles.finishModalStat}>
@@ -12086,7 +12739,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <Text style={styles.finishConfirmText}>Saving...</Text>
                 </View>
               ) : (
-                <Text style={styles.finishConfirmText}>Save and Finish</Text>
+                <Text style={styles.finishConfirmText}>{recoveryFlowSession ? 'Save Flow' : 'Save and Finish'}</Text>
               )}
             </TouchableOpacity>
             <TouchableOpacity
@@ -12116,9 +12769,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     surfaceColor={workoutPalette.soft}
                     iconColor={workoutPalette.strong}
                   />
-                  <Text style={styles.summaryCompletionTitle}>Workout complete</Text>
+                  <Text style={styles.summaryCompletionTitle}>{recoveryFlowSession ? 'Flow complete' : 'Workout complete'}</Text>
                   <Text style={styles.summaryCompletionSub}>
-                    Your session is saved. Recap and sharing are ready.
+                    {recoveryFlowSession
+                      ? 'Your recovery work is saved.'
+                      : 'Your session is saved. Recap and sharing are ready.'}
                   </Text>
                 </View>
 
@@ -12156,8 +12811,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         </View>
                         <Text style={styles.shareCardFocus} numberOfLines={2}>{workoutDisplayFocus || 'Workout'}</Text>
                         <View style={styles.shareCompletionRow}>
-                          <Text style={styles.shareCompletionText}>Workout complete</Text>
-                          <Text style={styles.shareCompletionText}>{summaryPlanLabel}</Text>
+                          <Text testID="summary-completion-title" style={styles.shareCompletionText}>{recoveryFlowSession ? 'Flow complete' : 'Workout complete'}</Text>
+                          <Text testID="summary-plan-label" style={styles.shareCompletionText}>{summaryPlanLabel}</Text>
                         </View>
                         {totalPlannedSets > 0 ? (
                           <View style={styles.shareCompletionTrack}>
@@ -12203,6 +12858,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         {summaryMetrics.map(metric => (
                           <View
                             key={metric.key}
+                            testID={`summary-metric-${metric.key}`}
                             style={[
                               styles.shareStatTile,
                               { borderColor: summaryToneBorderColor(metric.tone) },
@@ -12211,9 +12867,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               <Ionicons name={metric.icon as any} size={14} color={summaryToneColor(metric.tone)} />
                               <View style={[styles.shareStatToneDot, { backgroundColor: summaryToneColor(metric.tone) }]} />
                             </View>
-                            <Text style={styles.shareStatValue} numberOfLines={1}>{metric.value}</Text>
-                            <Text style={styles.shareStatLabel} numberOfLines={1}>{metric.label}</Text>
-                            <Text style={[styles.shareStatHint, { color: summaryToneColor(metric.tone) }]} numberOfLines={1}>{metric.hint}</Text>
+                            <Text testID={`summary-metric-${metric.key}-value`} style={styles.shareStatValue} numberOfLines={1}>{metric.value}</Text>
+                            <Text testID={`summary-metric-${metric.key}-label`} style={styles.shareStatLabel} numberOfLines={1}>{metric.label}</Text>
+                            <Text testID={`summary-metric-${metric.key}-hint`} style={[styles.shareStatHint, { color: summaryToneColor(metric.tone) }]} numberOfLines={1}>{metric.hint}</Text>
                           </View>
                         ))}
                       </View>

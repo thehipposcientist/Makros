@@ -268,6 +268,7 @@ export default function TrainerPortal({ authToken, themeName }: Props) {
 
   const renderClient = (client: TrainerClientSummary) => {
     const expanded = expandedClientId === client.client.user_id;
+    const workoutsShared = client.workouts.shared !== false;
     return (
       <View key={client.relationship_id} style={styles.clientCard}>
         <View style={styles.clientHeader}>
@@ -276,7 +277,7 @@ export default function TrainerPortal({ authToken, themeName }: Props) {
             <Text style={styles.rowSub}>@{client.client.username}</Text>
           </View>
           <View style={styles.adherencePill}>
-            <Text style={styles.adherenceText}>{client.workouts.adherence_pct}%</Text>
+            <Text style={styles.adherenceText}>{workoutsShared ? `${client.workouts.adherence_pct}%` : '—'}</Text>
           </View>
         </View>
 
@@ -290,12 +291,19 @@ export default function TrainerPortal({ authToken, themeName }: Props) {
           </View>
         )}
 
-        <View style={styles.metricGrid}>
-          <Metric label="Done" value={String(client.workouts.completed)} />
-          <Metric label="Planned" value={String(client.workouts.planned)} />
-          <Metric label="Missed" value={String(client.workouts.missed)} />
-          <Metric label="Last" value={formatDate(client.workouts.last_workout_date)} />
-        </View>
+        {workoutsShared ? (
+          <View style={styles.metricGrid}>
+            <Metric label="Done" value={String(client.workouts.completed)} />
+            <Metric label="Planned" value={String(client.workouts.planned)} />
+            <Metric label="Missed" value={String(client.workouts.missed)} />
+            <Metric label="Last" value={formatDate(client.workouts.last_workout_date)} />
+          </View>
+        ) : (
+          <View style={styles.hiddenMetricRow}>
+            <Ionicons name="lock-closed-outline" size={15} color={tc.textMuted} />
+            <Text style={styles.signalText}>Workouts hidden</Text>
+          </View>
+        )}
 
         <View style={styles.signalBlock}>
           <SignalLine
@@ -709,6 +717,18 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) {
     },
     metricGrid: {
       flexDirection: 'row',
+      gap: 8,
+      marginBottom: 12,
+    },
+    hiddenMetricRow: {
+      minHeight: 40,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: tc.border,
+      backgroundColor: tc.surfaceRaised,
+      paddingHorizontal: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
       gap: 8,
       marginBottom: 12,
     },

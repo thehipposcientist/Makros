@@ -2428,6 +2428,7 @@ export interface WorkoutSessionRecord {
   source?: string | null;
   completed_at?: string | null;
   created_at?: string | null;
+  external_source_id?: string | null;
   exercises?: WorkoutSessionExerciseRecord[];
 }
 
@@ -2932,6 +2933,12 @@ export type DailyHealthSnapshotPayload = {
   wrist_temperature_c?: number | null;
   sleep_breathing_disturbances?: number | null;
   sleep_breathing_disturbances_elevated?: boolean | null;
+  walking_step_length_m?: number | null;
+  running_stride_length_m?: number | null;
+  walking_steadiness_pct?: number | null;
+  walking_asymmetry_pct?: number | null;
+  walking_double_support_pct?: number | null;
+  six_minute_walk_distance_m?: number | null;
   weight_lbs?: number | null;
   readiness_score?: number | null;
   source?: string | null;
@@ -3363,17 +3370,52 @@ export type AIExerciseResult = {
    *  for those names. e.g. "BP" / "Bench" for Bench Press. Wger results
    *  don't carry aliases, so this is AI-source-only. */
   aliases?: string[];
-  /** free-exercise-db identifier — when present, the client renders a
-   *  static photo demo (or 2-frame cycling preview inside FormVideoModal)
-   *  in addition to the YouTube fallback. Populated server-side from
-   *  Exercise.demo_exercise_db_id at seed time. */
+  /** Legacy demo identifier. The client uses it only to match bundled
+   *  Move Kit videos; hosted WorkoutX is the primary non-Move-Kit demo. */
   demo_exercise_db_id?: string | null;
 };
 
-/** Resolve an exercise name to a YouTube video ID for the top form
- *  tutorial. Cached server-side. Returns the primary `video_id` plus a
- *  `candidates` list so the client can fall back to the next video when
- *  a player-level error fires (152/153/etc) inside the iframe. */
+/** Resolve an exercise name to hosted form media. The backend returns
+ *  ranked YouTube options plus, when configured, a WorkoutX GIF fallback
+ *  for exercises that do not have a bundled Move Kit demo. */
+export type WorkoutXExerciseDemo = {
+  id?: string | null;
+  name?: string | null;
+  gif?: string | null;
+  gifUrl?: string | null;
+  gif_url?: string | null;
+  gif_path?: string | null;
+  preview_url?: string | null;
+  thumbnail_url?: string | null;
+  image?: string | null;
+  image_url?: string | null;
+  source_url?: string | null;
+  body_part?: string | null;
+  target?: string | null;
+  equipment?: string | null;
+  difficulty?: string | null;
+  source?: string | null;
+};
+
+export type ExerciseVideoLookupResponse = {
+  video_id: string | null;
+  options?: Array<{
+    video_id: string;
+    title: string;
+    thumbnail_url: string;
+    author_name: string;
+    is_short: boolean;
+    recommended?: boolean;
+  }>;
+  candidates?: string[];
+  search_url: string;
+  cached?: boolean;
+  curated?: boolean;
+  empty_reason?: string | null;
+  workoutx_demo?: WorkoutXExerciseDemo | null;
+  source_priority?: 'workoutx' | 'youtube' | string | null;
+};
+
 export async function getExerciseVideo(
   token: string,
   exerciseName: string,
@@ -3382,7 +3424,7 @@ export async function getExerciseVideo(
     primaryMuscle?: string | null;
     movementPattern?: string | null;
   },
-): Promise<{ video_id: string; candidates?: string[]; search_url: string; cached?: boolean }> {
+): Promise<ExerciseVideoLookupResponse> {
   return request('/ai/exercise-video', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -5269,6 +5311,7 @@ export async function getAdherenceTrend(token: string, weeks = 8): Promise<{ wee
 
 export interface PlateauEntry {
   exercise_name: string;
+  primary_muscle?: string | null;
   current_1rm: number;
   weeks_stuck: number;
   suggestion: 'deload' | 'swap' | 'add_volume';
@@ -7762,6 +7805,7 @@ export interface TrainerClientSummary {
   client: TrainerUser;
   permissions: TrainerPermissionFlags;
   workouts: {
+    shared?: boolean;
     planned: number;
     completed: number;
     missed: number;

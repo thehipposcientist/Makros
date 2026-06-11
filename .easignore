@@ -9,12 +9,14 @@
 
 # dependencies
 node_modules/
+node_modules.deploy-stale-*/
 .pnp
 .pnp.js
 
 # testing
 coverage/
 assets/test/
+src/**/__tests__/
 
 # build output
 build/
@@ -44,13 +46,25 @@ android/app/.externalNativeBuild/
 android/local.properties
 .cxx/
 .externalNativeBuild/
+targets/resttimer-widget/Assets.xcassets/AppIcon.appiconset/ItunesArtwork@2x.png
+ios/Thallo/Images.xcassets/SplashScreenLogo.imageset/SplashScreenLogo.png
+assets/images/card-backgrounds/workout-card-rest-day-male.jpg
+assets/images/equipment/pec_deck_machine_alt_2.png
+assets/images/equipment/plate_loaded_chest_press_machine_alt_3.png
+assets/images/equipment/yoga_mat_alt_1.png
+assets/images/landing-photos/pexels-hiking-forest-woman.jpg
+assets/images/landing-photos/pexels-neon-gym-woman-11896016.jpg
 
 # large source-only input zip (generated runtime output is tracked, not this)
 assets/full-library.zip
 
 # repo-only material that is not used by the native app build
+CLAUDE.md
+start-tunnel.bat
+android/
 backend/
 docs/
+marketing/
 patches/
 .claude/
 .maestro/

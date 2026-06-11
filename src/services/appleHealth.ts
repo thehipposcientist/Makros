@@ -39,6 +39,12 @@ const READ_TYPES = [
   'OxygenSaturation',
   'AppleSleepingWristTemperature',
   'AppleSleepingBreathingDisturbances',
+  'WalkingStepLength',
+  'RunningStrideLength',
+  'WalkingSteadiness',
+  'WalkingAsymmetryPercentage',
+  'WalkingDoubleSupportPercentage',
+  'SixMinuteWalkTestDistance',
   'StandHour',
   'MindfulSession',
   'TimeInDaylight',
@@ -66,6 +72,7 @@ export const APPLE_HEALTH_PERMISSION_ITEMS = [
   { label: 'Blood oxygen', why: 'Adds optional sleep and recovery context when available.' },
   { label: 'Sleeping wrist temperature', why: 'Adds optional overnight recovery and hormone-support context when available.' },
   { label: 'Sleeping breathing disturbances', why: 'Adds optional sleep-breathing context for recovery and hormone-support estimates when available.' },
+  { label: 'Walking and running mobility', why: 'Adds optional stride, gait, and walking-capacity trends for mobility-aware training guidance.' },
   { label: 'Standing hours', why: 'Displays movement consistency from Apple Health.' },
   { label: 'Mindful minutes', why: 'Displays recovery habits logged in Apple Health.' },
   { label: 'Time in daylight', why: 'Powers optional sun exposure estimates when Apple Health records daylight time.' },
@@ -84,7 +91,7 @@ export const APPLE_HEALTH_PERMISSION_COPY = {
   title: 'Connect Apple Health?',
   body:
     'Apple Health is optional.\n\n' +
-    'If you connect it, Thallo asks only for Apple Health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, sleeping wrist temperature, sleeping breathing disturbances, standing hours, mindful minutes, time in daylight, and menstrual-flow data.\n\n' +
+    'If you connect it, Thallo asks only for Apple Health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, sleeping wrist temperature, sleeping breathing disturbances, walking and running mobility, standing hours, mindful minutes, time in daylight, and menstrual-flow data.\n\n' +
     'Thallo can also read nutrition summaries, like calories, protein, carbs, and fat, when apps such as MyFitnessPal write them to Apple Health.\n\n' +
     'Some categories only appear when your iPhone, Apple Watch, or another source app records them; Thallo hides missing categories instead of showing empty metrics.\n\n' +
     'This helps personalize readiness, recovery insights, optional morning sleep readiness notifications, weekly check-ins, and training or nutrition recommendations. Daily summaries may sync to your account so trends work across devices; raw HealthKit samples stay on your phone.\n\n' +
@@ -431,6 +438,12 @@ export interface DailySnapshot {
   wristTemperatureC: number | null;
   sleepBreathingDisturbances: number | null;
   sleepBreathingDisturbancesElevated: boolean | null;
+  walkingStepLengthM: number | null;
+  runningStrideLengthM: number | null;
+  walkingSteadinessPct: number | null;
+  walkingAsymmetryPct: number | null;
+  walkingDoubleSupportPct: number | null;
+  sixMinuteWalkDistanceM: number | null;
   weightLbs: number | null;
 }
 
@@ -534,6 +547,8 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
       stepsSamples, energySamples, basalSamples, workouts,
       hrvSamples, rhrSamples, vo2Samples, weightSamples,
       respSamples, spo2Samples, wristTempSamples, breathingSamples,
+      walkingStepLengthSamples, runningStrideLengthSamples, walkingSteadinessSamples,
+      walkingAsymmetrySamples, walkingDoubleSupportSamples, sixMinuteWalkSamples,
     ] = await Promise.all([
       typeof mod.getDailySteps === 'function' ? mod.getDailySteps(dayStartMs, dayEndMs).catch(() => []) : [],
       typeof mod.getActiveEnergyBurned === 'function' ? mod.getActiveEnergyBurned(dayStartMs, dayEndMs).catch(() => []) : [],
@@ -547,6 +562,12 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
       typeof mod.getOxygenSaturation === 'function' ? mod.getOxygenSaturation(nightStartMs, nightEndMs, 30).catch(() => []) : [],
       typeof mod.getSleepingWristTemperature === 'function' ? mod.getSleepingWristTemperature(nightStartMs, nightEndMs, 10).catch(() => []) : [],
       typeof mod.getSleepingBreathingDisturbances === 'function' ? mod.getSleepingBreathingDisturbances(nightStartMs, nightEndMs, 10).catch(() => []) : [],
+      typeof mod.getWalkingStepLength === 'function' ? mod.getWalkingStepLength(dayStartMs, dayEndMs, 30).catch(() => []) : [],
+      typeof mod.getRunningStrideLength === 'function' ? mod.getRunningStrideLength(dayStartMs, dayEndMs, 30).catch(() => []) : [],
+      typeof mod.getWalkingSteadiness === 'function' ? mod.getWalkingSteadiness(dayStartMs, dayEndMs, 10).catch(() => []) : [],
+      typeof mod.getWalkingAsymmetryPercentage === 'function' ? mod.getWalkingAsymmetryPercentage(dayStartMs, dayEndMs, 30).catch(() => []) : [],
+      typeof mod.getWalkingDoubleSupportPercentage === 'function' ? mod.getWalkingDoubleSupportPercentage(dayStartMs, dayEndMs, 30).catch(() => []) : [],
+      typeof mod.getSixMinuteWalkTestDistance === 'function' ? mod.getSixMinuteWalkTestDistance(dayStartMs, dayEndMs, 5).catch(() => []) : [],
     ]);
 
     const steps = _sumSamplesInWindow(stepsSamples, dayStartMs, dayEndMs);
@@ -596,6 +617,12 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
         ? breathingValues.reduce((sum: number, value: number) => sum + value, 0) / breathingValues.length
         : null,
       sleepBreathingDisturbancesElevated: breathingElevated,
+      walkingStepLengthM: _avgSamplesInWindow(walkingStepLengthSamples, dayStartMs, dayEndMs),
+      runningStrideLengthM: _avgSamplesInWindow(runningStrideLengthSamples, dayStartMs, dayEndMs),
+      walkingSteadinessPct: _avgSamplesInWindow(walkingSteadinessSamples, dayStartMs, dayEndMs),
+      walkingAsymmetryPct: _avgSamplesInWindow(walkingAsymmetrySamples, dayStartMs, dayEndMs),
+      walkingDoubleSupportPct: _avgSamplesInWindow(walkingDoubleSupportSamples, dayStartMs, dayEndMs),
+      sixMinuteWalkDistanceM: _avgSamplesInWindow(sixMinuteWalkSamples, dayStartMs, dayEndMs),
       weightLbs: _avgSamplesInWindow(weightSamples, dayStartMs, dayEndMs),
     };
   } catch {
